@@ -48,27 +48,34 @@ const directStreamMode = ref('')
 // ==========================================
 function updateSystemMediaSession(stationId) {
   if ('mediaSession' in navigator) {
-    // 【核心修改】：直接去全局配置里拿数据，拿不到就用默认的兜底信息
-    const meta = stationMap[stationId] || { name: 'WaveBypass', logoUrl: '/pwa-512x512.png' }
+    // 1. 获取配置
+    const meta = stationMap[stationId] || {}
 
-    navigator.mediaSession.metadata = new MediaMetadata({
-      title: meta.name,            // 歌曲名位置：显示电台名
-      artist: 'WaveBypass Radio',  // 歌手位置：显示你的应用名
-      album: 'Live Stream',        // 专辑位置
-      artwork: [
-        { src: meta.logoUrl, sizes: '512x512', type: 'image/png' }
-      ]
-    })
+    // 2. 确定最终使用的图片路径
+    // 如果 meta.logoUrl 存在就用它，不存在就用你放进 public/logos/ 的默认图
+    const finalLogo = meta.logoUrl || '/logos/default.png' // 👈 这里的路径要对应你 public 下的文件名
 
-    // 绑定系统锁屏界面的播放按钮，同步修改 Pinia 状态
-    navigator.mediaSession.setActionHandler('play', () => {
-      playerStore.togglePlay(true)
-    })
-    
-    // 绑定系统锁屏界面的暂停按钮，同步修改 Pinia 状态
-    navigator.mediaSession.setActionHandler('pause', () => {
-      playerStore.togglePlay(false)
-    })
+    try {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: meta.name || '未知频率',
+        artist: 'WaveBypass Radio',
+        album: 'Live Stream',
+        artwork: [
+          { 
+            src: finalLogo, 
+            sizes: '512x512', 
+            type: 'image/png' 
+          }
+        ]
+      })
+    } catch (e) {
+      // 就算系统元数据构造失败，也绝对不能影响核心播放逻辑
+      console.warn('MediaSession 写入失败，跳过元数据更新', e)
+    }
+
+    // 绑定系统播放/暂停控制
+    navigator.mediaSession.setActionHandler('play', () => playerStore.togglePlay(true))
+    navigator.mediaSession.setActionHandler('pause', () => playerStore.togglePlay(false))
   }
 }
 

@@ -22,40 +22,54 @@ StationFetcher = Callable[[], Awaitable[str]]
 logger = logging.getLogger("wavebypass.fetchers")
 
 
-# Hit FM 获取真实 m3u8 地址的接口。
-HITFM_API_URL = "https://www.hitoradio.com/newweb/hichannel.php"
+import os
+import httpx
 
+# 统一的伪装浏览器标识
+DEFAULT_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/147.0.0.0 Safari/537.36"
+)
 
-# Hit FM 请求头。
-# 这些字段来自浏览器抓包，作用是尽量模拟官网 Ajax 请求。
-HITFM_HEADERS = {
-    "Accept": "*/*",
-    "Accept-Language": "zh-CN,zh;q=0.9",
-    "Cache-Control": "no-cache",
-    "Connection": "keep-alive",
-    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-    "Origin": "https://www.hitoradio.com",
-    "Referer": "https://www.hitoradio.com/newweb/onair_n_ajax.php",
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/147.0.0.0 Safari/537.36"
-    ),
-}
+# 基础超时与配置
+HICHANNEL_TIMEOUT = httpx.Timeout(10.0)
 
+async def fetch_hichannel_engine(station_name: str, api_url: str, referer: str, origin: str, channel_id: str, cookie_env: str = None) -> str:
+    """底层通用抓取引擎：只需传入配置，逻辑完全一致"""
+    headers = {
+        "Accept": "*/*",
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "X-Requested-With": "XMLHttpRequest",
+        "User-Agent": DEFAULT_UA,
+        "Referer": referer,
+        "Origin": origin,
+    }
+    
+    # 自动加载环境变量中的 Cookie
+    if cookie_env:
+        cookie = os.getenv(cookie_env, "").strip()
+        if cookie:
+            headers["Cookie"] = cookie
 
-# Hit FM Ajax 表单参数。
-# channelID=1 表示当前抓取 Hit FM 主频道。
-HITFM_PAYLOAD = {
-    "channelID": "1",
-    "action": "getLIVEURL",
-}
+    payload = {"channelID": channel_id, "action": "getLIVEURL"}
 
+    # 步骤 A：获取带 Token 的 m3u8 地址
+    async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+        response = await client.post(api_url, headers=headers, data=payload)
+    response.raise_for_status()
+    real_url = response.text.strip()
+    
+    if not real_url.startswith(("http://", "https://")):
+        raise ValueError(f"{station_name} 返回内容非有效 URL: {real_url[:50]}")
 
-# Hit FM 请求超时时间。
-# 这里保持和你原始测试脚本一样的 10 秒，避免后台任务长时间卡死。
-HITFM_TIMEOUT = httpx.Timeout(10.0)
+    # 步骤 B：验证 CDN 连通性 (必须加上 verify=False，有些 CDN 证书链有问题)
+    async with httpx.AsyncClient(timeout=10.0, follow_redirects=True, verify=False) as cdn_client:
+        cdn_response = await cdn_client.get(real_url, headers={"User-Agent": DEFAULT_UA})
+    cdn_response.raise_for_status()
 
+    logger.info(f"[{station_name}] 抓取验证成功")
+    return real_url
 
 # UFO Radio 的公开入口地址。
 # 访问这个地址后，Revma 会 302 跳转到带 rj-token 的真实音频流地址。
@@ -66,87 +80,13 @@ UFO_STREAM_ENTRY_URL = "https://stream.rcs.revma.com/em90w4aeewzuv"
 # 这里使用浏览器 UA，减少流媒体服务因为默认 Python UA 拒绝请求的概率。
 UFO_HEADERS = {
     "Accept": "*/*",
-    "User-Agent": HITFM_HEADERS["User-Agent"],
+    "User-Agent": DEFAULT_UA,  # 直接用全局定义的变量
 }
-
 
 # UFO 跳转解析超时时间。
 # 这里只需要拿到响应头和最终 URL，不需要把整个音频流读完。
 UFO_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
 
-
-def build_hitfm_headers() -> dict[str, str]:
-    """构造 Hit FM 请求头。
-
-    Cookie 不硬编码到仓库，避免开源时泄露会话信息。
-    如果接口后续必须依赖 Cookie，请在 `.env` 中配置 HITFM_COOKIE。
-    """
-
-    # 复制基础请求头，避免直接修改全局常量。
-    headers = HITFM_HEADERS.copy()
-
-    # 从环境变量读取 Cookie，例如 PHPSESSID=xxxx。
-    hitfm_cookie = os.getenv("HITFM_COOKIE", "").strip()
-
-    # Cookie 不为空时才加入请求头。
-    if hitfm_cookie:
-        headers["Cookie"] = hitfm_cookie
-    else:
-        logger.warning("未配置 HITFM_COOKIE，将尝试不带 Cookie 请求 Hit FM。")
-
-    return headers
-
-
-async def fetch_hitfm() -> str:
-    """抓取 Hit FM 的最新 m3u8 地址。
-
-    逻辑来自你的 requests 测试脚本，但改成了 httpx 纯异步写法：
-    1. 向 Hit FM 官网 Ajax 接口伪装请求，拿到带 token 的真实 m3u8 地址。
-    2. 再用这个真实地址请求 CDN，确认当前服务器 IP 可以拿到播放列表。
-    3. CDN 验证成功后，把真实 m3u8 地址返回给后台定时任务保存。
-    """
-
-    # 构造带可选 Cookie 的请求头。
-    headers = build_hitfm_headers()
-
-    # 第一步：向 Hit FM 官网接口请求最新真实 m3u8 地址。
-    async with httpx.AsyncClient(timeout=HITFM_TIMEOUT, follow_redirects=True) as client:
-        response = await client.post(HITFM_API_URL, headers=headers, data=HITFM_PAYLOAD)
-
-    # 如果官网接口返回 4xx 或 5xx，这里会抛出 httpx.HTTPStatusError。
-    response.raise_for_status()
-
-    # 官网接口直接返回纯文本 URL，所以去掉首尾空白即可。
-    real_url = response.text.strip()
-
-    # 基础校验：真实播放地址必须是 http 或 https URL。
-    if not real_url.startswith(("http://", "https://")):
-        raise ValueError("Hit FM 返回内容不是有效 URL，可能 Cookie 失效或请求被拦截。")
-
-    # 第二步：验证 CDN 是否允许当前服务器 IP 请求 m3u8。
-    # verify=False 对应你原始脚本中的 requests.get(..., verify=False)。
-    async with httpx.AsyncClient(
-        timeout=HITFM_TIMEOUT,
-        follow_redirects=True,
-        verify=False,
-    ) as cdn_client:
-        cdn_response = await cdn_client.get(
-            real_url,
-            headers={"User-Agent": HITFM_HEADERS["User-Agent"]},
-        )
-
-    # CDN 返回非 2xx 时，说明 token、IP 或 CDN 规则可能存在问题。
-    cdn_response.raise_for_status()
-
-    # 简单确认返回内容不为空，避免把空响应当成可播放地址。
-    if not cdn_response.text.strip():
-        raise ValueError("Hit FM CDN 返回了空的 m3u8 内容。")
-
-    # 记录前几行内容，方便部署时确认后台确实拿到了播放列表。
-    logger.info("Hit FM CDN 验证通过，m3u8 前 5 行：%s", cdn_response.text.splitlines()[:5])
-
-    # 返回带 token 的真实 m3u8 地址，由 main.py 写入 CURRENT_STREAMS。
-    return real_url
 
 
 async def fetch_ufo() -> str:
@@ -187,114 +127,36 @@ async def fetch_ufo() -> str:
 
     return final_stream_url
 
-# Hit FM 台中分台表单参数
-HITFM_TAICHUNG_PAYLOAD = {
-    "channelID": "2",  # 2是台中，3是台南，4是宜兰
-    "action": "getLIVEURL",
-}
+async def hitfm_factory(name: str, cid: str) -> str:
+    """Hit FM 专用工厂函数：自动填充 Hit FM 的共有配置"""
+    return await fetch_hichannel_engine(
+        station_name=f"HitFM {name}",
+        api_url="https://www.hitoradio.com/newweb/hichannel.php",
+        referer="https://www.hitoradio.com/newweb/onair_n_ajax.php",
+        origin="https://www.hitoradio.com",
+        channel_id=cid,
+        cookie_env="HITFM_COOKIE"
+    )
 
-async def fetch_hitfm_taichung() -> str:
-    """抓取 Hit FM 台中分台的最新 m3u8 地址。"""
-    headers = build_hitfm_headers()
-    
-    # 获取真实地址
-    async with httpx.AsyncClient(timeout=HITFM_TIMEOUT, follow_redirects=True) as client:
-        response = await client.post(HITFM_API_URL, headers=headers, data=HITFM_TAICHUNG_PAYLOAD)
-    response.raise_for_status()
-    real_url = response.text.strip()
-    
-    if not real_url.startswith(("http://", "https://")):
-        raise ValueError("Hit FM 台中分台返回内容不是有效 URL。")
+# 这样你的分台定义就变成了真正的“一行代码”
+async def fetch_hitfm():         return await hitfm_factory("台北", "1")
+async def fetch_hitfm_taichung(): return await hitfm_factory("台中", "2")
+async def fetch_hitfm_tainan():   return await hitfm_factory("台南", "3")
+async def fetch_hitfm_yilan():    return await hitfm_factory("宜兰", "4")
+async def fetch_hitfm_hualian():  return await hitfm_factory("花莲", "5")
 
-    # 验证 CDN (复用原有的验证逻辑)
-    async with httpx.AsyncClient(timeout=HITFM_TIMEOUT, follow_redirects=True, verify=False) as cdn_client:
-        cdn_response = await cdn_client.get(real_url, headers={"User-Agent": HITFM_HEADERS["User-Agent"]})
-    cdn_response.raise_for_status()
-
-    logger.info("Hit FM 台中分台验证通过")
-    return real_url
-
-# Hit FM 台南分台表单参数
-HITFM_TAINAN_PAYLOAD = {
-    "channelID": "3",  # 2是台中，3是台南，4是宜兰
-    "action": "getLIVEURL",
-}
-
-async def fetch_hitfm_tainan() -> str:
-    """抓取 Hit FM 台南分台的最新 m3u8 地址。"""
-    headers = build_hitfm_headers()
-    
-    # 获取真实地址
-    async with httpx.AsyncClient(timeout=HITFM_TIMEOUT, follow_redirects=True) as client:
-        response = await client.post(HITFM_API_URL, headers=headers, data=HITFM_TAINAN_PAYLOAD)
-    response.raise_for_status()
-    real_url = response.text.strip()
-    
-    if not real_url.startswith(("http://", "https://")):
-        raise ValueError("Hit FM 台南分台返回内容不是有效 URL。")
-
-    # 验证 CDN (复用原有的验证逻辑)
-    async with httpx.AsyncClient(timeout=HITFM_TIMEOUT, follow_redirects=True, verify=False) as cdn_client:
-        cdn_response = await cdn_client.get(real_url, headers={"User-Agent": HITFM_HEADERS["User-Agent"]})
-    cdn_response.raise_for_status()
-
-    logger.info("Hit FM 台南分台验证通过")
-    return real_url
-
-# Hit FM 宜兰分台表单参数
-HITFM_YILAN_PAYLOAD = {
-    "channelID": "4",  # 2是台中，3是台南，4是宜兰
-    "action": "getLIVEURL",
-}
-
-async def fetch_hitfm_yilan() -> str:
-    """抓取 Hit FM 宜兰分台的最新 m3u8 地址。"""
-    headers = build_hitfm_headers()
-    
-    # 获取真实地址
-    async with httpx.AsyncClient(timeout=HITFM_TIMEOUT, follow_redirects=True) as client:
-        response = await client.post(HITFM_API_URL, headers=headers, data=HITFM_YILAN_PAYLOAD)
-    response.raise_for_status()
-    real_url = response.text.strip()
-    
-    if not real_url.startswith(("http://", "https://")):
-        raise ValueError("Hit FM 宜兰分台返回内容不是有效 URL。")
-
-    # 验证 CDN (复用原有的验证逻辑)
-    async with httpx.AsyncClient(timeout=HITFM_TIMEOUT, follow_redirects=True, verify=False) as cdn_client:
-        cdn_response = await cdn_client.get(real_url, headers={"User-Agent": HITFM_HEADERS["User-Agent"]})
-    cdn_response.raise_for_status()
-
-    logger.info("Hit FM 宜兰分台验证通过")
-    return real_url
-
-# Hit FM 花莲分台表单参数
-HITFM_HUALIAN_PAYLOAD = {
-    "channelID": "5",  # 2是台中，3是台南，4是宜兰，5是花莲
-    "action": "getLIVEURL",
-}
-
-async def fetch_hitfm_hualian() -> str:
-    """抓取 Hit FM 花莲分台的最新 m3u8 地址。"""
-    headers = build_hitfm_headers()
-    
-    # 获取真实地址
-    async with httpx.AsyncClient(timeout=HITFM_TIMEOUT, follow_redirects=True) as client:
-        response = await client.post(HITFM_API_URL, headers=headers, data=HITFM_HUALIAN_PAYLOAD)
-    response.raise_for_status()
-    real_url = response.text.strip()
-    
-    if not real_url.startswith(("http://", "https://")):
-        raise ValueError("Hit FM 花莲分台返回内容不是有效 URL。")
-
-    # 验证 CDN (复用原有的验证逻辑)
-    async with httpx.AsyncClient(timeout=HITFM_TIMEOUT, follow_redirects=True, verify=False) as cdn_client:
-        cdn_response = await cdn_client.get(real_url, headers={"User-Agent": HITFM_HEADERS["User-Agent"]})
-    cdn_response.raise_for_status()
-
-    logger.info("Hit FM 花莲分台验证通过")
-    return real_url
-
+# =========================================
+# POP Radio 91.7
+# =========================================
+async def fetch_pop917():
+    return await fetch_hichannel_engine(
+        station_name="POP Radio 91.7",
+        api_url="https://www.pop917.com/ajax.aspx",
+        referer="https://www.pop917.com/liveStream.aspx?id=1",
+        origin="https://www.pop917.com",
+        channel_id="1",
+        cookie_env="POP917_COOKIE"
+    )
 
 # ==========================================
 # 泉州无线 APP 系列电台通用抓取逻辑
@@ -390,6 +252,7 @@ async def fetch_qz_fm923() -> str:
         radio_id="1"  #特别的参数
     )
 
+
 # 电台抓取器注册表。
 # key 是前端或 API 使用的电台 ID，value 是负责刷新该电台真实播放地址的异步函数。
 STATION_FETCHER_MAP: dict[str, StationFetcher] = {
@@ -403,4 +266,5 @@ STATION_FETCHER_MAP: dict[str, StationFetcher] = {
     "qz_fm904": fetch_qz_fm904,
     "qz_fm1059": fetch_qz_fm1059,
     "qz_fm923": fetch_qz_fm923,
+    "pop917": fetch_pop917,
 }

@@ -38,6 +38,12 @@ export const stationList = [
     logoText: 'U',
     logoUrl: '/logos/uforadio.png',
   },
+    {
+    id: 'pop917',
+    name: 'POP Radio 91.7',
+    logoText: 'POP',
+    logoUrl: '/logos/pop917.png',
+  },
   {
     id: 'qz_fm889',
     name: '泉州新闻综合 88.9',
