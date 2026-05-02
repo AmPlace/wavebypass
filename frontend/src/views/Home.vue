@@ -19,12 +19,22 @@
         <div class="flex h-full flex-col overflow-hidden rounded-[1.25rem]">
           <!-- Logo 区域。 -->
           <div class="flex basis-3/5 items-center justify-center">
-            <!-- 当前先用圆形占位符，后续可替换成真实电台图片。 -->
+            <!-- Logo 外层容器，固定圆形尺寸，避免图片加载前后导致卡片跳动。 -->
             <div
-              class="flex size-16 items-center justify-center rounded-full border border-black/5 bg-white text-lg font-semibold text-neutral-700 shadow-sm shadow-black/[0.04] transition-transform duration-300 ease-out group-hover:scale-105 dark:border-white/10 dark:bg-neutral-900 dark:text-neutral-200 sm:size-20"
+              class="flex size-16 items-center justify-center overflow-hidden rounded-full border border-black/5 bg-white text-lg font-semibold text-neutral-700 shadow-sm shadow-black/[0.04] transition-transform duration-300 ease-out group-hover:scale-105 dark:border-white/10 dark:bg-neutral-900 dark:text-neutral-200 sm:size-20"
             >
-              <!-- 使用电台短标识作为临时 Logo。 -->
-              {{ station.logoText }}
+              <!-- 如果配置了真实 logo 图片，就优先显示图片。 -->
+              <img
+                v-if="station.logoUrl"
+                class="h-full w-full object-contain p-2"
+                :src="station.logoUrl"
+                :alt="`${station.name} logo`"
+              />
+
+              <!-- 如果还没有真实 logo，就回退到字母占位符。 -->
+              <span v-else>
+                {{ station.logoText }}
+              </span>
             </div>
           </div>
 
@@ -61,6 +71,7 @@ const stations = [
     id: 'hitfm',
     name: 'Hit FM',
     logoText: 'H',
+    logoUrl: '/logos/hitfm.png',
   },
   {
     id: 'ufo',

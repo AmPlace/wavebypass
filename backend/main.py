@@ -11,7 +11,7 @@ from collections.abc import AsyncIterator
 from urllib.parse import quote, urljoin, urlparse
 
 import httpx
-from fastapi import FastAPI, HTTPException, Query, Response
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
@@ -37,6 +37,18 @@ HTTP_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 # 有些广播 CDN 的证书链在 Python/OpenSSL 中会因为缺少 Subject Key Identifier 被拒绝。
 # 这里设置为 False，等价于你测试脚本中的 requests.get(..., verify=False)。
 CDN_VERIFY_SSL = False
+
+
+# 请求真实 CDN 时使用的伪装头。
+# Hit FM CDN 对浏览器 UA 更友好，所以 m3u8 和 ts 请求都统一使用这个 UA。
+CDN_REQUEST_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/147.0.0.0 Safari/537.36"
+    ),
+    "Accept": "*/*",
+}
 
 
 # 当前进程内存中的最新播放地址。
@@ -84,17 +96,17 @@ app.add_middleware(
 )
 
 
-def get_m3u8_cache_lock(station_id: str) -> asyncio.Lock:
-    """获取某个电台专用的 m3u8 微缓存锁。
+def get_m3u8_cache_lock(cache_key: str) -> asyncio.Lock:
+    """获取某个 m3u8 地址专用的微缓存锁。
 
-    使用 setdefault 可以在第一次访问某个电台时创建锁，
-    后续同一个 station_id 会复用同一把锁。
+    使用 setdefault 可以在第一次访问某个 m3u8 时创建锁，
+    后续同一个缓存键会复用同一把锁。
     """
 
-    return M3U8_CACHE_LOCKS.setdefault(station_id, asyncio.Lock())
+    return M3U8_CACHE_LOCKS.setdefault(cache_key, asyncio.Lock())
 
 
-def get_cached_m3u8_text(station_id: str) -> str | None:
+def get_cached_m3u8_text(cache_key: str) -> str | None:
     """读取仍在有效期内的 m3u8 缓存文本。
 
     如果缓存不存在、缓存内容为空，或者缓存已经超过 3 秒，则返回 None。
@@ -103,8 +115,8 @@ def get_cached_m3u8_text(station_id: str) -> str | None:
     # 获取当前系统时间戳，用于和缓存写入时间做差值比较。
     now = time.time()
 
-    # 从缓存字典中读取当前电台的缓存记录。
-    cache_item = M3U8_CACHE.get(station_id)
+    # 从缓存字典中读取当前 m3u8 地址的缓存记录。
+    cache_item = M3U8_CACHE.get(cache_key)
 
     # 没有缓存记录时，直接告诉调用方需要重新拉取。
     if cache_item is None:
@@ -125,11 +137,17 @@ def get_cached_m3u8_text(station_id: str) -> str | None:
 
 
 def rewrite_m3u8_text(raw_m3u8_text: str, real_m3u8_url: str, station_id: str) -> str:
-    """把真实 m3u8 中的 ts 切片地址改写成后端代理地址。
+    """把真实 m3u8 中的子列表和 ts 切片地址改写成后端代理地址。
 
-    真实 m3u8 里常见的切片地址是相对路径，例如 chunk_1.ts。
-    前端无法直接访问这些切片时，我们需要把它们改成：
+    Hit FM 这类 HLS 流经常是两级结构：
+    顶层 playlist.m3u8 里不是 ts，而是 chunklist.m3u8。
+    所以这里需要同时改写子级 .m3u8 和最终 .ts 切片。
+
+    ts 会被改成：
     /api/{station_id}/chunk.ts?target_url=真实切片绝对地址
+
+    子级 m3u8 会被改成：
+    /api/{station_id}/playlist.m3u8?target_url=真实子列表绝对地址
     """
 
     # 用列表收集每一行改写后的结果，最后再一次性 join，效率比反复字符串拼接更好。
@@ -148,16 +166,25 @@ def rewrite_m3u8_text(raw_m3u8_text: str, real_m3u8_url: str, station_id: str) -
         # urlparse 可以同时处理相对路径和绝对 URL。
         parsed_uri = urlparse(stripped_line)
 
-        # 这里只改写 .ts 切片，避免误改多码率 m3u8 子列表或其他资源。
-        if not parsed_uri.path.lower().endswith(".ts"):
-            rewritten_lines.append(line)
-            continue
+        # 取出小写路径，方便判断资源类型。
+        uri_path = parsed_uri.path.lower()
 
-        # urljoin 会根据真实 m3u8 的地址，把相对切片路径补成完整 URL。
-        absolute_ts_url = urljoin(real_m3u8_url, stripped_line)
+        # urljoin 会根据当前真实 m3u8 的地址，把相对路径补成完整 URL。
+        absolute_media_url = urljoin(real_m3u8_url, stripped_line)
 
         # target_url 放在查询参数中，必须 URL 编码，否则其中的 ?、& 等字符会破坏代理路由。
-        encoded_target_url = quote(absolute_ts_url, safe="")
+        encoded_target_url = quote(absolute_media_url, safe="")
+
+        # 子级 m3u8 播放列表继续交给 playlist 路由处理。
+        if uri_path.endswith(".m3u8"):
+            proxy_playlist_url = f"/api/{station_id}/playlist.m3u8?target_url={encoded_target_url}"
+            rewritten_lines.append(proxy_playlist_url)
+            continue
+
+        # 非 ts 资源先原样保留，避免误改未来可能出现的其他 HLS 标签资源。
+        if not uri_path.endswith(".ts"):
+            rewritten_lines.append(line)
+            continue
 
         # 生成指向本后端 TS 代理接口的切片地址。
         proxy_ts_url = f"/api/{station_id}/chunk.ts?target_url={encoded_target_url}"
@@ -207,35 +234,57 @@ async def startup_event() -> None:
     asyncio.create_task(refresh_tokens_task())
 
 
+def validate_target_url(target_url: str) -> None:
+    """校验代理目标 URL 是否只使用 HTTP/HTTPS 协议。"""
+
+    # 解析目标 URL，检查协议部分。
+    parsed_target_url = urlparse(target_url)
+
+    # 只允许代理 HTTP/HTTPS URL，避免被构造成 file:// 等危险协议。
+    if parsed_target_url.scheme not in {"http", "https"}:
+        raise HTTPException(status_code=400, detail="target_url 只允许 http 或 https 地址。")
+
+
 @app.get("/api/{station_id}/playlist.m3u8")
-async def get_station_playlist(station_id: str) -> Response:
+async def get_station_playlist(
+    station_id: str,
+    target_url: str | None = Query(default=None, min_length=1),
+) -> Response:
     """获取某个电台的代理 m3u8 播放列表。
 
     这个接口会先尝试命中 3 秒微缓存。
-    缓存过期后再访问真实 CDN，并把其中的 .ts 切片改写到本后端代理接口。
+    缓存过期后再访问真实 CDN，并把其中的子级 .m3u8 和 .ts 切片改写到本后端代理接口。
     """
 
+    # 如果 target_url 存在，说明这是子级 m3u8 请求。
+    # 如果 target_url 不存在，说明这是顶层电台 m3u8 请求，需要从 CURRENT_STREAMS 读取真实地址。
+    real_m3u8_url = target_url or CURRENT_STREAMS.get(station_id)
+
+    # 如果后台任务还没抓到该电台地址，就返回 503，表示服务暂时不可用。
+    if real_m3u8_url is None:
+        raise HTTPException(status_code=503, detail="该电台播放地址尚未准备好，请稍后重试。")
+
+    # 校验真实 m3u8 地址，只允许代理 http/https。
+    validate_target_url(real_m3u8_url)
+
+    # 缓存键必须包含真实 m3u8 地址。
+    # 因为同一个电台可能同时有顶层 playlist.m3u8 和子级 chunklist.m3u8。
+    cache_key = f"{station_id}:{real_m3u8_url}"
+
     # 第一次缓存检查：如果请求刚好落在 3 秒窗口内，立即返回，最快也最省资源。
-    cached_text = get_cached_m3u8_text(station_id)
+    cached_text = get_cached_m3u8_text(cache_key)
     if cached_text is not None:
         return Response(content=cached_text, media_type="application/vnd.apple.mpegurl")
 
-    # 获取当前电台专用的锁，避免缓存失效瞬间出现并发击穿。
-    cache_lock = get_m3u8_cache_lock(station_id)
+    # 获取当前 m3u8 地址专用的锁，避免缓存失效瞬间出现并发击穿。
+    cache_lock = get_m3u8_cache_lock(cache_key)
 
-    # 同一电台同一时间只允许一个请求去真实 CDN 重新拉取 m3u8。
+    # 同一个 m3u8 地址同一时间只允许一个请求去真实 CDN 重新拉取。
     async with cache_lock:
         # 第二次缓存检查：等待锁期间，可能已有其他请求完成刷新，所以这里再查一次。
-        cached_text = get_cached_m3u8_text(station_id)
+        cached_text = get_cached_m3u8_text(cache_key)
         if cached_text is not None:
             return Response(content=cached_text, media_type="application/vnd.apple.mpegurl")
-
-        # 从内存中读取后台定时任务维护的长效真实 m3u8 URL。
-        real_m3u8_url = CURRENT_STREAMS.get(station_id)
-
-        # 如果后台任务还没抓到该电台地址，就返回 503，表示服务暂时不可用。
-        if real_m3u8_url is None:
-            raise HTTPException(status_code=503, detail="该电台播放地址尚未准备好，请稍后重试。")
 
         try:
             # 使用异步 HTTP 客户端请求真实 m3u8，不阻塞 FastAPI 事件循环。
@@ -245,7 +294,7 @@ async def get_station_playlist(station_id: str) -> Response:
                 follow_redirects=True,
                 verify=CDN_VERIFY_SSL,
             ) as client:
-                real_response = await client.get(real_m3u8_url)
+                real_response = await client.get(real_m3u8_url, headers=CDN_REQUEST_HEADERS)
 
             # 非 2xx 状态通常表示 CDN 拒绝、token 失效或源站异常。
             real_response.raise_for_status()
@@ -254,17 +303,52 @@ async def get_station_playlist(station_id: str) -> Response:
             logger.exception("电台 %s 真实 m3u8 拉取失败：%s", station_id, exc)
             raise HTTPException(status_code=502, detail="真实 m3u8 拉取失败。") from exc
 
-        # 将真实 m3u8 里的 .ts 切片地址改写成我们的代理地址。
+        # 将真实 m3u8 里的子级 .m3u8 和 .ts 切片地址改写成我们的代理地址。
         rewritten_m3u8_text = rewrite_m3u8_text(real_response.text, real_m3u8_url, station_id)
 
         # 更新微缓存文本和时间戳。
-        M3U8_CACHE[station_id] = {
+        M3U8_CACHE[cache_key] = {
             "text": rewritten_m3u8_text,
             "timestamp": time.time(),
         }
 
         # 返回标准 HLS m3u8 MIME 类型，方便播放器正确识别。
         return Response(content=rewritten_m3u8_text, media_type="application/vnd.apple.mpegurl")
+
+
+@app.get("/api/{station_id}/{m3u8_name}.m3u8")
+async def get_relative_child_playlist(station_id: str, m3u8_name: str, request: Request) -> Response:
+    """兼容播放器直接请求相对子级 m3u8 的情况。
+
+    修复前端已经拿到旧主列表时，浏览器可能会请求：
+    /api/hitfm/chunklist.m3u8?token1=...
+
+    这里会根据当前电台的顶层真实 m3u8 URL，把 chunklist.m3u8 补成真实 CDN URL，
+    然后复用 get_station_playlist 的代理、缓存和改写逻辑。
+    """
+
+    # 从内存中读取当前电台顶层真实 m3u8 地址。
+    base_m3u8_url = CURRENT_STREAMS.get(station_id)
+
+    # 如果后台任务还没准备好地址，就返回 503。
+    if base_m3u8_url is None:
+        raise HTTPException(status_code=503, detail="该电台播放地址尚未准备好，请稍后重试。")
+
+    # 保留原请求中的 token、expire 等查询参数。
+    query_string = request.url.query
+
+    # 重新拼出相对子级 m3u8 文件名。
+    relative_m3u8_path = f"{m3u8_name}.m3u8"
+
+    # 如果有查询参数，就接回文件名后面。
+    if query_string:
+        relative_m3u8_path = f"{relative_m3u8_path}?{query_string}"
+
+    # 根据顶层真实 m3u8 URL，把相对子列表地址补成真实 CDN 绝对地址。
+    child_m3u8_url = urljoin(base_m3u8_url, relative_m3u8_path)
+
+    # 复用主 playlist 路由逻辑。
+    return await get_station_playlist(station_id=station_id, target_url=child_m3u8_url)
 
 
 @app.get("/api/{station_id}/chunk.ts")
@@ -278,17 +362,12 @@ async def proxy_ts_chunk(
     station_id 当前主要用于保持路由语义清晰，后续也可以用来做电台级限流或日志统计。
     """
 
-    # 只允许代理 HTTP/HTTPS URL，避免被构造成 file:// 等危险协议。
-    parsed_target_url = urlparse(target_url)
-    if parsed_target_url.scheme not in {"http", "https"}:
-        raise HTTPException(status_code=400, detail="target_url 只允许 http 或 https 地址。")
+    # 校验真实切片地址，只允许代理 http/https。
+    validate_target_url(target_url)
 
     # 主动设置请求头，不透传浏览器的真实客户端 IP。
     # 真实 CDN 看到的是后端服务器发出的请求，而不是用户浏览器直连请求。
-    upstream_headers = {
-        "User-Agent": "WaveBypass/0.1.0",
-        "Accept": "*/*",
-    }
+    upstream_headers = CDN_REQUEST_HEADERS
 
     # 创建异步客户端。这里先不使用 async with，因为响应流要在函数返回后继续被 StreamingResponse 消费。
     client = httpx.AsyncClient(

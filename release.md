@@ -65,3 +65,16 @@
 - 在 `backend/main.py` 中新增 `CDN_VERIFY_SSL = False`，用于兼容部分 CDN 证书链缺少 Subject Key Identifier 的问题。
 - 调整 m3u8 真实源拉取逻辑，使用 `httpx.AsyncClient(..., verify=False)` 跳过 CDN 证书校验。
 - 调整 ts 切片流式代理逻辑，同样跳过 CDN 证书校验，避免切片请求阶段再次触发 SSL 错误。
+
+## 2026-05-02 - 第九步：支持 Hit FM 两级 HLS 播放列表
+
+- 调整 m3u8 改写逻辑，除 `.ts` 切片外，也会把子级 `.m3u8` 改写到 `/api/{station_id}/playlist.m3u8?target_url=...`。
+- 调整 m3u8 微缓存键，从单纯电台 ID 改为 `电台 ID + 真实 m3u8 URL`，避免顶层列表和子级列表共用同一份缓存。
+- 新增 `/api/{station_id}/{m3u8_name}.m3u8` 兼容路由，用于兜底播放器直接请求 `chunklist.m3u8` 这类相对子列表的情况。
+- m3u8 和 ts 真实 CDN 请求统一使用浏览器 User-Agent，减少 CDN 因请求头差异导致的连接或访问问题。
+
+## 2026-05-02 - 第十步：支持电台真实 Logo 展示
+
+- 调整 `frontend/src/views/Home.vue` 的电台卡片，优先显示 `logoUrl` 配置的真实图片。
+- 没有配置真实图片的电台会自动回退到字母占位符，避免图片缺失导致界面空白。
+- 新增 `frontend/public/logos/` 目录，用于存放部署时可直接访问的电台 Logo 静态资源。
