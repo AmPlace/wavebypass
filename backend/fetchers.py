@@ -8,7 +8,8 @@
 import logging
 import os
 from collections.abc import Awaitable, Callable
-
+import asyncio
+import random
 import httpx
 
 
@@ -294,14 +295,13 @@ async def fetch_hitfm_hualian() -> str:
     logger.info("Hit FM 花莲分台验证通过")
     return real_url
 
+
 # ==========================================
-# 泉州交通之声 (FM889) 抓取逻辑
+# 泉州无线 APP 系列电台通用抓取逻辑
 # ==========================================
 
-# 泉州无线 APP API 接口地址
 QZTV_API_URL = "https://wxqz2.qztv.cn/api/media/info"
 
-# 伪装成 iOS 客户端的请求头（去掉了所有 Cookie）
 QZTV_HEADERS = {
     "Host": "wxqz2.qztv.cn",
     "Accept": "*/*",
@@ -309,50 +309,82 @@ QZTV_HEADERS = {
     "User-Agent": "QZWireless/20241122 CFNetwork/3860.500.112 Darwin/25.4.0",
 }
 
-# 伪造的设备指纹和请求参数（固定值即可骗过接口）
-QZTV_PAYLOAD = {
+# 注意：这里把 media_id 和 skin 都抽掉了
+QZTV_PAYLOAD_TEMPLATE = {
     "app_version": "3.3.4",
     "channel_type": "ios",
     "imei": "6EF23893-9A3E-4C0C-B124-05EA6AFA6EAC",
-    "media_id": "3",  # 3 代表 88.9 新闻综合广播
     "os_version": "26.4.2",
     "device_model": "iPhone17,2",
-    "skin": "88daf469b4bc0ebb8b760e20f62003a5",
 }
 
-# 泉州台请求超时时间
 QZTV_TIMEOUT = httpx.Timeout(10.0)
-
-async def fetch_qz_fm889() -> str:
-    """通过无线泉州 APP 接口抓取 FM889 真实 m3u8 地址，完美绕过网页端 WAF 滑块。"""
+ 
+async def fetch_qztv_base(media_id: str, skin: str, station_name: str) -> str:
+    """泉州台底层通用抓取引擎"""
     
-    # 向 APP API 发送 POST 请求，不带 Cookie
+    # 【核心防御】：随机休眠 5 到 15 秒。
+    # 这样如果有 4 个台同时触发刷新任务，它们会被打散在不同的时间点发出去，完美避开 WAF 的瞬时并发检测。
+    await asyncio.sleep(random.uniform(5.0, 15.0))
+    
+    payload = QZTV_PAYLOAD_TEMPLATE.copy()
+    payload["media_id"] = media_id
+    payload["skin"] = skin
+    
     async with httpx.AsyncClient(timeout=QZTV_TIMEOUT, verify=False) as client:
-        response = await client.post(QZTV_API_URL, headers=QZTV_HEADERS, data=QZTV_PAYLOAD)
+        response = await client.post(QZTV_API_URL, headers=QZTV_HEADERS, data=payload)
     
-    # 如果遇到 4xx/5xx 错误，抛出异常让外层重试
+    # 【核心调试】：如果不是 200，立刻把服务器返回的真实内容打出来，让我们看看是不是 WAF 的脸
+    if response.status_code != 200:
+        logger.error(f"[{station_name}] 遭遇非 200 响应！状态码: {response.status_code}, 内容: {response.text}")
+        
     response.raise_for_status()
     
     try:
         data = response.json()
-        
-        # 校验泉州台的业务错误码（0 表示成功）
         if data.get("error_code") != 0:
-             raise ValueError(f"泉州台 API 业务报错: {data}")
-             
-        # 提取底层的带有 auth_key 的 m3u8 地址
+             raise ValueError(f"{station_name} API 业务报错: {data}")
         real_url = data["data"]["media_info"]["video_path"]
-        
     except (ValueError, KeyError, TypeError) as e:
-        logger.error("解析泉州台 API 返回 JSON 失败，可能接口格式已变: %s", response.text)
-        raise ValueError("无法从无线泉州 API 提取播放地址。") from e
+        logger.error("解析 %s API 返回 JSON 失败: %s", station_name, response.text)
+        raise ValueError(f"无法提取 {station_name} 播放地址。") from e
 
-    # 基础校验：必须是合法的 URL
     if not real_url.startswith(("http://", "https://")):
-        raise ValueError("泉州台提取到的地址格式异常。")
+        raise ValueError(f"{station_name} 提取到的地址格式异常。")
 
-    logger.info("泉州交通之声 FM889 抓取成功：%s", real_url)
+    logger.info("%s 抓取成功：%s", station_name, real_url)
     return real_url
+# -----------------------------
+# 泉州台各频道具体实现
+# -----------------------------
+
+async def fetch_qz_fm889() -> str:
+    return await fetch_qztv_base(
+        media_id="3", 
+        skin="88daf469b4bc0ebb8b760e20f62003a5", 
+        station_name="泉州新闻综合 88.9"
+    )
+
+async def fetch_qz_fm904() -> str:
+    return await fetch_qztv_base(
+        media_id="4", 
+        skin="27374ae65783ecd9ea344017f42dda85", 
+        station_name="泉州交通广播 90.4"
+    )
+
+async def fetch_qz_fm1059() -> str:
+    return await fetch_qztv_base(
+        media_id="6", 
+        skin="9027907a948c415a061ff8fec3636b80", 
+        station_name="泉州刺桐之声 105.9"
+    )
+
+async def fetch_qz_fm923() -> str:
+    return await fetch_qztv_base(
+        media_id="5", 
+        skin="ff3409f7acdeeb923acaf3c4bddc91fc", 
+        station_name="泉州经济生活 92.3"
+    )
 
 # 电台抓取器注册表。
 # key 是前端或 API 使用的电台 ID，value 是负责刷新该电台真实播放地址的异步函数。
@@ -364,4 +396,7 @@ STATION_FETCHER_MAP: dict[str, StationFetcher] = {
     "hitfm_yilan": fetch_hitfm_yilan,
     "hitfm_hualian": fetch_hitfm_hualian,
     "qz_fm889": fetch_qz_fm889,
+    "qz_fm904": fetch_qz_fm904,
+    "qz_fm1059": fetch_qz_fm1059,
+    "qz_fm923": fetch_qz_fm923,
 }

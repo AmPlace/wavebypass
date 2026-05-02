@@ -51,11 +51,10 @@ CDN_REQUEST_HEADERS = {
 }
 
 def get_cdn_headers_for_station(station_id: str) -> dict[str, str]:
-    """根据不同电台，动态返回对应的 CDN 请求头（专治各种防盗链）。"""
     headers = CDN_REQUEST_HEADERS.copy()
     
-    if station_id == "qz_fm889":
-        # 泉州台阿里云 CDN 强制校验 Referer 和移动端 UA
+    # 只要是 qz_ 开头的电台，统统套用泉州的防盗链破解规则
+    if station_id.startswith("qz_"):
         headers["Referer"] = "https://wxqz2.qztv.cn"
         headers["User-Agent"] = "AppleCoreMedia/1.0.0.23E261 (iPhone; U; CPU OS 26_4_2 like Mac OS X; zh_cn)"
         

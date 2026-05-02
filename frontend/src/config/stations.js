@@ -40,10 +40,28 @@ export const stationList = [
   },
   {
     id: 'qz_fm889',
-    name: '泉州交通之声 FM889',
+    name: '泉州新闻综合 88.9',
     logoText: 'FM889',
     logoUrl: '/logos/qz889.png',
-  }
+  },
+    {
+    id: 'qz_fm904',
+    name: '泉州交通广播 90.4',
+    logoText: 'FM904',
+    logoUrl: '/logos/qz904.png',
+  },
+  {
+    id: 'qz_fm1059',
+    name: '泉州刺桐之声 105.9',
+    logoText: 'FM1059',
+    logoUrl: '/logos/qz1059.png',
+  },
+    {
+    id: 'qz_fm923',
+    name: '泉州经济生活 92.3',
+    logoText: 'FM923',
+    logoUrl: '/logos/qz923.png',
+  },
 ]
 
 // 2. 字典/映射格式：利用上面的数组自动生成！
