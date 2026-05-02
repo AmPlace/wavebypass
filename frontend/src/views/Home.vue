@@ -80,6 +80,7 @@ const stations = [
     id: 'ufo',
     name: 'UFO Radio',
     logoText: 'U',
+    logoUrl: '/logos/uforadio.png',
   },
 ]
 
