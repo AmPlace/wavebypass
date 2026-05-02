@@ -3,7 +3,7 @@
     这是一个无视觉 UI 的全局音频控制器。
     audio 标签保留在页面里，但通过 hidden 隐藏，由 Pinia 状态和 hls.js 来驱动播放。
   -->
-  <audio ref="audioRef" hidden playsinline></audio>
+  <audio ref="audioRef" hidden playsinline @error="handleAudioError"></audio>
 </template>
 
 <script setup>
@@ -29,9 +29,22 @@ const audioRef = ref(null)
 // 切换电台时必须销毁旧实例，否则旧的网络请求和事件监听可能残留。
 const hlsRef = ref(null)
 
-// 直连音频流电台列表。
-// 这些电台不走 m3u8/hls.js，而是直接让 audio 播放后端的 stream 代理。
-const directStreamStations = new Set(['ufo'])
+// UFO Radio 的公开直连入口。
+// 浏览器能直连时优先使用它；直连失败时再自动切到后端代理。
+const UFO_DIRECT_STREAM_URL = 'https://stream.rcs.revma.com/em90w4aeewzuv'
+
+// 直连音频流电台配置。
+// directUrl 是优先尝试的公网音频入口，proxyUrl 是失败后的后端中转地址。
+const directStreamStationMap = {
+  ufo: {
+    directUrl: UFO_DIRECT_STREAM_URL,
+    proxyUrl: '/api/ufo/stream',
+  },
+}
+
+// 当前直连流播放模式。
+// direct 表示正在尝试浏览器直连；proxy 表示已经切到后端中转。
+const directStreamMode = ref('')
 
 // 销毁当前 hls.js 实例。
 function destroyHls() {
@@ -45,6 +58,23 @@ function destroyHls() {
 
   // 清空引用，避免后续误用已经销毁的实例。
   hlsRef.value = null
+}
+
+// 清空 audio 元素当前来源。
+function resetAudioSource() {
+  // audio 还没有挂载时无需处理。
+  if (!audioRef.value) {
+    return
+  }
+
+  // 先暂停旧音频。
+  audioRef.value.pause()
+
+  // 移除旧 src，防止切台后旧连接继续占用网络。
+  audioRef.value.removeAttribute('src')
+
+  // 让浏览器应用 src 移除动作。
+  audioRef.value.load()
 }
 
 // 获取 CDN 注入的 hls.js 构造函数。
@@ -65,6 +95,12 @@ async function playAudioSafely() {
     // 如果浏览器认为这次播放不是由用户手势触发，可能会抛出 DOMException。
     await audioRef.value.play()
 
+    // 播放成功后清空旧错误。
+    playerStore.clearPlaybackError()
+
+    // 播放成功后结束加载状态。
+    playerStore.setLoading(false)
+
     // 播放成功后，同步 Pinia 状态。
     playerStore.togglePlay(true)
   } catch (error) {
@@ -72,13 +108,75 @@ async function playAudioSafely() {
     // 这里不把它抛出到页面，而是把播放状态同步为暂停，等待用户点击播放按钮。
     if (error instanceof DOMException) {
       console.warn('浏览器阻止了自动播放，需要用户手动点击播放。', error)
+      playerStore.setPlaybackError('浏览器阻止自动播放，请手动点击播放。')
     } else {
       console.warn('音频播放失败。', error)
+
+      // UFO 直连失败有时会表现为 play() Promise reject，而不是 audio error 事件。
+      // 这种情况下也要自动切到后端中转。
+      if (directStreamStationMap[currentStation.value] && directStreamMode.value === 'direct') {
+        fallbackToProxyStream(currentStation.value)
+        return
+      }
+
+      playerStore.setPlaybackError('音频播放失败，请稍后重试。')
     }
 
     // 播放失败后同步状态，避免 UI 误显示“正在播放”。
     playerStore.togglePlay(false)
   }
+}
+
+// 把 UFO 这类电台切到后端中转模式。
+function fallbackToProxyStream(stationId) {
+  // 读取当前电台直连配置。
+  const streamConfig = directStreamStationMap[stationId]
+
+  // 没有配置时无法回退。
+  if (!audioRef.value || !streamConfig) {
+    return
+  }
+
+  // 如果已经在中转模式，再失败就不继续递归重试。
+  if (directStreamMode.value === 'proxy') {
+    playerStore.setPlaybackError('后端中转音频流连接失败，请稍后重试。')
+    playerStore.togglePlay(false)
+    return
+  }
+
+  // 标记当前已经切到代理模式。
+  directStreamMode.value = 'proxy'
+
+  // 提示用户正在自动切换线路。
+  playerStore.setPlaybackError('直连失败，正在自动切换后端中转。')
+
+  // 切换中转时保持加载状态。
+  playerStore.setLoading(true)
+
+  // 设置后端代理地址。
+  audioRef.value.src = streamConfig.proxyUrl
+
+  // 重新加载音频源。
+  audioRef.value.load()
+
+  // 尝试播放代理流。
+  playAudioSafely()
+}
+
+// 处理 audio 标签自身的加载错误。
+function handleAudioError() {
+  // 当前电台 ID。
+  const stationId = currentStation.value
+
+  // UFO 直连失败时，自动回退到后端中转。
+  if (directStreamStationMap[stationId]) {
+    fallbackToProxyStream(stationId)
+    return
+  }
+
+  // HitFM 或其他 HLS 电台走到这里，说明 audio/hls 播放链路失败。
+  playerStore.setPlaybackError('电台音频加载失败，请检查后端代理或稍后重试。')
+  playerStore.togglePlay(false)
 }
 
 // 根据当前电台加载新的 m3u8 播放源。
@@ -94,10 +192,22 @@ function loadStation(stationId) {
   // 每次切换电台前，都先销毁旧的 hls 实例。
   destroyHls()
 
+  // 每次切台都清空旧音频源和旧错误。
+  resetAudioSource()
+  playerStore.clearPlaybackError()
+  playerStore.setLoading(true)
+  directStreamMode.value = ''
+
   // 如果是直连音频流电台，直接设置 audio.src。
-  if (directStreamStations.has(stationId)) {
-    // 直连流不需要 hls.js，后端会负责隐藏真实跳转地址并流式转发音频。
-    audioRef.value.src = `/api/${stationId}/stream`
+  if (directStreamStationMap[stationId]) {
+    // 读取直连配置。
+    const streamConfig = directStreamStationMap[stationId]
+
+    // 标记当前正在优先尝试浏览器直连。
+    directStreamMode.value = 'direct'
+
+    // UFO 直连时不经过后端；失败后 handleAudioError 会自动切到 proxyUrl。
+    audioRef.value.src = streamConfig.directUrl
 
     // 直连音频流可以直接尝试播放。
     playAudioSafely()
@@ -132,6 +242,7 @@ function loadStation(stationId) {
     hls.on(Hls.Events.ERROR, (_event, data) => {
       if (data?.fatal) {
         console.warn('HLS 播放发生致命错误。', data)
+        playerStore.setPlaybackError('HLS 播放发生错误，请稍后重试。')
         playerStore.togglePlay(false)
       }
     })
@@ -152,6 +263,7 @@ function loadStation(stationId) {
 
   // 如果走到这里，说明当前浏览器既不支持 hls.js，也不支持原生 HLS。
   console.warn('当前浏览器不支持 HLS 播放，或 hls.js CDN 尚未加载完成。')
+  playerStore.setPlaybackError('当前浏览器不支持 HLS 播放。')
   playerStore.togglePlay(false)
 }
 

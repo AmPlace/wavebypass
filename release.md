@@ -93,3 +93,18 @@
 - 新增 `DIRECT_STREAM_STATIONS`，区分 UFO 这类直连音频流和 Hit FM 这类 HLS/m3u8 电台。
 - 新增 `/api/{station_id}/stream` 路由，使用 httpx 流式代理直连音频，避免把无限直播流读入内存。
 - 前端 `AudioEngine.vue` 识别 `ufo` 时直接播放 `/api/ufo/stream`，不再走 hls.js。
+
+## 2026-05-02 - 第十三步：UFO 直连优先与前端错误提示
+
+- 调整 UFO 前端播放策略，优先直接播放 `https://stream.rcs.revma.com/em90w4aeewzuv`。
+- UFO 直连触发 audio 错误时，会自动回退到后端 `/api/ufo/stream` 中转代理。
+- Pinia 播放器状态新增 `playbackError`，用于保存当前播放错误信息。
+- `AudioEngine.vue` 会捕捉自动播放限制、HLS 致命错误和 audio 加载错误，并同步错误状态。
+- `BottomPlayer.vue` 会在底部控制条展示错误文案，HitFM 和 UFO 播放失败时用户能直接看到提示。
+
+## 2026-05-02 - 第十四步：增加克制的播放加载反馈
+
+- Pinia 播放器状态新增 `isLoading`，用于表示当前正在连接音频源。
+- `AudioEngine.vue` 在切台、直连、中转和 HLS 加载阶段同步加载状态，播放成功或失败后自动结束。
+- `BottomPlayer.vue` 在加载时将状态点切换为小型旋转指示器，并显示“正在连接”。
+- `Home.vue` 当前加载中的电台 Logo 会轻微脉冲，提供不打扰的选台反馈。

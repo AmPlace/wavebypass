@@ -7,15 +7,20 @@
     >
       <!-- 左侧：当前电台与直播状态。 -->
       <section class="flex min-w-0 basis-[30%] items-center gap-3">
-        <!-- 绿色呼吸点。 -->
-        <span class="relative flex size-2.5 shrink-0">
+        <!-- 状态点：播放中是绿色呼吸点，加载中是克制的小转圈，错误时是红点。 -->
+        <span class="relative flex size-3 shrink-0 items-center justify-center">
           <span
-            v-if="isPlaying"
-            class="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-60"
+            v-if="isLoading"
+            class="size-3 rounded-full border border-neutral-300 border-t-neutral-900 animate-spin dark:border-neutral-700 dark:border-t-white"
           ></span>
           <span
+            v-else-if="isPlaying"
+            class="absolute inline-flex size-2.5 animate-ping rounded-full bg-emerald-400 opacity-60"
+          ></span>
+          <span
+            v-if="!isLoading"
             class="relative inline-flex size-2.5 rounded-full"
-            :class="isPlaying ? 'bg-emerald-500' : 'bg-neutral-300 dark:bg-neutral-700'"
+            :class="statusDotClass"
           ></span>
         </span>
 
@@ -24,8 +29,11 @@
           <p class="truncate text-sm font-medium text-neutral-900 dark:text-neutral-100">
             {{ currentStationName }}
           </p>
-          <p class="text-xs font-medium text-neutral-500 dark:text-neutral-500">
-            Live
+          <p
+            class="truncate text-xs font-medium"
+            :class="playbackError ? 'text-red-500 dark:text-red-400' : 'text-neutral-500 dark:text-neutral-500'"
+          >
+            {{ statusText }}
           </p>
         </div>
       </section>
@@ -129,7 +137,7 @@ import { usePlayerStore } from '../stores/player'
 const playerStore = usePlayerStore()
 
 // 解构播放器状态。
-const { currentStation, isPlaying, volume } = storeToRefs(playerStore)
+const { currentStation, isPlaying, isLoading, volume, playbackError } = storeToRefs(playerStore)
 
 // 电台名称映射。
 // 这里和 Home.vue 的电台列表保持一致，后续可以抽到公共配置文件。
@@ -141,5 +149,33 @@ const stationNameMap = {
 // 根据当前电台 ID 获取展示名称。
 const currentStationName = computed(() => {
   return stationNameMap[currentStation.value] || currentStation.value || '未选择电台'
+})
+
+// 底部状态文案。
+// 有错误时展示错误；没有错误时保持简洁的 Live 状态。
+const statusText = computed(() => {
+  if (playbackError.value) {
+    return playbackError.value
+  }
+
+  if (isLoading.value) {
+    return '正在连接'
+  }
+
+  return 'Live'
+})
+
+// 状态圆点颜色。
+// 错误时显示红色；播放中显示绿色；空闲时显示灰色。
+const statusDotClass = computed(() => {
+  if (playbackError.value) {
+    return 'bg-red-500'
+  }
+
+  if (isPlaying.value) {
+    return 'bg-emerald-500'
+  }
+
+  return 'bg-neutral-300 dark:bg-neutral-700'
 })
 </script>

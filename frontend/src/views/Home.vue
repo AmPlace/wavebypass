@@ -22,6 +22,9 @@
             <!-- Logo 外层容器，固定圆形尺寸，避免图片加载前后导致卡片跳动。 -->
             <div
               class="flex size-16 items-center justify-center overflow-hidden rounded-full border border-black/5 bg-white text-lg font-semibold text-neutral-700 shadow-sm shadow-black/[0.04] transition-transform duration-300 ease-out group-hover:scale-105 dark:border-white/10 dark:bg-neutral-900 dark:text-neutral-200 sm:size-20"
+              :class="{
+                'animate-pulse': isCurrentStationLoading(station.id),
+              }"
             >
               <!-- 如果配置了真实 logo 图片，就优先显示图片。 -->
               <img
@@ -60,8 +63,8 @@ import { usePlayerStore } from '../stores/player'
 // 获取播放器 store。
 const playerStore = usePlayerStore()
 
-// 解构当前电台和播放状态，用于判断卡片是否高亮。
-const { currentStation, isPlaying } = storeToRefs(playerStore)
+// 解构当前电台、播放状态和加载状态，用于判断卡片高亮与轻量加载反馈。
+const { currentStation, isPlaying, isLoading } = storeToRefs(playerStore)
 
 // 电台列表。
 // 当前只展示后端已经注册抓取器的电台，避免用户点到尚未接入的电台后出现 503。
@@ -83,5 +86,10 @@ const stations = [
 // 判断某个电台是否是当前正在播放的电台。
 function isCurrentStationPlaying(stationId) {
   return currentStation.value === stationId && isPlaying.value
+}
+
+// 判断某个电台是否是当前正在连接中的电台。
+function isCurrentStationLoading(stationId) {
+  return currentStation.value === stationId && isLoading.value
 }
 </script>
