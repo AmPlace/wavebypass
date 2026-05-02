@@ -66,53 +66,11 @@ const playerStore = usePlayerStore()
 // 解构当前电台、播放状态和加载状态，用于判断卡片高亮与轻量加载反馈。
 const { currentStation, isPlaying, isLoading } = storeToRefs(playerStore)
 
-// 电台列表。
-// 当前只展示后端已经注册抓取器的电台，避免用户点到尚未接入的电台后出现 503。
-// 后续如果电台变多，可以把这个数组抽到独立配置文件中统一维护。
-const stations = [
-  {
-    id: 'hitfm',
-    name: 'Hit FM 台北',
-    logoText: 'H',
-    logoUrl: '/logos/hitfm.png',
-  },
-  {
-    id: 'hitfm_taichung',
-    name: 'Hit FM 台中',
-    logoText: '台中',
-    logoUrl: '/logos/hitfm.png',
-  },
-  {
-    id: 'hitfm_tainan',
-    name: 'Hit FM 台南',
-    logoText: '台南',
-    logoUrl: '/logos/hitfm.png',
-  },
-  {
-    id: 'hitfm_yilan',
-    name: 'Hit FM 宜兰',
-    logoText: '宜兰',
-    logoUrl: '/logos/hitfm.png',
-  },
-  {
-    id: 'hitfm_hualian',
-    name: 'Hit FM 花莲',
-    logoText: '花莲',
-    logoUrl: '/logos/hitfm.png',
-  },
-    {
-    id: 'ufo',
-    name: 'UFO Radio',
-    logoText: 'U',
-    logoUrl: '/logos/uforadio.png',
-  },
-    {
-    id: 'qz_fm889',
-    name: '泉州交通之声 FM889',
-    logoText: 'FM889',
-    logoUrl: '/logos/qz889.png',
-  },
-]
+// 电台列表
+import { stationList } from '../config/stations'
+
+// 直接使用引入的数组，不需要自己再写一遍了
+const stations = stationList
 
 // 判断某个电台是否是当前正在播放的电台。
 function isCurrentStationPlaying(stationId) {

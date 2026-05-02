@@ -141,19 +141,13 @@ const { currentStation, isPlaying, isLoading, volume, playbackError } = storeToR
 
 // 电台名称映射。
 // 这里和 Home.vue 的电台列表保持一致，后续可以抽到公共配置文件。
-const stationNameMap = {
-  hitfm: 'Hit FM 台北',
-  hitfm_taichung: 'Hit FM 台中',
-  hitfm_tainan: 'Hit FM 台南',
-  hitfm_yilan: 'Hit FM 宜兰',
-  hitfm_hualian: 'Hit FM 花莲',
-  ufo: 'UFO Radio',
-  qz_fm889: '泉州交通之声 FM889',
-}
+import { stationMap } from '../config/stations'
 
 // 根据当前电台 ID 获取展示名称。
 const currentStationName = computed(() => {
-  return stationNameMap[currentStation.value] || currentStation.value || '未选择电台'
+  // 1. 变量名换成引入的 stationMap
+  // 2. 加上 ?.name 提取对象里的名字属性
+  return stationMap[currentStation.value]?.name || currentStation.value || '未选择电台'
 })
 
 // 底部状态文案。

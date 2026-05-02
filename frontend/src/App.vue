@@ -61,47 +61,63 @@
 </template>
 
 <script setup>
-// 1. 导入 Vue 响应式 API
 import { onBeforeUnmount, onMounted, ref } from 'vue'
-
-// 2. 导入子组件（白屏就是因为上次漏了这三行！千万别删）
 import Home from './views/Home.vue'
 import BottomPlayer from './components/BottomPlayer.vue'
 import AudioEngine from './components/AudioEngine.vue'
 
-// 3. 主题控制逻辑
 const THEME_STORAGE_KEY = 'wavebypass-theme'
 const isDark = ref(false)
 let mediaQuery = null
+
+// 【新增核心功能】：动态修改手机状态栏颜色
+function updateThemeColor(isDarkMode) {
+  // 查找是否已经有 theme-color 标签
+  let metaThemeColor = document.querySelector('meta[name="theme-color"]')
+  
+  if (!metaThemeColor) {
+    // 如果没有，就动态创建一个插入到 <head> 中
+    metaThemeColor = document.createElement('meta')
+    metaThemeColor.name = 'theme-color'
+    document.head.appendChild(metaThemeColor)
+  }
+  
+  // 完美对接你的 Tailwind 背景色：
+  // 浅色模式你的背景是 bg-gray-100，对应 Hex 色值是 #f3f4f6
+  // 深色模式你的背景是 bg-neutral-900，对应 Hex 色值是 #171717
+  metaThemeColor.content = isDarkMode ? '#171717' : '#f3f4f6'
+}
 
 // 核心判断逻辑
 function applyTheme() {
   const savedTheme = window.localStorage.getItem(THEME_STORAGE_KEY)
   const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches
 
-  // 如果有本地存储，优先本地；否则跟随系统
   const shouldUseDark = savedTheme ? savedTheme === 'dark' : prefersDark
 
   isDark.value = shouldUseDark
   document.documentElement.classList.toggle('dark', shouldUseDark)
+  
+  // 每次切换主题时，同步修改手机状态栏颜色！
+  updateThemeColor(shouldUseDark)
 }
 
-// 用户手动点击按钮
+// 【关键修复】：将 applyTheme() 移出 onMounted！
+// 直接在 script setup 顶层同步执行，组件还没挂载到 DOM 时就先算好主题，
+// 彻底解决第一次进入时“慢半拍”不跟随系统的问题。
+applyTheme()
+
 function toggleTheme() {
   const nextTheme = isDark.value ? 'light' : 'dark'
   window.localStorage.setItem(THEME_STORAGE_KEY, nextTheme)
   applyTheme()
 }
 
-// 专门处理系统主题改变的函数
 function handleSystemThemeChange(e) {
-  // 当系统主动切换深浅色时，说明用户在系统设置里操作了
-  // 此时清除网页上的手动锁定，重新跟随系统
   window.localStorage.removeItem(THEME_STORAGE_KEY)
   applyTheme()
 }
 
-// 处理 iOS Safari 挂起后重回页面的延迟问题
 function handleVisibilityChange() {
   if (document.visibilityState === 'visible') {
     applyTheme()
@@ -109,14 +125,9 @@ function handleVisibilityChange() {
 }
 
 onMounted(() => {
-  applyTheme()
-  
+  // 挂载后只需要绑定监听器，不需要再调 applyTheme 了
   mediaQuery = window.matchMedia('(prefers-color-scheme: dark)')
-  
-  // 监听系统主题变化
   mediaQuery.addEventListener('change', handleSystemThemeChange)
-  
-  // 监听页面可见性变化，专治 iOS Safari 反应迟钝
   document.addEventListener('visibilitychange', handleVisibilityChange)
 })
 
