@@ -72,11 +72,35 @@ const { currentStation, isPlaying, isLoading } = storeToRefs(playerStore)
 const stations = [
   {
     id: 'hitfm',
-    name: 'Hit FM',
+    name: 'Hit FM 台北',
     logoText: 'H',
     logoUrl: '/logos/hitfm.png',
   },
   {
+    id: 'hitfm_taichung',
+    name: 'Hit FM 台中',
+    logoText: '台中',
+    logoUrl: '/logos/hitfm.png',
+  },
+  {
+    id: 'hitfm_tainan',
+    name: 'Hit FM 台南',
+    logoText: '台南',
+    logoUrl: '/logos/hitfm.png',
+  },
+  {
+    id: 'hitfm_yilan',
+    name: 'Hit FM 宜兰',
+    logoText: '宜兰',
+    logoUrl: '/logos/hitfm.png',
+  },
+  {
+    id: 'hitfm_hualian',
+    name: 'Hit FM 花莲',
+    logoText: '花莲',
+    logoUrl: '/logos/hitfm.png',
+  },
+    {
     id: 'ufo',
     name: 'UFO Radio',
     logoText: 'U',

@@ -186,10 +186,121 @@ async def fetch_ufo() -> str:
 
     return final_stream_url
 
+# Hit FM 台中分台表单参数
+HITFM_TAICHUNG_PAYLOAD = {
+    "channelID": "2",  # 2是台中，3是台南，4是宜兰
+    "action": "getLIVEURL",
+}
+
+async def fetch_hitfm_taichung() -> str:
+    """抓取 Hit FM 台中分台的最新 m3u8 地址。"""
+    headers = build_hitfm_headers()
+    
+    # 获取真实地址
+    async with httpx.AsyncClient(timeout=HITFM_TIMEOUT, follow_redirects=True) as client:
+        response = await client.post(HITFM_API_URL, headers=headers, data=HITFM_TAICHUNG_PAYLOAD)
+    response.raise_for_status()
+    real_url = response.text.strip()
+    
+    if not real_url.startswith(("http://", "https://")):
+        raise ValueError("Hit FM 台中分台返回内容不是有效 URL。")
+
+    # 验证 CDN (复用原有的验证逻辑)
+    async with httpx.AsyncClient(timeout=HITFM_TIMEOUT, follow_redirects=True, verify=False) as cdn_client:
+        cdn_response = await cdn_client.get(real_url, headers={"User-Agent": HITFM_HEADERS["User-Agent"]})
+    cdn_response.raise_for_status()
+
+    logger.info("Hit FM 台中分台验证通过")
+    return real_url
+
+# Hit FM 台南分台表单参数
+HITFM_TAINAN_PAYLOAD = {
+    "channelID": "3",  # 2是台中，3是台南，4是宜兰
+    "action": "getLIVEURL",
+}
+
+async def fetch_hitfm_tainan() -> str:
+    """抓取 Hit FM 台南分台的最新 m3u8 地址。"""
+    headers = build_hitfm_headers()
+    
+    # 获取真实地址
+    async with httpx.AsyncClient(timeout=HITFM_TIMEOUT, follow_redirects=True) as client:
+        response = await client.post(HITFM_API_URL, headers=headers, data=HITFM_TAINAN_PAYLOAD)
+    response.raise_for_status()
+    real_url = response.text.strip()
+    
+    if not real_url.startswith(("http://", "https://")):
+        raise ValueError("Hit FM 台南分台返回内容不是有效 URL。")
+
+    # 验证 CDN (复用原有的验证逻辑)
+    async with httpx.AsyncClient(timeout=HITFM_TIMEOUT, follow_redirects=True, verify=False) as cdn_client:
+        cdn_response = await cdn_client.get(real_url, headers={"User-Agent": HITFM_HEADERS["User-Agent"]})
+    cdn_response.raise_for_status()
+
+    logger.info("Hit FM 台南分台验证通过")
+    return real_url
+
+# Hit FM 宜兰分台表单参数
+HITFM_YILAN_PAYLOAD = {
+    "channelID": "4",  # 2是台中，3是台南，4是宜兰
+    "action": "getLIVEURL",
+}
+
+async def fetch_hitfm_yilan() -> str:
+    """抓取 Hit FM 宜兰分台的最新 m3u8 地址。"""
+    headers = build_hitfm_headers()
+    
+    # 获取真实地址
+    async with httpx.AsyncClient(timeout=HITFM_TIMEOUT, follow_redirects=True) as client:
+        response = await client.post(HITFM_API_URL, headers=headers, data=HITFM_YILAN_PAYLOAD)
+    response.raise_for_status()
+    real_url = response.text.strip()
+    
+    if not real_url.startswith(("http://", "https://")):
+        raise ValueError("Hit FM 宜兰分台返回内容不是有效 URL。")
+
+    # 验证 CDN (复用原有的验证逻辑)
+    async with httpx.AsyncClient(timeout=HITFM_TIMEOUT, follow_redirects=True, verify=False) as cdn_client:
+        cdn_response = await cdn_client.get(real_url, headers={"User-Agent": HITFM_HEADERS["User-Agent"]})
+    cdn_response.raise_for_status()
+
+    logger.info("Hit FM 宜兰分台验证通过")
+    return real_url
+
+# Hit FM 花莲分台表单参数
+HITFM_HUALIAN_PAYLOAD = {
+    "channelID": "5",  # 2是台中，3是台南，4是宜兰，5是花莲
+    "action": "getLIVEURL",
+}
+
+async def fetch_hitfm_hualian() -> str:
+    """抓取 Hit FM 花莲分台的最新 m3u8 地址。"""
+    headers = build_hitfm_headers()
+    
+    # 获取真实地址
+    async with httpx.AsyncClient(timeout=HITFM_TIMEOUT, follow_redirects=True) as client:
+        response = await client.post(HITFM_API_URL, headers=headers, data=HITFM_HUALIAN_PAYLOAD)
+    response.raise_for_status()
+    real_url = response.text.strip()
+    
+    if not real_url.startswith(("http://", "https://")):
+        raise ValueError("Hit FM 花莲分台返回内容不是有效 URL。")
+
+    # 验证 CDN (复用原有的验证逻辑)
+    async with httpx.AsyncClient(timeout=HITFM_TIMEOUT, follow_redirects=True, verify=False) as cdn_client:
+        cdn_response = await cdn_client.get(real_url, headers={"User-Agent": HITFM_HEADERS["User-Agent"]})
+    cdn_response.raise_for_status()
+
+    logger.info("Hit FM 花莲分台验证通过")
+    return real_url
 
 # 电台抓取器注册表。
 # key 是前端或 API 使用的电台 ID，value 是负责刷新该电台真实播放地址的异步函数。
 STATION_FETCHER_MAP: dict[str, StationFetcher] = {
     "hitfm": fetch_hitfm,
     "ufo": fetch_ufo,
+    "hitfm_taichung": fetch_hitfm_taichung,
+    "hitfm_tainan": fetch_hitfm_tainan,
+    "hitfm_yilan": fetch_hitfm_yilan,
+    "hitfm_hualian": fetch_hitfm_hualian,
 }

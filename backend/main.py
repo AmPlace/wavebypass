@@ -14,7 +14,7 @@ import httpx
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-
+from contextlib import asynccontextmanager
 from fetchers import STATION_FETCHER_MAP
 
 
@@ -257,7 +257,29 @@ async def refresh_tokens_task() -> None:
         await asyncio.sleep(TOKEN_REFRESH_INTERVAL_SECONDS)
 
 
-@app.on_event("startup")
+# 全局复用的异步 HTTP 客户端，维持与上游 CDN 的 Keep-Alive 长连接
+# 限制最大并发连接数，防止拖垮小鸡内存
+http_client = httpx.AsyncClient(
+    timeout=HTTP_TIMEOUT,
+    verify=CDN_VERIFY_SSL,
+    limits=httpx.Limits(max_keepalive_connections=50, max_connections=100)
+)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # 启动时执行
+    asyncio.create_task(refresh_tokens_task())
+    yield
+    # 关闭时执行，优雅释放全局客户端
+    await http_client.aclose()
+
+# 修改 FastAPI 初始化，传入 lifespan
+app = FastAPI(
+    title="WaveBypass",
+    description="用于聚合电台 m3u8 与 ts 切片代理的后端服务。",
+    version="0.1.0",
+    lifespan=lifespan, # <-- 新增这一行
+)
 async def startup_event() -> None:
     """FastAPI 启动时创建后台刷新任务。
 
@@ -421,56 +443,46 @@ async def proxy_ts_chunk(
 ) -> StreamingResponse:
     """代理单个 ts 音频切片。
 
-    该接口不会把整个 ts 文件读入内存，而是边从真实 CDN 读取、边转发给前端播放器。
-    station_id 当前主要用于保持路由语义清晰，后续也可以用来做电台级限流或日志统计。
+    该接口已使用全局 HTTP 连接池进行优化，大幅降低 TLS 握手开销。
+    边从真实 CDN 读取、边转发给前端播放器，不占用过多内存。
     """
 
     # 校验真实切片地址，只允许代理 http/https。
     validate_target_url(target_url)
 
     # 主动设置请求头，不透传浏览器的真实客户端 IP。
-    # 真实 CDN 看到的是后端服务器发出的请求，而不是用户浏览器直连请求。
     upstream_headers = CDN_REQUEST_HEADERS
 
-    # 创建异步客户端。这里先不使用 async with，因为响应流要在函数返回后继续被 StreamingResponse 消费。
-    client = httpx.AsyncClient(
-        timeout=HTTP_TIMEOUT,
-        follow_redirects=True,
-        verify=CDN_VERIFY_SSL,
-    )
-
-    # 先把响应变量设为 None，方便异常分支判断是否需要关闭已经打开的响应流。
+    # 先把响应变量设为 None，方便异常分支释放资源。
     upstream_response: httpx.Response | None = None
 
     try:
-        # 构造真实 CDN 请求。
-        request = client.build_request("GET", target_url, headers=upstream_headers)
+        # 【核心修改 1】：直接使用全局的 http_client 构建请求
+        request = http_client.build_request("GET", target_url, headers=upstream_headers)
 
-        # stream=True 表示只打开响应流，不把整个 ts 文件一次性读进内存。
-        upstream_response = await client.send(request, stream=True)
+        # stream=True 表示只打开响应流，不一次性读进内存。
+        upstream_response = await http_client.send(request, stream=True)
 
-        # 如果真实 CDN 返回错误，先关闭连接，再返回 502 给前端。
+        # 如果真实 CDN 返回错误，先关闭响应流，再返回 502 给前端。
         upstream_response.raise_for_status()
     except httpx.HTTPError as exc:
         if upstream_response is not None:
             await upstream_response.aclose()
-        await client.aclose()
+        # 【核心修改 2】：删除了 await client.aclose()，不关闭全局客户端
         logger.exception("电台 %s ts 切片代理失败：%s", station_id, exc)
         raise HTTPException(status_code=502, detail="真实 ts 切片拉取失败。") from exc
 
     async def stream_ts_bytes() -> AsyncIterator[bytes]:
         """逐块读取真实 ts 响应并转发给前端。"""
-
         try:
-            # 每次最多读取 64KB，可以在吞吐和内存之间取得较好的平衡。
+            # 每次最多读取 64KB，在吞吐和内存之间取得平衡。
             async for chunk in upstream_response.aiter_bytes(chunk_size=64 * 1024):
-                # httpx 理论上只会产出非空块；这里保留判断让逻辑更稳妥。
                 if chunk:
                     yield chunk
         finally:
-            # 无论播放正常结束还是用户中途断开，都释放上游响应和 HTTP 客户端。
+            # 【核心修改 3】：无论播放正常结束还是中途断开，只需关闭响应流。
+            # 绝对不能写 await http_client.aclose()，要把连接还给全局池！
             await upstream_response.aclose()
-            await client.aclose()
 
     # StreamingResponse 会消费上面的异步生成器，实现边下边传。
     return StreamingResponse(stream_ts_bytes(), media_type="video/MP2T")
@@ -480,8 +492,9 @@ async def proxy_ts_chunk(
 async def proxy_direct_audio_stream(station_id: str) -> StreamingResponse:
     """代理直连音频流电台。
 
-    UFO Radio 这类源不是 m3u8，而是一个持续输出的 MP3/AAC 音频流。
-    这里同样使用 httpx stream=True 边读边传，避免把无限直播流读入内存。
+    该接口已使用全局 HTTP 连接池进行优化，避免重复建立连接。
+    UFO Radio 这类源是一个持续输出的 MP3/AAC 音频流。
+    这里使用边读边传，避免把无限直播流读入内存。
     """
 
     # 只允许已声明为直连流的电台使用这个接口。
@@ -498,22 +511,15 @@ async def proxy_direct_audio_stream(station_id: str) -> StreamingResponse:
     # 校验真实音频流地址。
     validate_target_url(real_stream_url)
 
-    # 创建异步客户端。响应流会在 StreamingResponse 消费完后关闭。
-    client = httpx.AsyncClient(
-        timeout=HTTP_TIMEOUT,
-        follow_redirects=True,
-        verify=CDN_VERIFY_SSL,
-    )
+    # 【核心修改 1】：删除了局部 client 的创建代码
 
     # 先把响应变量设为 None，方便异常分支释放资源。
     upstream_response: httpx.Response | None = None
 
     try:
-        # 构造上游音频流请求。
-        request = client.build_request("GET", real_stream_url, headers=CDN_REQUEST_HEADERS)
-
-        # 打开上游音频流，但不一次性读取内容。
-        upstream_response = await client.send(request, stream=True)
+        # 【核心修改 2】：使用全局 http_client 构造和发送请求
+        request = http_client.build_request("GET", real_stream_url, headers=CDN_REQUEST_HEADERS)
+        upstream_response = await http_client.send(request, stream=True)
 
         # 如果 token 失效，立即刷新一次 UFO 跳转地址后重试。
         if upstream_response.status_code in TOKEN_REFRESH_HTTP_STATUS_CODES:
@@ -526,30 +532,29 @@ async def proxy_direct_audio_stream(station_id: str) -> StreamingResponse:
             )
 
             real_stream_url = await refresh_station_stream_url(station_id)
-            request = client.build_request("GET", real_stream_url, headers=CDN_REQUEST_HEADERS)
-            upstream_response = await client.send(request, stream=True)
+            # 【核心修改 3】：重试机制里也使用全局 http_client
+            request = http_client.build_request("GET", real_stream_url, headers=CDN_REQUEST_HEADERS)
+            upstream_response = await http_client.send(request, stream=True)
 
         # 非 2xx 状态说明真实音频流仍然不可用。
         upstream_response.raise_for_status()
     except httpx.HTTPError as exc:
         if upstream_response is not None:
             await upstream_response.aclose()
-        await client.aclose()
+        # 【核心修改 4】：删除了 await client.aclose()，不关闭全局连接池
         logger.exception("电台 %s 直连音频流代理失败：%s", station_id, exc)
         raise HTTPException(status_code=502, detail="真实音频流拉取失败。") from exc
 
     async def stream_audio_bytes() -> AsyncIterator[bytes]:
         """逐块读取真实音频流并转发给前端。"""
-
         try:
             # 直播音频流没有固定结束时间，所以必须逐块转发。
             async for chunk in upstream_response.aiter_bytes(chunk_size=64 * 1024):
                 if chunk:
                     yield chunk
         finally:
-            # 用户暂停、切台或关闭页面时，释放上游连接。
+            # 【核心修改 5】：用户断开时，只释放上游响应流，绝对不能关闭全局 http_client
             await upstream_response.aclose()
-            await client.aclose()
 
     # 优先复用上游 Content-Type；如果上游没给，就用通用音频类型。
     media_type = upstream_response.headers.get("content-type", "audio/mpeg")
