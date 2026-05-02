@@ -1,0 +1,59 @@
+# 该文件用于同时启动后端 FastAPI 服务和前端 Nginx 静态站点。
+services:
+  # 后端服务：负责真实 CDN 请求、m3u8 改写、ts 流式代理等核心能力。
+  backend:
+    # 使用 backend 目录中的 Dockerfile 构建镜像。
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+
+    # 给容器一个稳定名称，方便本地调试 docker logs。
+    container_name: wavebypass-backend
+
+    # 将容器 8000 端口映射到宿主机 8000 端口，方便直接访问 API。
+    ports:
+      - "8000:8000"
+
+    # 后端运行时环境变量。
+    # HITFM_COOKIE 用于 Hit FM 官网 Ajax 接口需要 Cookie 时传入。
+    environment:
+      HITFM_COOKIE: ${HITFM_COOKIE:-}
+
+    # 加入自定义网桥，frontend 可通过 http://backend:8000 访问它。
+    networks:
+      - wavebypass-net
+
+    # 除非手动停止，否则异常退出后自动重启，提升 Demo 部署稳定性。
+    restart: unless-stopped
+
+  # 前端服务：负责托管 Vue 构建产物，并通过 Nginx 代理 /api 请求。
+  frontend:
+    # 使用 frontend 目录中的多阶段 Dockerfile 构建镜像。
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+
+    # 给容器一个稳定名称，方便本地调试 docker logs。
+    container_name: wavebypass-frontend
+
+    # frontend 依赖 backend，Compose 会先启动 backend。
+    depends_on:
+      - backend
+
+    # 将容器 80 端口映射到宿主机 80 端口。
+    # 如果本机 80 被占用，可以临时改成 "8080:80"。
+    ports:
+      - "80:80"
+
+    # 与 backend 使用同一个网桥，Nginx 才能通过服务名 backend 找到后端。
+    networks:
+      - wavebypass-net
+
+    # 除非手动停止，否则异常退出后自动重启。
+    restart: unless-stopped
+
+# 自定义桥接网络。
+# Compose 会为服务创建 DNS，frontend 内部可直接访问 backend:8000。
+networks:
+  wavebypass-net:
+    driver: bridge

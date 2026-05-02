@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="WaveBypass 是一个极简电台聚合播放器，通过后端代理播放 m3u8 与 ts 音频切片。"
+    />
+    <meta name="theme-color" content="#f3f4f6" />
+    <title>WaveBypass</title>
+
+    <!--
+      hls.js 适合在线加载：它是纯浏览器运行时库，不参与 Vue 单文件组件编译。
+      这里通过 CDN 暴露 window.Hls，AudioEngine.vue 会直接读取这个全局对象。
+    -->
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script>
+  </head>
+  <body>
+    <div id="app"></div>
+
+    <!-- Vite 前端入口。 -->
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

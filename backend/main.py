@@ -1,0 +1,334 @@
+"""WaveBypass 后端入口。
+
+本文件负责初始化 FastAPI 应用、配置跨域、维护内存中的电台播放地址，
+并在服务启动后开启后台定时任务，持续刷新各电台的 CDN token 地址。
+"""
+
+import asyncio
+import logging
+import time
+from collections.abc import AsyncIterator
+from urllib.parse import quote, urljoin, urlparse
+
+import httpx
+from fastapi import FastAPI, HTTPException, Query, Response
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+
+from fetchers import STATION_FETCHER_MAP
+
+
+# 每 5 小时刷新一次 token。
+# 真实 CDN token 有效期约 6 小时，提前 1 小时刷新可以减少播放中断风险。
+TOKEN_REFRESH_INTERVAL_SECONDS = 18_000
+
+
+# m3u8 微缓存有效期，单位是秒。
+# 直播 m3u8 会频繁变化，所以只缓存很短时间，用来削峰而不是长期保存。
+M3U8_CACHE_TTL_SECONDS = 3.0
+
+
+# 下载 m3u8 或 ts 时使用的超时时间。
+# connect 控制建立连接时间，read 控制读取数据时间，避免请求永久卡住。
+HTTP_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
+
+
+# 是否校验真实 CDN 的 HTTPS 证书。
+# 有些广播 CDN 的证书链在 Python/OpenSSL 中会因为缺少 Subject Key Identifier 被拒绝。
+# 这里设置为 False，等价于你测试脚本中的 requests.get(..., verify=False)。
+CDN_VERIFY_SSL = False
+
+
+# 当前进程内存中的最新播放地址。
+# key 是电台 ID，例如 "hitfm"；value 是对应电台最新的 m3u8 URL。
+CURRENT_STREAMS: dict[str, str] = {}
+
+
+# m3u8 微缓存。
+# 结构示例：
+# {
+#     "hitfm": {
+#         "text": "#EXTM3U\n...",
+#         "timestamp": 1710000000.0,
+#     }
+# }
+M3U8_CACHE: dict[str, dict[str, str | float]] = {}
+
+
+# 每个电台一把异步锁。
+# 当缓存过期且同一时间有大量请求进来时，锁可以避免所有请求同时打到真实 CDN。
+M3U8_CACHE_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+# 创建模块级日志记录器。
+# 后续 Docker 中可以通过 docker logs 查看这些刷新状态和异常信息。
+logger = logging.getLogger("wavebypass")
+
+
+# 初始化 FastAPI 应用。
+app = FastAPI(
+    title="WaveBypass",
+    description="用于聚合电台 m3u8 与 ts 切片代理的后端服务。",
+    version="0.1.0",
+)
+
+
+# 允许所有来源跨域访问。
+# 开发期这样最省心；如果后续公开部署，可以改成只允许你的前端域名。
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+def get_m3u8_cache_lock(station_id: str) -> asyncio.Lock:
+    """获取某个电台专用的 m3u8 微缓存锁。
+
+    使用 setdefault 可以在第一次访问某个电台时创建锁，
+    后续同一个 station_id 会复用同一把锁。
+    """
+
+    return M3U8_CACHE_LOCKS.setdefault(station_id, asyncio.Lock())
+
+
+def get_cached_m3u8_text(station_id: str) -> str | None:
+    """读取仍在有效期内的 m3u8 缓存文本。
+
+    如果缓存不存在、缓存内容为空，或者缓存已经超过 3 秒，则返回 None。
+    """
+
+    # 获取当前系统时间戳，用于和缓存写入时间做差值比较。
+    now = time.time()
+
+    # 从缓存字典中读取当前电台的缓存记录。
+    cache_item = M3U8_CACHE.get(station_id)
+
+    # 没有缓存记录时，直接告诉调用方需要重新拉取。
+    if cache_item is None:
+        return None
+
+    # 取出缓存文本；类型转换是为了让字典结构保持简单，方便初学阶段阅读。
+    cached_text = str(cache_item.get("text", ""))
+
+    # 取出缓存写入时间；没有 timestamp 时按 0 处理，会自然判定为过期。
+    cached_timestamp = float(cache_item.get("timestamp", 0.0))
+
+    # 只要缓存有内容，并且距离写入时间还不到 3 秒，就认为命中微缓存。
+    if cached_text and now - cached_timestamp < M3U8_CACHE_TTL_SECONDS:
+        return cached_text
+
+    # 走到这里说明缓存不存在有效内容，调用方需要访问真实 CDN。
+    return None
+
+
+def rewrite_m3u8_text(raw_m3u8_text: str, real_m3u8_url: str, station_id: str) -> str:
+    """把真实 m3u8 中的 ts 切片地址改写成后端代理地址。
+
+    真实 m3u8 里常见的切片地址是相对路径，例如 chunk_1.ts。
+    前端无法直接访问这些切片时，我们需要把它们改成：
+    /api/{station_id}/chunk.ts?target_url=真实切片绝对地址
+    """
+
+    # 用列表收集每一行改写后的结果，最后再一次性 join，效率比反复字符串拼接更好。
+    rewritten_lines: list[str] = []
+
+    # splitlines 会按行拆分 m3u8，同时不保留换行符，方便逐行判断。
+    for line in raw_m3u8_text.splitlines():
+        # 去掉首尾空白只用于判断；真正写回时会使用改写后的标准路径。
+        stripped_line = line.strip()
+
+        # 空行和以 # 开头的标签行不是切片 URI，直接原样保留。
+        if not stripped_line or stripped_line.startswith("#"):
+            rewritten_lines.append(line)
+            continue
+
+        # urlparse 可以同时处理相对路径和绝对 URL。
+        parsed_uri = urlparse(stripped_line)
+
+        # 这里只改写 .ts 切片，避免误改多码率 m3u8 子列表或其他资源。
+        if not parsed_uri.path.lower().endswith(".ts"):
+            rewritten_lines.append(line)
+            continue
+
+        # urljoin 会根据真实 m3u8 的地址，把相对切片路径补成完整 URL。
+        absolute_ts_url = urljoin(real_m3u8_url, stripped_line)
+
+        # target_url 放在查询参数中，必须 URL 编码，否则其中的 ?、& 等字符会破坏代理路由。
+        encoded_target_url = quote(absolute_ts_url, safe="")
+
+        # 生成指向本后端 TS 代理接口的切片地址。
+        proxy_ts_url = f"/api/{station_id}/chunk.ts?target_url={encoded_target_url}"
+
+        # 写入改写后的切片行。
+        rewritten_lines.append(proxy_ts_url)
+
+    # m3u8 是文本协议，使用 \n 拼回即可；末尾加换行让输出更接近常见 m3u8 文件格式。
+    return "\n".join(rewritten_lines) + "\n"
+
+
+async def refresh_tokens_task() -> None:
+    """后台定时刷新所有电台的真实播放地址。
+
+    任务启动后会立刻执行一轮抓取，然后每隔 5 小时再次执行。
+    单个电台抓取失败不会影响其他电台，也不会让整个后台任务退出。
+    """
+
+    while True:
+        # 遍历所有已注册的电台抓取器。
+        for station_id, fetcher in STATION_FETCHER_MAP.items():
+            try:
+                # 调用对应电台的异步抓取函数，拿到最新 m3u8 URL。
+                latest_stream_url = await fetcher()
+
+                # 将最新 URL 写入全局内存字典，供后续 API 或代理逻辑读取。
+                CURRENT_STREAMS[station_id] = latest_stream_url
+
+                # 记录成功刷新日志，方便排查 token 是否按时续命。
+                logger.info("电台 %s 播放地址刷新成功", station_id)
+            except Exception:
+                # 使用 logger.exception 会自动记录异常堆栈，便于定位真实抓取逻辑的问题。
+                logger.exception("电台 %s 播放地址刷新失败", station_id)
+
+        # 当前轮次执行完后休眠 5 小时，再进入下一轮刷新。
+        await asyncio.sleep(TOKEN_REFRESH_INTERVAL_SECONDS)
+
+
+@app.on_event("startup")
+async def startup_event() -> None:
+    """FastAPI 启动时创建后台刷新任务。
+
+    asyncio.create_task 会把刷新循环交给事件循环后台执行，
+    不会阻塞 FastAPI 继续启动和处理 HTTP 请求。
+    """
+
+    asyncio.create_task(refresh_tokens_task())
+
+
+@app.get("/api/{station_id}/playlist.m3u8")
+async def get_station_playlist(station_id: str) -> Response:
+    """获取某个电台的代理 m3u8 播放列表。
+
+    这个接口会先尝试命中 3 秒微缓存。
+    缓存过期后再访问真实 CDN，并把其中的 .ts 切片改写到本后端代理接口。
+    """
+
+    # 第一次缓存检查：如果请求刚好落在 3 秒窗口内，立即返回，最快也最省资源。
+    cached_text = get_cached_m3u8_text(station_id)
+    if cached_text is not None:
+        return Response(content=cached_text, media_type="application/vnd.apple.mpegurl")
+
+    # 获取当前电台专用的锁，避免缓存失效瞬间出现并发击穿。
+    cache_lock = get_m3u8_cache_lock(station_id)
+
+    # 同一电台同一时间只允许一个请求去真实 CDN 重新拉取 m3u8。
+    async with cache_lock:
+        # 第二次缓存检查：等待锁期间，可能已有其他请求完成刷新，所以这里再查一次。
+        cached_text = get_cached_m3u8_text(station_id)
+        if cached_text is not None:
+            return Response(content=cached_text, media_type="application/vnd.apple.mpegurl")
+
+        # 从内存中读取后台定时任务维护的长效真实 m3u8 URL。
+        real_m3u8_url = CURRENT_STREAMS.get(station_id)
+
+        # 如果后台任务还没抓到该电台地址，就返回 503，表示服务暂时不可用。
+        if real_m3u8_url is None:
+            raise HTTPException(status_code=503, detail="该电台播放地址尚未准备好，请稍后重试。")
+
+        try:
+            # 使用异步 HTTP 客户端请求真实 m3u8，不阻塞 FastAPI 事件循环。
+            # verify=False 用于兼容部分 CDN 证书链不完整的问题。
+            async with httpx.AsyncClient(
+                timeout=HTTP_TIMEOUT,
+                follow_redirects=True,
+                verify=CDN_VERIFY_SSL,
+            ) as client:
+                real_response = await client.get(real_m3u8_url)
+
+            # 非 2xx 状态通常表示 CDN 拒绝、token 失效或源站异常。
+            real_response.raise_for_status()
+        except httpx.HTTPError as exc:
+            # 记录真实异常，返回给前端时隐藏内部细节。
+            logger.exception("电台 %s 真实 m3u8 拉取失败：%s", station_id, exc)
+            raise HTTPException(status_code=502, detail="真实 m3u8 拉取失败。") from exc
+
+        # 将真实 m3u8 里的 .ts 切片地址改写成我们的代理地址。
+        rewritten_m3u8_text = rewrite_m3u8_text(real_response.text, real_m3u8_url, station_id)
+
+        # 更新微缓存文本和时间戳。
+        M3U8_CACHE[station_id] = {
+            "text": rewritten_m3u8_text,
+            "timestamp": time.time(),
+        }
+
+        # 返回标准 HLS m3u8 MIME 类型，方便播放器正确识别。
+        return Response(content=rewritten_m3u8_text, media_type="application/vnd.apple.mpegurl")
+
+
+@app.get("/api/{station_id}/chunk.ts")
+async def proxy_ts_chunk(
+    station_id: str,
+    target_url: str = Query(..., min_length=1),
+) -> StreamingResponse:
+    """代理单个 ts 音频切片。
+
+    该接口不会把整个 ts 文件读入内存，而是边从真实 CDN 读取、边转发给前端播放器。
+    station_id 当前主要用于保持路由语义清晰，后续也可以用来做电台级限流或日志统计。
+    """
+
+    # 只允许代理 HTTP/HTTPS URL，避免被构造成 file:// 等危险协议。
+    parsed_target_url = urlparse(target_url)
+    if parsed_target_url.scheme not in {"http", "https"}:
+        raise HTTPException(status_code=400, detail="target_url 只允许 http 或 https 地址。")
+
+    # 主动设置请求头，不透传浏览器的真实客户端 IP。
+    # 真实 CDN 看到的是后端服务器发出的请求，而不是用户浏览器直连请求。
+    upstream_headers = {
+        "User-Agent": "WaveBypass/0.1.0",
+        "Accept": "*/*",
+    }
+
+    # 创建异步客户端。这里先不使用 async with，因为响应流要在函数返回后继续被 StreamingResponse 消费。
+    client = httpx.AsyncClient(
+        timeout=HTTP_TIMEOUT,
+        follow_redirects=True,
+        verify=CDN_VERIFY_SSL,
+    )
+
+    # 先把响应变量设为 None，方便异常分支判断是否需要关闭已经打开的响应流。
+    upstream_response: httpx.Response | None = None
+
+    try:
+        # 构造真实 CDN 请求。
+        request = client.build_request("GET", target_url, headers=upstream_headers)
+
+        # stream=True 表示只打开响应流，不把整个 ts 文件一次性读进内存。
+        upstream_response = await client.send(request, stream=True)
+
+        # 如果真实 CDN 返回错误，先关闭连接，再返回 502 给前端。
+        upstream_response.raise_for_status()
+    except httpx.HTTPError as exc:
+        if upstream_response is not None:
+            await upstream_response.aclose()
+        await client.aclose()
+        logger.exception("电台 %s ts 切片代理失败：%s", station_id, exc)
+        raise HTTPException(status_code=502, detail="真实 ts 切片拉取失败。") from exc
+
+    async def stream_ts_bytes() -> AsyncIterator[bytes]:
+        """逐块读取真实 ts 响应并转发给前端。"""
+
+        try:
+            # 每次最多读取 64KB，可以在吞吐和内存之间取得较好的平衡。
+            async for chunk in upstream_response.aiter_bytes(chunk_size=64 * 1024):
+                # httpx 理论上只会产出非空块；这里保留判断让逻辑更稳妥。
+                if chunk:
+                    yield chunk
+        finally:
+            # 无论播放正常结束还是用户中途断开，都释放上游响应和 HTTP 客户端。
+            await upstream_response.aclose()
+            await client.aclose()
+
+    # StreamingResponse 会消费上面的异步生成器，实现边下边传。
+    return StreamingResponse(stream_ts_bytes(), media_type="video/MP2T")
