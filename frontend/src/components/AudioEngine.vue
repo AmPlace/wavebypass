@@ -7,6 +7,9 @@
 </template>
 
 <script setup>
+// 1. 在顶部定义一次，作为“全局基准”
+const API_BASE = import.meta.env.VITE_API_BASE_URL || ''
+
 // Vue 的响应式工具。
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
@@ -34,7 +37,7 @@ const UFO_DIRECT_STREAM_URL = 'https://stream.rcs.revma.com/em90w4aeewzuv'
 const directStreamStationMap = {
   ufo: {
     directUrl: UFO_DIRECT_STREAM_URL,
-    proxyUrl: '/api/ufo/stream',
+    proxyUrl: `${API_BASE}/api/ufo/stream`,
   },
 }
 
@@ -161,7 +164,7 @@ function loadStation(stationId) {
     return
   }
 
-  const playlistUrl = `/api/${stationId}/playlist.m3u8`
+  const playlistUrl = `${API_BASE}/api/${stationId}/playlist.m3u8`
 
   destroyHls()
   resetAudioSource()
