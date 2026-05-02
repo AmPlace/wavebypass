@@ -309,18 +309,20 @@ QZTV_HEADERS = {
     "User-Agent": "QZWireless/20241122 CFNetwork/3860.500.112 Darwin/25.4.0",
 }
 
-# 注意：这里把 media_id 和 skin 都抽掉了
 QZTV_PAYLOAD_TEMPLATE = {
     "app_version": "3.3.4",
     "channel_type": "ios",
     "imei": "6EF23893-9A3E-4C0C-B124-05EA6AFA6EAC",
     "os_version": "26.4.2",
     "device_model": "iPhone17,2",
+    "user_id": "",
+    "session_id": "",
+    "radio_id": "",  # 默认设为空，兼容前面的 88.9 和 90.4
 }
 
 QZTV_TIMEOUT = httpx.Timeout(10.0)
  
-async def fetch_qztv_base(media_id: str, skin: str, station_name: str) -> str:
+async def fetch_qztv_base(media_id: str, skin: str, station_name: str, radio_id: str = "") -> str:
     """泉州台底层通用抓取引擎"""
     
     # 【核心防御】：随机休眠 5 到 15 秒。
@@ -330,6 +332,7 @@ async def fetch_qztv_base(media_id: str, skin: str, station_name: str) -> str:
     payload = QZTV_PAYLOAD_TEMPLATE.copy()
     payload["media_id"] = media_id
     payload["skin"] = skin
+    payload["radio_id"] = radio_id  # 把 radio_id 也塞进去
     
     async with httpx.AsyncClient(timeout=QZTV_TIMEOUT, verify=False) as client:
         response = await client.post(QZTV_API_URL, headers=QZTV_HEADERS, data=payload)
@@ -383,7 +386,8 @@ async def fetch_qz_fm923() -> str:
     return await fetch_qztv_base(
         media_id="5", 
         skin="ff3409f7acdeeb923acaf3c4bddc91fc", 
-        station_name="泉州经济生活 92.3"
+        station_name="泉州经济生活 92.3",
+        radio_id="1"  #特别的参数
     )
 
 # 电台抓取器注册表。
