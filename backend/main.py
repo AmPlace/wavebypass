@@ -51,6 +51,11 @@ CDN_REQUEST_HEADERS = {
 }
 
 
+# 这些状态码通常表示真实 m3u8 URL 已经过期、被 CDN 回收或 token 不再可用。
+# 顶层播放列表遇到这些状态时，可以立即重新抓取一次最新 token 并重试。
+TOKEN_REFRESH_HTTP_STATUS_CODES = {401, 403, 404, 410}
+
+
 # 当前进程内存中的最新播放地址。
 # key 是电台 ID，例如 "hitfm"；value 是对应电台最新的 m3u8 URL。
 CURRENT_STREAMS: dict[str, str] = {}
@@ -196,6 +201,33 @@ def rewrite_m3u8_text(raw_m3u8_text: str, real_m3u8_url: str, station_id: str) -
     return "\n".join(rewritten_lines) + "\n"
 
 
+async def refresh_station_stream_url(station_id: str) -> str:
+    """立即刷新单个电台的真实 m3u8 地址。
+
+    后台任务会每 5 小时刷新一次，但如果 CDN 提前让 URL 失效，
+    请求路由可以调用这个函数立即补抓一次，减少用户侧播放失败。
+    """
+
+    # 从注册表中找到当前电台对应的抓取函数。
+    fetcher = STATION_FETCHER_MAP.get(station_id)
+
+    # 没有注册抓取器时，说明这是未知电台。
+    if fetcher is None:
+        raise HTTPException(status_code=404, detail="未知电台。")
+
+    # 调用真实抓取函数，获取最新 m3u8 URL。
+    latest_stream_url = await fetcher()
+
+    # 写入全局内存字典，覆盖旧的过期 URL。
+    CURRENT_STREAMS[station_id] = latest_stream_url
+
+    # 记录日志，方便确认是否发生过按需续命。
+    logger.info("电台 %s 播放地址已按需刷新", station_id)
+
+    # 返回最新 URL，调用方可以立刻用它重试。
+    return latest_stream_url
+
+
 async def refresh_tokens_task() -> None:
     """后台定时刷新所有电台的真实播放地址。
 
@@ -205,13 +237,10 @@ async def refresh_tokens_task() -> None:
 
     while True:
         # 遍历所有已注册的电台抓取器。
-        for station_id, fetcher in STATION_FETCHER_MAP.items():
+        for station_id in STATION_FETCHER_MAP:
             try:
-                # 调用对应电台的异步抓取函数，拿到最新 m3u8 URL。
-                latest_stream_url = await fetcher()
-
-                # 将最新 URL 写入全局内存字典，供后续 API 或代理逻辑读取。
-                CURRENT_STREAMS[station_id] = latest_stream_url
+                # 刷新当前电台真实 m3u8 URL。
+                await refresh_station_stream_url(station_id)
 
                 # 记录成功刷新日志，方便排查 token 是否按时续命。
                 logger.info("电台 %s 播放地址刷新成功", station_id)
@@ -243,6 +272,19 @@ def validate_target_url(target_url: str) -> None:
     # 只允许代理 HTTP/HTTPS URL，避免被构造成 file:// 等危险协议。
     if parsed_target_url.scheme not in {"http", "https"}:
         raise HTTPException(status_code=400, detail="target_url 只允许 http 或 https 地址。")
+
+
+async def fetch_real_m3u8_text(real_m3u8_url: str) -> httpx.Response:
+    """请求真实 CDN m3u8，并返回原始响应对象。"""
+
+    # 使用异步 HTTP 客户端请求真实 m3u8，不阻塞 FastAPI 事件循环。
+    # verify=False 用于兼容部分 CDN 证书链不完整的问题。
+    async with httpx.AsyncClient(
+        timeout=HTTP_TIMEOUT,
+        follow_redirects=True,
+        verify=CDN_VERIFY_SSL,
+    ) as client:
+        return await client.get(real_m3u8_url, headers=CDN_REQUEST_HEADERS)
 
 
 @app.get("/api/{station_id}/playlist.m3u8")
@@ -287,14 +329,26 @@ async def get_station_playlist(
             return Response(content=cached_text, media_type="application/vnd.apple.mpegurl")
 
         try:
-            # 使用异步 HTTP 客户端请求真实 m3u8，不阻塞 FastAPI 事件循环。
-            # verify=False 用于兼容部分 CDN 证书链不完整的问题。
-            async with httpx.AsyncClient(
-                timeout=HTTP_TIMEOUT,
-                follow_redirects=True,
-                verify=CDN_VERIFY_SSL,
-            ) as client:
-                real_response = await client.get(real_m3u8_url, headers=CDN_REQUEST_HEADERS)
+            # 请求真实 CDN m3u8。
+            real_response = await fetch_real_m3u8_text(real_m3u8_url)
+
+            # 如果顶层 m3u8 返回 410/403 等状态，说明内存里的长效 URL 可能已经失效。
+            # 子级 m3u8 由顶层列表派生，无法单独刷新，所以这里只对顶层请求做按需刷新。
+            if target_url is None and real_response.status_code in TOKEN_REFRESH_HTTP_STATUS_CODES:
+                logger.warning(
+                    "电台 %s 顶层 m3u8 返回 %s，准备刷新 token 后重试一次",
+                    station_id,
+                    real_response.status_code,
+                )
+
+                # 立即抓取最新真实 m3u8 URL。
+                real_m3u8_url = await refresh_station_stream_url(station_id)
+
+                # 重新计算缓存键，避免继续写入旧 URL 的缓存槽。
+                cache_key = f"{station_id}:{real_m3u8_url}"
+
+                # 使用新 URL 重试一次。
+                real_response = await fetch_real_m3u8_text(real_m3u8_url)
 
             # 非 2xx 状态通常表示 CDN 拒绝、token 失效或源站异常。
             real_response.raise_for_status()
