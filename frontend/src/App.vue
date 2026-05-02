@@ -61,73 +61,69 @@
 </template>
 
 <script setup>
-// Vue 生命周期与响应式工具。
+// 1. 导入 Vue 响应式 API
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 
-// 页面主体。
+// 2. 导入子组件（白屏就是因为上次漏了这三行！千万别删）
 import Home from './views/Home.vue'
-
-// 底部播放器。
 import BottomPlayer from './components/BottomPlayer.vue'
-
-// 隐藏音频引擎。
 import AudioEngine from './components/AudioEngine.vue'
 
-// 主题本地存储键。
+// 3. 主题控制逻辑
 const THEME_STORAGE_KEY = 'wavebypass-theme'
-
-// 当前是否为深色模式。
 const isDark = ref(false)
-
-// 保存系统主题监听器，组件卸载时用于清理。
 let mediaQuery = null
 
-// 根据当前设置应用主题。
+// 核心判断逻辑
 function applyTheme() {
-  // 用户手动选择的主题，可能是 light、dark 或 null。
   const savedTheme = window.localStorage.getItem(THEME_STORAGE_KEY)
-
-  // 系统是否偏好深色模式。
   const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches
 
-  // 如果用户没有手动选择，就跟随系统；否则使用用户选择。
+  // 如果有本地存储，优先本地；否则跟随系统
   const shouldUseDark = savedTheme ? savedTheme === 'dark' : prefersDark
 
-  // 同步响应式状态，供图标切换使用。
   isDark.value = shouldUseDark
-
-  // Tailwind 的 dark: 类默认依赖 html.dark。
   document.documentElement.classList.toggle('dark', shouldUseDark)
 }
 
-// 手动切换主题。
+// 用户手动点击按钮
 function toggleTheme() {
-  // 当前深色则切到浅色，当前浅色则切到深色。
   const nextTheme = isDark.value ? 'light' : 'dark'
-
-  // 写入本地存储，表示用户已经做过手动选择。
   window.localStorage.setItem(THEME_STORAGE_KEY, nextTheme)
-
-  // 立刻应用新主题。
   applyTheme()
 }
 
-// 组件挂载后初始化主题，并监听系统主题变化。
-onMounted(() => {
-  // 首次进入页面时应用主题。
+// 专门处理系统主题改变的函数
+function handleSystemThemeChange(e) {
+  // 当系统主动切换深浅色时，说明用户在系统设置里操作了
+  // 此时清除网页上的手动锁定，重新跟随系统
+  window.localStorage.removeItem(THEME_STORAGE_KEY)
   applyTheme()
+}
 
-  // 创建系统主题偏好监听器。
+// 处理 iOS Safari 挂起后重回页面的延迟问题
+function handleVisibilityChange() {
+  if (document.visibilityState === 'visible') {
+    applyTheme()
+  }
+}
+
+onMounted(() => {
+  applyTheme()
+  
   mediaQuery = window.matchMedia('(prefers-color-scheme: dark)')
-
-  // 当用户没有手动选择主题时，系统主题变化会自动同步。
-  mediaQuery.addEventListener('change', applyTheme)
+  
+  // 监听系统主题变化
+  mediaQuery.addEventListener('change', handleSystemThemeChange)
+  
+  // 监听页面可见性变化，专治 iOS Safari 反应迟钝
+  document.addEventListener('visibilitychange', handleVisibilityChange)
 })
 
-// 组件卸载前移除系统主题监听器。
 onBeforeUnmount(() => {
   if (mediaQuery) {
-    mediaQuery.removeEventListener('change', applyTheme)
+    mediaQuery.removeEventListener('change', handleSystemThemeChange)
   }
+  document.removeEventListener('visibilitychange', handleVisibilityChange)
 })
 </script>

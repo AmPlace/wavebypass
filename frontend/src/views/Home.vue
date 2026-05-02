@@ -106,6 +106,12 @@ const stations = [
     logoText: 'U',
     logoUrl: '/logos/uforadio.png',
   },
+    {
+    id: 'qz_fm889',
+    name: '泉州交通之声 FM889',
+    logoText: 'FM889',
+    logoUrl: '/logos/qz889.png',
+  },
 ]
 
 // 判断某个电台是否是当前正在播放的电台。

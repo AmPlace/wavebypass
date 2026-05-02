@@ -148,6 +148,7 @@ const stationNameMap = {
   hitfm_yilan: 'Hit FM 宜兰',
   hitfm_hualian: 'Hit FM 花莲',
   ufo: 'UFO Radio',
+  qz_fm889: '泉州交通之声 FM889',
 }
 
 // 根据当前电台 ID 获取展示名称。

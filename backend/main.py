@@ -50,6 +50,16 @@ CDN_REQUEST_HEADERS = {
     "Accept": "*/*",
 }
 
+def get_cdn_headers_for_station(station_id: str) -> dict[str, str]:
+    """根据不同电台，动态返回对应的 CDN 请求头（专治各种防盗链）。"""
+    headers = CDN_REQUEST_HEADERS.copy()
+    
+    if station_id == "qz_fm889":
+        # 泉州台阿里云 CDN 强制校验 Referer 和移动端 UA
+        headers["Referer"] = "https://wxqz2.qztv.cn"
+        headers["User-Agent"] = "AppleCoreMedia/1.0.0.23E261 (iPhone; U; CPU OS 26_4_2 like Mac OS X; zh_cn)"
+        
+    return headers
 
 # 这些状态码通常表示真实 m3u8 URL 已经过期、被 CDN 回收或 token 不再可用。
 # 顶层播放列表遇到这些状态时，可以立即重新抓取一次最新 token 并重试。
@@ -301,17 +311,20 @@ def validate_target_url(target_url: str) -> None:
         raise HTTPException(status_code=400, detail="target_url 只允许 http 或 https 地址。")
 
 
-async def fetch_real_m3u8_text(real_m3u8_url: str) -> httpx.Response:
+async def fetch_real_m3u8_text(real_m3u8_url: str, station_id: str) -> httpx.Response:
     """请求真实 CDN m3u8，并返回原始响应对象。"""
-
-    # 使用异步 HTTP 客户端请求真实 m3u8，不阻塞 FastAPI 事件循环。
-    # verify=False 用于兼容部分 CDN 证书链不完整的问题。
+    
+    # 动态获取当前电台专属的防盗链 Header
+    headers = get_cdn_headers_for_station(station_id)
+    
+    # 如果你之前这里已经改成了用 http_client，就保持用 http_client，
+    # 如果还是 async with，那就照下面这样写：
     async with httpx.AsyncClient(
         timeout=HTTP_TIMEOUT,
         follow_redirects=True,
         verify=CDN_VERIFY_SSL,
     ) as client:
-        return await client.get(real_m3u8_url, headers=CDN_REQUEST_HEADERS)
+        return await client.get(real_m3u8_url, headers=headers)
 
 
 @app.get("/api/{station_id}/playlist.m3u8")
@@ -361,7 +374,7 @@ async def get_station_playlist(
 
         try:
             # 请求真实 CDN m3u8。
-            real_response = await fetch_real_m3u8_text(real_m3u8_url)
+            real_response = await fetch_real_m3u8_text(real_m3u8_url, station_id)
 
             # 如果顶层 m3u8 返回 410/403 等状态，说明内存里的长效 URL 可能已经失效。
             # 子级 m3u8 由顶层列表派生，无法单独刷新，所以这里只对顶层请求做按需刷新。
@@ -379,7 +392,7 @@ async def get_station_playlist(
                 cache_key = f"{station_id}:{real_m3u8_url}"
 
                 # 使用新 URL 重试一次。
-                real_response = await fetch_real_m3u8_text(real_m3u8_url)
+                real_response = await fetch_real_m3u8_text(real_m3u8_url, station_id)
 
             # 非 2xx 状态通常表示 CDN 拒绝、token 失效或源站异常。
             real_response.raise_for_status()
@@ -451,7 +464,7 @@ async def proxy_ts_chunk(
     validate_target_url(target_url)
 
     # 主动设置请求头，不透传浏览器的真实客户端 IP。
-    upstream_headers = CDN_REQUEST_HEADERS
+    upstream_headers = get_cdn_headers_for_station(station_id)
 
     # 先把响应变量设为 None，方便异常分支释放资源。
     upstream_response: httpx.Response | None = None
