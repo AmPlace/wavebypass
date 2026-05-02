@@ -29,6 +29,10 @@ const audioRef = ref(null)
 // 切换电台时必须销毁旧实例，否则旧的网络请求和事件监听可能残留。
 const hlsRef = ref(null)
 
+// 直连音频流电台列表。
+// 这些电台不走 m3u8/hls.js，而是直接让 audio 播放后端的 stream 代理。
+const directStreamStations = new Set(['ufo'])
+
 // 销毁当前 hls.js 实例。
 function destroyHls() {
   // 如果当前没有 hls 实例，直接返回。
@@ -89,6 +93,17 @@ function loadStation(stationId) {
 
   // 每次切换电台前，都先销毁旧的 hls 实例。
   destroyHls()
+
+  // 如果是直连音频流电台，直接设置 audio.src。
+  if (directStreamStations.has(stationId)) {
+    // 直连流不需要 hls.js，后端会负责隐藏真实跳转地址并流式转发音频。
+    audioRef.value.src = `/api/${stationId}/stream`
+
+    // 直连音频流可以直接尝试播放。
+    playAudioSafely()
+
+    return
+  }
 
   // 从全局对象读取 hls.js。
   const Hls = getHlsConstructor()

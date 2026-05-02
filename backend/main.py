@@ -56,6 +56,11 @@ CDN_REQUEST_HEADERS = {
 TOKEN_REFRESH_HTTP_STATUS_CODES = {401, 403, 404, 410}
 
 
+# 非 HLS 的直连音频电台。
+# 这些电台不走 playlist.m3u8，而是前端直接请求 /api/{station_id}/stream。
+DIRECT_STREAM_STATIONS = {"ufo"}
+
+
 # 当前进程内存中的最新播放地址。
 # key 是电台 ID，例如 "hitfm"；value 是对应电台最新的 m3u8 URL。
 CURRENT_STREAMS: dict[str, str] = {}
@@ -298,6 +303,10 @@ async def get_station_playlist(
     缓存过期后再访问真实 CDN，并把其中的子级 .m3u8 和 .ts 切片改写到本后端代理接口。
     """
 
+    # UFO 这类电台不是 HLS，没有 playlist.m3u8。
+    if station_id in DIRECT_STREAM_STATIONS:
+        raise HTTPException(status_code=400, detail="该电台是直连音频流，请使用 /api/{station_id}/stream。")
+
     # 如果 target_url 存在，说明这是子级 m3u8 请求。
     # 如果 target_url 不存在，说明这是顶层电台 m3u8 请求，需要从 CURRENT_STREAMS 读取真实地址。
     real_m3u8_url = target_url or CURRENT_STREAMS.get(station_id)
@@ -465,3 +474,84 @@ async def proxy_ts_chunk(
 
     # StreamingResponse 会消费上面的异步生成器，实现边下边传。
     return StreamingResponse(stream_ts_bytes(), media_type="video/MP2T")
+
+
+@app.get("/api/{station_id}/stream")
+async def proxy_direct_audio_stream(station_id: str) -> StreamingResponse:
+    """代理直连音频流电台。
+
+    UFO Radio 这类源不是 m3u8，而是一个持续输出的 MP3/AAC 音频流。
+    这里同样使用 httpx stream=True 边读边传，避免把无限直播流读入内存。
+    """
+
+    # 只允许已声明为直连流的电台使用这个接口。
+    if station_id not in DIRECT_STREAM_STATIONS:
+        raise HTTPException(status_code=400, detail="该电台不是直连音频流。")
+
+    # 从内存中读取后台任务维护的最新真实音频流 URL。
+    real_stream_url = CURRENT_STREAMS.get(station_id)
+
+    # 如果后台还没准备好 URL，就立即刷新一次。
+    if real_stream_url is None:
+        real_stream_url = await refresh_station_stream_url(station_id)
+
+    # 校验真实音频流地址。
+    validate_target_url(real_stream_url)
+
+    # 创建异步客户端。响应流会在 StreamingResponse 消费完后关闭。
+    client = httpx.AsyncClient(
+        timeout=HTTP_TIMEOUT,
+        follow_redirects=True,
+        verify=CDN_VERIFY_SSL,
+    )
+
+    # 先把响应变量设为 None，方便异常分支释放资源。
+    upstream_response: httpx.Response | None = None
+
+    try:
+        # 构造上游音频流请求。
+        request = client.build_request("GET", real_stream_url, headers=CDN_REQUEST_HEADERS)
+
+        # 打开上游音频流，但不一次性读取内容。
+        upstream_response = await client.send(request, stream=True)
+
+        # 如果 token 失效，立即刷新一次 UFO 跳转地址后重试。
+        if upstream_response.status_code in TOKEN_REFRESH_HTTP_STATUS_CODES:
+            await upstream_response.aclose()
+
+            logger.warning(
+                "电台 %s 直连音频流返回 %s，准备刷新地址后重试一次",
+                station_id,
+                upstream_response.status_code,
+            )
+
+            real_stream_url = await refresh_station_stream_url(station_id)
+            request = client.build_request("GET", real_stream_url, headers=CDN_REQUEST_HEADERS)
+            upstream_response = await client.send(request, stream=True)
+
+        # 非 2xx 状态说明真实音频流仍然不可用。
+        upstream_response.raise_for_status()
+    except httpx.HTTPError as exc:
+        if upstream_response is not None:
+            await upstream_response.aclose()
+        await client.aclose()
+        logger.exception("电台 %s 直连音频流代理失败：%s", station_id, exc)
+        raise HTTPException(status_code=502, detail="真实音频流拉取失败。") from exc
+
+    async def stream_audio_bytes() -> AsyncIterator[bytes]:
+        """逐块读取真实音频流并转发给前端。"""
+
+        try:
+            # 直播音频流没有固定结束时间，所以必须逐块转发。
+            async for chunk in upstream_response.aiter_bytes(chunk_size=64 * 1024):
+                if chunk:
+                    yield chunk
+        finally:
+            # 用户暂停、切台或关闭页面时，释放上游连接。
+            await upstream_response.aclose()
+            await client.aclose()
+
+    # 优先复用上游 Content-Type；如果上游没给，就用通用音频类型。
+    media_type = upstream_response.headers.get("content-type", "audio/mpeg")
+
+    return StreamingResponse(stream_audio_bytes(), media_type=media_type)

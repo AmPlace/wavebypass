@@ -85,3 +85,11 @@
 - 新增 `fetch_real_m3u8_text`，统一封装真实 CDN m3u8 请求逻辑。
 - 当顶层 m3u8 返回 `401`、`403`、`404` 或 `410` 时，后端会立即重新抓取最新 token 并重试一次。
 - 后台定时任务改为复用单电台刷新函数，减少重复代码并保持刷新行为一致。
+
+## 2026-05-02 - 第十二步：接入 UFO Radio 直连音频流
+
+- 将 `fetch_ufo` 从 mock 占位逻辑替换为真实 Revma 跳转解析逻辑。
+- UFO 入口地址 `https://stream.rcs.revma.com/em90w4aeewzuv` 会自动跟随跳转，保存最终带 `rj-tok` 的真实音频流地址。
+- 新增 `DIRECT_STREAM_STATIONS`，区分 UFO 这类直连音频流和 Hit FM 这类 HLS/m3u8 电台。
+- 新增 `/api/{station_id}/stream` 路由，使用 httpx 流式代理直连音频，避免把无限直播流读入内存。
+- 前端 `AudioEngine.vue` 识别 `ufo` 时直接播放 `/api/ufo/stream`，不再走 hls.js。
