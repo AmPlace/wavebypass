@@ -139,7 +139,7 @@ export const stationList = [
     name: '福建交通广播 100.7',
     logoText: '闽',
     livePath: 'fj_traffic/live',
-    logoUrl: '/logos/fjjtgb.png',
+    logoUrl: '/logos/fjjtgb.jpg',
     tags: ['news', 'CN'],
   },
 ]
