@@ -618,8 +618,14 @@ async def proxy_yunting_stations(province_code: str) -> Response:
         raise HTTPException(status_code=502, detail="云听 API 请求失败") from exc
 
     # 只缓存 data 数组（不存整个 {code, message, data} 包装），前端和 EPG 端点都直接遍历数组
+    # 云听 API 返回的 URL 是 http://，HTTPS 页面会拦截混合内容，统一改为 https://
     import json
-    stations_json = json.dumps(resp.json().get("data", []), ensure_ascii=False)
+    stations = resp.json().get("data", [])
+    for s in stations:
+        for key in ("playUrlLow", "mp3PlayUrlLow", "mp3PlayUrlHigh"):
+            if isinstance(s.get(key), str) and s[key].startswith("http://"):
+                s[key] = "https://" + s[key][7:]
+    stations_json = json.dumps(stations, ensure_ascii=False)
     YUNTING_CACHE[province_code] = {"data": stations_json, "ts": time.time()}
     return Response(content=stations_json, media_type="application/json")
 
@@ -660,6 +666,10 @@ async def yunting_epg() -> Response:
                     )
                     resp.raise_for_status()
                     stations_data = resp.json().get("data", [])
+                    for s in stations_data:
+                        for key in ("playUrlLow", "mp3PlayUrlLow", "mp3PlayUrlHigh"):
+                            if isinstance(s.get(key), str) and s[key].startswith("http://"):
+                                s[key] = "https://" + s[key][7:]
                     YUNTING_CACHE[prov] = {"data": json.dumps(stations_data, ensure_ascii=False), "ts": time.time()}
                     for item in stations_data:
                         cid = str(item.get("contentId", ""))
@@ -704,6 +714,9 @@ def _find_yunting_url(station_id: str, name: str = "") -> str | None:
                         if not any(f.replace(".", "") == freq_digits for f in title_freqs):
                             continue
                     url = item.get("playUrlLow", "")
+                    # 防御性修复：缓存数据理论上已改为 HTTPS，但旧缓存可能残留 HTTP
+                    if url.startswith("http://"):
+                        url = "https://" + url[7:]
                     if url.startswith(("http://", "https://")):
                         return url
             except Exception:

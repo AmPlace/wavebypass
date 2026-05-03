@@ -323,6 +323,9 @@ async def fetch_yunting(province_code: str, content_id: str) -> str:
     for item in resp.json().get("data", []):
         if str(item.get("contentId")) == str(content_id):
             url = item.get("playUrlLow", "")
+            # 云听 API 返回 http://，HTTPS 页面会拦截混合内容，统一改为 https://
+            if url.startswith("http://"):
+                url = "https://" + url[7:]
             if url.startswith(("http://", "https://")):
                 logger.info("云听 %s (%s) 抓取成功", item.get("title"), content_id)
                 return url
