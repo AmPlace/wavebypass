@@ -15,7 +15,7 @@ from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from contextlib import asynccontextmanager
-from fetchers import STATION_FETCHER_MAP
+from fetchers import STATION_FETCHER_MAP, yunting
 
 
 # 每 5 小时刷新一次 token。
@@ -585,12 +585,162 @@ async def proxy_direct_audio_stream(station_id: str) -> StreamingResponse:
     return StreamingResponse(stream_audio_bytes(), media_type=media_type)
 
 
+# 云听 (radio.cn) 代理配置。
+# 新增省份只需在 YUNTING_PROVINCES 加一个省份代码。
+YUNTING_API_BASE = "https://ytmsout.radio.cn/web/appBroadcast/list"
+YUNTING_PROVINCES = ['350000']  # 350000=福建
+YUNTING_CACHE: dict[str, dict] = {}
+YUNTING_CACHE_TTL = 2 * 3600
+
+
+@app.get("/api/yunting/stations/{province_code}")
+async def proxy_yunting_stations(province_code: str) -> Response:
+    """反代云听电台列表 API，缓存 2 小时。
+
+    前端通过此接口发现云听电台，返回的电台 ID 格式为 yt_{contentId}。
+    流地址由 stream-url 端点按需提供，不在此处暴露（token 会过期）。
+    """
+    cached = YUNTING_CACHE.get(province_code)
+    if cached and time.time() - cached["ts"] < YUNTING_CACHE_TTL:
+        return Response(content=cached["data"], media_type="application/json")
+
+    params = {"categoryId": 0, "provinceCode": province_code}
+    headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+    try:
+        resp = await httpx.AsyncClient(timeout=15.0).get(
+            YUNTING_API_BASE, params=params, headers=headers, follow_redirects=True,
+        )
+        resp.raise_for_status()
+    except httpx.HTTPError as exc:
+        if cached:
+            logger.warning("云听 API 拉取失败，返回缓存: %s", exc)
+            return Response(content=cached["data"], media_type="application/json")
+        raise HTTPException(status_code=502, detail="云听 API 请求失败") from exc
+
+    # 只缓存 data 数组（不存整个 {code, message, data} 包装），前端和 EPG 端点都直接遍历数组
+    import json
+    stations_json = json.dumps(resp.json().get("data", []), ensure_ascii=False)
+    YUNTING_CACHE[province_code] = {"data": stations_json, "ts": time.time()}
+    return Response(content=stations_json, media_type="application/json")
+
+
+@app.get("/api/yunting/epg")
+async def yunting_epg() -> Response:
+    """返回所有已缓存省份电台的 EPG（当前节目名），供前端定期刷新。
+
+    缓存命中时零网络请求，直接从内存拼接。
+    缓存未命中时拉取云听 API 并顺便更新主省份缓存。
+    返回格式：{"contentId": "节目名", ...}
+    """
+    import json
+
+    merged: dict[str, str] = {}
+    need_refresh: list[str] = []
+
+    for prov in YUNTING_PROVINCES:
+        cached = YUNTING_CACHE.get(prov)
+        if cached and time.time() - cached["ts"] < YUNTING_CACHE_TTL:
+            for item in json.loads(cached["data"]):
+                cid = str(item.get("contentId", ""))
+                sub = item.get("subtitle", "")
+                if cid and sub:
+                    merged[cid] = sub
+        else:
+            need_refresh.append(prov)
+
+    if need_refresh:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            for prov in need_refresh:
+                try:
+                    resp = await client.get(
+                        YUNTING_API_BASE,
+                        params={"categoryId": 0, "provinceCode": prov},
+                        headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"},
+                        follow_redirects=True,
+                    )
+                    resp.raise_for_status()
+                    stations_data = resp.json().get("data", [])
+                    YUNTING_CACHE[prov] = {"data": json.dumps(stations_data, ensure_ascii=False), "ts": time.time()}
+                    for item in stations_data:
+                        cid = str(item.get("contentId", ""))
+                        sub = item.get("subtitle", "")
+                        if cid and sub:
+                            merged[cid] = sub
+                except Exception:
+                    pass
+
+    return Response(content=json.dumps(merged), media_type="application/json")
+
+
+import re as _re
+
+
+def _find_yunting_url(station_id: str, name: str = "") -> str | None:
+    """在云听缓存中按名称匹配电台，返回 playUrlLow 或 None。
+
+    匹配策略（按优先级）：
+    1. 前端传来的电台名称：提取中文关键词（去掉数字和空格）+ 频率，在云听中精确查找
+    2. station_id 城市代码兜底（如 qz → "泉州"）
+
+    name 由前端 AudioEngine 从 stations.js 的 stationMap 中获取并传递，无需后端维护额外字典。
+    """
+    import json
+
+    if station_id.startswith(("yt_", "rb_")):
+        return None
+
+    def _search(keyword: str | None, freq_digits: str) -> str | None:
+        for prov in YUNTING_PROVINCES:
+            cached = YUNTING_CACHE.get(prov)
+            if not cached:
+                continue
+            try:
+                for item in json.loads(cached["data"]):
+                    title = item.get("title", "")
+                    if keyword and keyword not in title:
+                        continue
+                    if freq_digits:
+                        title_freqs = _re.findall(r"\d{2,3}\.\d", title)
+                        if not any(f.replace(".", "") == freq_digits for f in title_freqs):
+                            continue
+                    url = item.get("playUrlLow", "")
+                    if url.startswith(("http://", "https://")):
+                        return url
+            except Exception:
+                continue
+        return None
+
+    # 策略 1：用前端传来的电台名称匹配
+    if name:
+        # 去掉数字和小数点，只保留中文字符（提取电台核心名称）
+        # "泉州新闻综合 88.9" → "泉州新闻综合"，"福建交通广播" → "福建交通广播"
+        keyword = _re.sub(r"[\d.\s]", "", name)
+        # 提取名称中的频率（"88.9" → "889"，用于精确匹配云听标题中的频率）
+        freq_match = _re.search(r"\d{2,3}\.\d", name)
+        freq_digits = freq_match.group().replace(".", "") if freq_match else ""
+        result = _search(keyword or None, freq_digits)
+        if result:
+            return result
+
+    # 策略 2：station_id 城市代码兜底（处理前端未传 name 的情况）
+    parts = station_id.split("_", 1)
+    if len(parts) >= 2:
+        city_code = parts[0]
+        freq_digits = _re.sub(r"[^0-9]", "", parts[1])
+        result = _search(city_code, freq_digits)
+        if result:
+            return result
+
+    return None
+
+
 @app.get("/api/{station_id}/stream-url")
-async def get_stream_url(station_id: str) -> Response:
+async def get_stream_url(station_id: str, name: str = "") -> Response:
     """返回电台最新播放地址的直链，供前端直连 CDN 播放，节省后端流量。
 
     前端拿到 URL 后用 HLS.js 直接加载 CDN 的 m3u8，CORS 或加载失败时再回退到后端代理。
     该接口零开销：直接读内存字典，不做任何网络请求。
+    name 参数由前端从 stations.js 的 stationMap 中获取并传递，用于云听回退时按名称匹配。
     """
 
     import json
@@ -600,14 +750,30 @@ async def get_stream_url(station_id: str) -> Response:
     # 内存里没有，尝试立即刷新一次（按需触发 fetcher）
     if url is None:
         fetcher = STATION_FETCHER_MAP.get(station_id)
+
+        # yt_* 云听电台：首次请求时动态创建 fetcher 并注册（自动纳入后台刷新）
+        if fetcher is None and station_id.startswith("yt_"):
+            content_id = station_id[3:]
+            for prov in YUNTING_PROVINCES:
+                STATION_FETCHER_MAP[station_id] = yunting(prov, content_id)
+                fetcher = STATION_FETCHER_MAP[station_id]
+                break
+
         if fetcher is None:
             raise HTTPException(status_code=404, detail="未知电台。")
         try:
             url = await fetcher()
             CURRENT_STREAMS[station_id] = url
         except Exception as exc:
-            logger.exception("电台 %s stream-url 刷新失败", station_id)
-            raise HTTPException(status_code=503, detail="播放地址暂不可用") from exc
+            logger.warning("电台 %s 主 fetcher 失败: %s，尝试云听回退", station_id, exc)
+            fallback_url = _find_yunting_url(station_id, name)
+            if fallback_url:
+                logger.info("电台 %s 云听回退成功", station_id)
+                url = fallback_url
+                CURRENT_STREAMS[station_id] = url
+            else:
+                logger.exception("电台 %s stream-url 刷新失败（云听也无匹配）", station_id)
+                raise HTTPException(status_code=503, detail="播放地址暂不可用") from exc
 
     return Response(
         content=json.dumps({"url": url}),

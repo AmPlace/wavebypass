@@ -301,6 +301,43 @@ def tingfm(post_id: int) -> StationFetcher:
     return _fetch
 
 
+# ==========================================
+# 云听 (radio.cn) 系列电台通用抓取逻辑
+# ==========================================
+# 云听 API 按省份返回电台列表 + m3u8/mp3 地址（带 token，约 19 小时过期）。
+# 电台 ID 格式：yt_{contentId}，由 stream-url 端点按需动态注册到 STATION_FETCHER_MAP。
+
+YUNTING_API_BASE = "https://ytmsout.radio.cn/web/appBroadcast/list"
+YUNTING_TIMEOUT = httpx.Timeout(15.0)
+
+
+async def fetch_yunting(province_code: str, content_id: str) -> str:
+    """云听通用抓取器：调云听 API，按 contentId 找到电台，返回 m3u8 URL。"""
+    params = {"categoryId": 0, "provinceCode": province_code}
+    headers = {"User-Agent": DEFAULT_UA, "Accept": "application/json"}
+
+    async with httpx.AsyncClient(timeout=YUNTING_TIMEOUT, follow_redirects=True) as client:
+        resp = await client.get(YUNTING_API_BASE, params=params, headers=headers)
+    resp.raise_for_status()
+
+    for item in resp.json().get("data", []):
+        if str(item.get("contentId")) == str(content_id):
+            url = item.get("playUrlLow", "")
+            if url.startswith(("http://", "https://")):
+                logger.info("云听 %s (%s) 抓取成功", item.get("title"), content_id)
+                return url
+            raise ValueError(f"云听 contentId={content_id} URL 格式异常: {url}")
+
+    raise ValueError(f"云听省份 {province_code} 中未找到 contentId={content_id}")
+
+
+def yunting(province_code: str, content_id: str) -> StationFetcher:
+    """工厂函数：返回绑定了 province_code + content_id 的抓取闭包。"""
+    async def _fetch() -> str:
+        return await fetch_yunting(province_code, content_id)
+    return _fetch
+
+
 # 电台抓取器注册表。
 # key 是前端或 API 使用的电台 ID，value 是负责刷新该电台真实播放地址的异步函数。
 STATION_FETCHER_MAP: dict[str, StationFetcher] = {
@@ -317,4 +354,5 @@ STATION_FETCHER_MAP: dict[str, StationFetcher] = {
     "pop917": fetch_pop917,
     # tingfm 系列：只需在这里加一行，post_id 从 tingfm.com 电台页面 URL 获取
     "fj_traffic": tingfm(94),   # 福建交通广播 FM100.7
+    "fzzhzs":     tingfm(100),  # 福州左海之声 FM90.1
 }

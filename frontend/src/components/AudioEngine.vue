@@ -62,7 +62,7 @@ function updateSystemMediaSession(stationId) {
     try {
       navigator.mediaSession.metadata = new MediaMetadata({
         title: meta.name || '未知频率',
-        artist: 'WaveBypass Radio',
+        artist: meta.subtitle || 'WaveBypass Radio',
         album: 'Live Stream',
         artwork: [{ src: finalLogo, sizes: '512x512', type: 'image/png' }],
       })
@@ -74,6 +74,18 @@ function updateSystemMediaSession(stationId) {
     navigator.mediaSession.setActionHandler('pause', () => playerStore.togglePlay(false))
   }
 }
+
+// 云听电台 EPG 更新时自动刷新 MediaSession 显示
+// playerStore.updateStationEpg() 会更新 stationMap[id].subtitle，触发此 watcher
+watch(
+  () => {
+    const id = currentStation.value
+    return id ? playerStore.stationMap[id]?.subtitle : undefined
+  },
+  (subtitle) => {
+    if (subtitle && currentStation.value) updateSystemMediaSession(currentStation.value)
+  },
+)
 
 function destroyHls() {
   if (!hlsRef.value) return
@@ -198,9 +210,10 @@ function loadStation(stationId) {
       // directPlay 电台：先尝试直连 CDN 的 m3u8，节省后端流量
       if (canDirectPlay) {
         try {
+          const stName = playerStore.stationMap[stationId]?.name || ''
           const ctrl = new AbortController()
           const timer = setTimeout(() => ctrl.abort(), 5000)
-          const res = await fetch(`${API_BASE}/api/${stationId}/stream-url`, { signal: ctrl.signal })
+          const res = await fetch(`${API_BASE}/api/${stationId}/stream-url?name=${encodeURIComponent(stName)}`, { signal: ctrl.signal })
           clearTimeout(timer)
           if (res.ok) {
             const { url } = await res.json()
@@ -264,9 +277,10 @@ function loadStation(stationId) {
 
       if (canDirectPlay) {
         try {
+          const stName = playerStore.stationMap[stationId]?.name || ''
           const ctrl = new AbortController()
           const timer = setTimeout(() => ctrl.abort(), 5000)
-          const res = await fetch(`${API_BASE}/api/${stationId}/stream-url`, { signal: ctrl.signal })
+          const res = await fetch(`${API_BASE}/api/${stationId}/stream-url?name=${encodeURIComponent(stName)}`, { signal: ctrl.signal })
           clearTimeout(timer)
           if (res.ok) {
             const { url } = await res.json()

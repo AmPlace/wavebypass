@@ -354,3 +354,156 @@ UFO 电台之前在 `AudioEngine.vue` 里硬编码了 `UFO_DIRECT_STREAM_URL` �
 
 **无需其他改动**
 AudioEngine.vue 的 directStreamStationMap 自动合并所有 directUrl 电台，前端直连播放 + 失败回退后端中转均自动生效。
+
+---
+
+## 2026-05-04 新增：接入云听 (radio.cn) API，按省份动态加载电台
+
+**背景**
+云听官方 API（`ytmsout.radio.cn/web/appBroadcast/list?provinceCode=xxx`）按省份返回电台列表和 m3u8 地址，token 有效期约 19 小时。设计成通用模板，后续新增省份只需改一行配置。
+
+**架构**
+电台 ID 统一用 `yt_{contentId}` 前缀，避免和现有电台冲突。播放链路：
+```
+前端发现电台 → 直接加入 allStations（directPlay: true）
+→ 用户点击 → AudioEngine 请求 /api/yt_{id}/stream-url
+→ 后端首次请求时动态创建 fetcher 并注册到 STATION_FETCHER_MAP（自动纳入后台刷新）
+→ 后端返回最新 m3u8 URL → 前端 HLS.js 直连 CDN 播放（失败则自动回退后端代理）
+```
+
+**后端实现**
+1. `fetchers.py`：新增 `fetch_yunting(province_code, content_id)` 通用抓取函数，调云听 API 按 contentId 查找电台，返回 m3u8 URL
+2. `fetchers.py`：新增 `yunting(province_code, content_id)` 工厂函数，返回闭包（同 tingfm 工厂模式）
+3. `main.py`：新增 `GET /api/yunting/stations/{province_code}` 路由，反代云听 API 并缓存 2 小时，返回电台列表原始 JSON
+4. `main.py`：`get_stream_url` 中新增 `yt_*` 动态 fetcher 注册逻辑：首次请求时自动创建并注册，后续请求复用，后台定时任务自动刷新已注册电台
+
+**前端实现**
+1. `api/yunting.js`（新建）：`YUNTING_PROVINCES` 配置省份列表，`fetchYuntingStations(provinceCode)` 请求后端代理，`mapToStation()` 映射为项目格式（`directPlay: true`，根据电台名称自动推断类型标签）
+2. `Home.vue`：新增 `ytStations` ref + `ytLoading` ref，`onMounted` 中与 Radio Browser 并行拉取，`allStations` 合并三源（stationList + rbStations + ytStations）
+3. `Home.vue`：`regionLabels` 新增 `'福建'`，筛选栏自动出现云听电台的省份选项
+
+**配置方式**
+```js
+// frontend/src/api/yunting.js
+export const YUNTING_PROVINCES = ['350000']  // 福建，加其他省加一个代码即可
+```
+```python
+# backend/main.py
+YUNTING_PROVINCES = ['350000']
+```
+新增省份：前后端各加一个省份代码，筛选栏自动出现对应地区，无需改其他代码。
+
+**改动文件**
+- `backend/fetchers.py`：新增 `fetch_yunting`、`yunting` 工厂
+- `backend/main.py`：新增云听反代路由 + `yt_*` 动态 fetcher 注册
+- `frontend/src/api/yunting.js`（新建）
+- `frontend/src/views/Home.vue`：新增云听电台加载 + 合并逻辑
+
+---
+
+## 2026-05-04 新增：云听 EPG 当前节目字幕显示 + MediaSession 集成
+
+**背景**
+云听 API 返回的 `subtitle` 字段包含当前正在播出的节目名（如"音乐无人驾驶"）。将这个字段映射到电台卡片上，让界面比普通 Radio Browser 高级得多。同时将 EPG 信息同步到系统 MediaSession（锁屏/通知栏显示当前节目名）。
+
+**实现**
+1. `api/yunting.js`：`mapToStation()` 新增 `subtitle` 字段映射
+2. `stores/player.js`：新增 `updateStationEpg(stationId, subtitle)` action，更新 `stationMap[id].subtitle`
+3. `Home.vue`：新增 `epgMap` ref + `syncEpg(data)` 函数，同时更新 `epgMap`（卡片显示）和 `playerStore`（MediaSession）
+4. `Home.vue`：`watch(ytStations, { once: true })` 从云听电台初始加载的 `subtitle` 填充 `epgMap`
+5. `Home.vue`：`onMounted` 中新增 EPG 轮询定时器（每 3 分钟调用 `/api/yunting/epg`），`syncEpg()` 同步更新卡片和 store
+6. `Home.vue`：卡片电台名下方新增字幕行（`line-clamp-1`，`text-[0.7rem]`，灰色）
+7. `AudioEngine.vue`：`updateSystemMediaSession` 使用 `meta.subtitle` 作为 artist（当前节目名），非云听电台回退到 'WaveBypass Radio'
+8. `AudioEngine.vue`：新增 `watch(stationMap[id].subtitle)` 监听 EPG 更新，自动刷新 MediaSession 显示
+
+**EPG 数据流**
+```
+云听 API → /api/yunting/stations → Home.vue ytStations → watch → syncEpg()
+                                                          ↓
+每 3 分钟 → /api/yunting/epg → syncEpg() → epgMap（卡片显示）
+                                        → playerStore.updateStationEpg()
+                                              → AudioEngine watcher
+                                                  → updateSystemMediaSession()
+                                                      → 锁屏/通知栏显示当前节目
+```
+
+**改动文件**
+- `frontend/src/api/yunting.js`：`mapToStation` 新增 `subtitle`
+- `frontend/src/stores/player.js`：新增 `updateStationEpg` action
+- `frontend/src/views/Home.vue`：新增 `epgMap` + `syncEpg` + `watch(ytStations)` + 轮询 + 卡片字幕
+- `frontend/src/components/AudioEngine.vue`：MediaSession artist 改为 `meta.subtitle` + 新增 subtitle watcher
+
+---
+
+## 2026-05-04 新增：云听 EPG 轻量端点
+
+**背景**
+前端需要定期刷新当前节目信息（EPG），但主省份代理缓存 2 小时，直接复用会拿到过期节目数据。需要一个轻量端点只返回 `{contentId: subtitle}` 映射。
+
+**实现**
+1. `main.py`：新增 `GET /api/yunting/epg`，遍历 `YUNTING_CACHE` 已缓存省份，拼接所有电台的 `contentId → subtitle` 映射
+2. 缓存命中 → 零网络请求，直接从内存拼接；缓存未命中 → 拉取云听 API 并顺便更新主省份缓存
+3. 返回体很小（只有 id→节目名映射），适合前端每 3 分钟轮询
+
+**改动文件**
+- `backend/main.py`：新增 `yunting_epg` 端点
+
+---
+
+## 2026-05-04 新增：多源流回退（云听兜底现有 fetcher 电台）
+
+**背景**
+现有的泉州系列等静态 fetcher 电台，如果各自的 API 暂时不可用，播放就会失败。云听 API 也包含这些电台，可以作为备用源。
+
+**实现**
+1. `main.py`：新增 `_find_yunting_url(station_id, name)` 辅助函数，从云听缓存中按名称匹配电台
+2. `get_stream_url` 新增 `name` 查询参数，AudioEngine 调用时从 `stationMap` 获取电台中文名并传递
+3. 匹配策略（按优先级）：
+   - 策略 1（前端传名）：从中文名提取关键词（去掉数字/空格）+ 频率，在云听缓存中精确查找
+   - 策略 2（兜底）：从 station_id 提取城市代码（如 `qz`→泉州），按城市名模糊匹配
+4. `get_stream_url` 的 `except` 块中调用：主 fetcher 失败时，自动从云听找同名电台的流地址兜底
+5. 对前端完全透明：现有的泉州 88.9 等电台 ID 不变，只是多了个备用源
+6. `yt_*` 和 `rb_*` 电台跳过回退（它们有自己的播放链路）
+
+**匹配示例**
+- `qz_fm889`，name="泉州新闻综合 88.9" → 关键词"泉州新闻综合" + 频率"889" → 匹配云听"泉州889新闻综合广播"
+- `fj_traffic`，name="福建交通广播 100.7" → 关键词"福建交通广播" + 频率"1007" → 匹配云听"福建交通广播 FM100.7"
+
+**设计决策**
+- 电台中文名由前端从 `stations.js` 的 `stationMap` 中获取并传递，无需后端维护额外字典
+- 云听 API 请求无需 Cookie 或 Token，直接 GET 即可
+- 云听 API 返回的 `playUrlLow` 每次通过 `fetch_yunting()` 实时获取，token 不会过期（过期的是播放 URL 本身，而非 API 列表）
+
+**改动文件**
+- `backend/main.py`：新增 `_find_yunting_url` + `get_stream_url` 新增 `name` 参数
+- `frontend/src/components/AudioEngine.vue`：两处 `stream-url` 请求新增 `name` 查询参数
+
+---
+
+## 2026-05-04 修复：云听电台地区标签与现有筛选冲突
+
+**问题**
+- Radio Browser 中国电台 tag 为 `['CN']`（显示为"中国大陆"）
+- 云听福建电台 tag 为 `['福建']`（省份标签）
+- 选"中国大陆"看不到云听福建台，选"福建"看不到 RB 中国台
+- 本地泉州/福建电台也只有 `CN` 标签，选"福建"看不到它们
+
+**修复**
+1. `yunting.js`：`mapToStation()` tags 改为 `['CN', provinceLabel, inferType(name)]`，同时打国家标签和省份标签
+2. `stations.js`：泉州 4 台 + 福建交通 + 福州左海 tags 从 `['news', 'CN']` 改为 `['CN', '福建', 'news']`
+
+**标签层级设计**
+- 国家标签（`CN`/`TW`/`JP`）：Radio Browser 电台和云听电台共用，选国家看全部
+- 省份标签（`福建`/`广东`等）：云听电台自动打，本地电台手动打，RB 电台无省份信息
+- 类型标签（`news`/`music`/`talk`）：所有电台通用
+
+**筛选逻辑**：选"中国大陆" → 匹配 `CN` → 看到所有中国电台；选"福建" → 匹配 `福建` → 只看福建电台。省份是国家的子集，两者不冲突。
+
+**新增省份操作**
+1. `yunting.js`：`YUNTING_PROVINCES` 加省份代码 + `PROVINCE_LABELS` 加省份名
+2. `Home.vue`：`regionLabels` 加省份名
+3. `mapToStation` 自动附加 `CN` 标签，无需手动改
+
+**改动文件**
+- `frontend/src/api/yunting.js`：`mapToStation` tags 加 `CN`
+- `frontend/src/config/stations.js`：6 个福建电台 tags 加 `'福建'`

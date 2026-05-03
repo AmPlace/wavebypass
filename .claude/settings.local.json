@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:api.tingfm.com)",
+      "WebFetch(domain:tingfm.com)",
+      "WebFetch(domain:zh.wikipedia.org)",
+      "WebFetch(domain:www.sohu.com)"
+    ]
+  }
+}

@@ -53,7 +53,7 @@
       <!-- 电台数量 -->
       <p class="text-xs text-gray-400 dark:text-gray-500">
         共 {{ filteredStations.length }} 个电台
-        <span v-if="rbLoading" class="ml-2">正在加载…</span>
+        <span v-if="rbLoading || ytLoading" class="ml-2">正在加载…</span>
       </p>
     </header>
 
@@ -102,10 +102,16 @@
                   <span v-else>{{ station.logoText }}</span>
                 </div>
               </div>
-              <!-- 电台名称 -->
-              <div class="flex basis-2/5 items-center justify-center px-2 text-center">
-                <span class="line-clamp-2 text-sm font-medium text-gray-800 dark:text-gray-200 sm:text-[0.95rem]">
+              <!-- 电台名称 + EPG 当前节目 -->
+              <div class="flex basis-2/5 flex-col items-center justify-center px-2 text-center">
+                <span class="line-clamp-1 text-sm font-medium text-gray-800 dark:text-gray-200 sm:text-[0.95rem]">
                   {{ station.name }}
+                </span>
+                <span
+                  v-if="station.subtitle || epgMap[station.id.replace('yt_', '')]"
+                  class="mt-0.5 line-clamp-1 text-[0.7rem] text-gray-400 dark:text-gray-500"
+                >
+                  {{ station.subtitle || epgMap[station.id.replace('yt_', '')] }}
                 </span>
               </div>
             </div>
@@ -120,7 +126,8 @@
 import { storeToRefs } from 'pinia'
 import { usePlayerStore } from '../stores/player'
 import { fetchStationsByCountry, RB_FETCH_COUNTRIES } from '../api/radioBrowser'
-import { computed, inject, onBeforeUnmount, onMounted, ref, watchEffect } from 'vue'
+import { fetchYuntingStations, YUNTING_PROVINCES } from '../api/yunting'
+import { computed, inject, onBeforeUnmount, onMounted, ref, watch, watchEffect } from 'vue'
 import { useScroll, useThrottleFn } from '@vueuse/core'
 
 const playerStore = usePlayerStore()
@@ -130,12 +137,41 @@ const { currentStation, isPlaying, isLoading, stationList } = storeToRefs(player
 const rbStations = ref([])
 const rbLoading = ref(false)
 
-// 合并静态电台 + Radio Browser 电台
-const allStations = computed(() => [...stationList.value, ...rbStations.value])
+// ========== 云听 (radio.cn) 数据 ==========
+const ytStations = ref([])
+const ytLoading = ref(false)
+
+// ========== EPG（当前节目名）==========
+// epgMap 用于卡片显示：key 是 contentId（无 yt_ 前缀），value 是节目名
+// 两路数据源：
+//   1. 初始加载：云听 API 返回的 subtitle → watch(ytStations) 填充
+//   2. 定期刷新：每 3 分钟调 /api/yunting/epg → syncEpg() 同时更新 epgMap 和 store
+// store 中的 subtitle 变化会触发 AudioEngine 的 watcher → 自动刷新 MediaSession（锁屏/通知栏）
+const epgMap = ref({})
+
+// 将 EPG 数据同步到 epgMap（卡片显示）和 playerStore（MediaSession）
+function syncEpg(data) {
+  epgMap.value = data
+  for (const [cid, subtitle] of Object.entries(data)) {
+    playerStore.updateStationEpg(`yt_${cid}`, subtitle)
+  }
+}
+
+// 云听电台加载完成后，用初始 subtitle 填充 epgMap
+watch(ytStations, (list) => {
+  const initial = {}
+  for (const s of list) {
+    if (s.subtitle) initial[s.id.replace('yt_', '')] = s.subtitle
+  }
+  if (Object.keys(initial).length) syncEpg(initial)
+}, { once: true })
+
+// 合并静态电台 + Radio Browser 电台 + 云听电台
+const allStations = computed(() => [...stationList.value, ...rbStations.value, ...ytStations.value])
 
 // ========== 筛选配置 ==========
 // 地区标签映射，新增地区只需在这里加一行
-const regionLabels = { TW: '台湾', CN: '中国大陆', JP: '日本', US: '美国', KR: '韩国', GB: '英国', DE: '德国', FR: '法国' }
+const regionLabels = { TW: '台湾', CN: '中国大陆', JP: '日本', US: '美国', KR: '韩国', GB: '英国', DE: '德国', FR: '法国', 福建: '福建' }
 
 // 类型标签映射，对应 radioBrowser.js 的 TAG_TYPE_MAP 输出值
 const typeLabels = { music: '音乐', news: '新闻', talk: '谈话', sports: '体育', religious: '宗教', other: '其他' }
@@ -213,6 +249,7 @@ const gridRef = ref(null)
 // grid 容器实际宽度，由 ResizeObserver 持续更新。
 const containerWidth = ref(1024)
 let resizeObserver = null
+let epgTimer = null
 
 // useScroll（@vueuse/core）：响应式追踪滚动位置，自动处理 iOS Safari 弹性滚动等边界。
 const { y: scrollY } = useScroll(scrollRef)
@@ -292,10 +329,32 @@ onMounted(() => {
     list.forEach((s) => playerStore.addStation(s))
     rbLoading.value = false
   })()
+
+  // 按 YUNTING_PROVINCES 配置并行拉取云听电台
+  // 想加其他省份：去 api/yunting.js 的 YUNTING_PROVINCES 里加省份代码即可
+  ;(async () => {
+    ytLoading.value = true
+    const results = await Promise.all(
+      YUNTING_PROVINCES.map((code) => fetchYuntingStations(code))
+    )
+    const list = results.flat()
+    ytStations.value = list
+    list.forEach((s) => playerStore.addStation(s))
+    ytLoading.value = false
+  })()
+
+  // EPG 定期刷新（每 3 分钟），同时更新卡片显示和 store（触发 MediaSession 刷新）
+  epgTimer = setInterval(async () => {
+    try {
+      const res = await fetch('/api/yunting/epg')
+      if (res.ok) syncEpg(await res.json())
+    } catch {}
+  }, 180_000)
 })
 
 // 组件卸载时断开 ResizeObserver，防止内存泄漏。
 onBeforeUnmount(() => {
   if (resizeObserver) resizeObserver.disconnect()
+  if (epgTimer) clearInterval(epgTimer)
 })
 </script>

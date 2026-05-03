@@ -122,5 +122,12 @@ export const usePlayerStore = defineStore('player', {
       // 不更新 stationList，因为 Home.vue 有自己的 rbStations 列表单独管理显示
       this.stationMap[station.id] = station
     },
+
+    // 更新电台 EPG（当前节目名），由 Home.vue 的 EPG 轮询调用
+    // AudioEngine 的 watcher 会自动检测到 subtitle 变化并刷新 MediaSession
+    updateStationEpg(stationId, subtitle) {
+      const station = this.stationMap[stationId]
+      if (station) station.subtitle = subtitle
+    },
   },
 })
