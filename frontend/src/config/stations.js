@@ -132,6 +132,15 @@ export const stationList = [
     logoUrl: '/logos/twzgxqw.png',
     tags: ['talk', 'TW'],
   },
+  // tingfm 系列：livePath 让前端走 HLS 后端代理，URL 由 fetcher 自动刷新
+  // post_id 从 tingfm.com 电台页面 URL 获取
+  {
+    id: 'fj_traffic',
+    name: '福建交通广播',
+    logoText: '闽',
+    livePath: 'fj_traffic/live',
+    tags: ['news', 'CN'],
+  },
 ]
 
 // 2. 字典/映射格式：利用上面的数组自动生成！

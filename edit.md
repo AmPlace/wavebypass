@@ -43,7 +43,27 @@
 
 ---
 
-## 2026-05-04 新增：后端反代 Radio Browser API，解决大陆无法访问问题
+## 2026-05-04 新增：tingfm 通用抓取器，接入福建交通广播 FM100.7
+
+**背景**
+tingfm.com 提供公开 API（`api.tingfm.com/wp-json/query/wndt_streams`），返回电台的 m3u8 和 mp3 播放地址。需要设计成通用模板，后续加其他 tingfm 电台只需一行配置。
+
+**实现**
+1. `fetchers.py`：新增 `fetch_tingfm(post_id)` 通用抓取函数，请求 tingfm API，优先取 m3u8 流（HLS，quality 更高），没有则取 mp3
+2. `fetchers.py`：新增 `tingfm(post_id)` 工厂函数，返回绑定了 post_id 的闭包，用于注册到 `STATION_FETCHER_MAP`
+3. `fetchers.py`：`STATION_FETCHER_MAP` 新增 `"fj_traffic": tingfm(94)`（福建交通广播，post_id=94）
+4. `stations.js`：新增 `fj_traffic` 电台配置，`livePath: 'fj_traffic/live'` 让前端走 HLS 后端代理
+
+**后续新增 tingfm 电台只需两步**
+1. `fetchers.py`：`STATION_FETCHER_MAP` 加一行，如 `"fj_music": tingfm(123)`
+2. `stations.js`：加一条配置，`id` 对应 map 的 key，`livePath` 设为 `{id}/live`
+
+**播放链路**
+前端请求 `/api/fj_traffic/playlist.m3u8` → 后端通过 fetcher 调用 tingfm API 拿到最新 m3u8 URL → 请求 CDN m3u8 → 改写切片地址为后端代理 → 返回给 hls.js 播放。后台定时任务每 5 小时自动刷新 token。
+
+**改动文件**
+- `backend/fetchers.py`：新增 `fetch_tingfm`、`tingfm` 工厂函数，注册 `fj_traffic`
+- `frontend/src/config/stations.js`：新增福建交通广播配置
 
 **背景**
 Radio Browser 官方 API（`all.api.radio-browser.info`）在大陆无法直连，导致首页电台列表加载失败。

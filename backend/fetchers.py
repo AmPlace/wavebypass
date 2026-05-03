@@ -253,6 +253,54 @@ async def fetch_qz_fm923() -> str:
     )
 
 
+# ==========================================
+# tingfm.com 系列电台通用抓取逻辑
+# ==========================================
+# tingfm API 返回 JSON，包含 streams[] 数组，按 priority 降序。
+# 优先取 m3u8（HLS），没有则取 mp3 直连。
+# 新增 tingfm 电台：只需在 STATION_FETCHER_MAP 加一行注册即可。
+
+TINGFM_API_BASE = "https://api.tingfm.com/wp-json/query/wndt_streams"
+TINGFM_TIMEOUT = httpx.Timeout(10.0)
+
+async def fetch_tingfm(post_id: int) -> str:
+    """tingfm 通用抓取器，传入 post_id 即可。"""
+    params = {"post_id": post_id, "in_web": "true"}
+    headers = {
+        "Accept": "application/json",
+        "Referer": "https://tingfm.com/",
+        "Origin": "https://tingfm.com",
+        "User-Agent": DEFAULT_UA,
+    }
+
+    async with httpx.AsyncClient(timeout=TINGFM_TIMEOUT, follow_redirects=True) as client:
+        resp = await client.get(TINGFM_API_BASE, params=params, headers=headers)
+    resp.raise_for_status()
+
+    data = resp.json()
+    streams = data.get("data", {}).get("streams", [])
+    if not streams:
+        raise ValueError(f"tingfm post_id={post_id} 无可用流地址")
+
+    # 优先取 m3u8，其次按 priority 降序取第一个
+    m3u8 = next((s for s in streams if s.get("type") == "m3u8"), None)
+    chosen = m3u8 or max(streams, key=lambda s: s.get("priority", 0))
+    url = chosen.get("url", "")
+
+    if not url.startswith(("http://", "https://")):
+        raise ValueError(f"tingfm post_id={post_id} 返回无效 URL: {url}")
+
+    logger.info("tingfm post_id=%d 抓取成功（%s）", post_id, chosen.get("type"))
+    return url
+
+
+def tingfm(post_id: int) -> StationFetcher:
+    """工厂函数：返回一个绑定了 post_id 的抓取闭包，用于注册到 STATION_FETCHER_MAP。"""
+    async def _fetch() -> str:
+        return await fetch_tingfm(post_id)
+    return _fetch
+
+
 # 电台抓取器注册表。
 # key 是前端或 API 使用的电台 ID，value 是负责刷新该电台真实播放地址的异步函数。
 STATION_FETCHER_MAP: dict[str, StationFetcher] = {
@@ -267,4 +315,6 @@ STATION_FETCHER_MAP: dict[str, StationFetcher] = {
     "qz_fm1059": fetch_qz_fm1059,
     "qz_fm923": fetch_qz_fm923,
     "pop917": fetch_pop917,
+    # tingfm 系列：只需在这里加一行，post_id 从 tingfm.com 电台页面 URL 获取
+    "fj_traffic": tingfm(94),   # 福建交通广播 FM100.7
 }
