@@ -497,7 +497,16 @@ async def proxy_ts_chunk(
             await upstream_response.aclose()
 
     # StreamingResponse 会消费上面的异步生成器，实现边下边传。
-    return StreamingResponse(stream_ts_bytes(), media_type="video/MP2T")
+    # 在最后返回 StreamingResponse 的时候加上 headers
+    return StreamingResponse(
+        stream_ts_bytes(), 
+        media_type="video/MP2T",
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Cache-Control": "no-cache", # 避免前端缓存旧切片
+            # "Content-Disposition": "attachment; filename=chunk.ts" # 可选：强制定制下载名，主要用于调试
+        }
+    )
 
 
 @app.get("/api/{station_id}/stream")

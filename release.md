@@ -126,3 +126,16 @@
 - 修复泉州923特殊的radioid
 - 增加前后端分离部署支持，添加环境变量
 - 增加pop923电台，优化hinetfm模板逻辑
+- 增加HLS.js低延迟参数
+
+## 2026-05-03 - 增加台湾城市广播网电台，支持简单直链电台自动识别播放
+
+- 新增台湾城市广播网（cityfm）电台，直链地址为 `https://fm901.cityfm.com.tw:8083/901`
+- `stations.js` 新增 `directUrl` 字段，简单直链电台只需配置 `directUrl` 即可，无需后端 fetcher
+- 修复 `AudioEngine.vue` 的 `loadStation` 未识别 `stationMap.directUrl` 导致简单电台仍走 HLS playlist 的问题
+- 现在 `stationMap` 里有 `directUrl` 且无 `livePath` 的电台，前端自动跳过 HLS 直接用 `<audio>` 原生播放
+- 统一直连电台回退机制：`directStreamStationMap` 自动合并 `stationMap` 的 directUrl 电台，共用直连→中转回退逻辑
+- HLS 致命错误时也会尝试 directUrl 直连回退，不再直接报错停止
+- 重构 UFO 电台：移除 AudioEngine.vue 中硬编码的直连 URL，改由 stations.js 配置 directUrl，统一收编进自动合并逻辑
+- proxyUrl 生成规则：有 livePath 的电台走 /api/{id}/stream（直连流代理），无 livePath 的走 /api/{id}/live（HLS 代理）
+- 新增中广新闻网、中广流行网、中广音乐网、iGO531、中广乡亲网，均为 Revma 直链，仅需在 stations.js 配置 directUrl

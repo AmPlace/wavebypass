@@ -32,14 +32,21 @@ const { currentStation, isPlaying, volume } = storeToRefs(playerStore)
 const audioRef = ref(null)
 const hlsRef = ref(null)
 
-const UFO_DIRECT_STREAM_URL = 'https://stream.rcs.revma.com/em90w4aeewzuv'
-
-const directStreamStationMap = {
-  ufo: {
-    directUrl: UFO_DIRECT_STREAM_URL,
-    proxyUrl: `${API_BASE}/api/ufo/stream`,
-  },
-}
+// 自动合并 stationMap 里所有 directUrl 电台，共用直连→中转回退逻辑
+// 有 livePath 的电台走 HLS 代理 /live，没有的走直连流代理 /stream
+const directStreamStationMap = Object.fromEntries(
+  Object.entries(stationMap)
+    .filter(([, s]) => s.directUrl)
+    .map(([id, s]) => [
+      id,
+      {
+        directUrl: s.directUrl,
+        proxyUrl: s.livePath
+          ? `${API_BASE}/api/${id}/stream`
+          : `${API_BASE}/api/${id}/live`,
+      },
+    ])
+)
 
 const directStreamMode = ref('')
 
@@ -179,6 +186,7 @@ function loadStation(stationId) {
   playerStore.setLoading(true)
   directStreamMode.value = ''
 
+  // directStreamStationMap 已合并 stationMap 的 directUrl 电台，统一走直连播放
   if (directStreamStationMap[stationId]) {
     const streamConfig = directStreamStationMap[stationId]
     directStreamMode.value = 'direct'
@@ -187,10 +195,18 @@ function loadStation(stationId) {
     return
   }
 
-  const Hls = getHlsConstructor()
-
   if (Hls?.isSupported()) {
-    const hls = new Hls()
+    // 【核心修改】：传入低延迟优化参数
+    const hls = new Hls({
+      enableWorker: true,        // 使用 Web Worker 提升解析性能
+      lowLatencyMode: true,      // 开启低延迟模式
+      autoStartLoad: true,       // 自动开始加载数据
+      startFragPrefetch: true,   // 预取第一个切片，加速起播
+      liveSyncDurationCount: 2,  // 维持在距离直播边缘 2 个切片的位置
+      liveMaxLatencyDurationCount: 5, // 允许的最大延迟切片数
+      maxBufferLength: 10,       // 限制最大缓冲长度，防止内存占用过大和延迟累积
+    })
+    
     hlsRef.value = hls
     hls.loadSource(playlistUrl)
     hls.attachMedia(audioRef.value)
@@ -202,6 +218,11 @@ function loadStation(stationId) {
     hls.on(Hls.Events.ERROR, (_event, data) => {
       if (data?.fatal) {
         console.warn('HLS 播放发生致命错误。', data)
+        // HLS 失败后，尝试用 directUrl 直连回退
+        if (directStreamStationMap[stationId]) {
+          fallbackToProxyStream(stationId)
+          return
+        }
         playerStore.setPlaybackError('HLS 播放发生错误，请稍后重试。')
         playerStore.togglePlay(false)
       }
