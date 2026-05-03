@@ -103,7 +103,7 @@
 import { storeToRefs } from 'pinia'
 import { usePlayerStore } from '../stores/player'
 import { fetchStationsByCountry, RB_FETCH_COUNTRIES } from '../api/radioBrowser'
-import { computed, onMounted, ref, watchEffect } from 'vue'
+import { computed, inject, onMounted, ref, watchEffect } from 'vue'
 
 const playerStore = usePlayerStore()
 const { currentStation, isPlaying, isLoading, stationList } = storeToRefs(playerStore)
@@ -125,6 +125,8 @@ const typeLabels = { music: '音乐', news: '新闻', talk: '谈话', sports: '�
 // 当前选中的筛选条件，空字符串表示"全部"
 const selectedRegion = ref('')
 const selectedType = ref('')
+// 搜索关键词，从 App.vue 通过 provide/inject 共享过来
+const searchQuery = inject('searchQuery')
 
 // 从当前所有电台的 tags 中自动提取出现过的地区列表
 const regions = computed(() => {
@@ -154,10 +156,16 @@ const filteredStations = ref([])
 watchEffect(() => {
   const region = selectedRegion.value
   const type = selectedType.value
+  // 搜索关键词转小写，用于不区分大小写的模糊匹配
+  const query = searchQuery.value.trim().toLowerCase()
   const result = allStations.value.filter((s) => {
+    // 地区筛选
     const tags = s.tags || []
     if (region && !tags.includes(region)) return false
+    // 类型筛选
     if (type && !tags.includes(type)) return false
+    // 名称搜索：电台名包含关键词即匹配
+    if (query && !(s.name || '').toLowerCase().includes(query)) return false
     return true
   })
   filteredStations.value = result

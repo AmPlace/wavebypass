@@ -1,13 +1,44 @@
 <template>
   <!-- 全局应用壳：负责背景、字体、主题色过渡和页面组合。 -->
   <div class="min-h-screen bg-gray-100 font-sans text-neutral-950 antialiased transition-colors duration-300 dark:bg-neutral-900 dark:text-neutral-50">
-    <!-- 顶部主题切换按钮。 -->
-    <button
-      type="button"
-      class="fixed right-4 top-4 z-50 flex size-10 items-center justify-center rounded-full border border-black/5 bg-white/70 text-neutral-700 shadow-sm shadow-black/[0.04] backdrop-blur-xl transition-all duration-200 ease-out hover:scale-[1.03] hover:bg-white active:scale-95 dark:border-white/10 dark:bg-neutral-950/60 dark:text-neutral-200 dark:hover:bg-neutral-950 sm:right-6 sm:top-6"
-      :aria-label="isDark ? '切换到浅色模式' : '切换到深色模式'"
-      @click="toggleTheme"
-    >
+    <!-- 顶部工具栏：搜索按钮 + 主题切换按钮，同一排，样式统一。 -->
+    <div class="fixed right-4 top-4 z-50 flex items-center gap-2 sm:right-6 sm:top-6">
+      <!-- 搜索框：默认收起为圆形图标，点击展开为输入框 -->
+      <div
+        class="relative flex items-center rounded-full border border-black/5 bg-white/70 shadow-sm shadow-black/[0.04] backdrop-blur-xl transition-all duration-300 ease-out dark:border-white/10 dark:bg-neutral-950/60"
+        :class="searchExpanded ? 'w-48 sm:w-56' : 'size-10'"
+      >
+        <!-- 搜索图标按钮：点击展开/收起 -->
+        <button
+          type="button"
+          class="flex size-10 shrink-0 items-center justify-center text-neutral-700 transition-colors hover:text-neutral-900 dark:text-neutral-200 dark:hover:text-white"
+          aria-label="搜索电台"
+          @click="toggleSearch"
+        >
+          <svg class="size-5" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="1.8" />
+            <path d="M16.5 16.5L21 21" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+          </svg>
+        </button>
+        <!-- 输入框：展开后显示，收起后隐藏 -->
+        <input
+          ref="searchInputRef"
+          v-model="searchQuery"
+          type="text"
+          placeholder="搜索电台…"
+          class="h-full w-full bg-transparent pr-3 text-sm text-neutral-800 outline-none placeholder:text-gray-400 dark:text-neutral-200 dark:placeholder:text-gray-500"
+          :class="searchExpanded ? 'opacity-100' : 'pointer-events-none opacity-0'"
+          @blur="onSearchBlur"
+        />
+      </div>
+
+      <!-- 主题切换按钮 -->
+      <button
+        type="button"
+        class="flex size-10 items-center justify-center rounded-full border border-black/5 bg-white/70 text-neutral-700 shadow-sm shadow-black/[0.04] backdrop-blur-xl transition-all duration-200 ease-out hover:scale-[1.03] hover:bg-white active:scale-95 dark:border-white/10 dark:bg-neutral-950/60 dark:text-neutral-200 dark:hover:bg-neutral-950"
+        :aria-label="isDark ? '切换到浅色模式' : '切换到深色模式'"
+        @click="toggleTheme"
+      >
       <!-- 深色模式图标。 -->
       <svg
         v-if="isDark"
@@ -48,6 +79,7 @@
         />
       </svg>
     </button>
+    </div>
 
     <!-- 主体选台页面。 -->
     <Home />
@@ -61,7 +93,7 @@
 </template>
 
 <script setup>
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { onBeforeUnmount, onMounted, provide, ref, nextTick } from 'vue'
 import Home from './views/Home.vue'
 import BottomPlayer from './components/BottomPlayer.vue'
 import AudioEngine from './components/AudioEngine.vue'
@@ -104,8 +136,37 @@ function applyTheme() {
 
 // 【关键修复】：将 applyTheme() 移出 onMounted！
 // 直接在 script setup 顶层同步执行，组件还没挂载到 DOM 时就先算好主题，
-// 彻底解决第一次进入时“慢半拍”不跟随系统的问题。
+// 彻底解决第一次进入时”慢半拍”不跟随系统的问题。
 applyTheme()
+
+// ========== 搜索功能 ==========
+// 搜索关键词，通过 provide 传递给 Home.vue 做电台过滤
+const searchQuery = ref('')
+provide('searchQuery', searchQuery)
+
+// 搜索框展开状态：默认收起为圆形图标，点击展开为输入框
+const searchExpanded = ref(false)
+// 输入框 ref，展开后自动聚焦
+const searchInputRef = ref(null)
+
+// 点击搜索图标：切换展开/收起
+function toggleSearch() {
+  searchExpanded.value = !searchExpanded.value
+  // 展开后自动聚焦输入框
+  if (searchExpanded.value) {
+    nextTick(() => searchInputRef.value?.focus())
+  } else {
+    // 收起时清空搜索内容
+    searchQuery.value = ''
+  }
+}
+
+// 输入框失焦且内容为空时自动收起
+function onSearchBlur() {
+  if (!searchQuery.value.trim()) {
+    searchExpanded.value = false
+  }
+}
 
 function toggleTheme() {
   const nextTheme = isDark.value ? 'light' : 'dark'
