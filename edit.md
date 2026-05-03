@@ -59,6 +59,34 @@
 
 ---
 
+## 2026-05-04 新增：directPlay 直连 CDN 模式，节省后端流量
+
+**背景**
+后端代理所有 HLS 流量（m3u8 + 切片），带宽压力大。对于 CORS 友好的 CDN，前端可以直接加载 m3u8 和切片，后端只需提供最新 URL。
+
+**实现**
+1. `main.py`：新增 `GET /api/{station_id}/stream-url` 接口，直接返回 `CURRENT_STREAMS` 中的最新 URL（零开销，内存读取）；内存中没有时按需触发 fetcher 刷新
+2. `AudioEngine.vue`：`loadStation` 中新增 directPlay 逻辑——先从 `/api/{station_id}/stream-url` 拿到 CDN 直链，用 HLS.js 直连加载 m3u8；HLS 致命错误时自动回退到后端代理 `/api/{station_id}/playlist.m3u8` 重试一次
+3. `stations.js`：新增 `directPlay: true` 配置字段，标记支持直连的电台（目前仅 fj_traffic）
+
+**播放链路（directPlay 电台）**
+1. 前端请求 `/api/fj_traffic/stream-url` → 后端返回 `{url: "https://ytcast.radio.cn/..."}`（毫秒级）
+2. HLS.js 直连 CDN 加载 m3u8 + .aac 切片 → 成功则播放 ✓（后端零流量）
+3. 直连失败（CORS/网络/CDN 挂了）→ 自动回退 `/api/fj_traffic/playlist.m3u8` 走后端代理
+4. 后端 fetcher 每 5 小时自动刷新 token，保证 URL 持续有效
+
+**兼容性**
+- Safari 原生 HLS（无 hls.js）同样支持 directPlay
+- 未设置 `directPlay` 的电台行为完全不变
+- ufo 等有 `directUrl` 的电台回退逻辑不受影响
+
+**改动文件**
+- `backend/main.py`：新增 `/api/{station_id}/stream-url` 路由
+- `frontend/src/components/AudioEngine.vue`：HLS 加载新增 directPlay 直连 + 回退逻辑
+- `frontend/src/config/stations.js`：fj_traffic 新增 `directPlay: true`
+
+---
+
 ## 2026-05-04 新增：tingfm 通用抓取器，接入福建交通广播 FM100.7
 
 **背景**

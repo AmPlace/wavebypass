@@ -585,6 +585,36 @@ async def proxy_direct_audio_stream(station_id: str) -> StreamingResponse:
     return StreamingResponse(stream_audio_bytes(), media_type=media_type)
 
 
+@app.get("/api/{station_id}/stream-url")
+async def get_stream_url(station_id: str) -> Response:
+    """返回电台最新播放地址的直链，供前端直连 CDN 播放，节省后端流量。
+
+    前端拿到 URL 后用 HLS.js 直接加载 CDN 的 m3u8，CORS 或加载失败时再回退到后端代理。
+    该接口零开销：直接读内存字典，不做任何网络请求。
+    """
+
+    import json
+
+    url = CURRENT_STREAMS.get(station_id)
+
+    # 内存里没有，尝试立即刷新一次（按需触发 fetcher）
+    if url is None:
+        fetcher = STATION_FETCHER_MAP.get(station_id)
+        if fetcher is None:
+            raise HTTPException(status_code=404, detail="未知电台。")
+        try:
+            url = await fetcher()
+            CURRENT_STREAMS[station_id] = url
+        except Exception as exc:
+            logger.exception("电台 %s stream-url 刷新失败", station_id)
+            raise HTTPException(status_code=503, detail="播放地址暂不可用") from exc
+
+    return Response(
+        content=json.dumps({"url": url}),
+        media_type="application/json",
+    )
+
+
 # Radio Browser 代理缓存，key 是国家代码，缓存 6 小时（电台数据几乎不变）。
 RB_CACHE: dict[str, dict] = {}
 RB_CACHE_TTL = 6 * 3600

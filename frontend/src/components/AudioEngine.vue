@@ -189,28 +189,56 @@ function loadStation(stationId) {
 
   // 优先级 3：HLS 播放（m3u8 电台，或有 livePath + directUrl 的电台如 ufo）
   if (Hls?.isSupported()) {
-    const hls = new Hls({
-      enableWorker: true,
-      lowLatencyMode: true,
-      autoStartLoad: true,
-      startFragPrefetch: true,
-      liveSyncDurationCount: 2,
-      liveMaxLatencyDurationCount: 5,
-      maxBufferLength: 10,
-    })
+    const canDirectPlay = playerStore.stationMap[stationId]?.directPlay
+    let triedDirect = false
 
-    hlsRef.value = hls
-    hls.loadSource(playlistUrl)
-    hls.attachMedia(audioRef.value)
+    async function startHlsWithFallback() {
+      let hlsUrl = playlistUrl
 
-    hls.on(Hls.Events.MANIFEST_PARSED, () => {
-      playAudioSafely()
-    })
+      // directPlay 电台：先尝试直连 CDN 的 m3u8，节省后端流量
+      if (canDirectPlay) {
+        try {
+          const ctrl = new AbortController()
+          const timer = setTimeout(() => ctrl.abort(), 5000)
+          const res = await fetch(`${API_BASE}/api/${stationId}/stream-url`, { signal: ctrl.signal })
+          clearTimeout(timer)
+          if (res.ok) {
+            const { url } = await res.json()
+            if (url) { hlsUrl = url; directStreamMode.value = 'direct' }
+          }
+        } catch {}
+      }
 
-    hls.on(Hls.Events.ERROR, (_event, data) => {
-      if (data?.fatal) {
+      if (currentStation.value !== stationId) return
+
+      const hls = new Hls({
+        enableWorker: true,
+        lowLatencyMode: true,
+        autoStartLoad: true,
+        startFragPrefetch: true,
+        liveSyncDurationCount: 2,
+        liveMaxLatencyDurationCount: 5,
+        maxBufferLength: 10,
+      })
+      hlsRef.value = hls
+      hls.loadSource(hlsUrl)
+      hls.attachMedia(audioRef.value)
+
+      hls.on(Hls.Events.MANIFEST_PARSED, () => { playAudioSafely() })
+
+      hls.on(Hls.Events.ERROR, (_event, data) => {
+        if (!data?.fatal) return
         console.warn('HLS 播放发生致命错误。', data)
-        // HLS 失败后，尝试用 directUrl 直连回退（ufo 等同时有 livePath + directUrl 的电台）
+
+        // directPlay 直连失败 → 回退后端代理重试一次
+        if (canDirectPlay && directStreamMode.value === 'direct' && !triedDirect) {
+          triedDirect = true
+          directStreamMode.value = 'proxy'
+          destroyHls()
+          startHlsWithFallback()
+          return
+        }
+        // ufo 等同时有 directUrl 的电台 → 直连 mp3 回退
         if (directUrl) {
           destroyHls()
           directStreamMode.value = 'direct'
@@ -220,16 +248,39 @@ function loadStation(stationId) {
         }
         playerStore.setPlaybackError('HLS 播放发生错误，请稍后重试。')
         playerStore.togglePlay(false)
-      }
-    })
+      })
+    }
 
+    startHlsWithFallback()
     return
   }
 
-  // Safari 原生 HLS 支持
+  // Safari 原生 HLS 支持（无 hls.js 时的降级路径）
   if (audioRef.value.canPlayType('application/vnd.apple.mpegurl')) {
-    audioRef.value.src = playlistUrl
-    audioRef.value.addEventListener('loadedmetadata', playAudioSafely, { once: true })
+    const canDirectPlay = playerStore.stationMap[stationId]?.directPlay
+
+    async function startSafariHls() {
+      let hlsUrl = playlistUrl
+
+      if (canDirectPlay) {
+        try {
+          const ctrl = new AbortController()
+          const timer = setTimeout(() => ctrl.abort(), 5000)
+          const res = await fetch(`${API_BASE}/api/${stationId}/stream-url`, { signal: ctrl.signal })
+          clearTimeout(timer)
+          if (res.ok) {
+            const { url } = await res.json()
+            if (url) hlsUrl = url
+          }
+        } catch {}
+      }
+      if (currentStation.value !== stationId) return
+
+      audioRef.value.src = hlsUrl
+      audioRef.value.addEventListener('loadedmetadata', playAudioSafely, { once: true })
+    }
+
+    startSafariHls()
     return
   }
 

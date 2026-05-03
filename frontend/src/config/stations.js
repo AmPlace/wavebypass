@@ -132,13 +132,13 @@ export const stationList = [
     logoUrl: '/logos/twzgxqw.png',
     tags: ['talk', 'TW'],
   },
-  // tingfm 系列：livePath 让前端走 HLS 后端代理，URL 由 fetcher 自动刷新
+  // tingfm 系列：directPlay 优先直连 CDN，失败自动回退后端代理
   // post_id 从 tingfm.com 电台页面 URL 获取
   {
     id: 'fj_traffic',
     name: '福建交通广播 100.7',
     logoText: '闽',
-    livePath: 'fj_traffic/live',
+    directPlay: true,
     logoUrl: '/logos/fjjtgb.jpg',
     tags: ['news', 'CN'],
   },
