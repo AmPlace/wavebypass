@@ -1,6 +1,9 @@
 // 引入 Pinia 的 defineStore，用来创建一个全局状态仓库。
 import { defineStore } from 'pinia'
 
+// 引入静态电台配置，作为 store 的初始数据
+import { stationList as staticList } from '../config/stations'
+
 // 创建播放器状态仓库。
 // 其他 Vue 组件可以通过 usePlayerStore() 读取播放状态，也可以调用这里的 actions 改变播放行为。
 export const usePlayerStore = defineStore('player', {
@@ -25,7 +28,19 @@ export const usePlayerStore = defineStore('player', {
     // 当前播放错误信息。
     // 为空字符串表示没有错误；有内容时底部播放器会展示给用户。
     playbackError: '',
+
+    // 电台列表，初始化为静态配置，后续可通过 addStation() 动态追加
+    stationList: [...staticList],
+
+    // 电台映射表，从列表自动生成，供快速查找用
+    stationMap: Object.fromEntries(staticList.map((s) => [s.id, s])),
   }),
+
+  // getters 派生状态，不直接存数据，而是从 state 计算得来
+  getters: {
+    // 当前电台总数，UI 可用于展示数量
+    stationCount: (state) => state.stationList.length,
+  },
 
   // actions 是改变状态的方法。
   // 把状态变更集中放在这里，后续排查播放问题会更清晰。
@@ -97,6 +112,15 @@ export const usePlayerStore = defineStore('player', {
     // 清空播放错误信息。
     clearPlaybackError() {
       this.playbackError = ''
+    },
+
+    // 动态追加电台，Radio Browser 等外部数据源调用此方法
+    addStation(station) {
+      // 已存在则跳过，避免重复
+      if (this.stationMap[station.id]) return
+      // 只更新 stationMap（供 AudioEngine/BottomPlayer 查找播放地址和电台名称）
+      // 不更新 stationList，因为 Home.vue 有自己的 rbStations 列表单独管理显示
+      this.stationMap[station.id] = station
     },
   },
 })

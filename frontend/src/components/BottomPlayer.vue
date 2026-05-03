@@ -139,15 +139,9 @@ const playerStore = usePlayerStore()
 // 解构播放器状态。
 const { currentStation, isPlaying, isLoading, volume, playbackError } = storeToRefs(playerStore)
 
-// 电台名称映射。
-// 这里和 Home.vue 的电台列表保持一致，后续可以抽到公共配置文件。
-import { stationMap } from '../config/stations'
-
-// 根据当前电台 ID 获取展示名称。
+// 根据当前电台 ID 从 store 的 stationMap 获取展示名称（含 Radio Browser 动态电台）
 const currentStationName = computed(() => {
-  // 1. 变量名换成引入的 stationMap
-  // 2. 加上 ?.name 提取对象里的名字属性
-  return stationMap[currentStation.value]?.name || currentStation.value || '未选择电台'
+  return playerStore.stationMap[currentStation.value]?.name || currentStation.value || '未选择电台'
 })
 
 // 底部状态文案。

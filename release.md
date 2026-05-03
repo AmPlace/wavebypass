@@ -139,3 +139,14 @@
 - 重构 UFO 电台：移除 AudioEngine.vue 中硬编码的直连 URL，改由 stations.js 配置 directUrl，统一收编进自动合并逻辑
 - proxyUrl 生成规则：有 livePath 的电台走 /api/{id}/stream（直连流代理），无 livePath 的走 /api/{id}/live（HLS 代理）
 - 新增中广新闻网、中广流行网、中广音乐网、iGO531、中广乡亲网，均为 Revma 直链，仅需在 stations.js 配置 directUrl
+- 接入 Radio Browser API，首页自动拉取台湾电台并追加到电台列表末尾
+- 新增 `api/radioBrowser.js`：封装 Radio Browser 请求、数据映射、国家配置
+- `player.js` 新增 `stationList`、`stationMap` 状态和 `addStation()` 方法，支持动态追加电台
+- Home.vue 改为从 store 读取电台列表，合并静态 + Radio Browser 电台后统一渲染
+- 所有电台新增 tags 字段，同时包含地区标签（TW/CN）和类型标签（music/news/talk 等）
+- Radio Browser 电台的 tags 字段自动解析归类，常见标签映射为统一类型
+- 首页新增筛选栏：地区 pill + 类型 pill，从所有电台的 tags 自动提取可用选项，点击过滤电台列表
+- 修复电台列表重复 bug：`addStation()` 同时写入 stationList 和 stationMap 导致每个 RB 电台出现两次，筛选数量翻倍
+- `addStation()` 改为只更新 stationMap，显示列表由 Home.vue 的 rbStations 单独管理，职责分离避免重复
+- 新增 `RB_FETCH_COUNTRIES` 配置项，集中声明首页要拉取的 Radio Browser 地区列表，新增地区只需加一个国家代码
+- `onMounted` 改为从 `RB_FETCH_COUNTRIES` 读取地区列表，`Promise.all` 并行拉取多个地区电台
