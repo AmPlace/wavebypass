@@ -1,7 +1,7 @@
 // src/api/radioBrowser.js
 
 // Radio Browser 官方聚合域名，自动分配到最快节点，不要硬编码单节点
-const API_BASE = 'https://all.api.radio-browser.info/json'
+const RB_DIRECT_BASE = 'https://all.api.radio-browser.info/json'
 
 // 支持的国家列表，新增国家只需在这里加一行
 // code 是 ISO 3166-1 alpha-2 国家代码，label 是中文显示名
@@ -82,32 +82,33 @@ export function parseRbTags(tagsStr, countryCode) {
 }
 
 // 按国家代码获取电台列表，返回已映射为本项目格式的 station 数组
+// 请求链路：前端缓存 → 后端反代（带 6 小时缓存）→ 直连 Radio Browser 回退
 export async function fetchStationsByCountry(countryCode) {
-  // 有缓存直接返回
   if (cache[countryCode]) return cache[countryCode]
 
+  // 先尝试后端反代（大陆用户可达，且后端有 6 小时缓存，命中后秒回）
+  let data = null
   try {
-    // 调用 Radio Browser API，按投票数降序，优先返回高质量电台，不限制数量
-    const res = await fetch(
-      `${API_BASE}/stations/bycountrycodeexact/${countryCode}` +
-      `?order=votes&reverse=true`
-    )
+    const ctrl = new AbortController()
+    const timer = setTimeout(() => ctrl.abort(), 10_000)
+    const res = await fetch(`/api/radio-browser/stations/${countryCode}`, { signal: ctrl.signal })
+    clearTimeout(timer)
+    if (res.ok) data = await res.json()
+  } catch {}
 
-    // 请求失败返回空数组，不影响页面
-    if (!res.ok) return []
-
-    const data = await res.json()
-
-    // 把 Radio Browser 格式映射为本项目的 station 格式
-    const stations = data.map((item) => mapToStation(item, countryCode)).filter(Boolean)
-
-    // 写入缓存
-    cache[countryCode] = stations
-    return stations
-  } catch {
-    // 网络异常等静默返回空数组
-    return []
+  // 后端失败则直连 Radio Browser 回退（海外用户 / 后端未部署时）
+  if (!data) {
+    try {
+      const res = await fetch(`${RB_DIRECT_BASE}/stations/bycountrycodeexact/${countryCode}?order=votes&reverse=true`)
+      if (res.ok) data = await res.json()
+    } catch {}
   }
+
+  if (!data) return []
+
+  const stations = data.map((item) => mapToStation(item, countryCode)).filter(Boolean)
+  cache[countryCode] = stations
+  return stations
 }
 
 // 单条 Radio Browser 电台 → 本项目 station 格式

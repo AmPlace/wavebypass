@@ -43,7 +43,26 @@
 
 ---
 
-## 2026-05-04 新增：可收起搜索框，按电台名实时过滤
+## 2026-05-04 新增：后端反代 Radio Browser API，解决大陆无法访问问题
+
+**背景**
+Radio Browser 官方 API（`all.api.radio-browser.info`）在大陆无法直连，导致首页电台列表加载失败。
+
+**方案**
+- 后端新增 `GET /api/radio-browser/stations/{country_code}` 路由，通过后端云服务器中转请求 Radio Browser
+- 后端内存缓存 6 小时（电台数据几乎不变），缓存命中后零开销
+- 即使 Radio Browser 临时不可用，缓存未过期时降级返回旧数据，不报错
+- 前端改为先请求后端反代（10s 超时），失败后回退直连 Radio Browser（海外用户 / 后端未部署场景）
+
+**请求链路**
+1. 前端缓存命中 → 直接返回（无网络请求）
+2. 请求后端 `/api/radio-browser/stations/{code}` → 后端缓存命中 → 秒回
+3. 后端缓存未命中 → 后端去 Radio Browser 拉取 → 缓存 6 小时 → 返回
+4. 后端请求失败 → 前端回退直连 Radio Browser 官方 API
+
+**改动文件**
+- `backend/main.py`：新增 Radio Browser 反代路由 + 内存缓存（`RB_CACHE`，6 小时 TTL）
+- `frontend/src/api/radioBrowser.js`：`fetchStationsByCountry` 改为后端优先 + 直连回退
 
 **实现**
 1. `App.vue`：顶部工具栏新增搜索按钮，与夜间模式按钮同排，样式完全统一（`size-10` 圆形毛玻璃）。点击展开为输入框（`w-48`/`w-56`），自动聚焦；输入框为空时失焦自动收起，再次点击图标收起并清空内容

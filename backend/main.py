@@ -581,3 +581,35 @@ async def proxy_direct_audio_stream(station_id: str) -> StreamingResponse:
     media_type = upstream_response.headers.get("content-type", "audio/mpeg")
 
     return StreamingResponse(stream_audio_bytes(), media_type=media_type)
+
+
+# Radio Browser 代理缓存，key 是国家代码，缓存 6 小时（电台数据几乎不变）。
+RB_CACHE: dict[str, dict] = {}
+RB_CACHE_TTL = 6 * 3600
+
+
+@app.get("/api/radio-browser/stations/{country_code}")
+async def proxy_radio_browser(country_code: str) -> Response:
+    """反代 Radio Browser API，内存缓存 6 小时。
+
+    大陆无法直连 Radio Browser，通过后端中转可以绕过网络限制。
+    缓存命中后零开销，适合每次页面加载都调用。
+    """
+
+    cached = RB_CACHE.get(country_code)
+    if cached and time.time() - cached["ts"] < RB_CACHE_TTL:
+        return Response(content=cached["data"], media_type="application/json")
+
+    url = f"https://all.api.radio-browser.info/json/stations/bycountrycodeexact/{country_code}?order=votes&reverse=true"
+    try:
+        resp = await http_client.get(url, follow_redirects=True)
+        resp.raise_for_status()
+    except httpx.HTTPError as exc:
+        # 缓存未过期时降级返回旧数据，比报错好
+        if cached:
+            logger.warning("Radio Browser 拉取失败，返回缓存: %s", exc)
+            return Response(content=cached["data"], media_type="application/json")
+        raise HTTPException(status_code=502, detail="Radio Browser 请求失败") from exc
+
+    RB_CACHE[country_code] = {"data": resp.text, "ts": time.time()}
+    return Response(content=resp.text, media_type="application/json")
