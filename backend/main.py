@@ -200,12 +200,14 @@ def rewrite_m3u8_text(raw_m3u8_text: str, real_m3u8_url: str, station_id: str) -
             rewritten_lines.append(proxy_playlist_url)
             continue
 
-        # 非 ts 资源先原样保留，避免误改未来可能出现的其他 HLS 标签资源。
-        if not uri_path.endswith(".ts"):
+        # 非媒体切片资源原样保留，避免误改其他 HLS 标签。
+        # 除 .ts 外，.aac/.mp3/.mp4/.fmp4/.m4s 也是常见的 HLS 切片格式。
+        SEGMENT_EXTENSIONS = (".ts", ".aac", ".mp3", ".mp4", ".fmp4", ".m4s")
+        if not uri_path.endswith(SEGMENT_EXTENSIONS):
             rewritten_lines.append(line)
             continue
 
-        # 生成指向本后端 TS 代理接口的切片地址。
+        # 生成指向本后端切片代理接口的地址。
         proxy_ts_url = f"/api/{station_id}/chunk.ts?target_url={encoded_target_url}"
 
         # 写入改写后的切片行。
