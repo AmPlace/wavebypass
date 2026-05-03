@@ -82,16 +82,15 @@ export function parseRbTags(tagsStr, countryCode) {
 }
 
 // 按国家代码获取电台列表，返回已映射为本项目格式的 station 数组
-export async function fetchStationsByCountry(countryCode, { limit = 50 } = {}) {
+export async function fetchStationsByCountry(countryCode) {
   // 有缓存直接返回
-  const cacheKey = `${countryCode}_${limit}`
-  if (cache[cacheKey]) return cache[cacheKey]
+  if (cache[countryCode]) return cache[countryCode]
 
   try {
-    // 调用 Radio Browser API，按投票数降序，优先返回高质量电台
+    // 调用 Radio Browser API，按投票数降序，优先返回高质量电台，不限制数量
     const res = await fetch(
       `${API_BASE}/stations/bycountrycodeexact/${countryCode}` +
-      `?limit=${limit}&order=votes&reverse=true`
+      `?order=votes&reverse=true`
     )
 
     // 请求失败返回空数组，不影响页面
@@ -103,7 +102,7 @@ export async function fetchStationsByCountry(countryCode, { limit = 50 } = {}) {
     const stations = data.map((item) => mapToStation(item, countryCode)).filter(Boolean)
 
     // 写入缓存
-    cache[cacheKey] = stations
+    cache[countryCode] = stations
     return stations
   } catch {
     // 网络异常等静默返回空数组
