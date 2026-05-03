@@ -507,3 +507,35 @@ YUNTING_PROVINCES = ['350000']
 **改动文件**
 - `frontend/src/api/yunting.js`：`mapToStation` tags 加 `CN`
 - `frontend/src/config/stations.js`：6 个福建电台 tags 加 `'福建'`
+
+---
+
+## 2026-05-04 优化：云听 EPG 独立缓存 + URL 预缓存
+
+**问题**
+1. EPG（当前节目名）原来和电台列表共享 2 小时缓存，节目半小时换一次，EPG 过时太久
+2. 每次 `/api/{station_id}/stream-url` 对云听电台都要调 `fetch_yunting()` 请求云听 API 拿 URL，耗时 1-2 秒
+3. `proxy_yunting_stations` 加载电台列表时已经拿到所有 URL 和 subtitle，但只缓存了列表本身
+
+**方案**
+新增两层独立缓存，在 `proxy_yunting_stations` 加载时预填充，读取端零网络请求：
+
+| 缓存 | TTL | 写入时机 | 读取端 |
+|------|-----|---------|--------|
+| `YUNTING_EPG_CACHE` | 10 分钟 | proxy_yunting_stations + yunting_epg API 刷新时 | `GET /api/yunting/epg` |
+| `YUNTING_URL_CACHE` | 1 小时 | proxy_yunting_stations 加载时 | `GET /api/{id}/stream-url` |
+
+**EPG 三级优先级读取**
+1. `YUNTING_EPG_CACHE`（10 min）命中 → 直接返回，零网络请求
+2. EPG 过期 → 从 `YUNTING_CACHE`（2h 省份列表缓存）提取 subtitle 补充
+3. 两者都过期 → 调云听 API，同时更新 `YUNTING_CACHE` + `YUNTING_EPG_CACHE`
+
+**URL 缓存读取**
+`get_stream_url` 对 `yt_*` 电台：先查 `YUNTING_URL_CACHE` → 命中直接返回 → 未命中才创建 fetcher 调 API
+
+**改动文件**
+- `backend/main.py`：
+  - 新增 `YUNTING_EPG_CACHE`、`YUNTING_EPG_TTL`（600s）、`YUNTING_URL_CACHE`、`YUNTING_URL_TTL`（3600s）
+  - `proxy_yunting_stations` 加载时预填充两层缓存
+  - `yunting_epg` 改为三级优先级读取，EPG 过期从列表缓存补充
+  - `get_stream_url` 对 `yt_*` 先查 URL 缓存再调 fetcher

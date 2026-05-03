@@ -592,6 +592,18 @@ YUNTING_PROVINCES = ['350000']  # 350000=福建
 YUNTING_CACHE: dict[str, dict] = {}
 YUNTING_CACHE_TTL = 2 * 3600
 
+# 云听 EPG（当前节目名）独立缓存，比电台列表更新更频繁。
+# 电台列表 2 小时足够，但节目每半小时换一次，EPG 用 10 分钟 TTL。
+YUNTING_EPG_CACHE: dict[str, dict] = {}   # {"yt_{contentId}": {"subtitle": "...", "ts": ...}}
+YUNTING_EPG_TTL = 10 * 60
+
+# 云听电台播放 URL 缓存。
+# proxy_yunting_stations 加载电台列表时已拿到所有 URL，顺便缓存起来。
+# get_stream_url 直接从这里读，省掉每次单独调 fetch_yunting() 的延迟。
+# URL 有效期约 19 小时（key+time 参数），缓存 1 小时完全够用。
+YUNTING_URL_CACHE: dict[str, dict] = {}   # {"yt_{contentId}": {"url": "...", "ts": ...}}
+YUNTING_URL_TTL = 1 * 3600
+
 
 @app.get("/api/yunting/stations/{province_code}")
 async def proxy_yunting_stations(province_code: str) -> Response:
@@ -627,6 +639,20 @@ async def proxy_yunting_stations(province_code: str) -> Response:
                 s[key] = "https://" + s[key][7:]
     stations_json = json.dumps(stations, ensure_ascii=False)
     YUNTING_CACHE[province_code] = {"data": stations_json, "ts": time.time()}
+
+    # 同时预填充 URL 缓存和 EPG 缓存，后续 get_stream_url 和 EPG 端点可直接命中，无需再调云听 API
+    now = time.time()
+    for s in stations:
+        cid = str(s.get("contentId", ""))
+        if not cid:
+            continue
+        url = s.get("playUrlLow", "")
+        if url.startswith(("http://", "https://")):
+            YUNTING_URL_CACHE[f"yt_{cid}"] = {"url": url, "ts": now}
+        subtitle = s.get("subtitle", "")
+        if subtitle:
+            YUNTING_EPG_CACHE[f"yt_{cid}"] = {"subtitle": subtitle, "ts": now}
+
     return Response(content=stations_json, media_type="application/json")
 
 
@@ -634,29 +660,47 @@ async def proxy_yunting_stations(province_code: str) -> Response:
 async def yunting_epg() -> Response:
     """返回所有已缓存省份电台的 EPG（当前节目名），供前端定期刷新。
 
-    缓存命中时零网络请求，直接从内存拼接。
-    缓存未命中时拉取云听 API 并顺便更新主省份缓存。
+    优先读 YUNTING_EPG_CACHE（10 分钟 TTL），命中即零网络请求。
+    EPG 过期时从 YUNTING_CACHE（2h）补充；两者都过期才拉云听 API。
     返回格式：{"contentId": "节目名", ...}
     """
     import json
 
+    now = time.time()
     merged: dict[str, str] = {}
-    need_refresh: list[str] = []
 
-    for prov in YUNTING_PROVINCES:
-        cached = YUNTING_CACHE.get(prov)
-        if cached and time.time() - cached["ts"] < YUNTING_CACHE_TTL:
-            for item in json.loads(cached["data"]):
-                cid = str(item.get("contentId", ""))
-                sub = item.get("subtitle", "")
-                if cid and sub:
-                    merged[cid] = sub
+    # 第一优先级：从独立 EPG 缓存读取（10 分钟 TTL）
+    stale_epg_keys: list[str] = []
+    for key, entry in YUNTING_EPG_CACHE.items():
+        if now - entry["ts"] < YUNTING_EPG_TTL:
+            merged[key.replace("yt_", "")] = entry["subtitle"]
         else:
-            need_refresh.append(prov)
+            stale_epg_keys.append(key)
 
-    if need_refresh:
+    # 第二优先级：从省份列表缓存补充过期的 EPG 条目（2h TTL）
+    need_api_refresh: list[str] = []
+    if stale_epg_keys:
+        # 哪些省份的列表缓存还新鲜？直接从里面读 subtitle
+        fresh_provs: list[str] = []
+        for prov in YUNTING_PROVINCES:
+            cached = YUNTING_CACHE.get(prov)
+            if cached and now - cached["ts"] < YUNTING_CACHE_TTL:
+                fresh_provs.append(prov)
+                for item in json.loads(cached["data"]):
+                    cid = str(item.get("contentId", ""))
+                    sub = item.get("subtitle", "")
+                    if cid and sub and f"yt_{cid}" in stale_epg_keys:
+                        merged[cid] = sub
+                        # 同步回写 EPG 缓存，延长寿命
+                        YUNTING_EPG_CACHE[f"yt_{cid}"] = {"subtitle": sub, "ts": now}
+        # EPG 过期 + 列表缓存也过期的省份，需要调 API
+        if len(fresh_provs) < len(YUNTING_PROVINCES):
+            need_api_refresh = [p for p in YUNTING_PROVINCES if p not in fresh_provs]
+
+    # 第三优先级：调云听 API 获取最新数据，同时更新两个缓存
+    if need_api_refresh:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            for prov in need_refresh:
+            for prov in need_api_refresh:
                 try:
                     resp = await client.get(
                         YUNTING_API_BASE,
@@ -670,12 +714,13 @@ async def yunting_epg() -> Response:
                         for key in ("playUrlLow", "mp3PlayUrlLow", "mp3PlayUrlHigh"):
                             if isinstance(s.get(key), str) and s[key].startswith("http://"):
                                 s[key] = "https://" + s[key][7:]
-                    YUNTING_CACHE[prov] = {"data": json.dumps(stations_data, ensure_ascii=False), "ts": time.time()}
+                    YUNTING_CACHE[prov] = {"data": json.dumps(stations_data, ensure_ascii=False), "ts": now}
                     for item in stations_data:
                         cid = str(item.get("contentId", ""))
                         sub = item.get("subtitle", "")
                         if cid and sub:
                             merged[cid] = sub
+                            YUNTING_EPG_CACHE[f"yt_{cid}"] = {"subtitle": sub, "ts": now}
                 except Exception:
                     pass
 
@@ -764,29 +809,38 @@ async def get_stream_url(station_id: str, name: str = "") -> Response:
     if url is None:
         fetcher = STATION_FETCHER_MAP.get(station_id)
 
-        # yt_* 云听电台：首次请求时动态创建 fetcher 并注册（自动纳入后台刷新）
+        # yt_* 云听电台：先查 URL 缓存（proxy_yunting_stations 已预填充），省掉网络请求
         if fetcher is None and station_id.startswith("yt_"):
+            cached_url = YUNTING_URL_CACHE.get(station_id)
+            if cached_url and time.time() - cached_url["ts"] < YUNTING_URL_TTL:
+                url = cached_url["url"]
+                CURRENT_STREAMS[station_id] = url
+                logger.info("电台 %s 从 URL 缓存命中", station_id)
+
+        # 缓存未命中：动态创建 fetcher 并注册（自动纳入后台刷新）
+        if url is None and fetcher is None and station_id.startswith("yt_"):
             content_id = station_id[3:]
             for prov in YUNTING_PROVINCES:
                 STATION_FETCHER_MAP[station_id] = yunting(prov, content_id)
                 fetcher = STATION_FETCHER_MAP[station_id]
                 break
 
-        if fetcher is None:
+        if url is None and fetcher is None:
             raise HTTPException(status_code=404, detail="未知电台。")
-        try:
-            url = await fetcher()
-            CURRENT_STREAMS[station_id] = url
-        except Exception as exc:
-            logger.warning("电台 %s 主 fetcher 失败: %s，尝试云听回退", station_id, exc)
-            fallback_url = _find_yunting_url(station_id, name)
-            if fallback_url:
-                logger.info("电台 %s 云听回退成功", station_id)
-                url = fallback_url
+        if url is None:
+            try:
+                url = await fetcher()
                 CURRENT_STREAMS[station_id] = url
-            else:
-                logger.exception("电台 %s stream-url 刷新失败（云听也无匹配）", station_id)
-                raise HTTPException(status_code=503, detail="播放地址暂不可用") from exc
+            except Exception as exc:
+                logger.warning("电台 %s 主 fetcher 失败: %s，尝试云听回退", station_id, exc)
+                fallback_url = _find_yunting_url(station_id, name)
+                if fallback_url:
+                    logger.info("电台 %s 云听回退成功", station_id)
+                    url = fallback_url
+                    CURRENT_STREAMS[station_id] = url
+                else:
+                    logger.exception("电台 %s stream-url 刷新失败（云听也无匹配）", station_id)
+                    raise HTTPException(status_code=503, detail="播放地址暂不可用") from exc
 
     return Response(
         content=json.dumps({"url": url}),
