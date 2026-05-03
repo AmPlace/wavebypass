@@ -171,7 +171,7 @@ const allStations = computed(() => [...stationList.value, ...rbStations.value, .
 
 // ========== 筛选配置 ==========
 // 地区标签映射，新增地区只需在这里加一行
-const regionLabels = { TW: '台湾', CN: '中国大陆', JP: '日本', US: '美国', KR: '韩国', GB: '英国', DE: '德国', FR: '法国', 福建: '福建' }
+const regionLabels = { TW: '台湾', CN: '中国大陆', JP: '日本', US: '美国', KR: '韩国', GB: '英国', DE: '德国', FR: '法国', 福建: '福建', 上海: '上海', 浙江: '浙江' }
 
 // 类型标签映射，对应 radioBrowser.js 的 TAG_TYPE_MAP 输出值
 const typeLabels = { music: '音乐', news: '新闻', talk: '谈话', sports: '体育', religious: '宗教', other: '其他' }
