@@ -9,6 +9,7 @@
     "preview": "vite preview --host 0.0.0.0"
   },
   "dependencies": {
+    "@vueuse/core": "^14.3.0",
     "pinia": "^3.0.0",
     "vue": "^3.5.0"
   },

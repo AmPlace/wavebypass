@@ -150,3 +150,18 @@
 - `addStation()` 改为只更新 stationMap，显示列表由 Home.vue 的 rbStations 单独管理，职责分离避免重复
 - 新增 `RB_FETCH_COUNTRIES` 配置项，集中声明首页要拉取的 Radio Browser 地区列表，新增地区只需加一个国家代码
 - `onMounted` 改为从 `RB_FETCH_COUNTRIES` 读取地区列表，`Promise.all` 并行拉取多个地区电台
+
+## 2026-05-04
+- 顶部工具栏新增可收起搜索框，点击放大镜图标展开为输入框，输入时实时按电台名过滤，失焦自动收起
+- 搜索关键词通过 `provide/inject` 从 App.vue 传递给 Home.vue，与地区/类型筛选同时生效
+- Radio Browser 拉取去掉 `limit=50` 限制，改为拉取该地区全部电台
+- 虚拟滚动改用 `@vueuse/core` 的 `useScroll` + `useThrottleFn`，替代纯 JS 手写滚动追踪，代码更简洁可维护
+- 滚动容器从 Home.vue 的 `main` 移到 App.vue 根 div（`h-dvh overflow-y-auto`），滚动条贴紧浏览器右侧边缘
+- `ResizeObserver` 监听 grid 容器宽度（非视口宽度），准确计算响应式列数（2/4/6）和行高
+- `virtualRows` computed 只取可视区域 ±3 行缓冲，1000+ 电台任意时刻只渲染约 30~40 个 DOM 节点
+- 修复 iOS Safari 视口高度问题：`h-dvh` 替代 `h-screen`，排除地址栏高度
+- 修复 iOS Safari 弹性滚动负 scrollTop 导致的布局异常
+- 统一移动端和桌面端卡片行间距为 20px，修复移动端卡片上下紧贴问题
+- Grid 的 `gap` 改为动态 style 绑定，消除 CSS/JS gap 不一致导致卡片溢出的问题
+- 修复 Safari（iOS + macOS）卡片间距拥挤：Safari 的 `aspect-ratio` + Grid 布局有兼容性 bug，卡片高度溢出吃掉行间距。去掉 `aspect-square`，改用 JS 算出精确高度并设为内联 style
+- `transition-all` 改为 `transition-[background-color,transform,box-shadow,border-color]`，排除 height，修复 ResizeObserver 触发时第一行卡片高度跳变带动画的问题

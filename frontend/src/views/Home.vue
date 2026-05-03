@@ -1,5 +1,5 @@
 <template>
-  <!-- 页面主体区域：预留底部播放器空间，避免内容被悬浮控制条遮挡。 -->
+  <!-- 页面主体：居中布局，不负责滚动（滚动容器在 App.vue 根 div）。 -->
   <main class="mx-auto flex min-h-screen w-full max-w-7xl flex-col items-center px-5 py-10 pb-36 sm:px-8 lg:px-10">
 
     <!-- 筛选栏 -->
@@ -7,7 +7,6 @@
       <!-- 地区筛选 -->
       <div class="flex flex-wrap items-center gap-2">
         <span class="shrink-0 text-xs text-gray-400 dark:text-gray-500">地区</span>
-        <!-- "全部"按钮：选中时取消地区筛选 -->
         <button
           type="button"
           class="rounded-full border px-3 py-1 text-xs transition-colors"
@@ -58,43 +57,61 @@
       </p>
     </header>
 
-    <!-- 电台网格：移动端 2 列，平板 4 列，桌面 6 列 -->
-    <section class="grid w-full grid-cols-2 gap-4 sm:grid-cols-4 sm:gap-5 lg:grid-cols-6">
-      <button
-        v-for="station in filteredStations"
-        :key="station.id"
-        type="button"
-        :aria-label="`切换到 ${station.name}`"
-        class="group aspect-square rounded-3xl border border-white/70 bg-gray-50/80 p-3 text-left shadow-sm shadow-black/[0.03] outline-none backdrop-blur-xl transition-all duration-300 ease-out hover:scale-[1.02] hover:bg-white/90 active:scale-95 dark:border-white/10 dark:bg-neutral-800/50 dark:shadow-black/20 dark:hover:bg-neutral-800/75"
-        :class="{
-          'ring-2 ring-black dark:ring-white': isCurrentStationPlaying(station.id),
-        }"
-        @click="playerStore.switchStation(station.id)"
+    <!-- 虚拟滚动区域：totalHeight 撑开滚动高度，只创建可视区域附近的 DOM 节点。 -->
+    <!-- gridRef 用于 ResizeObserver 测量实际宽度，驱动列数和行高重新计算。 -->
+    <section
+      ref="gridRef"
+      class="relative w-full"
+      :style="{ height: `${totalHeight}px` }"
+    >
+      <div
+        v-for="row in virtualRows"
+        :key="row.startIndex"
+        class="absolute left-0 top-0 w-full"
+        :style="{ transform: `translateY(${row.startIndex * (rowHeight + gap)}px)` }"
       >
-        <div class="flex h-full flex-col overflow-hidden rounded-[1.25rem]">
-          <!-- Logo 区域 -->
-          <div class="flex basis-3/5 items-center justify-center">
-            <div
-              class="flex size-16 items-center justify-center overflow-hidden rounded-full border border-black/5 bg-white text-lg font-semibold text-neutral-700 shadow-sm shadow-black/[0.04] transition-transform duration-300 ease-out group-hover:scale-105 dark:border-white/10 dark:bg-neutral-900 dark:text-neutral-200 sm:size-20"
-              :class="{ 'animate-pulse': isCurrentStationLoading(station.id) }"
-            >
-              <img
-                v-if="station.logoUrl"
-                class="h-full w-full object-cover"
-                :src="station.logoUrl"
-                :alt="`${station.name} logo`"
-              />
-              <span v-else>{{ station.logoText }}</span>
+        <div
+          class="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6"
+          :style="{ gap: `${gap}px` }"
+        >
+          <button
+            v-for="station in row.items"
+            :key="station.id"
+            type="button"
+            :aria-label="`切换到 ${station.name}`"
+            :style="{ height: `${cardSize}px` }"
+            class="group rounded-3xl border border-white/70 bg-gray-50/80 p-3 text-left shadow-sm shadow-black/[0.03] outline-none backdrop-blur-xl transition-[background-color,transform,box-shadow,border-color] duration-300 ease-out hover:scale-[1.02] hover:bg-white/90 active:scale-95 dark:border-white/10 dark:bg-neutral-800/50 dark:shadow-black/20 dark:hover:bg-neutral-800/75"
+            :class="{
+              'ring-2 ring-black dark:ring-white': isCurrentStationPlaying(station.id),
+            }"
+            @click="playerStore.switchStation(station.id)"
+          >
+            <div class="flex h-full flex-col overflow-hidden rounded-[1.25rem]">
+              <!-- Logo 区域 -->
+              <div class="flex basis-3/5 items-center justify-center">
+                <div
+                  class="flex size-16 items-center justify-center overflow-hidden rounded-full border border-black/5 bg-white text-lg font-semibold text-neutral-700 shadow-sm shadow-black/[0.04] transition-transform duration-300 ease-out group-hover:scale-105 dark:border-white/10 dark:bg-neutral-900 dark:text-neutral-200 sm:size-20"
+                  :class="{ 'animate-pulse': isCurrentStationLoading(station.id) }"
+                >
+                  <img
+                    v-if="station.logoUrl"
+                    class="h-full w-full object-cover"
+                    :src="station.logoUrl"
+                    :alt="`${station.name} logo`"
+                  />
+                  <span v-else>{{ station.logoText }}</span>
+                </div>
+              </div>
+              <!-- 电台名称 -->
+              <div class="flex basis-2/5 items-center justify-center px-2 text-center">
+                <span class="line-clamp-2 text-sm font-medium text-gray-800 dark:text-gray-200 sm:text-[0.95rem]">
+                  {{ station.name }}
+                </span>
+              </div>
             </div>
-          </div>
-          <!-- 电台名称 -->
-          <div class="flex basis-2/5 items-center justify-center px-2 text-center">
-            <span class="line-clamp-2 text-sm font-medium text-gray-800 dark:text-gray-200 sm:text-[0.95rem]">
-              {{ station.name }}
-            </span>
-          </div>
+          </button>
         </div>
-      </button>
+      </div>
     </section>
   </main>
 </template>
@@ -103,7 +120,8 @@
 import { storeToRefs } from 'pinia'
 import { usePlayerStore } from '../stores/player'
 import { fetchStationsByCountry, RB_FETCH_COUNTRIES } from '../api/radioBrowser'
-import { computed, inject, onMounted, ref, watchEffect } from 'vue'
+import { computed, inject, onBeforeUnmount, onMounted, ref, watchEffect } from 'vue'
+import { useScroll, useThrottleFn } from '@vueuse/core'
 
 const playerStore = usePlayerStore()
 const { currentStation, isPlaying, isLoading, stationList } = storeToRefs(playerStore)
@@ -187,20 +205,97 @@ function isCurrentStationLoading(stationId) {
   return currentStation.value === stationId && isLoading.value
 }
 
-// ========== 初始化 ==========
-// 按 RB_FETCH_COUNTRIES 配置并行拉取多个地区的电台
-// 想加其他地区：去 radioBrowser.js 的 RB_FETCH_COUNTRIES 里加国家代码即可
-onMounted(async () => {
-  rbLoading.value = true
-  // 并行拉取所有配置的地区，Promise.all 等全部完成
-  const results = await Promise.all(
-    RB_FETCH_COUNTRIES.map((code) => fetchStationsByCountry(code))
-  )
-  // 把各地区结果合并成一个数组
-  const list = results.flat()
-  rbStations.value = list
-  // 注册到 store 的 stationMap，供 AudioEngine 查找播放地址
-  list.forEach((s) => playerStore.addStation(s))
-  rbLoading.value = false
+// ========== 虚拟滚动（@vueuse/core 辅助函数组合） ==========
+// 从 App.vue 注入滚动容器 ref（App.vue 根 div，h-dvh overflow-y-auto）。
+const scrollRef = inject('scrollRef')
+// grid 容器 ref，用于 ResizeObserver 测量实际内容宽度（受 main 的 max-w-7xl 和 padding 约束）。
+const gridRef = ref(null)
+// grid 容器实际宽度，由 ResizeObserver 持续更新。
+const containerWidth = ref(1024)
+let resizeObserver = null
+
+// useScroll（@vueuse/core）：响应式追踪滚动位置，自动处理 iOS Safari 弹性滚动等边界。
+const { y: scrollY } = useScroll(scrollRef)
+// 节流到 60fps（16ms），避免低端机频繁计算。
+const throttledScrollY = useThrottleFn((val) => { scrollPosition.value = val }, 16)
+const scrollPosition = ref(0)
+// scrollY 变化时触发节流更新。
+watchEffect(() => { throttledScrollY(scrollY.value) })
+
+// 响应式列数：移动端 2 列、平板 4 列、桌面 6 列。
+const columns = computed(() => {
+  const w = containerWidth.value
+  if (w >= 1024) return 6
+  if (w >= 640) return 4
+  return 2
+})
+
+// 行间距：统一 20px，同时绑定到 grid 的 :style 保证 CSS/JS 完全同步。
+const gap = computed(() => 20)
+
+// 单行高度 = 卡片宽度（正方形）+ 行间距。
+const rowHeight = computed(() => {
+  const cols = columns.value
+  return (containerWidth.value - gap.value * (cols - 1)) / cols
+})
+
+// 卡片尺寸（宽=高）：Safari 对 aspect-ratio + Grid 有 bug，改用 JS 直接设 height。
+const cardSize = computed(() => rowHeight.value)
+
+// 电台按行分组，每行包含 columns 个电台。
+const rows = computed(() => {
+  const cols = columns.value
+  const stations = filteredStations.value
+  const result = []
+  for (let i = 0; i < stations.length; i += cols) {
+    result.push(stations.slice(i, i + cols))
+  }
+  return result
+})
+
+// 虚拟行计算：只取可视区域附近 ±3 行，其余不创建 DOM。
+const virtualRows = computed(() => {
+  const totalRows = rows.value.length
+  if (totalRows === 0) return []
+  const rh = rowHeight.value + gap.value
+  const startRow = Math.max(0, Math.floor(scrollPosition.value / rh) - 3)
+  const viewportH = scrollRef.value?.clientHeight || window.innerHeight
+  const endRow = Math.min(totalRows, Math.ceil((scrollPosition.value + viewportH) / rh) + 3)
+  return rows.value.slice(startRow, endRow).map((items, i) => ({
+    items,
+    startIndex: startRow + i,
+  }))
+})
+
+// 总滚动高度，撑开滚动容器的滚动条。
+const totalHeight = computed(() => rows.value.length * (rowHeight.value + gap.value))
+
+// 监听 grid 容器宽度变化，驱动列数和行高重新计算。
+onMounted(() => {
+  resizeObserver = new ResizeObserver((entries) => {
+    for (const entry of entries) {
+      containerWidth.value = entry.contentRect.width
+    }
+  })
+  if (gridRef.value) resizeObserver.observe(gridRef.value)
+
+  // 按 RB_FETCH_COUNTRIES 配置并行拉取多个地区的 Radio Browser 电台
+  // 想加其他地区：去 radioBrowser.js 的 RB_FETCH_COUNTRIES 里加国家代码即可
+  ;(async () => {
+    rbLoading.value = true
+    const results = await Promise.all(
+      RB_FETCH_COUNTRIES.map((code) => fetchStationsByCountry(code))
+    )
+    const list = results.flat()
+    rbStations.value = list
+    // 注册到 store 的 stationMap，供 AudioEngine 查找播放地址
+    list.forEach((s) => playerStore.addStation(s))
+    rbLoading.value = false
+  })()
+})
+
+// 组件卸载时断开 ResizeObserver，防止内存泄漏。
+onBeforeUnmount(() => {
+  if (resizeObserver) resizeObserver.disconnect()
 })
 </script>

@@ -1,5 +1,75 @@
 # 修改记录
 
+## 2026-05-04 修改：虚拟滚动改用 @vueuse/core，滚动容器重构，修复移动端卡片间距
+
+**背景**
+纯 JS 手写虚拟滚动虽然性能达标，但代码复杂度高，用户无法自行维护。决定改用 `@vueuse/core` 提供的 `useScroll` + `useThrottleFn` 组合，大幅简化滚动追踪逻辑。
+
+**方案选型**
+- `content-visibility: auto`（CSS 原生）：跳过屏幕外渲染，但 DOM 节点和图片请求仍然全部创建，不能解决图片并发问题
+- `@tanstack/vue-virtual`（第三方库）：初始化时 `getScrollElement` 返回 null 导致内部 watcher 崩溃，排查后放弃
+- 纯 JS 手写虚拟滚动：性能达标但代码复杂，维护困难
+- **最终方案：@vueuse/core 的 `useScroll` + `useThrottleFn`**：用成熟库处理滚动追踪和节流，手写虚拟行计算逻辑保持简洁可控
+
+**实现**
+- 滚动容器从 `Home.vue` 的 `main` 移到 `App.vue` 根 `div`（`h-dvh overflow-y-auto`），滚动条贴紧浏览器右侧边缘
+- `Home.vue` 通过 `inject('scrollRef')` 获取 App.vue 的滚动容器 ref
+- `useScroll`（@vueuse/core）自动追踪滚动位置，兼容 iOS Safari 弹性滚动
+- `useThrottleFn` 节流到 60fps（16ms），避免低端机频繁计算
+- `gridRef` 独立 ref，`ResizeObserver` 监听 grid 容器实际内容宽度（受 `max-w-7xl` 和 padding 约束），动态计算响应式列数（2/4/6 列）
+- `virtualRows` computed 只取当前可视区域 ±3 行缓冲，约 30~40 个 DOM 节点
+- `totalHeight` 撑开滚动容器高度，浏览器显示正常滚动条
+- 筛选栏用 `shrink-0` 固定在滚动区域顶部，不参与虚拟滚动
+
+**iOS Safari 修复**
+- `h-dvh` 替代 `h-screen`：`100vh` 在 iOS Safari 包含地址栏高度，`dvh` 是排除地址栏后的动态视口高度
+- `Math.max(0, ...)` 钳制 scrollTop：iOS Safari 弹性滚动会出现负值，导致 translateY 异常
+
+**移动端卡片间距修复**
+- 行间距从响应式值（移动端 16px，桌面 20px）统一为 20px，避免移动端卡片上下紧贴
+- `gap` computed 简化为固定 `20`，和 Tailwind `gap-5` 一致
+- Grid 的 `gap` 从 Tailwind 响应式类（`gap-4 sm:gap-5`）改为动态 style 绑定（`:style="{ gap: '20px' }"`），彻底消除 CSS/JS gap 不一致导致卡片溢出吃掉行间距的问题
+- Safari `aspect-ratio` bug 修复：Safari（iOS + macOS）在 Grid 布局中 `aspect-ratio` 不能正确约束卡片高度，卡片溢出后吃掉行间距。去掉 `aspect-square`，改为 JS 算出精确卡片宽度后设为内联 `height`，完全绕过 Safari 的 aspect-ratio 实现缺陷
+- ResizeObserver 高度跳变动画 bug 修复：`containerWidth` 初始值为 1024，ResizeObserver 触发后才更新为真实值，`cardSize` 随之变化。`transition-all` 会把高度变化也带动画，导致第一行卡片先短一截再延长。将 `transition-all` 改为 `transition-[background-color,transform,box-shadow,border-color]`，只过渡 hover 真正需要的属性，高度变化瞬间完成无动画
+
+**性能对比**
+- 优化前：1000 条电台全部创建 DOM 节点，1000 张图片同时请求
+- 优化后：任意时刻只创建约 30~40 个 DOM 节点，只加载屏幕内可见的几十张图片
+
+**改动文件**
+- `frontend/src/views/Home.vue`：改用 `useScroll` + `useThrottleFn`，滚动追踪逻辑大幅简化，gap 统一为 20px
+- `frontend/src/App.vue`：根 div 改为滚动容器（`h-dvh overflow-y-auto`），`provide('scrollRef')`
+- `frontend/package.json`：移除 `@tanstack/vue-virtual`，保留 `@vueuse/core`
+
+---
+
+## 2026-05-04 新增：可收起搜索框，按电台名实时过滤
+
+**实现**
+1. `App.vue`：顶部工具栏新增搜索按钮，与夜间模式按钮同排，样式完全统一（`size-10` 圆形毛玻璃）。点击展开为输入框（`w-48`/`w-56`），自动聚焦；输入框为空时失焦自动收起，再次点击图标收起并清空内容
+2. `App.vue`：`searchQuery` 通过 `provide` 传递给子组件
+3. `Home.vue`：移除自带搜索框和 `searchQuery` ref，改用 `inject('searchQuery')` 读取关键词，`watchEffect` 中新增名称模糊过滤（不区分大小写，与地区/类型筛选同时生效取交集）
+
+**改动文件**
+- `frontend/src/App.vue`：新增搜索按钮组件 + `provide('searchQuery')`
+- `frontend/src/views/Home.vue`：移除搜索框，改用 `inject`，`watchEffect` 新增名称过滤
+
+---
+
+## 2026-05-04 修改：Radio Browser 拉取去掉 limit 限制
+
+**背景**
+`fetchStationsByCountry` 原来有 `limit=50` 参数，只取前 50 个电台，导致部分电台（如上海音乐广播）被截断不显示。
+
+**改动**
+- `radioBrowser.js`：移除 `limit` 参数和函数签名中的解构默认值，API 请求不再带 `limit`，拉取该地区全部电台
+- 缓存 key 从 `${countryCode}_${limit}` 简化为 `countryCode`
+
+**改动文件**
+- `frontend/src/api/radioBrowser.js`
+
+---
+
 ## 2026-05-03 新增：RB_FETCH_COUNTRIES 多地区 Radio Browser 拉取配置
 
 **背景**

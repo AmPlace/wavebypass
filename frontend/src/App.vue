@@ -1,6 +1,7 @@
 <template>
-  <!-- 全局应用壳：负责背景、字体、主题色过渡和页面组合。 -->
-  <div class="min-h-screen bg-gray-100 font-sans text-neutral-950 antialiased transition-colors duration-300 dark:bg-neutral-900 dark:text-neutral-50">
+  <!-- 全局应用壳：同时作为虚拟滚动的滚动容器，h-dvh 让滚动条在浏览器最右边。 -->
+  <!-- 用 dvh 而非 vh：iOS Safari 的 100vh 包含地址栏高度，dvh 是排除地址栏后的动态视口高度。 -->
+  <div ref="scrollRef" class="h-dvh overflow-y-auto bg-gray-100 font-sans text-neutral-950 antialiased transition-colors duration-300 dark:bg-neutral-900 dark:text-neutral-50">
     <!-- 顶部工具栏：搜索按钮 + 主题切换按钮，同一排，样式统一。 -->
     <div class="fixed right-4 top-4 z-50 flex items-center gap-2 sm:right-6 sm:top-6">
       <!-- 搜索框：默认收起为圆形图标，点击展开为输入框 -->
@@ -101,6 +102,10 @@ import AudioEngine from './components/AudioEngine.vue'
 const THEME_STORAGE_KEY = 'wavebypass-theme'
 const isDark = ref(false)
 let mediaQuery = null
+
+// 滚动容器 ref，同时作为虚拟滚动的滚动容器，通过 provide 传给 Home.vue 使用。
+const scrollRef = ref(null)
+provide('scrollRef', scrollRef)
 
 // 【新增核心功能】：动态修改手机状态栏颜色
 function updateThemeColor(isDarkMode) {
