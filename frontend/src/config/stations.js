@@ -79,42 +79,42 @@ export const stationList = [
     // 台湾城市广播网直链，无 m3u8 列表，直接返回音频流
     directUrl: 'https://fm901.cityfm.com.tw:8083/901',
     // 暂无官方 logo，用字母占位
-    logoUrl: '',
+    logoUrl: '/logos/twcsgbw.jpg',
   },
   {
     id: 'bcc_news',
     name: '中广新闻网',
     logoText: '新闻',
     directUrl: 'https://stream.rcs.revma.com/fgtx07f3qtzuv',
-    logoUrl: '',
+    logoUrl: '/logos/twzgxww.png',
   },
   {
     id: 'bcc_pop',
     name: '中广流行网',
     logoText: '流行',
     directUrl: 'https://stream.rcs.revma.com/s1zttsg3qtzuv',
-    logoUrl: '',
+    logoUrl: '/logos/twzglxw.jpg',
   },
   {
     id: 'bcc_music',
     name: '中广音乐网',
     logoText: '音乐',
     directUrl: 'https://stream.rcs.revma.com/ks4vsmg3qtzuv',
-    logoUrl: '',
+    logoUrl: '/logos/twzgyyw.jpg',
   },
   {
     id: 'igot531',
     name: 'iGO531',
     logoText: '531',
     directUrl: 'https://stream.rcs.revma.com/1qxn2vg3qtzuv',
-    logoUrl: '',
+    logoUrl: '/logos/twigo531.jpg',
   },
   {
     id: 'bcc_rural',
     name: '中广乡亲网',
     logoText: '乡亲',
     directUrl: 'https://stream.rcs.revma.com/p2e3rfg3qtzuv',
-    logoUrl: '',
+    logoUrl: '/logos/twzgxqw.png',
   },
 ]
 

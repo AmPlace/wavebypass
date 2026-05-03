@@ -29,7 +29,7 @@
               <!-- 如果配置了真实 logo 图片，就优先显示图片。 -->
               <img
                 v-if="station.logoUrl"
-                class="h-full w-full object-contain p-2"
+                class="h-full w-full object-cover"
                 :src="station.logoUrl"
                 :alt="`${station.name} logo`"
               />
