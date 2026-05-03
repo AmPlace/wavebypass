@@ -136,9 +136,10 @@ export const stationList = [
   // post_id 从 tingfm.com 电台页面 URL 获取
   {
     id: 'fj_traffic',
-    name: '福建交通广播',
+    name: '福建交通广播 100.7',
     logoText: '闽',
     livePath: 'fj_traffic/live',
+    logoUrl: '/logos/fjjtgb.png',
     tags: ['news', 'CN'],
   },
 ]
