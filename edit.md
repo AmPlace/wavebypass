@@ -1,5 +1,35 @@
 # 修改记录
 
+## 2026-05-04 修改：移动端 UI 改进（顶栏重构 + 筛选横向滚动 + 底部播放器跑马灯）
+
+**背景**
+移动端三个 UI 问题：右上角搜索/主题按钮与地区筛选标签冲突、33 个地区 pill 换行太多占大量纵向空间、底部播放器电台名和错误信息因空间不足被截断。
+
+**实现**
+
+**App.vue 顶栏重构**
+- 浮动 `fixed right-4 top-4` 改为全宽固定状态栏
+- 结构：`safe-area-inset-top` 安全区留白 + `h-14` 工具栏
+- 三栏布局：左 `w-10` 占位（未来放返回按钮）、中空白（预留电台/电视切换）、右搜索框+主题按钮
+- 背景纯色 `bg-gray-100 dark:bg-neutral-900`（去掉 `/80` 透明度，与页面背景完全一致，解决 iOS Safari 顶栏色差）
+
+**Home.vue 改动**
+- `<main>` padding 从 `py-10` 改为 `pt-20 pb-36`，给固定顶栏让出空间
+- 地区筛选从 `flex flex-wrap` 改为 `flex items-center gap-2 overflow-x-auto scrollbar-hide` 单行横向滚动
+- 所有 pill 按钮加 `shrink-0` 防被压缩，33 个标签一行可滑动
+- 类型筛选保持 `flex-wrap`（只有 6 个，不需要滚动）
+- PC 端左右各加圆形箭头按钮（`hidden sm:flex`），点击 `scrollBy(±150)` 平滑滚动，`canScrollLeft` / `canScrollRight` 控制显隐
+- 移动端右侧加渐变遮罩 `bg-gradient-to-l from-gray-100 to-transparent`（`sm:hidden`），提示还有更多内容
+- `watch(regions)` + `nextTick(updateScrollState)` 在数据加载后自动检测滚动状态
+
+**BottomPlayer.vue 改动**
+- 左侧 `basis-[30%]` 加宽为 `basis-[40%]`，中间 `basis-[40%]` 缩为 `basis-[30%]`
+- 电台名和状态文案从 `truncate` 改为跑马灯（Marquee）：检测到文字溢出时触发 CSS `translateX` 缓慢滚动动画（8 秒周期，前 20% 停留，20%-80% 滚动，后 20% 停留）
+- `nameRef` / `statusRef` + `watch` 检测 `scrollWidth > clientWidth` 自动切换 `marquee` class
+
+**style.css**
+- 新增 `.scrollbar-hide` 工具类：`::-webkit-scrollbar { display: none }` + `scrollbar-width: none`（Firefox）+ `-ms-overflow-style: none`（IE）
+
 ## 2026-05-04 修改：虚拟滚动改用 @vueuse/core，滚动容器重构，修复移动端卡片间距
 
 **背景**

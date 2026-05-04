@@ -2,84 +2,96 @@
   <!-- 全局应用壳：同时作为虚拟滚动的滚动容器，h-dvh 让滚动条在浏览器最右边。 -->
   <!-- 用 dvh 而非 vh：iOS Safari 的 100vh 包含地址栏高度，dvh 是排除地址栏后的动态视口高度。 -->
   <div ref="scrollRef" class="h-dvh overflow-y-auto bg-gray-100 font-sans text-neutral-950 antialiased transition-colors duration-300 dark:bg-neutral-900 dark:text-neutral-50">
-    <!-- 顶部工具栏：搜索按钮 + 主题切换按钮，同一排，样式统一。 -->
-    <div class="fixed right-4 top-4 z-50 flex items-center gap-2 sm:right-6 sm:top-6">
-      <!-- 搜索框：默认收起为圆形图标，点击展开为输入框 -->
-      <div
-        class="relative flex items-center rounded-full border border-black/5 bg-white/70 shadow-sm shadow-black/[0.04] backdrop-blur-xl transition-all duration-300 ease-out dark:border-white/10 dark:bg-neutral-950/60"
-        :class="searchExpanded ? 'w-48 sm:w-56' : 'size-10'"
-      >
-        <!-- 搜索图标按钮：点击展开/收起 -->
-        <button
-          type="button"
-          class="flex size-10 shrink-0 items-center justify-center text-neutral-700 transition-colors hover:text-neutral-900 dark:text-neutral-200 dark:hover:text-white"
-          aria-label="搜索电台"
-          @click="toggleSearch"
-        >
-          <svg class="size-5" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-            <circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="1.8" />
-            <path d="M16.5 16.5L21 21" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
-          </svg>
-        </button>
-        <!-- 输入框：展开后显示，收起后隐藏 -->
-        <input
-          ref="searchInputRef"
-          v-model="searchQuery"
-          type="text"
-          placeholder="搜索电台…"
-          class="h-full w-full bg-transparent pr-3 text-sm text-neutral-800 outline-none placeholder:text-gray-400 dark:text-neutral-200 dark:placeholder:text-gray-500"
-          :class="searchExpanded ? 'opacity-100' : 'pointer-events-none opacity-0'"
-          @blur="onSearchBlur"
-        />
+    <!-- 顶部固定工具栏：状态栏安全区 + 三栏布局（左占位/中预留/右按钮） -->
+    <div class="fixed inset-x-0 top-0 z-50 bg-gray-100 dark:bg-neutral-900">
+      <!-- 安全区留白（刘海屏等） -->
+      <div class="h-[env(safe-area-inset-top)]"></div>
+      <!-- 实际工具栏 -->
+      <div class="flex h-12 items-center justify-between px-4 sm:px-6">
+        <!-- 左侧：占位（未来可放返回按钮等） -->
+        <div class="w-10"></div>
+        <!-- 中间：预留电台/电视切换按钮位置 -->
+        <div></div>
+        <!-- 右侧：搜索 + 主题切换 -->
+        <div class="flex items-center gap-2">
+          <!-- 搜索框：默认收起为圆形图标，点击展开为输入框 -->
+          <div
+            class="relative flex items-center rounded-full border border-black/5 bg-white/70 shadow-sm shadow-black/[0.04] backdrop-blur-xl transition-all duration-300 ease-out dark:border-white/10 dark:bg-neutral-950/60"
+            :class="searchExpanded ? 'w-48 sm:w-56' : 'size-10'"
+          >
+            <!-- 搜索图标按钮：点击展开/收起 -->
+            <button
+              type="button"
+              class="flex size-10 shrink-0 items-center justify-center text-neutral-700 transition-colors hover:text-neutral-900 dark:text-neutral-200 dark:hover:text-white"
+              aria-label="搜索电台"
+              @click="toggleSearch"
+            >
+              <svg class="size-5" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="1.8" />
+                <path d="M16.5 16.5L21 21" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+              </svg>
+            </button>
+            <!-- 输入框：展开后显示，收起后隐藏 -->
+            <input
+              ref="searchInputRef"
+              v-model="searchQuery"
+              type="text"
+              placeholder="搜索电台…"
+              class="h-full w-full bg-transparent pr-3 text-sm text-neutral-800 outline-none placeholder:text-gray-400 dark:text-neutral-200 dark:placeholder:text-gray-500"
+              :class="searchExpanded ? 'opacity-100' : 'pointer-events-none opacity-0'"
+              @blur="onSearchBlur"
+            />
+          </div>
+
+          <!-- 主题切换按钮 -->
+          <button
+            type="button"
+            class="flex size-10 items-center justify-center rounded-full border border-black/5 bg-white/70 text-neutral-700 shadow-sm shadow-black/[0.04] backdrop-blur-xl transition-all duration-200 ease-out hover:scale-[1.03] hover:bg-white active:scale-95 dark:border-white/10 dark:bg-neutral-950/60 dark:text-neutral-200 dark:hover:bg-neutral-950"
+            :aria-label="isDark ? '切换到浅色模式' : '切换到深色模式'"
+            @click="toggleTheme"
+          >
+            <!-- 深色模式图标。 -->
+            <svg
+              v-if="isDark"
+              class="size-5"
+              viewBox="0 0 24 24"
+              fill="none"
+              aria-hidden="true"
+            >
+              <path
+                d="M12 3v2M12 19v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M3 12h2M19 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"
+                stroke="currentColor"
+                stroke-width="1.8"
+                stroke-linecap="round"
+              />
+              <circle
+                cx="12"
+                cy="12"
+                r="4"
+                stroke="currentColor"
+                stroke-width="1.8"
+              />
+            </svg>
+
+            <!-- 浅色模式图标。 -->
+            <svg
+              v-else
+              class="size-5"
+              viewBox="0 0 24 24"
+              fill="none"
+              aria-hidden="true"
+            >
+              <path
+                d="M20.5 14.4A7.7 7.7 0 0 1 9.6 3.5 8.5 8.5 0 1 0 20.5 14.4Z"
+                stroke="currentColor"
+                stroke-width="1.8"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+          </button>
+        </div>
       </div>
-
-      <!-- 主题切换按钮 -->
-      <button
-        type="button"
-        class="flex size-10 items-center justify-center rounded-full border border-black/5 bg-white/70 text-neutral-700 shadow-sm shadow-black/[0.04] backdrop-blur-xl transition-all duration-200 ease-out hover:scale-[1.03] hover:bg-white active:scale-95 dark:border-white/10 dark:bg-neutral-950/60 dark:text-neutral-200 dark:hover:bg-neutral-950"
-        :aria-label="isDark ? '切换到浅色模式' : '切换到深色模式'"
-        @click="toggleTheme"
-      >
-      <!-- 深色模式图标。 -->
-      <svg
-        v-if="isDark"
-        class="size-5"
-        viewBox="0 0 24 24"
-        fill="none"
-        aria-hidden="true"
-      >
-        <path
-          d="M12 3v2M12 19v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M3 12h2M19 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"
-          stroke="currentColor"
-          stroke-width="1.8"
-          stroke-linecap="round"
-        />
-        <circle
-          cx="12"
-          cy="12"
-          r="4"
-          stroke="currentColor"
-          stroke-width="1.8"
-        />
-      </svg>
-
-      <!-- 浅色模式图标。 -->
-      <svg
-        v-else
-        class="size-5"
-        viewBox="0 0 24 24"
-        fill="none"
-        aria-hidden="true"
-      >
-        <path
-          d="M20.5 14.4A7.7 7.7 0 0 1 9.6 3.5 8.5 8.5 0 1 0 20.5 14.4Z"
-          stroke="currentColor"
-          stroke-width="1.8"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-        />
-      </svg>
-    </button>
     </div>
 
     <!-- 主体选台页面。 -->

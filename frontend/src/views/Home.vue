@@ -1,30 +1,65 @@
 <template>
   <!-- 页面主体：居中布局，不负责滚动（滚动容器在 App.vue 根 div）。 -->
-  <main class="mx-auto flex min-h-screen w-full max-w-7xl flex-col items-center px-5 py-10 pb-36 sm:px-8 lg:px-10">
+  <main class="mx-auto flex min-h-screen w-full max-w-7xl flex-col items-center px-5 pt-[calc(env(safe-area-inset-top)+3.5rem)] pb-36 sm:px-8 lg:px-10">
 
     <!-- 筛选栏 -->
     <header class="mb-6 w-full space-y-3">
-      <!-- 地区筛选 -->
-      <div class="flex flex-wrap items-center gap-2">
-        <span class="shrink-0 text-xs text-gray-400 dark:text-gray-500">地区</span>
+      <!-- 地区筛选：单行横向滚动 + 左右箭头 + 右侧渐变提示 -->
+      <div class="relative flex items-center">
+        <!-- 左箭头（PC 端点击滚动，移动端隐藏） -->
         <button
+          v-show="canScrollLeft"
           type="button"
-          class="rounded-full border px-3 py-1 text-xs transition-colors"
-          :class="pillClass(!selectedRegion)"
-          @click="selectedRegion = ''"
+          class="hidden shrink-0 sm:flex absolute left-0 z-10 size-7 items-center justify-center rounded-full bg-white/90 text-gray-500 shadow-sm hover:text-gray-800 dark:bg-neutral-800/90 dark:text-gray-400 dark:hover:text-gray-200"
+          aria-label="向左滚动"
+          @click="scrollRegionBy(-150)"
         >
-          全部
+          <svg class="size-4" viewBox="0 0 24 24" fill="none"><path d="M15 19l-7-7 7-7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </button>
+
+        <!-- 滚动区域 -->
+        <div
+          ref="regionScrollRef"
+          class="flex items-center gap-2 overflow-x-auto scrollbar-hide"
+          @scroll="onRegionScroll"
+        >
+          <span class="shrink-0 text-xs text-gray-400 dark:text-gray-500">地区</span>
+          <button
+            type="button"
+            class="shrink-0 rounded-full border px-3 py-1 text-xs transition-colors"
+            :class="pillClass(!selectedRegion)"
+            @click="selectedRegion = ''"
+          >
+            全部
+          </button>
+          <button
+            v-for="r in regions"
+            :key="r"
+            type="button"
+            class="shrink-0 rounded-full border px-3 py-1 text-xs transition-colors"
+            :class="pillClass(selectedRegion === r)"
+            @click="selectedRegion = selectedRegion === r ? '' : r"
+          >
+            {{ regionLabels[r] || r }}
+          </button>
+        </div>
+
+        <!-- 右箭头（PC 端点击滚动，移动端隐藏） -->
         <button
-          v-for="r in regions"
-          :key="r"
+          v-show="canScrollRight"
           type="button"
-          class="rounded-full border px-3 py-1 text-xs transition-colors"
-          :class="pillClass(selectedRegion === r)"
-          @click="selectedRegion = selectedRegion === r ? '' : r"
+          class="hidden shrink-0 sm:flex absolute right-0 z-10 size-7 items-center justify-center rounded-full bg-white/90 text-gray-500 shadow-sm hover:text-gray-800 dark:bg-neutral-800/90 dark:text-gray-400 dark:hover:text-gray-200"
+          aria-label="向右滚动"
+          @click="scrollRegionBy(150)"
         >
-          {{ regionLabels[r] || r }}
+          <svg class="size-4" viewBox="0 0 24 24" fill="none"><path d="M9 5l7 7-7 7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </button>
+
+        <!-- 右侧渐变遮罩：提示后面还有更多内容 -->
+        <div
+          v-show="canScrollRight"
+          class="pointer-events-none absolute right-0 top-0 bottom-0 w-12 bg-gradient-to-l from-gray-100 to-transparent dark:from-neutral-900 sm:hidden"
+        ></div>
       </div>
 
       <!-- 类型筛选 -->
@@ -127,7 +162,7 @@ import { storeToRefs } from 'pinia'
 import { usePlayerStore } from '../stores/player'
 import { fetchAllYuntingStations } from '../api/yunting'
 import { fetchMyradioStations } from '../api/myradio'
-import { computed, inject, onBeforeUnmount, onMounted, ref, watch, watchEffect } from 'vue'
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch, watchEffect } from 'vue'
 import { useScroll, useThrottleFn } from '@vueuse/core'
 
 const playerStore = usePlayerStore()
@@ -233,6 +268,26 @@ const selectedType = ref('')
 // 搜索关键词，从 App.vue 通过 provide/inject 共享过来
 const searchQuery = inject('searchQuery')
 
+// ========== 地区筛选横向滚动 ==========
+const regionScrollRef = ref(null)
+const canScrollLeft = ref(false)
+const canScrollRight = ref(false)
+
+function updateScrollState() {
+  const el = regionScrollRef.value
+  if (!el) return
+  canScrollLeft.value = el.scrollLeft > 2
+  canScrollRight.value = el.scrollLeft < el.scrollWidth - el.clientWidth - 2
+}
+
+function onRegionScroll() {
+  updateScrollState()
+}
+
+function scrollRegionBy(delta) {
+  regionScrollRef.value?.scrollBy({ left: delta, behavior: 'smooth' })
+}
+
 // 地域限制配置，启动时从 /api/config 获取
 const geoConfig = ref({ geoRestrict: false, blockedRegions: [] })
 const geoConfigLoaded = ref(false)
@@ -247,6 +302,9 @@ const regions = computed(() => {
   }
   return [...set]
 })
+
+// 地区列表变化后重新检测滚动状态（DOM 更新后）
+watch(regions, () => nextTick(updateScrollState))
 
 // 从当前所有电台的 tags 中自动提取出现过的类型列表
 const types = computed(() => {
@@ -370,6 +428,9 @@ onMounted(() => {
     }
   })
   if (gridRef.value) resizeObserver.observe(gridRef.value)
+
+  // 检测地区筛选的初始滚动状态
+  nextTick(updateScrollState)
 
   // 获取地域限制配置 + 静态电台列表（从后端动态加载，支持地域过滤）
   ;(async () => {

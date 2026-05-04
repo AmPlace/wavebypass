@@ -6,7 +6,7 @@
       class="mx-auto flex h-20 max-w-4xl items-center justify-between gap-3 rounded-3xl border border-white/20 bg-white/70 px-4 shadow-lg shadow-black/[0.06] backdrop-blur-xl dark:border-white/10 dark:bg-black/70 dark:shadow-black/30 sm:px-5"
     >
       <!-- 左侧：当前电台与直播状态。 -->
-      <section class="flex min-w-0 basis-[30%] items-center gap-3">
+      <section class="flex min-w-0 basis-[40%] items-center gap-3">
         <!-- 状态点：播放中是绿色呼吸点，加载中是克制的小转圈，错误时是红点。 -->
         <span class="relative flex size-3 shrink-0 items-center justify-center">
           <span
@@ -24,14 +24,22 @@
           ></span>
         </span>
 
-        <!-- 电台名称，窄屏时单行省略。 -->
-        <div class="min-w-0">
-          <p class="truncate text-sm font-medium text-neutral-900 dark:text-neutral-100">
+        <!-- 电台名称，超出时跑马灯滚动。 -->
+        <div ref="nameWrapperRef" class="min-w-0 overflow-hidden">
+          <p
+            ref="nameRef"
+            class="whitespace-nowrap text-sm font-medium text-neutral-900 dark:text-neutral-100"
+            :class="{ 'marquee': isNameOverflow }"
+          >
             {{ currentStationName }}
           </p>
           <p
-            class="truncate text-xs font-medium"
-            :class="playbackError ? 'text-red-500 dark:text-red-400' : 'text-neutral-500 dark:text-neutral-500'"
+            ref="statusRef"
+            class="whitespace-nowrap text-xs font-medium"
+            :class="[
+              playbackError ? 'text-red-500 dark:text-red-400' : 'text-neutral-500 dark:text-neutral-500',
+              { 'marquee': isStatusOverflow },
+            ]"
           >
             {{ statusText }}
           </p>
@@ -39,7 +47,7 @@
       </section>
 
       <!-- 中间：播放 / 暂停按钮。 -->
-      <section class="flex basis-[40%] justify-center">
+      <section class="flex basis-[30%] justify-center">
         <button
           type="button"
           class="flex size-12 items-center justify-center rounded-full bg-neutral-950 text-white shadow-sm shadow-black/10 transition-all duration-200 ease-out hover:scale-[1.03] hover:bg-black active:scale-95 dark:bg-white dark:text-black dark:hover:bg-neutral-100"
@@ -125,7 +133,7 @@
 
 <script setup>
 // computed 用于根据当前电台 ID 计算展示名称。
-import { computed } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 
 // storeToRefs 用于保持 Pinia state 的响应式。
 import { storeToRefs } from 'pinia'
@@ -138,6 +146,24 @@ const playerStore = usePlayerStore()
 
 // 解构播放器状态。
 const { currentStation, isPlaying, isLoading, volume, playbackError } = storeToRefs(playerStore)
+
+// 跑马灯：检测文字是否溢出容器
+const nameRef = ref(null)
+const statusRef = ref(null)
+const isNameOverflow = ref(false)
+const isStatusOverflow = ref(false)
+
+function checkOverflow() {
+  if (nameRef.value) {
+    isNameOverflow.value = nameRef.value.scrollWidth > nameRef.value.parentElement.clientWidth
+  }
+  if (statusRef.value) {
+    isStatusOverflow.value = statusRef.value.scrollWidth > statusRef.value.parentElement.clientWidth
+  }
+}
+
+// 电台名或状态文案变化时重新检测溢出
+watch([currentStation, playbackError, isLoading], () => nextTick(checkOverflow))
 
 // 根据当前电台 ID 从 store 的 stationMap 获取展示名称（含 Radio Browser 动态电台）
 const currentStationName = computed(() => {
@@ -172,3 +198,16 @@ const statusDotClass = computed(() => {
   return 'bg-neutral-300 dark:bg-neutral-700'
 })
 </script>
+
+<style scoped>
+.marquee {
+  animation: marquee 8s linear infinite;
+  padding-right: 2rem;
+}
+@keyframes marquee {
+  0%   { transform: translateX(0); }
+  20%  { transform: translateX(0); }
+  80%  { transform: translateX(-50%); }
+  100% { transform: translateX(-50%); }
+}
+</style>
