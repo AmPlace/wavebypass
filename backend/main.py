@@ -388,27 +388,37 @@ def _write_yunting_caches(prov: str, stations: list[dict], now: float) -> None:
             YUNTING_EPG_CACHE[f"yt_{cid}"] = {"subtitle": sub, "ts": now}
 
 
+async def _yunting_warmup() -> None:
+    """拉取一轮所有省份的云听数据并写入缓存，同时预合并全量响应。"""
+    now = time.time()
+    tasks = [_fetch_one_province(prov) for prov in YUNTING_PROVINCES]
+    results = await asyncio.gather(*tasks)
+
+    prefetched = 0
+    merged: list[dict] = []
+    for prov, stations in zip(YUNTING_PROVINCES, results):
+        if stations is None:
+            # 拉取失败，从旧缓存补充到 merged
+            cached = YUNTING_CACHE.get(prov)
+            if cached:
+                merged.extend(json.loads(cached["data"]))
+            continue
+        _write_yunting_caches(prov, stations, now)
+        merged.extend(stations)
+        prefetched += 1
+
+    # 预合并全量响应，后续 /api/yunting/all 直接返回，零 JSON 解析
+    if merged:
+        YUNTING_ALL_CACHE["data"] = json.dumps(merged, ensure_ascii=False).encode("utf-8")
+        YUNTING_ALL_CACHE["ts"] = now
+
+    logger.info("云听缓存预热完成: %d/%d 个省份成功", prefetched, len(YUNTING_PROVINCES))
+
+
 async def _yunting_refresh_task() -> None:
-    """后台定时守护协程：预热 + 每小时静默刷新云听三层缓存。
-
-    启动时立即执行一轮（预热），之后每 YUNTING_REFRESH_INTERVAL 执行一次。
-    通过 asyncio.Semaphore(5) 限制并发，避免瞬间 31 个请求触发 WAF。
-    单个省份拉取失败时保留旧缓存，不影响其他省份。
-    """
+    """后台定时守护协程：启动时预热 + 每小时静默刷新云听三层缓存。"""
     while True:
-        now = time.time()
-        # asyncio.gather + Semaphore(5)：最多 5 个省份同时请求，其余排队
-        tasks = [_fetch_one_province(prov) for prov in YUNTING_PROVINCES]
-        results = await asyncio.gather(*tasks)
-
-        prefetched = 0
-        for prov, stations in zip(YUNTING_PROVINCES, results):
-            if stations is None:
-                continue  # 拉取失败，保留旧缓存，不覆盖
-            _write_yunting_caches(prov, stations, now)
-            prefetched += 1
-
-        logger.info("云听缓存刷新完成: %d/%d 个省份成功", prefetched, len(YUNTING_PROVINCES))
+        await _yunting_warmup()
         await asyncio.sleep(YUNTING_REFRESH_INTERVAL)
 
 
@@ -809,6 +819,9 @@ YUNTING_PROVINCES = [
 YUNTING_CACHE: dict[str, dict] = {}
 YUNTING_CACHE_TTL = 2 * 3600
 
+# 云听全量合并缓存：/api/yunting/all 的预合并结果，命中时零 JSON 解析
+YUNTING_ALL_CACHE: dict[str, bytes | float] = {}  # {"data": json_bytes, "ts": float}
+
 # 云听 EPG（当前节目名）独立缓存，比电台列表更新更频繁。
 # 电台列表 2 小时足够，但节目每半小时换一次，EPG 用 10 分钟 TTL。
 YUNTING_EPG_CACHE: dict[str, dict] = {}   # {"yt_{contentId}": {"subtitle": "...", "ts": ...}}
@@ -931,13 +944,21 @@ async def proxy_yunting_stations(province_code: str) -> Response:
 async def proxy_yunting_all() -> Response:
     """一次返回所有省份的云听电台列表，前端只需一个请求。
 
-    启动预热已填充缓存，命中时零网络请求、纯内存拼接。
-    未命中的省份通过 _fetch_one_province 拉取（受信号量限流，失败保留旧缓存）。
+    优先读预合并缓存 YUNTING_ALL_CACHE（预热时填充），命中时零 JSON 解析。
+    未命中时从各省缓存拼接，缺失的省份实时拉取。
     """
     import json
 
-    merged: list[dict] = []
     now = time.time()
+
+    # 快速路径：预合并缓存命中，直接返回原始 bytes
+    all_cached = YUNTING_ALL_CACHE.get("data")
+    all_ts = YUNTING_ALL_CACHE.get("ts", 0)
+    if all_cached and now - all_ts < YUNTING_CACHE_TTL:
+        return Response(content=all_cached, media_type="application/json")
+
+    # 慢速路径：从各省缓存拼接
+    merged: list[dict] = []
     missing: list[str] = []
 
     for prov in YUNTING_PROVINCES:
@@ -956,10 +977,11 @@ async def proxy_yunting_all() -> Response:
             _write_yunting_caches(prov, stations, now)
             merged.extend(stations)
 
-    return Response(
-        content=json.dumps(merged, ensure_ascii=False),
-        media_type="application/json",
-    )
+    # 写入预合并缓存，下次请求命中
+    result_bytes = json.dumps(merged, ensure_ascii=False).encode("utf-8")
+    YUNTING_ALL_CACHE["data"] = result_bytes
+    YUNTING_ALL_CACHE["ts"] = now
+    return Response(content=result_bytes, media_type="application/json")
 
 
 @app.get("/api/yunting/epg")

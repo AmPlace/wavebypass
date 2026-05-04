@@ -831,3 +831,34 @@ headers = {**CDN_REQUEST_HEADERS, "Referer": referer}
 - 前端构建产物不含任何台湾电台数据（stations.js 不再被导入，Vite tree-shake 排除）
 - 后端 `/api/stations` 和 `/api/myradio/all` 根据 `CF-IPCountry` 头过滤，大陆 IP 收到的响应中不含台湾电台
 - 流端点 403 拦截，即使知道 station ID 也无法播放
+
+---
+
+## 2026-05-04 优化：云听 `/api/yunting/all` 响应加速
+
+**问题**
+`/api/yunting/all` 响应耗时约 3 秒。原因：
+1. 缓存存的是 JSON 字符串，每次请求要 `json.loads` 31 次再 `json.dumps` 合并
+2. 启动预热是后台 `create_task`，首次请求可能在缓存就绪前到达，触发 31 省份实时拉取
+
+**方案**
+
+### 预合并缓存 `YUNTING_ALL_CACHE`
+- 新增 `YUNTING_ALL_CACHE`（`{"data": bytes, "ts": float}`），存储预合并的 JSON bytes
+- `_yunting_warmup()` 预热时同时构建全量 merged 结果写入 `YUNTING_ALL_CACHE`
+- `proxy_yunting_all` 快速路径：`YUNTING_ALL_CACHE` 命中时直接返回原始 bytes，零 `json.loads`/`json.dumps`
+- 慢速路径（缓存未就绪）：从各省 `YUNTING_CACHE` 拼接，缺失省份实时拉取，结果写入 `YUNTING_ALL_CACHE` 供后续请求命中
+- TTL 与省份缓存一致（2 小时），预热时同一 `now` 时间戳
+
+### `_yunting_warmup()` 提取
+- 从 `_yunting_refresh_task()` 的 while 循环中提取为独立函数
+- `_yunting_refresh_task()` 改为：warmup → sleep → warmup → sleep
+- 预热逻辑不变：`asyncio.gather` + `Semaphore(5)` 限流，单省失败保留旧缓存
+
+**效果**
+- 预热完成后：`/api/yunting/all` 从 ~3 秒降到 <10ms（纯内存 bytes 返回）
+- 预热前首次请求：仍走慢速路径（~3 秒），但结果写入缓存后后续请求命中快速路径
+- 启动流程不变：后台 `create_task` 非阻塞，不延迟服务器启动
+
+**改动文件**
+- `backend/main.py`：新增 `YUNTING_ALL_CACHE`、`_yunting_warmup()`；更新 `_yunting_refresh_task`、`proxy_yunting_all`
