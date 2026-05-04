@@ -364,6 +364,8 @@ async def lifespan(app: FastAPI):
     # 启动时执行
     asyncio.create_task(refresh_tokens_task())
     asyncio.create_task(_yunting_refresh_task())
+    asyncio.create_task(_myradio_refresh_task())
+    asyncio.create_task(_prefetch_rb())
     yield
     # 关闭时执行，优雅释放全局客户端
     await http_client.aclose()
@@ -722,6 +724,58 @@ YUNTING_URL_CACHE: dict[str, dict] = {}   # {"yt_{contentId}": {"url": "...", "t
 YUNTING_URL_TTL = 1 * 3600
 
 
+# ==========================================
+# myradio.tw 电台缓存
+# ==========================================
+# key 格式：mr_{id}（如 mr_A1001），value 包含 name/url/logo/ts
+# 24h TTL，myradio 官网直链无 token 过期，长缓存没问题
+MYRADIO_CACHE: dict[str, dict] = {}
+MYRADIO_CACHE_TTL = 24 * 3600
+
+
+async def _myradio_refresh_task() -> None:
+    """后台定时守护协程：预热 + 每 24 小时静默刷新 myradio 缓存。"""
+    from fetchers import fetch_myradio_all
+
+    while True:
+        try:
+            stations = await fetch_myradio_all()
+            if stations:
+                now = time.time()
+                MYRADIO_CACHE.clear()
+                for s in stations:
+                    MYRADIO_CACHE[f"mr_{s['id']}"] = {
+                        "name": s["name"],
+                        "url": s["url"],
+                        "logo": s["logo"],
+                        "freq": s.get("freq", ""),
+                        "tag": s.get("tag", ""),
+                        "ts": now,
+                    }
+                logger.info("myradio 电台预热完成: %d 个", len(stations))
+            else:
+                logger.warning("myradio 抓取返回空列表")
+        except Exception:
+            logger.exception("myradio 预热/刷新失败")
+        await asyncio.sleep(MYRADIO_CACHE_TTL)
+
+
+@app.get("/api/myradio/all")
+async def get_myradio_all() -> Response:
+    """返回所有已缓存的 myradio 电台列表（从预热缓存读取）。"""
+    import json
+
+    stations = [
+        {"id": k.replace("mr_", ""), "name": v["name"], "url": v["url"],
+         "logo": v["logo"], "freq": v.get("freq", ""), "tag": v.get("tag", "")}
+        for k, v in MYRADIO_CACHE.items()
+    ]
+    return Response(
+        content=json.dumps(stations, ensure_ascii=False),
+        media_type="application/json",
+    )
+
+
 @app.get("/api/yunting/stations/{province_code}")
 async def proxy_yunting_stations(province_code: str) -> Response:
     """反代云听电台列表 API，缓存 2 小时。
@@ -882,6 +936,71 @@ async def yunting_epg() -> Response:
 import re as _re
 
 
+# 繁→简映射（仅电台名高频字，覆盖 myradio.tw 台湾电台常见用字）
+_T2S = {
+    "樂": "乐", "聲": "声", "網": "网", "廣": "广", "聯": "联",
+    "談": "谈", "體": "体", "車": "车", "濟": "济", "鄉": "乡",
+    "訊": "讯", "藝": "艺", "語": "语", "華": "华", "電": "电",
+    "視": "视", "國": "国", "劇": "剧", "寶": "宝", "環": "环",
+    "紅": "红", "節": "节", "製": "制", "報": "报", "導": "导",
+    "續": "续", "話": "话", "兒": "儿", "動": "动", "預": "预",
+    "後": "后", "獨": "独", "經": "经", "選": "选", "顧": "顾",
+    "慶": "庆", "親": "亲", "師": "师", "勞": "劳", "樹": "树",
+    "費": "费", "際": "际", "婦": "妇", "軍": "军", "黨": "党",
+    "陽": "阳", "萬": "万", "聖": "圣", "誕": "诞", "與": "与",
+    "術": "术", "雜": "杂", "舞": "舞", "戲": "戏", "戲": "戏",
+    "廳": "厅", "錄": "录", "紀": "纪", "繪": "绘", "攝": "摄",
+    "書": "书", "畫": "画", "詩": "诗", "詞": "词", "謠": "谣",
+    "調": "调", "擊": "击", "搖": "摇", "滾": "滚", "藍": "蓝",
+    "靈": "灵", "處": "处", "號": "号", "機": "机", "檔": "档",
+    "線": "线", "練": "练", "組": "组", "團": "团", "隊": "队",
+    "員": "员", "場": "场", "館": "馆", "園": "园", "區": "区",
+    "鄉": "乡", "鎮": "镇", "縣": "县", "島": "岛", "峽": "峡",
+    "灣": "湾", "裡": "里", "裡": "里", "週": "周", "東": "东",
+    "西": "西", "南": "南", "北": "北", "中": "中",
+}
+
+
+def _normalize_name(raw: str) -> str:
+    """电台名称规范化：去空格、转小写、去常见后缀和频率、繁→简，用于跨源模糊匹配。
+
+    "HitFM 台北"       → "hitfm台北"
+    "HitFM台北之聲"     → "hitfm台北"
+    "Hit FM 97.7 古典音樂" → "hitfm古典音乐"
+    "泉州新闻综合 88.9"  → "泉州新闻综合"
+    "泉州新闻综合广播"   → "泉州新闻综合"
+    """
+    s = raw.lower().replace(" ", "")
+    # 去频率数字（FM 97.7、88.9 等，保留 "HitFM" 中的 FM）
+    s = _re.sub(r"(?<![a-z])fm\d[\d.]*", "", s)
+    # 去常见后缀（支持 城市+后缀 的组合，如 "台北之声" → 去掉）
+    s = _re.sub(r"[一-鿥]{0,4}(之声|之聲|电台|广播电台|广播|联播网|聯播網)$", "", s)
+    # 繁→简（电台名高频字）
+    s = "".join(_T2S.get(c, c) for c in s)
+    return s
+
+
+def _names_match(query: str, target: str) -> bool:
+    """保守的名称匹配，防止短子串误匹配。
+
+    规则：
+    1. 完全相等 → True
+    2. 短串是长串的子串：要求短串 ≥ 4 字符，且长度 ≥ 长串的 60%
+       例：'hitfm' in 'hitfm台北'       → 5≥4, 5/7=71%  → True
+       例：'新闻综合' in '泉州新闻综合广播' → 4≥4, 4/8=50%  → True（反向：长串含短串时同理）
+       例：'全球华语广播网' in 'needsradio全球华语广播网' → 7/15=47% < 60% → False
+    3. 其他情况 → False
+    """
+    if not query or not target:
+        return False
+    if query == target:
+        return True
+    shorter, longer = (query, target) if len(query) <= len(target) else (target, query)
+    if shorter in longer and len(shorter) >= 4 and len(shorter) * 100 >= len(longer) * 60:
+        return True
+    return False
+
+
 def _find_yunting_url(station_id: str, name: str = "") -> str | None:
     """在云听缓存中按名称匹配电台，返回 playUrlLow 或 None。
 
@@ -944,6 +1063,208 @@ def _find_yunting_url(station_id: str, name: str = "") -> str | None:
     return None
 
 
+def _find_myradio_url(station_id: str, name: str = "") -> str | None:
+    """在 myradio 缓存中按名称匹配电台，返回直连流 URL 或 None。
+
+    使用 _normalize_name 规范化后匹配，解决：
+    - "HitFM 台北" vs "Hit FM"（去空格后都是 "hitfm"）
+    - "泉州新闻综合 88.9" vs "泉州新闻综合广播"（去后缀后都是 "泉州新闻综合"）
+    """
+    if station_id.startswith("mr_"):
+        return None
+
+    if not name:
+        return None
+
+    query = _normalize_name(name)
+    if not query:
+        return None
+
+    # 规范化后子串匹配（双向，带长度校验，防止短子串误匹配）
+    for _key, entry in MYRADIO_CACHE.items():
+        cached = _normalize_name(entry.get("name", ""))
+        if not cached:
+            continue
+        if _names_match(query, cached):
+            return entry["url"]
+
+    return None
+
+
+def _infer_rb_region(station_id: str) -> str | None:
+    """从 station_id 前缀推断所属地区，用于 RB 匹配时限定国家，防止跨区误匹配。
+
+    mr_* → 'TW'（myradio 只有台湾台）
+    yt_* → 'CN'（云听只有大陆台）
+    其他 → None（不限制，全量搜索）
+    """
+    if station_id.startswith("mr_"):
+        return "TW"
+    if station_id.startswith("yt_"):
+        return "CN"
+    return None
+
+
+def _find_rb_url(station_id: str, name: str = "", region: str | None = None) -> str | None:
+    """在 Radio Browser 缓存中按名称匹配电台，返回直连流 URL 或 None。
+
+    region: 限定只搜索指定国家的 RB 数据（如 'TW'、'CN'），防止跨区误匹配。
+    """
+    import json as _json
+
+    if station_id.startswith("rb_"):
+        return None
+
+    if not name:
+        return None
+
+    query = _normalize_name(name)
+    if not query:
+        return None
+
+    countries = [region] if region else list(RB_CACHE.keys())
+    for country in countries:
+        cached = RB_CACHE.get(country)
+        if not cached:
+            continue
+        try:
+            for item in _json.loads(cached["data"]):
+                rb_name = _normalize_name(item.get("name") or "")
+                if not rb_name:
+                    continue
+                if _names_match(query, rb_name):
+                    url = item.get("url_resolved") or item.get("url") or ""
+                    if url.startswith(("http://", "https://")):
+                        return url
+        except Exception:
+            continue
+
+    return None
+
+
+def _find_fallback_url(station_id: str, name: str = "") -> str | None:
+    """统一回退链：云听 → myradio → RB。按顺序尝试，第一个命中即返回。"""
+    region = _infer_rb_region(station_id)
+    for finder in (_find_yunting_url, _find_myradio_url):
+        url = finder(station_id, name)
+        if url:
+            return url
+    return _find_rb_url(station_id, name, region=region)
+
+
+def _collect_all_urls(station_id: str, name: str = "") -> list[str]:
+    """收集电台所有可用流 URL（去重），供前端逐个尝试。
+
+    顺序：当前主源 → 云听 → myradio → RB
+    """
+    import json as _json
+
+    urls: list[str] = []
+    seen: set[str] = set()
+
+    def _add(url: str | None):
+        if url and url not in seen:
+            seen.add(url)
+            urls.append(url)
+
+    # 当前主源
+    _add(CURRENT_STREAMS.get(station_id))
+
+    # mr_* 电台：MYRADIO_CACHE 里可能还没写入 CURRENT_STREAMS
+    if station_id.startswith("mr_"):
+        mr = MYRADIO_CACHE.get(station_id)
+        if mr:
+            _add(mr.get("url"))
+
+    # 云听
+    _add(_find_yunting_url(station_id, name))
+
+    # myradio
+    _add(_find_myradio_url(station_id, name))
+
+    # Radio Browser（限定地区，防止跨区误匹配）
+    region = _infer_rb_region(station_id)
+    _add(_find_rb_url(station_id, name, region=region))
+
+    return urls
+
+
+@app.get("/api/{station_id}/all-urls")
+async def get_all_urls(station_id: str, name: str = "") -> Response:
+    """返回电台所有可用流 URL（去重有序），供前端逐个尝试直连。"""
+    import json
+
+    urls = _collect_all_urls(station_id, name)
+    return Response(
+        content=json.dumps(urls, ensure_ascii=False),
+        media_type="application/json",
+    )
+
+
+async def _head_check(url: str) -> tuple[str, float]:
+    """HEAD 探测单个 URL，返回 (url, 响应时间秒)。失败返回 inf。"""
+    t0 = time.monotonic()
+    try:
+        async with httpx.AsyncClient(verify=False, follow_redirects=True, timeout=5.0) as client:
+            resp = await client.head(url, headers=CDN_REQUEST_HEADERS)
+            if resp.status_code < 400:
+                return (url, time.monotonic() - t0)
+    except Exception:
+        pass
+    return (url, float("inf"))
+
+
+@app.get("/api/{station_id}/reachable-urls")
+async def get_reachable_urls(station_id: str, name: str = "") -> Response:
+    """并行 HEAD 探测所有源 URL，返回按响应速度排序的可达 URL 列表。
+
+    前端拿到后直接按顺序尝试，不可达的 URL 已被过滤，省掉每个 5s 超时。
+    """
+    import json
+
+    urls = _collect_all_urls(station_id, name)
+    if not urls:
+        return Response(content="[]", media_type="application/json")
+
+    # 并行 HEAD 探测所有 URL
+    results = await asyncio.gather(*[_head_check(u) for u in urls])
+    # 过滤不可达（inf），按响应时间排序
+    reachable = sorted(
+        [(u, t) for u, t in results if t < float("inf")],
+        key=lambda x: x[1],
+    )
+    sorted_urls = [u for u, _ in reachable]
+
+    logger.info("电台 %s 可达性探测: %d/%d 可达, 最快: %s",
+                station_id, len(sorted_urls), len(urls),
+                sorted_urls[0] if sorted_urls else "无")
+
+    return Response(
+        content=json.dumps(sorted_urls, ensure_ascii=False),
+        media_type="application/json",
+    )
+
+
+@app.get("/api/proxy/stream")
+async def proxy_stream(url: str = Query(...)) -> StreamingResponse:
+    """通用音频流代理：接受任意 URL，流式转发，绕过浏览器 CORS 限制。"""
+
+    if not url.startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="仅支持 http/https 地址。")
+
+    async def _stream():
+        try:
+            async with httpx.AsyncClient(verify=False, follow_redirects=True) as client:
+                async with client.stream("GET", url, headers=CDN_REQUEST_HEADERS, timeout=HTTP_TIMEOUT) as resp:
+                    resp.raise_for_status()
+                    async for chunk in resp.aiter_bytes(8192):
+                        yield chunk
+        except Exception:
+            return
+
+    return StreamingResponse(_stream(), media_type="audio/mpeg")
+
+
 @app.get("/api/{station_id}/stream-url")
 async def get_stream_url(station_id: str, name: str = "") -> Response:
     """返回电台最新播放地址的直链，供前端直连 CDN 播放，节省后端流量。
@@ -969,6 +1290,14 @@ async def get_stream_url(station_id: str, name: str = "") -> Response:
                 CURRENT_STREAMS[station_id] = url
                 logger.info("电台 %s 从 URL 缓存命中", station_id)
 
+        # mr_* myradio 电台：直接从 MYRADIO_CACHE 读取（24h TTL，后台预热）
+        if fetcher is None and station_id.startswith("mr_"):
+            mr_cached = MYRADIO_CACHE.get(station_id)
+            if mr_cached and time.time() - mr_cached["ts"] < MYRADIO_CACHE_TTL:
+                url = mr_cached["url"]
+                CURRENT_STREAMS[station_id] = url
+                logger.info("电台 %s 从 myradio 缓存命中", station_id)
+
         # 缓存未命中：动态创建 fetcher 并注册（自动纳入后台刷新）
         if url is None and fetcher is None and station_id.startswith("yt_"):
             content_id = station_id[3:]
@@ -977,21 +1306,24 @@ async def get_stream_url(station_id: str, name: str = "") -> Response:
                 fetcher = STATION_FETCHER_MAP[station_id]
                 break
 
-        if url is None and fetcher is None:
+        if url is None and fetcher is None and not station_id.startswith("mr_"):
             raise HTTPException(status_code=404, detail="未知电台。")
-        if url is None:
+        # mr_* 电台缓存过期或缺失，数据由后台预热任务刷新，返回 503
+        if url is None and station_id.startswith("mr_"):
+            raise HTTPException(status_code=503, detail="myradio 电台数据正在刷新，请稍后重试。")
+        if url is None and fetcher is not None:
             try:
                 url = await fetcher()
                 CURRENT_STREAMS[station_id] = url
             except Exception as exc:
-                logger.warning("电台 %s 主 fetcher 失败: %s，尝试云听回退", station_id, exc)
-                fallback_url = _find_yunting_url(station_id, name)
+                logger.warning("电台 %s 主 fetcher 失败: %s，尝试多源回退", station_id, exc)
+                fallback_url = _find_fallback_url(station_id, name)
                 if fallback_url:
-                    logger.info("电台 %s 云听回退成功", station_id)
+                    logger.info("电台 %s 多源回退成功", station_id)
                     url = fallback_url
                     CURRENT_STREAMS[station_id] = url
                 else:
-                    logger.exception("电台 %s stream-url 刷新失败（云听也无匹配）", station_id)
+                    logger.exception("电台 %s stream-url 刷新失败（多源均无匹配）", station_id)
                     raise HTTPException(status_code=503, detail="播放地址暂不可用") from exc
 
     return Response(
@@ -1030,3 +1362,23 @@ async def proxy_radio_browser(country_code: str) -> Response:
 
     RB_CACHE[country_code] = {"data": resp.text, "ts": time.time()}
     return Response(content=resp.text, media_type="application/json")
+
+
+# 后端启动时预热 RB 缓存（TW + CN），供 _find_rb_url / _collect_all_urls 匹配用。
+# 前端不再拉取 RB 数据（隐藏 RB 电台卡片），但后端仍需 RB 数据作回退源。
+_RB_PREFETCH_REGIONS = ["TW", "CN"]
+
+
+async def _prefetch_rb() -> None:
+    """启动时预热 RB 缓存，之后每 6 小时静默刷新。"""
+    while True:
+        for code in _RB_PREFETCH_REGIONS:
+            try:
+                url = f"https://all.api.radio-browser.info/json/stations/bycountrycodeexact/{code}?order=votes&reverse=true"
+                resp = await http_client.get(url, follow_redirects=True)
+                resp.raise_for_status()
+                RB_CACHE[code] = {"data": resp.text, "ts": time.time()}
+                logger.info("RB %s 预热完成: %d bytes", code, len(resp.text))
+            except Exception as exc:
+                logger.warning("RB %s 预热失败: %s", code, exc)
+        await asyncio.sleep(RB_CACHE_TTL)

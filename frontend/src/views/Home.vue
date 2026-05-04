@@ -53,7 +53,7 @@
       <!-- 电台数量 -->
       <p class="text-xs text-gray-400 dark:text-gray-500">
         共 {{ filteredStations.length }} 个电台
-        <span v-if="rbLoading || ytLoading" class="ml-2">正在加载…</span>
+        <span v-if="ytLoading || mrLoading" class="ml-2">正在加载…</span>
       </p>
     </header>
 
@@ -125,21 +125,21 @@
 <script setup>
 import { storeToRefs } from 'pinia'
 import { usePlayerStore } from '../stores/player'
-import { fetchStationsByCountry, RB_FETCH_COUNTRIES } from '../api/radioBrowser'
 import { fetchAllYuntingStations } from '../api/yunting'
+import { fetchMyradioStations } from '../api/myradio'
 import { computed, inject, onBeforeUnmount, onMounted, ref, watch, watchEffect } from 'vue'
 import { useScroll, useThrottleFn } from '@vueuse/core'
 
 const playerStore = usePlayerStore()
 const { currentStation, isPlaying, isLoading, stationList } = storeToRefs(playerStore)
 
-// ========== Radio Browser 数据 ==========
-const rbStations = ref([])
-const rbLoading = ref(false)
-
 // ========== 云听 (radio.cn) 数据 ==========
 const ytStations = ref([])
 const ytLoading = ref(false)
+
+// ========== myradio.tw 数据 ==========
+const mrStations = ref([])
+const mrLoading = ref(false)
 
 // ========== EPG（当前节目名）==========
 // epgMap 用于卡片显示：key 是 contentId（无 yt_ 前缀），value 是节目名
@@ -166,8 +166,46 @@ watch(ytStations, (list) => {
   if (Object.keys(initial).length) syncEpg(initial)
 }, { once: true })
 
-// 合并静态电台 + Radio Browser 电台 + 云听电台
-const allStations = computed(() => [...stationList.value, ...rbStations.value, ...ytStations.value])
+// 繁→简高频字映射（电台名常见字，与后端 _T2S 保持一致）
+const T2S = { '樂':'乐','聲':'声','網':'网','廣':'广','聯':'联','華':'华','國':'国','東':'东','電':'电','視':'视','經':'经','發':'发','動':'动','學':'学','機':'机','區':'区','車':'车','產':'产','業':'业','問':'问','開':'开','長':'长','報':'报','點':'点','號':'号','團':'团','場':'场','處':'处','間':'间','書':'书','術':'术','議':'议','記':'记','設':'设','計':'计','話':'话','題':'题','調':'调','論':'论','辦':'办','營':'营','環':'环','競':'竞','衛':'卫','實':'实','總':'总','統':'统','義':'义','資':'资','運':'运','選':'选','達':'达','進':'进','鄉':'乡','錢':'钱','鐵':'铁','門':'门','陽':'阳','雲':'云','飛':'飞','魚':'鱼','馬':'马','風':'风','齊':'齐','龍':'龙' }
+// 字符标准化：繁→简 + 全角→半角，用于生成稳定的去重 key
+function normalizeForDedup(str) {
+  return (str || '').replace(/\s+/g, '').toLowerCase().replace(/[一-鿿]/g, (c) => T2S[c] || c)
+}
+
+// 四源去重：同名电台只保留一张卡片，优先级 静态 > myradio > 云听 > RB
+function deduplicateByName(stations) {
+  const groups = new Map()
+  for (const s of stations) {
+    const key = normalizeForDedup(s.name)
+    if (!groups.has(key)) groups.set(key, [])
+    groups.get(key).push(s)
+  }
+  return [...groups.values()].map((group) => {
+    if (group.length === 1) return group[0]
+    // 优先级：静态(id 无前缀) 0 > mr_ 1 > yt_ 2 > rb_ 3
+    const pri = (s) => {
+      if (s.id.startsWith('mr_')) return 1
+      if (s.id.startsWith('yt_')) return 2
+      if (s.id.startsWith('rb_')) return 3
+      return 0
+    }
+    group.sort((a, b) => pri(a) - pri(b))
+    const primary = { ...group[0] }
+    // 合并所有源的 tags
+    primary.tags = [...new Set(group.flatMap((s) => s.tags || []))]
+    // 选最好的 logo
+    if (!primary.logoUrl) {
+      const found = group.find((s) => s.logoUrl)
+      if (found) primary.logoUrl = found.logoUrl
+    }
+    return primary
+  })
+}
+
+const allStations = computed(() =>
+  deduplicateByName([...stationList.value, ...mrStations.value, ...ytStations.value])
+)
 
 // ========== 筛选配置 ==========
 // 地区标签映射，新增地区只需在这里加一行
@@ -323,20 +361,6 @@ onMounted(() => {
   })
   if (gridRef.value) resizeObserver.observe(gridRef.value)
 
-  // 按 RB_FETCH_COUNTRIES 配置并行拉取多个地区的 Radio Browser 电台
-  // 想加其他地区：去 radioBrowser.js 的 RB_FETCH_COUNTRIES 里加国家代码即可
-  ;(async () => {
-    rbLoading.value = true
-    const results = await Promise.all(
-      RB_FETCH_COUNTRIES.map((code) => fetchStationsByCountry(code))
-    )
-    const list = results.flat()
-    rbStations.value = list
-    // 注册到 store 的 stationMap，供 AudioEngine 查找播放地址
-    list.forEach((s) => playerStore.addStation(s))
-    rbLoading.value = false
-  })()
-
   // 一次请求拉取所有省份云听电台（后端 /api/yunting/all 从预热缓存返回，零延迟）
   ;(async () => {
     ytLoading.value = true
@@ -344,6 +368,15 @@ onMounted(() => {
     ytStations.value = list
     list.forEach((s) => playerStore.addStation(s))
     ytLoading.value = false
+  })()
+
+  // myradio.tw 台湾电台（后端 /api/myradio/all 从预热缓存返回）
+  ;(async () => {
+    mrLoading.value = true
+    const list = await fetchMyradioStations()
+    mrStations.value = list
+    list.forEach((s) => playerStore.addStation(s))
+    mrLoading.value = false
   })()
 
   // EPG 定期刷新（每 3 分钟），同时更新卡片显示和 store（触发 MediaSession 刷新）

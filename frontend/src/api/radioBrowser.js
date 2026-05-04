@@ -17,9 +17,9 @@ export const RB_COUNTRIES = [
 ]
 
 // ========== 首页要自动拉取的地区列表 ==========
-// 只需要在这里加国家代码，首页就会自动拉取该地区的电台
-// 例如想加日本电台：把下面改成 ['TW', 'JP']
-export const RB_FETCH_COUNTRIES = ['TW', 'CN']
+// 前端不再拉取 RB 电台（隐藏 RB 卡片），RB 数据由后端启动时自动预热，仅用于回退匹配。
+// 如需在前端显示某地区的 RB 电台，把国家代码加回这里即可。
+export const RB_FETCH_COUNTRIES = []
 
 // Radio Browser 常见标签 → 本项目统一类型标签
 // 只要原始 tag 包含左边关键词，就归类为右边的类型

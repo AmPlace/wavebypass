@@ -435,6 +435,86 @@ YUNTING_PROVINCES = ['350000']
 
 ---
 
+## 多源回退架构（myradio.tw + 统一回退链）
+
+**背景**
+每个电台只有一个流来源，一旦失效就无法播放。接入 myradio.tw 作为台湾电台主源，建立跨源回退链（云听 → myradio → RB），同名电台前端只显示一张卡片。
+
+**myradio 抓取策略**
+- 列表页 HTML 只抓一次，用正则提取所有 station ID（`A\d{4}`）+ buildId
+- 之后用 Next.js JSON API（`_next/data/{buildId}/zh-TW/{id}.json`）并发获取每个电台详情
+- `x-nextjs-data: 1` 请求头，返回 JSON，无需解析 HTML
+- `asyncio.Semaphore(5)` 限流防 WAF
+
+**后端新增**
+- `fetchers.py`：`fetch_myradio_all()` — 抓取器，缓存 buildId 供后续复用
+- `main.py`：`MYRADIO_CACHE`（24h TTL）+ `_myradio_refresh_task()` 后台定时守护
+- `main.py`：`GET /api/myradio/all` — 从预热缓存返回所有电台
+- `main.py`：`_find_fallback_url(station_id, name)` — 统一回退链
+  - `_find_yunting_url` → `_find_myradio_url` → `_find_rb_url`
+  - 名称匹配策略：中文字符全包含即命中
+- `main.py`：`get_stream_url` 支持 `mr_*` 电台直接读 MYRADIO_CACHE，fetcher 失败走 `_find_fallback_url`
+
+**前端新增**
+- `api/myradio.js`：调 `/api/myradio/all`，ID 前缀 `mr_`，自动推断类型标签
+- `Home.vue`：`deduplicateByName()` 四源去重，优先级 静态 > mr_ > yt_ > rb_
+  - 合并 tags（如台湾电台同时有 `TW` + `music`）
+  - 选最好的 logo（优先级高的源没有 logo 时用低优先级源的）
+- `radioBrowser.js`：`RB_FETCH_COUNTRIES` 从 `['TW', 'CN']` 改为 `['CN']`
+
+**改动文件**
+- `backend/fetchers.py`：新增 `fetch_myradio_all()`
+- `backend/main.py`：新增 `MYRADIO_CACHE`、`_myradio_refresh_task`、`GET /api/myradio/all`、`_find_myradio_url`、`_find_rb_url`、`_find_fallback_url`，更新 `get_stream_url`
+- `frontend/src/api/myradio.js`：新建
+- `frontend/src/api/radioBrowser.js`：`RB_FETCH_COUNTRIES` 去掉 TW
+- `frontend/src/views/Home.vue`：新增 `mrStations`、`deduplicateByName()`、myradio 加载 IIFE
+
+---
+
+## 多源并发探测 + 直连/中转分离回退
+
+**背景**
+原回退链是串行的：每个源试直连(5s超时)→中转(5s超时)，8个源最差40秒。且后端 HEAD 探测不能代表前端连通性（地理位置、CORS 不同）。
+
+**方案：前端双模式并发探测**
+- 直连流 (mp3/aac)：用 `<audio>` 探测，`canplay` 触发即成功（不设 `crossOrigin` 可跨域播放）
+- HLS 流 (m3u8)：用 hls.js 探测，`MANIFEST_PARSED` 触发即成功
+- `Promise.race` 取所有探测中最快成功的，约 2-3 秒（并发），不是串行加起来
+- 后端 HEAD 探测不可靠：后端在中国能连云听但前端在海外可能连不上，反之亦然
+
+**两阶段回退链（以 HitFM 为例）**
+```
+阶段1 并发直连:
+  [主源m3u8→hls.js, 云听m3u8→hls.js, myradio mp3→audio, RB mp3→audio]
+  → 最快成功的胜出
+  ↓ 全败
+阶段2 并发中转:
+  [主源中转→hls.js, 云听中转→hls.js, myradio中转→audio, RB中转→audio]
+  → 最快成功的胜出
+  ↓ 全败
+报错 "所有音频源均不可用"
+```
+
+**后端新增**
+- `GET /api/{station_id}/all-urls`：返回所有源 URL 列表（去重有序）
+- `GET /api/{station_id}/reachable-urls`：并行 HEAD 探测，返回可达 URL（备用）
+- `GET /api/proxy/stream?url=xxx`：通用音频流中转代理
+- `_normalize_name` 增强：繁→简（电台高频字）、更多后缀（之声/之聲）
+
+**前端新增**
+- `isHlsUrl(url)`：判断 URL 是否为 HLS 流（`.m3u8`）
+- `playUrl(url, stationId, mode)`：统一播放函数，自动识别 HLS/直连
+- `probeParallel(urls, stationId, mode)`：双模式并发探测，返回 `{ url, index, type }` 或 null
+- `tryFallbackUrls` 改为两阶段：并发直连探测 → 并发中转探测
+- `fetchAllUrls` 调 `/api/{id}/all-urls`
+- `handleAudioError` 失败时调 `tryFallbackUrls` 继续回退
+
+**改动文件**
+- `backend/main.py`：新增 `all-urls`、`reachable-urls`、`proxy/stream` 端点，改进 `_normalize_name`
+- `frontend/src/components/AudioEngine.vue`：新增 `isHlsUrl`、`playUrl`、`probeParallel`，重写 `tryFallbackUrls`，更新 `loadStation`
+
+---
+
 ## 2026-05-04 新增：云听 EPG 轻量端点
 
 **背景**
@@ -582,3 +662,96 @@ YUNTING_PROVINCES = ['350000']
 - `backend/main.py`：新增 `yunting_client`、`_prefetch_yunting`、`/api/yunting/all`，更新 `lifespan`、`proxy_yunting_stations`、`yunting_epg`
 - `frontend/src/api/yunting.js`：新增 `fetchAllYuntingStations`
 - `frontend/src/views/Home.vue`：云听加载改为单请求，移除 `YUNTING_PROVINCES` 导入
+
+---
+
+## 2026-05-04 修改：直连探测自动升级 HTTP→HTTPS + 中转智能复用
+
+**背景**
+myradio.tw 和 Radio Browser 返回的流地址多为 `http://`，但很多源站实际已部署 SSL 证书。浏览器对 http 页面加载 http 资源虽然不触发 mixed content，但部分站点会强制 301 到 https，或 CDN 直接支持 https。原先的直连探测原样使用 http URL，白白浪费了一次省掉中转的机会。
+
+**方案**
+直连探测阶段（阶段 1）对所有 `http://` URL 自动尝试 `https://`：
+- `upgradeHttps(url)` 工具函数：`http://` → `https://`，已是 https 或其他协议的不变
+- `filterReachable(urls, { tryHttps })` 参数：为 true 时 HEAD 请求发往 https 版本，返回的 reachable 列表已是 https URL
+- `probeParallel(urls, stationId, mode, { tryHttps })` 参数透传
+- 阶段 1 调用 `probeParallel(urls, stationId, 'direct', { tryHttps: true })`
+
+中转阶段（阶段 2）使用**原始 http URL**：
+- 后端 `/api/proxy/stream?url=` 做的是服务端到源站的请求，无跨域限制，http 完全可用
+- 后端到源站走 http 还是 https 取决于原始 URL，不做强制升级（服务端无 mixed content 问题）
+- 万一某源只有 http（无 SSL），中转是唯一可用路径
+
+**`_directProbeWinner` 智能复用**
+问题：直连 HTTPS 探测成功 → `playUrl` 播放失败（如 CORS）→ `handleAudioError` → `tryFallbackUrls` 重试 → 阶段 1 又探测成功 → 又播放失败 → 死循环。
+根因：探测成功只能说明"源站可达"，不能说明"浏览器能直连播放"（CORS/mixed content 限制）。
+
+解决：
+- `_directProbeWinner` 保存阶段 1 胜出结果
+- `tryFallbackUrls` 第二次进入时：阶段 1 探测失败（因为 `destroyHls` 已清理上一轮播放器），但 `_directProbeWinner` 还在 → 阶段 2a 跳过探测，直接用该源的原始 URL 构造 proxy URL 播放
+- 阶段 2a 失败才进入阶段 2b（全量中转探测）
+
+**`_fallbackIndex` 延迟消费**
+原先 `_fallbackIndex = winner.index + 1` 在播放前执行，一旦 `playUrl` 失败，该 URL 就被"消费"了，中转重试时找不到它。
+改为：`_fallbackIndex` 和 `_directProbeWinner` 都在 `playUrl` 成功后才更新。播放失败时 URL 保持可用，`handleAudioError` 触发的重试可以中转同一源。
+
+**改动文件**
+- `frontend/src/components/AudioEngine.vue`：新增 `upgradeHttps`、`_directProbeWinner`；更新 `filterReachable`、`probeParallel`、`tryFallbackUrls`、`loadStation`
+
+---
+
+## 2026-05-04 修复：RB 台湾数据缺失 + 跨源名称误匹配
+
+**问题 1：台湾电台缺少 RB 回退源**
+`RB_FETCH_COUNTRIES` 被改为 `['CN']`（myradio 接管台湾时），导致 `RB_CACHE` 里没有 `TW` 数据。`_find_rb_url` 遍历 RB_CACHE 时找不到台湾电台，`/api/{id}/all-urls` 永远不会返回 RB 的台湾流。
+
+**修复**：`RB_FETCH_COUNTRIES` 恢复为 `['TW', 'CN']`。
+
+**问题 2：跨源名称匹配太松导致误匹配**
+`_find_rb_url` 和 `_find_myradio_url` 使用 `query in rb_name or rb_name in query` 纯子串匹配。"Needs Radio 全球華語廣播網" 规范化后包含 "全球华语广播网"，这个子串在很多大陆电台名里都出现，导致多个台湾电台误匹配到同一个 xmcdn 流。
+
+**修复**：
+- 新增 `_names_match(query, target)` 函数，规则：
+  1. 完全相等 → True
+  2. 短串是长串的子串：要求短串 ≥ 4 字符 **且** 长度 ≥ 长串的 60%
+     - "hitfm"(5) in "hitfm台北"(7) → 5/7=71% → ✓
+     - "全球华语广播网"(7) in "needsradio全球华语广播网"(15) → 7/15=47% < 60% → ✗
+- `_find_rb_url`、`_find_myradio_url` 都改用 `_names_match`
+- 删除 `_find_myradio_url` 的策略 2（中文字符全包含，太松）
+
+**问题 3：RB 跨区误匹配**
+即使名称匹配收紧，仍可能有同名电台跨区（如大陆和台湾都有"中央广播电台"）。需要从源头限制搜索范围。
+
+**修复**：
+- 新增 `_infer_rb_region(station_id)`：`mr_*` → `'TW'`，`yt_*` → `'CN'`，其他 → `None`
+- `_find_rb_url` 新增 `region` 参数：`region='TW'` 时只搜 `RB_CACHE['TW']`，`region=None` 时全量搜索（兜底）
+- `_collect_all_urls` 和 `_find_fallback_url` 都自动推断 region 并传入
+
+**改动文件**
+- `frontend/src/api/radioBrowser.js`：`RB_FETCH_COUNTRIES` 恢复 `['TW', 'CN']`
+- `backend/main.py`：新增 `_names_match`、`_infer_rb_region`；更新 `_find_rb_url`、`_find_myradio_url`、`_find_fallback_url`、`_collect_all_urls`
+
+**架构调整：RB 从前端展示中剥离**
+RB 电台只用于后端回退匹配，不再出现在前端卡片列表里。前端只展示 fetcher + myradio + 云听三源，界面更干净；后端 `all-urls` 和 `_find_fallback_url` 仍可返回 RB 流供并发探测。
+
+- `RB_FETCH_COUNTRIES` 改为 `[]`（前端不再请求 RB 数据）
+- `Home.vue` 移除 `rbStations`、`rbLoading`、RB 导入、RB 加载 IIFE，`allStations` 从四源改为三源
+- 后端新增 `_prefetch_rb()`：启动时自动预热 TW + CN 的 `RB_CACHE`，每 6 小时静默刷新。之前 RB 数据靠前端请求写入缓存，前端不请求后需要后端自己维护
+- `/api/radio-browser/stations/{country_code}` 路由保留，供手动刷新或未来重新启用
+
+**改动文件**
+- `frontend/src/api/radioBrowser.js`：`RB_FETCH_COUNTRIES` → `[]`
+- `frontend/src/views/Home.vue`：移除 RB 导入、rbStations/rbLoading、RB 加载 IIFE、allStations 中 RB 源
+- `backend/main.py`：新增 `_prefetch_rb()`，更新 `lifespan`
+
+---
+
+**问题 4：RB TW 重新接入后前端卡片重复**
+`RB_FETCH_COUNTRIES` 恢复 TW 后，myradio 和 RB 的同名台湾电台各自生成独立卡片。原因：`deduplicateByName` 的去重键只做 `replace(/\s+/g, '').toLowerCase()`，没有繁→简转换。myradio 的"古典音樂"和 RB 的"古典音乐" key 不同，无法归组。
+
+**修复**：
+- 新增 `normalizeForDedup(str)`：去空格 + 小写 + 繁→简（`T2S` 映射表，与后端 `_T2S` 一致，覆盖电台名高频字）
+- `deduplicateByName` 改用 `normalizeForDedup(s.name)` 生成去重 key
+
+**改动文件**
+- `frontend/src/views/Home.vue`：新增 `T2S`、`normalizeForDedup`，更新 `deduplicateByName`

@@ -5,8 +5,10 @@
 后续新增电台时，只需要新增一个 fetch_xxx 函数，并注册到 STATION_FETCHER_MAP。
 """
 
+import json
 import logging
 import os
+import re
 from collections.abc import Awaitable, Callable
 import asyncio
 import random
@@ -339,6 +341,65 @@ def yunting(province_code: str, content_id: str) -> StationFetcher:
     async def _fetch() -> str:
         return await fetch_yunting(province_code, content_id)
     return _fetch
+
+
+# ==========================================
+# myradio.tw 系列电台抓取逻辑
+# ==========================================
+# 策略：列表页 HTML 只抓一次提取所有 station ID + buildId，
+# 之后用 Next.js JSON API（_next/data/{buildId}/zh-TW/{id}.json）获取电台详情。
+# 避免反复请求 HTML 触发风控。
+
+MYRADIO_BASE = "https://myradio-dev.zeabur.app"
+MYRADIO_TIMEOUT = httpx.Timeout(15.0)
+_mr_sem = asyncio.Semaphore(5)
+_myradio_build_id: str | None = None
+
+
+async def fetch_myradio_all() -> list[dict]:
+    """抓取 myradio 全量台湾电台。返回 [{id, name, url, logo, freq, tag, codec}]。"""
+    global _myradio_build_id
+    headers = {"User-Agent": DEFAULT_UA, "x-nextjs-data": "1"}
+
+    async with httpx.AsyncClient(timeout=MYRADIO_TIMEOUT, follow_redirects=True) as client:
+        # 第 1 步：列表页 HTML 只抓一次，提取所有 station ID + buildId
+        resp = await client.get(f"{MYRADIO_BASE}/zh-TW", headers=headers)
+        resp.raise_for_status()
+        ids = list(set(re.findall(r'href="[^"]*?/(A\d{4})"', resp.text)))
+
+        if not _myradio_build_id:
+            m_build = re.search(r'"buildId"\s*:\s*"([^"]+)"', resp.text)
+            if m_build:
+                _myradio_build_id = m_build.group(1)
+            else:
+                _myradio_build_id = "zyHz39BkSpQMj2O8YxLfe"
+                logger.warning("myradio buildId 提取失败，使用硬编码兜底")
+
+        logger.info("myradio 发现 %d 个电台 ID，buildId=%s", len(ids), _myradio_build_id)
+
+        # 第 2 步：并发请求 JSON API（轻量，无 HTML 解析）
+        async def _fetch_one(sid: str) -> dict | None:
+            async with _mr_sem:
+                try:
+                    url = f"{MYRADIO_BASE}/_next/data/{_myradio_build_id}/zh-TW/{sid}.json?id={sid}"
+                    r = await client.get(url, headers=headers)
+                    r.raise_for_status()
+                    radio = r.json()["pageProps"]["radio"]
+                    return {
+                        "id": radio["id"],
+                        "name": radio["name"],
+                        "url": radio["url"],
+                        "logo": f"https://images.myradio.com.tw/images/{radio['id']}.jpg",
+                        "freq": radio.get("des", ""),
+                        "tag": radio.get("tag", ""),
+                        "codec": radio.get("codec", 0),
+                    }
+                except Exception as exc:
+                    logger.debug("myradio %s 详情获取失败: %s", sid, exc)
+            return None
+
+        results = await asyncio.gather(*[_fetch_one(sid) for sid in ids])
+    return [r for r in results if r]
 
 
 # 电台抓取器注册表。
