@@ -955,7 +955,11 @@ async def proxy_yunting_all() -> Response:
     all_cached = YUNTING_ALL_CACHE.get("data")
     all_ts = YUNTING_ALL_CACHE.get("ts", 0)
     if all_cached and now - all_ts < YUNTING_CACHE_TTL:
-        return Response(content=all_cached, media_type="application/json")
+        return Response(
+            content=all_cached,
+            media_type="application/json",
+            headers={"Cache-Control": "public, s-maxage=3600, max-age=300"},
+        )
 
     # 慢速路径：从各省缓存拼接
     merged: list[dict] = []
@@ -981,7 +985,11 @@ async def proxy_yunting_all() -> Response:
     result_bytes = json.dumps(merged, ensure_ascii=False).encode("utf-8")
     YUNTING_ALL_CACHE["data"] = result_bytes
     YUNTING_ALL_CACHE["ts"] = now
-    return Response(content=result_bytes, media_type="application/json")
+    return Response(
+        content=result_bytes,
+        media_type="application/json",
+        headers={"Cache-Control": "public, s-maxage=3600, max-age=300"},
+    )
 
 
 @app.get("/api/yunting/epg")

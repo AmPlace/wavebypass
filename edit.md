@@ -860,5 +860,11 @@ headers = {**CDN_REQUEST_HEADERS, "Referer": referer}
 - 预热前首次请求：仍走慢速路径（~3 秒），但结果写入缓存后后续请求命中快速路径
 - 启动流程不变：后台 `create_task` 非阻塞，不延迟服务器启动
 
+**CDN 缓存**
+`/api/yunting/all` 响应添加 `Cache-Control: public, s-maxage=3600, max-age=300`：
+- `s-maxage=3600`：Cloudflare CDN 缓存 1 小时（云听全是大陆台，无地域过滤问题）
+- `max-age=300`：浏览器缓存 5 分钟（避免频繁请求后端）
+- 不加 `Vary: CF-IPCountry`（Cloudflare 默认忽略 Vary，需要手动配置 Cache Key 才生效）
+
 **改动文件**
 - `backend/main.py`：新增 `YUNTING_ALL_CACHE`、`_yunting_warmup()`；更新 `_yunting_refresh_task`、`proxy_yunting_all`
