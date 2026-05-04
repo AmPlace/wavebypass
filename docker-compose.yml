@@ -18,6 +18,9 @@ services:
     # HITFM_COOKIE 用于 Hit FM 官网 Ajax 接口需要 Cookie 时传入。
     environment:
       HITFM_COOKIE: ${HITFM_COOKIE:-}
+      # 地域限制：GEO_RESTRICT=1 启用，大陆 IP 自动屏蔽指定地区电台
+      GEO_RESTRICT: ${GEO_RESTRICT:-}
+      GEO_BLOCKED_REGIONS: ${GEO_BLOCKED_REGIONS:-TW}
 
     # 加入自定义网桥，frontend 可通过 http://backend:8000 访问它。
     networks:

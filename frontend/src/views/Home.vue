@@ -203,9 +203,13 @@ function deduplicateByName(stations) {
   })
 }
 
-const allStations = computed(() =>
-  deduplicateByName([...stationList.value, ...mrStations.value, ...ytStations.value])
-)
+const allStations = computed(() => {
+  const merged = deduplicateByName([...stationList.value, ...mrStations.value, ...ytStations.value])
+  if (!geoConfig.value.geoRestrict) return merged
+  const blocked = new Set(geoConfig.value.blockedRegions || [])
+  if (!blocked.size) return merged
+  return merged.filter((s) => !(s.tags || []).some((t) => blocked.has(t)))
+})
 
 // ========== 筛选配置 ==========
 // 地区标签映射，新增地区只需在这里加一行
@@ -226,6 +230,9 @@ const selectedRegion = ref('')
 const selectedType = ref('')
 // 搜索关键词，从 App.vue 通过 provide/inject 共享过来
 const searchQuery = inject('searchQuery')
+
+// 地域限制配置，启动时从 /api/config 获取
+const geoConfig = ref({ geoRestrict: false, blockedRegions: [] })
 
 // 从当前所有电台的 tags 中自动提取出现过的地区列表
 const regions = computed(() => {
@@ -360,6 +367,12 @@ onMounted(() => {
     }
   })
   if (gridRef.value) resizeObserver.observe(gridRef.value)
+
+  // 获取地域限制配置（必须在电台加载前完成，否则过滤不生效）
+  fetch('/api/config')
+    .then((r) => (r.ok ? r.json() : { geoRestrict: false }))
+    .then((c) => { geoConfig.value = c })
+    .catch(() => {})
 
   // 一次请求拉取所有省份云听电台（后端 /api/yunting/all 从预热缓存返回，零延迟）
   ;(async () => {

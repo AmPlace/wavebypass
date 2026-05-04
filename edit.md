@@ -783,3 +783,43 @@ headers = {**CDN_REQUEST_HEADERS, "Referer": referer}
 
 **改动文件**
 - `backend/main.py`：`proxy_stream` 端点添加基于 URL origin 的 `Referer` 头
+
+---
+
+## 2026-05-04 功能：IP 地域自动识别 + 前后端双重敏感内容过滤
+
+**背景**
+用户前置套了 Cloudflare Tunnel，需要大陆 IP 自动屏蔽台湾分区（敏感内容），海外 IP 无限制。Cloudflare Tunnel 自动在请求中注入 `CF-IPCountry` 头（ISO 3166-1 国家代码，如 `CN`），无需自建 GeoIP 数据库。
+
+**方案**
+
+### 配置
+- `GEO_RESTRICT=1`：启用地域限制（默认关闭）
+- `GEO_BLOCKED_REGIONS=TW`：被屏蔽的地区 tag，逗号分隔，默认 `TW`
+
+### 后端
+- 新增 `_is_geo_blocked(station_id, request)` 辅助函数：
+  - 读取 `CF-IPCountry` 头，非 `CN`（海外）→ 不限制
+  - 无 CF 头（直接访问）→ 默认限制（安全侧，宁可多屏蔽不漏）
+  - `mr_*` 前缀 → 台湾 myradio 电台，自动屏蔽
+  - `_TW_STATION_IDS` 集合：已知静态台湾电台 ID（hitfm、pop917、cityfm 等），硬编码
+  - `MYRADIO_CACHE` 反查：以防遗漏
+- 新增 `GET /api/config`：返回 `{geoRestrict, blockedRegions}` 供前端使用
+- `/api/myradio/all`：过滤被屏蔽地区的电台（不返回给前端）
+- 所有流端点加入 403 拦截：`playlist.m3u8`、`chunk.ts`、`stream`、`stream-url`、`all-urls`、`reachable-urls`、`{m3u8_name}.m3u8`
+- 云听端点无需过滤（全是大陆台）
+
+### 前端
+- `Home.vue` 启动时调 `/api/config` 获取地域配置
+- `allStations` 计算属性根据 `geoConfig.blockedRegions` 过滤电台
+- `regions` 筛选 pill 基于过滤后的 `allStations` 生成，被屏蔽地区自动消失
+
+### Docker
+- `docker-compose.yml` 新增 `GEO_RESTRICT`、`GEO_BLOCKED_REGIONS` 环境变量
+- `.env.example` 新增配置说明
+
+**改动文件**
+- `backend/main.py`：新增 `GEO_RESTRICT`/`GEO_BLOCKED_REGIONS` 配置、`_TW_STATION_IDS`、`_is_geo_blocked()`、`/api/config` 端点；`get_myradio_all` 过滤；7 个流端点 403 拦截
+- `frontend/src/views/Home.vue`：新增 `geoConfig` ref、`/api/config` 调用、`allStations` 地域过滤
+- `docker-compose.yml`：新增环境变量
+- `.env.example`：新增配置说明

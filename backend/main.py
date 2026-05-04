@@ -6,6 +6,7 @@
 
 import asyncio
 import logging
+import os
 import time
 from collections.abc import AsyncIterator
 from urllib.parse import quote, urljoin, urlparse
@@ -68,6 +69,45 @@ TOKEN_REFRESH_HTTP_STATUS_CODES = {401, 403, 404, 410}
 # 非 HLS 的直连音频电台。
 # 这些电台不走 playlist.m3u8，而是前端直接请求 /api/{station_id}/stream。
 DIRECT_STREAM_STATIONS = {"ufo"}
+
+
+# ========== 地域限制配置 ==========
+# GEO_RESTRICT=1 启用地域限制，大陆 IP 自动屏蔽指定地区电台
+GEO_RESTRICT = os.getenv("GEO_RESTRICT", "").strip() == "1"
+# 被屏蔽的地区 tag 列表，逗号分隔，默认 TW
+GEO_BLOCKED_REGIONS = set(
+    r.strip() for r in os.getenv("GEO_BLOCKED_REGIONS", "TW").split(",") if r.strip()
+)
+# 已知台湾电台 ID（静态配置中的台湾台，后端没有 tags 概念，需要硬编码）
+_TW_STATION_IDS = {
+    "hitfm", "hitfm_tainan", "hitfm_taichung", "hitfm_yilan", "hitfm_hualien",
+    "pop917", "pop923", "cityfm", "bcr_news", "bcr_pop", "bcr_music",
+    "igo531", "bcr_hakka",
+}
+
+
+def _is_geo_blocked(station_id: str, request: Request) -> bool:
+    """检查电台是否因地域限制被屏蔽。大陆 IP 或无 CF 头时触发限制。"""
+    if not GEO_RESTRICT or not GEO_BLOCKED_REGIONS:
+        return False
+    country = request.headers.get("cf-ipcountry", "").upper()
+    if country and country != "CN":
+        return False  # 海外不限制
+    # 后端没有 tags 概念，用 ID 前缀和缓存推断电台所属地区：
+    #   mr_* / _TW_STATION_IDS / MYRADIO_CACHE → 台湾电台
+    #   其他（yt_*、静态 fetcher、RB）→ 大陆电台
+    is_tw = (
+        station_id.startswith("mr_")
+        or station_id in _TW_STATION_IDS
+        or station_id in MYRADIO_CACHE
+    )
+    # 台湾电台被屏蔽
+    if is_tw and "TW" in GEO_BLOCKED_REGIONS:
+        return True
+    # 大陆电台被屏蔽（非台湾电台视为大陆电台）
+    if not is_tw and "CN" in GEO_BLOCKED_REGIONS:
+        return True
+    return False
 
 
 # 当前进程内存中的最新播放地址。
@@ -415,16 +455,33 @@ async def fetch_real_m3u8_text(real_m3u8_url: str, station_id: str) -> httpx.Res
         return await client.get(real_m3u8_url, headers=headers)
 
 
+@app.get("/api/config")
+async def get_config(request: Request) -> dict:
+    """返回前端需要的运行时配置（地域限制信息）。"""
+    if not GEO_RESTRICT:
+        return {"geoRestrict": False}
+    country = request.headers.get("cf-ipcountry", "").upper()
+    if country and country != "CN":
+        return {"geoRestrict": False}
+    return {
+        "geoRestrict": True,
+        "blockedRegions": sorted(GEO_BLOCKED_REGIONS),
+    }
+
+
 @app.get("/api/{station_id}/playlist.m3u8")
 async def get_station_playlist(
     station_id: str,
     target_url: str | None = Query(default=None, min_length=1),
+    request: Request = None,
 ) -> Response:
     """获取某个电台的代理 m3u8 播放列表。
 
     这个接口会先尝试命中 3 秒微缓存。
     缓存过期后再访问真实 CDN，并把其中的子级 .m3u8 和 .ts 切片改写到本后端代理接口。
     """
+    if request and _is_geo_blocked(station_id, request):
+        raise HTTPException(status_code=403, detail="该电台因地域限制不可用。")
 
     # UFO 这类电台不是 HLS，没有 playlist.m3u8。
     if station_id in DIRECT_STREAM_STATIONS:
@@ -512,6 +569,8 @@ async def get_relative_child_playlist(station_id: str, m3u8_name: str, request: 
     这里会根据当前电台的顶层真实 m3u8 URL，把 chunklist.m3u8 补成真实 CDN URL，
     然后复用 get_station_playlist 的代理、缓存和改写逻辑。
     """
+    if _is_geo_blocked(station_id, request):
+        raise HTTPException(status_code=403, detail="该电台因地域限制不可用。")
 
     # 从内存中读取当前电台顶层真实 m3u8 地址。
     base_m3u8_url = CURRENT_STREAMS.get(station_id)
@@ -541,12 +600,15 @@ async def get_relative_child_playlist(station_id: str, m3u8_name: str, request: 
 async def proxy_ts_chunk(
     station_id: str,
     target_url: str = Query(..., min_length=1),
+    request: Request = None,
 ) -> StreamingResponse:
     """代理单个 ts 音频切片。
 
     该接口已使用全局 HTTP 连接池进行优化，大幅降低 TLS 握手开销。
     边从真实 CDN 读取、边转发给前端播放器，不占用过多内存。
     """
+    if request and _is_geo_blocked(station_id, request):
+        raise HTTPException(status_code=403, detail="该电台因地域限制不可用。")
 
     # 校验真实切片地址，只允许代理 http/https。
     validate_target_url(target_url)
@@ -599,13 +661,15 @@ async def proxy_ts_chunk(
 
 
 @app.get("/api/{station_id}/stream")
-async def proxy_direct_audio_stream(station_id: str) -> StreamingResponse:
+async def proxy_direct_audio_stream(station_id: str, request: Request = None) -> StreamingResponse:
     """代理直连音频流电台。
 
     该接口已使用全局 HTTP 连接池进行优化，避免重复建立连接。
     UFO Radio 这类源是一个持续输出的 MP3/AAC 音频流。
     这里使用边读边传，避免把无限直播流读入内存。
     """
+    if request and _is_geo_blocked(station_id, request):
+        raise HTTPException(status_code=403, detail="该电台因地域限制不可用。")
 
     # 只允许已声明为直连流的电台使用这个接口。
     if station_id not in DIRECT_STREAM_STATIONS:
@@ -761,7 +825,7 @@ async def _myradio_refresh_task() -> None:
 
 
 @app.get("/api/myradio/all")
-async def get_myradio_all() -> Response:
+async def get_myradio_all(request: Request) -> Response:
     """返回所有已缓存的 myradio 电台列表（从预热缓存读取）。"""
     import json
 
@@ -769,6 +833,7 @@ async def get_myradio_all() -> Response:
         {"id": k.replace("mr_", ""), "name": v["name"], "url": v["url"],
          "logo": v["logo"], "freq": v.get("freq", ""), "tag": v.get("tag", "")}
         for k, v in MYRADIO_CACHE.items()
+        if not _is_geo_blocked(k, request)
     ]
     return Response(
         content=json.dumps(stations, ensure_ascii=False),
@@ -1204,9 +1269,12 @@ def _collect_all_urls(station_id: str, name: str = "") -> list[str]:
 
 
 @app.get("/api/{station_id}/all-urls")
-async def get_all_urls(station_id: str, name: str = "") -> Response:
+async def get_all_urls(station_id: str, name: str = "", request: Request = None) -> Response:
     """返回电台所有可用流 URL（去重有序），供前端逐个尝试直连。"""
     import json
+
+    if request and _is_geo_blocked(station_id, request):
+        raise HTTPException(status_code=403, detail="该电台因地域限制不可用。")
 
     urls = _collect_all_urls(station_id, name)
     return Response(
@@ -1229,12 +1297,15 @@ async def _head_check(url: str) -> tuple[str, float]:
 
 
 @app.get("/api/{station_id}/reachable-urls")
-async def get_reachable_urls(station_id: str, name: str = "") -> Response:
+async def get_reachable_urls(station_id: str, name: str = "", request: Request = None) -> Response:
     """并行 HEAD 探测所有源 URL，返回按响应速度排序的可达 URL 列表。
 
     前端拿到后直接按顺序尝试，不可达的 URL 已被过滤，省掉每个 5s 超时。
     """
     import json
+
+    if request and _is_geo_blocked(station_id, request):
+        raise HTTPException(status_code=403, detail="该电台因地域限制不可用。")
 
     urls = _collect_all_urls(station_id, name)
     if not urls:
@@ -1285,7 +1356,7 @@ async def proxy_stream(url: str = Query(...)) -> StreamingResponse:
 
 
 @app.get("/api/{station_id}/stream-url")
-async def get_stream_url(station_id: str, name: str = "") -> Response:
+async def get_stream_url(station_id: str, name: str = "", request: Request = None) -> Response:
     """返回电台最新播放地址的直链，供前端直连 CDN 播放，节省后端流量。
 
     前端拿到 URL 后用 HLS.js 直接加载 CDN 的 m3u8，CORS 或加载失败时再回退到后端代理。
@@ -1294,6 +1365,9 @@ async def get_stream_url(station_id: str, name: str = "") -> Response:
     """
 
     import json
+
+    if request and _is_geo_blocked(station_id, request):
+        raise HTTPException(status_code=403, detail="该电台因地域限制不可用。")
 
     url = CURRENT_STREAMS.get(station_id)
 
