@@ -6,19 +6,73 @@
 
 // ========== 首页要自动拉取的省份列表 ==========
 // 只需要在这里加省份代码，首页就会自动拉取该省份的云听电台
-// 350000 = 福建，110000 = 北京，440000 = 广东，310000 = 上海 …
-export const YUNTING_PROVINCES = ['350000', '310000', '330000']
+export const YUNTING_PROVINCES = [
+  '340000', // 安徽
+  '110000', // 北京
+  '500000', // 重庆
+  '350000', // 福建
+  '620000', // 甘肃
+  '440000', // 广东
+  '450000', // 广西
+  '520000', // 贵州
+  '460000', // 海南
+  '130000', // 河北
+  '410000', // 河南
+  '230000', // 黑龙江
+  '420000', // 湖北
+  '430000', // 湖南
+  '220000', // 吉林
+  '320000', // 江苏
+  '360000', // 江西
+  '210000', // 辽宁
+  '150000', // 内蒙古
+  '640000', // 宁夏
+  '630000', // 青海
+  '370000', // 山东
+  '140000', // 山西
+  '610000', // 陕西
+  '310000', // 上海
+  '510000', // 四川
+  '540000', // 西藏
+  '650000', // 新疆
+  '660000', // 新疆兵团
+  '530000', // 云南
+  '330000', // 浙江
+]
 
-// 省份代码 → 中文地区标签，新增省份在这里加一行即可
+// 省份代码 → 中文地区标签
 const PROVINCE_LABELS = {
-  '350000': '福建',
+  '340000': '安徽',
   '110000': '北京',
+  '500000': '重庆',
+  '350000': '福建',
+  '620000': '甘肃',
   '440000': '广东',
-  '310000': '上海',
-  '330000': '浙江',
-  '320000': '江苏',
-  '510000': '四川',
+  '450000': '广西',
+  '520000': '贵州',
+  '460000': '海南',
+  '130000': '河北',
+  '410000': '河南',
+  '230000': '黑龙江',
   '420000': '湖北',
+  '430000': '湖南',
+  '220000': '吉林',
+  '320000': '江苏',
+  '360000': '江西',
+  '210000': '辽宁',
+  '150000': '内蒙古',
+  '640000': '宁夏',
+  '630000': '青海',
+  '370000': '山东',
+  '140000': '山西',
+  '610000': '陕西',
+  '310000': '上海',
+  '510000': '四川',
+  '540000': '西藏',
+  '650000': '新疆',
+  '660000': '新疆兵团',
+  '530000': '云南',
+  '330000': '浙江',
 }
 
 // 根据电台名称关键词自动推断类型标签
@@ -58,6 +112,37 @@ export async function fetchYuntingStations(provinceCode) {
   const stations = data.map((item) => mapToStation(item, provinceCode)).filter(Boolean)
   cache[provinceCode] = stations
   return stations
+}
+
+// 一次拉取所有省份的云听电台（单个请求），避免 31 个并发请求吃满浏览器连接。
+// 后端 /api/yunting/all 从内存缓存拼接，启动预热后命中即零网络延迟。
+export async function fetchAllYuntingStations() {
+  try {
+    const ctrl = new AbortController()
+    const timer = setTimeout(() => ctrl.abort(), 15_000)
+    const res = await fetch('/api/yunting/all', { signal: ctrl.signal })
+    clearTimeout(timer)
+    if (!res.ok) return []
+    const data = await res.json()
+
+    // 按 provinceCode 分组并缓存，供 fetchYuntingStations 单省查询复用
+    const grouped = {}
+    for (const item of data) {
+      const prov = String(item.provinceCode || '')
+      if (!grouped[prov]) grouped[prov] = []
+      grouped[prov].push(item)
+    }
+
+    const all = []
+    for (const [prov, items] of Object.entries(grouped)) {
+      const stations = items.map((item) => mapToStation(item, prov)).filter(Boolean)
+      cache[prov] = stations
+      all.push(...stations)
+    }
+    return all
+  } catch {
+    return []
+  }
 }
 
 // 单条云听电台 → 本项目 station 格式

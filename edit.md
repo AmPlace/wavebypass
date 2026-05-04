@@ -539,3 +539,46 @@ YUNTING_PROVINCES = ['350000']
   - `proxy_yunting_stations` 加载时预填充两层缓存
   - `yunting_epg` 改为三级优先级读取，EPG 过期从列表缓存补充
   - `get_stream_url` 对 `yt_*` 先查 URL 缓存再调 fetcher
+
+---
+
+## 2026-05-04 优化：云听 31 省份全量接入 + 启动预热 + 单请求加载
+
+**问题**
+1. 31 个省份全部接入后，前端 31 个并发请求吃满浏览器同域 6 连接上限，logo 图片被排队等待
+2. 后端每个请求新建 `httpx.AsyncClient`，31 次独立 TLS 握手浪费时间
+3. 首次加载无缓存时，所有请求都要等云听 API 返回
+
+**方案**
+
+### 后端：启动预热（核心）
+新增 `_prefetch_yunting()`，在 `lifespan` 中通过 `asyncio.create_task` 启动：
+- `asyncio.gather` 并行发出 31 个请求（单客户端连接池复用 TCP）
+- 结果写入三层缓存：`YUNTING_CACHE`（电台列表 2h）、`YUNTING_URL_CACHE`（URL 1h）、`YUNTING_EPG_CACHE`（EPG 10min）
+- Docker 启动日志出现 `云听省份预热完成: 31/31 个省份` 即预热成功
+
+### 后端：共享客户端
+新增 `yunting_client = httpx.AsyncClient(timeout=15, follow_redirects=True, limits=10)`：
+- `proxy_yunting_stations`、`yunting_epg`、`_prefetch_yunting` 共用
+- 省掉每次请求新建客户端的 DNS + TCP + TLS 开销
+- `lifespan` 关闭时调用 `yunting_client.aclose()` 释放资源
+
+### 后端：单端点全量返回
+新增 `GET /api/yunting/all`：
+- 从 `YUNTING_CACHE` 读取所有省份数据，缓存命中时零网络请求、纯内存拼接
+- 未命中的省份逐个拉取后写入缓存
+
+### 前端：单请求替代 31 请求
+- 新增 `fetchAllYuntingStations()`：请求 `/api/yunting/all`，按 `provinceCode` 分组缓存
+- `Home.vue` 的云听 IIFE 改为 `await fetchAllYuntingStations()`
+- 原 `fetchYuntingStations(provinceCode)` 保留，单省查询直接命中前端缓存（`fetchAllYuntingStations` 已预填充）
+
+### 修复：省份筛选标签丢失
+**现象**：31 省份全部接入后，地区筛选栏只显示"全部/台湾/中国大陆/福建"，其他省份消失。
+**原因**：云听 API 返回的电台数据对象本身不含 `provinceCode` 字段（该字段只在省份列表端点出现）。后端将电台数据原样缓存，`/api/yunting/all` 返回扁平数组时前端无法按省份分组，`PROVINCE_LABELS[undefined]` 返回空，省份标签丢失。
+**修复**：三处缓存写入路径（`_write_yunting_caches`、`proxy_yunting_stations`、`yunting_epg`）在写入前通过 `s.setdefault("provinceCode", prov)` 注入省份代码，前端分组逻辑正常工作。
+
+**改动文件**
+- `backend/main.py`：新增 `yunting_client`、`_prefetch_yunting`、`/api/yunting/all`，更新 `lifespan`、`proxy_yunting_stations`、`yunting_epg`
+- `frontend/src/api/yunting.js`：新增 `fetchAllYuntingStations`
+- `frontend/src/views/Home.vue`：云听加载改为单请求，移除 `YUNTING_PROVINCES` 导入

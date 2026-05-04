@@ -276,13 +276,98 @@ http_client = httpx.AsyncClient(
     limits=httpx.Limits(max_keepalive_connections=50, max_connections=100)
 )
 
+# 云听 API 专用共享客户端，31 个省份共用连接池，省掉 31 次独立 TLS 握手
+yunting_client = httpx.AsyncClient(
+    timeout=15.0,
+    follow_redirects=True,
+    limits=httpx.Limits(max_keepalive_connections=10, max_connections=10),
+)
+
+
+# 云听定时刷新间隔：1 小时（URL 有效期约 19 小时，EPG 每半小时换节目，1h 是安全折中）
+YUNTING_REFRESH_INTERVAL = 1 * 3600
+
+# 并发信号量：限制同时发出的云听 API 请求数，避免触发 WAF 封禁
+_yunting_sem = asyncio.Semaphore(5)
+
+
+async def _fetch_one_province(prov: str) -> list[dict] | None:
+    """拉取单个省份的云听电台列表，受信号量限流。
+
+    成功返回电台列表（已做 http→https 改写），失败返回 None（保留旧缓存）。
+    """
+    try:
+        async with _yunting_sem:
+            resp = await yunting_client.get(
+                YUNTING_API_BASE,
+                params={"categoryId": 0, "provinceCode": prov},
+                headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"},
+            )
+        resp.raise_for_status()
+        stations = resp.json().get("data", [])
+        for s in stations:
+            for key in ("playUrlLow", "mp3PlayUrlLow", "mp3PlayUrlHigh"):
+                if isinstance(s.get(key), str) and s[key].startswith("http://"):
+                    s[key] = "https://" + s[key][7:]
+        return stations
+    except Exception:
+        logger.warning("云听省份 %s 拉取失败，保留旧缓存", prov)
+        return None
+
+
+def _write_yunting_caches(prov: str, stations: list[dict], now: float) -> None:
+    """将单个省份的电台数据写入三层缓存。"""
+    import json
+
+    # 电台 API 原始数据不含 provinceCode，注入后前端 /api/yunting/all 可按省份分组
+    for s in stations:
+        s.setdefault("provinceCode", prov)
+    YUNTING_CACHE[prov] = {"data": json.dumps(stations, ensure_ascii=False), "ts": now}
+    for s in stations:
+        cid = str(s.get("contentId", ""))
+        if not cid:
+            continue
+        url = s.get("playUrlLow", "")
+        if url.startswith(("http://", "https://")):
+            YUNTING_URL_CACHE[f"yt_{cid}"] = {"url": url, "ts": now}
+        sub = s.get("subtitle", "")
+        if sub:
+            YUNTING_EPG_CACHE[f"yt_{cid}"] = {"subtitle": sub, "ts": now}
+
+
+async def _yunting_refresh_task() -> None:
+    """后台定时守护协程：预热 + 每小时静默刷新云听三层缓存。
+
+    启动时立即执行一轮（预热），之后每 YUNTING_REFRESH_INTERVAL 执行一次。
+    通过 asyncio.Semaphore(5) 限制并发，避免瞬间 31 个请求触发 WAF。
+    单个省份拉取失败时保留旧缓存，不影响其他省份。
+    """
+    while True:
+        now = time.time()
+        # asyncio.gather + Semaphore(5)：最多 5 个省份同时请求，其余排队
+        tasks = [_fetch_one_province(prov) for prov in YUNTING_PROVINCES]
+        results = await asyncio.gather(*tasks)
+
+        prefetched = 0
+        for prov, stations in zip(YUNTING_PROVINCES, results):
+            if stations is None:
+                continue  # 拉取失败，保留旧缓存，不覆盖
+            _write_yunting_caches(prov, stations, now)
+            prefetched += 1
+
+        logger.info("云听缓存刷新完成: %d/%d 个省份成功", prefetched, len(YUNTING_PROVINCES))
+        await asyncio.sleep(YUNTING_REFRESH_INTERVAL)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # 启动时执行
     asyncio.create_task(refresh_tokens_task())
+    asyncio.create_task(_yunting_refresh_task())
     yield
     # 关闭时执行，优雅释放全局客户端
     await http_client.aclose()
+    await yunting_client.aclose()
 
 # 修改 FastAPI 初始化，传入 lifespan
 app = FastAPI(
@@ -588,7 +673,39 @@ async def proxy_direct_audio_stream(station_id: str) -> StreamingResponse:
 # 云听 (radio.cn) 代理配置。
 # 新增省份只需在 YUNTING_PROVINCES 加一个省份代码。
 YUNTING_API_BASE = "https://ytmsout.radio.cn/web/appBroadcast/list"
-YUNTING_PROVINCES = ['350000']  # 350000=福建
+YUNTING_PROVINCES = [
+    '340000',  # 安徽
+    '110000',  # 北京
+    '500000',  # 重庆
+    '350000',  # 福建
+    '620000',  # 甘肃
+    '440000',  # 广东
+    '450000',  # 广西
+    '520000',  # 贵州
+    '460000',  # 海南
+    '130000',  # 河北
+    '410000',  # 河南
+    '230000',  # 黑龙江
+    '420000',  # 湖北
+    '430000',  # 湖南
+    '220000',  # 吉林
+    '320000',  # 江苏
+    '360000',  # 江西
+    '210000',  # 辽宁
+    '150000',  # 内蒙古
+    '640000',  # 宁夏
+    '630000',  # 青海
+    '370000',  # 山东
+    '140000',  # 山西
+    '610000',  # 陕西
+    '310000',  # 上海
+    '510000',  # 四川
+    '540000',  # 西藏
+    '650000',  # 新疆
+    '660000',  # 新疆兵团
+    '530000',  # 云南
+    '330000',  # 浙江
+]
 YUNTING_CACHE: dict[str, dict] = {}
 YUNTING_CACHE_TTL = 2 * 3600
 
@@ -619,8 +736,8 @@ async def proxy_yunting_stations(province_code: str) -> Response:
     params = {"categoryId": 0, "provinceCode": province_code}
     headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
     try:
-        resp = await httpx.AsyncClient(timeout=15.0).get(
-            YUNTING_API_BASE, params=params, headers=headers, follow_redirects=True,
+        resp = await yunting_client.get(
+            YUNTING_API_BASE, params=params, headers=headers,
         )
         resp.raise_for_status()
     except httpx.HTTPError as exc:
@@ -634,6 +751,7 @@ async def proxy_yunting_stations(province_code: str) -> Response:
     import json
     stations = resp.json().get("data", [])
     for s in stations:
+        s.setdefault("provinceCode", province_code)  # 注入省份代码，供前端 /api/yunting/all 分组
         for key in ("playUrlLow", "mp3PlayUrlLow", "mp3PlayUrlHigh"):
             if isinstance(s.get(key), str) and s[key].startswith("http://"):
                 s[key] = "https://" + s[key][7:]
@@ -654,6 +772,41 @@ async def proxy_yunting_stations(province_code: str) -> Response:
             YUNTING_EPG_CACHE[f"yt_{cid}"] = {"subtitle": subtitle, "ts": now}
 
     return Response(content=stations_json, media_type="application/json")
+
+
+@app.get("/api/yunting/all")
+async def proxy_yunting_all() -> Response:
+    """一次返回所有省份的云听电台列表，前端只需一个请求。
+
+    启动预热已填充缓存，命中时零网络请求、纯内存拼接。
+    未命中的省份通过 _fetch_one_province 拉取（受信号量限流，失败保留旧缓存）。
+    """
+    import json
+
+    merged: list[dict] = []
+    now = time.time()
+    missing: list[str] = []
+
+    for prov in YUNTING_PROVINCES:
+        cached = YUNTING_CACHE.get(prov)
+        if cached and now - cached["ts"] < YUNTING_CACHE_TTL:
+            merged.extend(json.loads(cached["data"]))
+        else:
+            missing.append(prov)
+
+    if missing:
+        tasks = [_fetch_one_province(prov) for prov in missing]
+        results = await asyncio.gather(*tasks)
+        for prov, stations in zip(missing, results):
+            if stations is None:
+                continue
+            _write_yunting_caches(prov, stations, now)
+            merged.extend(stations)
+
+    return Response(
+        content=json.dumps(merged, ensure_ascii=False),
+        media_type="application/json",
+    )
 
 
 @app.get("/api/yunting/epg")
@@ -699,30 +852,29 @@ async def yunting_epg() -> Response:
 
     # 第三优先级：调云听 API 获取最新数据，同时更新两个缓存
     if need_api_refresh:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            for prov in need_api_refresh:
-                try:
-                    resp = await client.get(
-                        YUNTING_API_BASE,
-                        params={"categoryId": 0, "provinceCode": prov},
-                        headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"},
-                        follow_redirects=True,
-                    )
-                    resp.raise_for_status()
-                    stations_data = resp.json().get("data", [])
-                    for s in stations_data:
-                        for key in ("playUrlLow", "mp3PlayUrlLow", "mp3PlayUrlHigh"):
-                            if isinstance(s.get(key), str) and s[key].startswith("http://"):
-                                s[key] = "https://" + s[key][7:]
-                    YUNTING_CACHE[prov] = {"data": json.dumps(stations_data, ensure_ascii=False), "ts": now}
-                    for item in stations_data:
-                        cid = str(item.get("contentId", ""))
-                        sub = item.get("subtitle", "")
-                        if cid and sub:
-                            merged[cid] = sub
-                            YUNTING_EPG_CACHE[f"yt_{cid}"] = {"subtitle": sub, "ts": now}
-                except Exception:
-                    pass
+        for prov in need_api_refresh:
+            try:
+                resp = await yunting_client.get(
+                    YUNTING_API_BASE,
+                    params={"categoryId": 0, "provinceCode": prov},
+                    headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"},
+                )
+                resp.raise_for_status()
+                stations_data = resp.json().get("data", [])
+                for s in stations_data:
+                    s.setdefault("provinceCode", prov)
+                    for key in ("playUrlLow", "mp3PlayUrlLow", "mp3PlayUrlHigh"):
+                        if isinstance(s.get(key), str) and s[key].startswith("http://"):
+                            s[key] = "https://" + s[key][7:]
+                YUNTING_CACHE[prov] = {"data": json.dumps(stations_data, ensure_ascii=False), "ts": now}
+                for item in stations_data:
+                    cid = str(item.get("contentId", ""))
+                    sub = item.get("subtitle", "")
+                    if cid and sub:
+                        merged[cid] = sub
+                        YUNTING_EPG_CACHE[f"yt_{cid}"] = {"subtitle": sub, "ts": now}
+            except Exception:
+                pass
 
     return Response(content=json.dumps(merged), media_type="application/json")
 

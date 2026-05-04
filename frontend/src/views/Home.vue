@@ -126,7 +126,7 @@
 import { storeToRefs } from 'pinia'
 import { usePlayerStore } from '../stores/player'
 import { fetchStationsByCountry, RB_FETCH_COUNTRIES } from '../api/radioBrowser'
-import { fetchYuntingStations, YUNTING_PROVINCES } from '../api/yunting'
+import { fetchAllYuntingStations } from '../api/yunting'
 import { computed, inject, onBeforeUnmount, onMounted, ref, watch, watchEffect } from 'vue'
 import { useScroll, useThrottleFn } from '@vueuse/core'
 
@@ -171,7 +171,14 @@ const allStations = computed(() => [...stationList.value, ...rbStations.value, .
 
 // ========== 筛选配置 ==========
 // 地区标签映射，新增地区只需在这里加一行
-const regionLabels = { TW: '台湾', CN: '中国大陆', JP: '日本', US: '美国', KR: '韩国', GB: '英国', DE: '德国', FR: '法国', 福建: '福建', 上海: '上海', 浙江: '浙江' }
+const regionLabels = {
+  TW: '台湾', CN: '中国大陆', JP: '日本', US: '美国', KR: '韩国', GB: '英国', DE: '德国', FR: '法国',
+  安徽: '安徽', 北京: '北京', 重庆: '重庆', 福建: '福建', 甘肃: '甘肃', 广东: '广东', 广西: '广西',
+  贵州: '贵州', 海南: '海南', 河北: '河北', 河南: '河南', 黑龙江: '黑龙江', 湖北: '湖北', 湖南: '湖南',
+  吉林: '吉林', 江苏: '江苏', 江西: '江西', 辽宁: '辽宁', 内蒙古: '内蒙古', 宁夏: '宁夏', 青海: '青海',
+  山东: '山东', 山西: '山西', 陕西: '陕西', 上海: '上海', 四川: '四川', 西藏: '西藏', 新疆: '新疆',
+  新疆兵团: '新疆兵团', 云南: '云南', 浙江: '浙江',
+}
 
 // 类型标签映射，对应 radioBrowser.js 的 TAG_TYPE_MAP 输出值
 const typeLabels = { music: '音乐', news: '新闻', talk: '谈话', sports: '体育', religious: '宗教', other: '其他' }
@@ -330,14 +337,10 @@ onMounted(() => {
     rbLoading.value = false
   })()
 
-  // 按 YUNTING_PROVINCES 配置并行拉取云听电台
-  // 想加其他省份：去 api/yunting.js 的 YUNTING_PROVINCES 里加省份代码即可
+  // 一次请求拉取所有省份云听电台（后端 /api/yunting/all 从预热缓存返回，零延迟）
   ;(async () => {
     ytLoading.value = true
-    const results = await Promise.all(
-      YUNTING_PROVINCES.map((code) => fetchYuntingStations(code))
-    )
-    const list = results.flat()
+    const list = await fetchAllYuntingStations()
     ytStations.value = list
     list.forEach((s) => playerStore.addStation(s))
     ytLoading.value = false

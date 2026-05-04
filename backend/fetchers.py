@@ -356,6 +356,6 @@ STATION_FETCHER_MAP: dict[str, StationFetcher] = {
     "qz_fm923": fetch_qz_fm923,
     "pop917": fetch_pop917,
     # tingfm 系列：只需在这里加一行，post_id 从 tingfm.com 电台页面 URL 获取
-    "fj_traffic": tingfm(94),   # 福建交通广播 FM100.7
-    "fzzhzs":     tingfm(100),  # 福州左海之声 FM90.1
+    # "fj_traffic": tingfm(94),   # 福建交通广播 FM100.7
+    # "fzzhzs":     tingfm(100),  # 福州左海之声 FM90.1
 }

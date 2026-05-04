@@ -132,24 +132,6 @@ export const stationList = [
     logoUrl: '/logos/twzgxqw.png',
     tags: ['talk', 'TW'],
   },
-  // tingfm 系列：directPlay 优先直连 CDN，失败自动回退后端代理
-  // post_id 从 tingfm.com 电台页面 URL 获取
-  {
-    id: 'fj_traffic',
-    name: '福建交通广播 100.7',
-    logoText: '闽',
-    directPlay: true,
-    logoUrl: '/logos/fjjtgb.jpg',
-    tags: ['CN', '福建', 'news'],
-  },
-  {
-    id: 'fzzhzs',
-    name: '福州左海之声 FM90.1',
-    logoText: '左海',
-    directPlay: true,
-    logoUrl: '/logos/fzzhzs.jpeg',
-    tags: ['CN', '福建', 'news'],
-  },
 ]
 
 // 2. 字典/映射格式：利用上面的数组自动生成！
