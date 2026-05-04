@@ -78,33 +78,46 @@ GEO_RESTRICT = os.getenv("GEO_RESTRICT", "").strip() == "1"
 GEO_BLOCKED_REGIONS = set(
     r.strip() for r in os.getenv("GEO_BLOCKED_REGIONS", "TW").split(",") if r.strip()
 )
-# 已知台湾电台 ID（静态配置中的台湾台，后端没有 tags 概念，需要硬编码）
-_TW_STATION_IDS = {
-    "hitfm", "hitfm_tainan", "hitfm_taichung", "hitfm_yilan", "hitfm_hualien",
-    "pop917", "pop923", "cityfm", "bcr_news", "bcr_pop", "bcr_music",
-    "igo531", "bcr_hakka",
-}
+# 静态电台配置（与前端 stations.js 同步）
+STATIC_STATIONS = [
+    {"id": "hitfm", "name": "Hit FM 台北", "logoText": "H", "logoUrl": "/logos/hitfm.png", "tags": ["music", "TW"]},
+    {"id": "hitfm_taichung", "name": "Hit FM 台中", "logoText": "台中", "logoUrl": "/logos/hitfm.png", "tags": ["music", "TW"]},
+    {"id": "hitfm_tainan", "name": "Hit FM 台南", "logoText": "台南", "logoUrl": "/logos/hitfm.png", "tags": ["music", "TW"]},
+    {"id": "hitfm_yilan", "name": "Hit FM 宜兰", "logoText": "宜兰", "logoUrl": "/logos/hitfm.png", "tags": ["music", "TW"]},
+    {"id": "hitfm_hualian", "name": "Hit FM 花莲", "logoText": "花莲", "logoUrl": "/logos/hitfm.png", "tags": ["music", "TW"]},
+    {"id": "ufo", "name": "UFO Radio", "logoText": "U", "logoUrl": "/logos/uforadio.png", "directUrl": "https://stream.rcs.revma.com/em90w4aeewzuv", "livePath": "ufo/live", "tags": ["talk", "TW"]},
+    {"id": "pop917", "name": "POP Radio 91.7", "logoText": "POP", "logoUrl": "/logos/pop917.png", "tags": ["music", "TW"]},
+    {"id": "qz_fm889", "name": "泉州新闻综合 88.9", "logoText": "FM889", "logoUrl": "/logos/qz889.png", "tags": ["CN", "福建", "news"]},
+    {"id": "qz_fm904", "name": "泉州交通广播 90.4", "logoText": "FM904", "logoUrl": "/logos/qz904.png", "tags": ["CN", "福建", "news"]},
+    {"id": "qz_fm1059", "name": "泉州刺桐之声 105.9", "logoText": "FM1059", "logoUrl": "/logos/qz1059.png", "tags": ["CN", "福建", "talk"]},
+    {"id": "qz_fm923", "name": "泉州经济生活 92.3", "logoText": "FM923", "logoUrl": "/logos/qz923.png", "tags": ["CN", "福建", "news"]},
+    {"id": "cityfm", "name": "城市广播网", "logoText": "城", "directUrl": "https://fm901.cityfm.com.tw:8083/901", "logoUrl": "/logos/twcsgbw.jpg", "tags": ["music", "TW"]},
+    {"id": "bcc_news", "name": "中广新闻网", "logoText": "新闻", "directUrl": "https://stream.rcs.revma.com/fgtx07f3qtzuv", "logoUrl": "/logos/twzgxww.png", "tags": ["news", "TW"]},
+    {"id": "bcc_pop", "name": "中广流行网", "logoText": "流行", "directUrl": "https://stream.rcs.revma.com/s1zttsg3qtzuv", "logoUrl": "/logos/twzglxw.jpg", "tags": ["music", "TW"]},
+    {"id": "bcc_music", "name": "中广音乐网", "logoText": "音乐", "directUrl": "https://stream.rcs.revma.com/ks4vsmg3qtzuv", "logoUrl": "/logos/twzgyyw.jpg", "tags": ["music", "TW"]},
+    {"id": "igot531", "name": "iGO531", "logoText": "531", "directUrl": "https://stream.rcs.revma.com/1qxn2vg3qtzuv", "logoUrl": "/logos/twigo531.jpg", "tags": ["music", "TW"]},
+    {"id": "bcc_rural", "name": "中广乡亲网", "logoText": "乡亲", "directUrl": "https://stream.rcs.revma.com/p2e3rfg3qtzuv", "logoUrl": "/logos/twzgxqw.png", "tags": ["talk", "TW"]},
+]
+
+# 从 STATIC_STATIONS 的 tags 动态提取各地区电台 ID（不硬编码）
+_TW_STATION_IDS = {s["id"] for s in STATIC_STATIONS if "TW" in s.get("tags", [])}
 
 
 def _is_geo_blocked(station_id: str, request: Request) -> bool:
-    """检查电台是否因地域限制被屏蔽。大陆 IP 或无 CF 头时触发限制。"""
+    """检查电台是否因地域限制被屏蔽。根据 tags 动态判断电台所属地区。"""
     if not GEO_RESTRICT or not GEO_BLOCKED_REGIONS:
         return False
     country = request.headers.get("cf-ipcountry", "").upper()
     if country and country != "CN":
         return False  # 海外不限制
-    # 后端没有 tags 概念，用 ID 前缀和缓存推断电台所属地区：
-    #   mr_* / _TW_STATION_IDS / MYRADIO_CACHE → 台湾电台
-    #   其他（yt_*、静态 fetcher、RB）→ 大陆电台
+    # 根据 ID 前缀和缓存判断电台所属地区（tags 在前端，后端用前缀推断）
     is_tw = (
-        station_id.startswith("mr_")
-        or station_id in _TW_STATION_IDS
-        or station_id in MYRADIO_CACHE
+        station_id.startswith("mr_")       # myradio 全是台湾台
+        or station_id in _TW_STATION_IDS    # 静态配置中 tag 含 TW 的
+        or station_id in MYRADIO_CACHE      # myradio 缓存中的
     )
-    # 台湾电台被屏蔽
     if is_tw and "TW" in GEO_BLOCKED_REGIONS:
         return True
-    # 大陆电台被屏蔽（非台湾电台视为大陆电台）
     if not is_tw and "CN" in GEO_BLOCKED_REGIONS:
         return True
     return False
@@ -467,6 +480,27 @@ async def get_config(request: Request) -> dict:
         "geoRestrict": True,
         "blockedRegions": sorted(GEO_BLOCKED_REGIONS),
     }
+
+
+@app.get("/api/stations")
+async def get_stations(request: Request) -> Response:
+    """返回静态电台列表，根据地域限制过滤。前端启动时调用替代本地 stations.js。"""
+    import json
+
+    if not GEO_RESTRICT:
+        stations = STATIC_STATIONS
+    else:
+        country = request.headers.get("cf-ipcountry", "").upper()
+        if country and country != "CN":
+            stations = STATIC_STATIONS
+        else:
+            blocked = GEO_BLOCKED_REGIONS
+            stations = [s for s in STATIC_STATIONS if not any(t in blocked for t in s.get("tags", []))]
+
+    return Response(
+        content=json.dumps(stations, ensure_ascii=False),
+        media_type="application/json",
+    )
 
 
 @app.get("/api/{station_id}/playlist.m3u8")

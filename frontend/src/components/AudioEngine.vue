@@ -19,9 +19,6 @@ import { storeToRefs } from 'pinia'
 // 引入播放器全局状态仓库
 import { usePlayerStore } from '../stores/player'
 
-// 引入静态电台配置（仅用于 MediaSession 等不需要动态更新的场景）
-import { stationMap as staticStationMap } from '../config/stations'
-
 // 获取播放器 store 实例
 const playerStore = usePlayerStore()
 
@@ -56,7 +53,7 @@ function hasDirectUrl(stationId) {
 // 更新系统控制中心和锁屏的播放信息
 function updateSystemMediaSession(stationId) {
   if ('mediaSession' in navigator) {
-    const meta = playerStore.stationMap[stationId] || staticStationMap[stationId] || {}
+    const meta = playerStore.stationMap[stationId] || {}
     const finalLogo = meta.logoUrl || '/logos/default.png'
 
     try {

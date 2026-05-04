@@ -819,7 +819,15 @@ headers = {**CDN_REQUEST_HEADERS, "Referer": referer}
 - `.env.example` 新增配置说明
 
 **改动文件**
-- `backend/main.py`：新增 `GEO_RESTRICT`/`GEO_BLOCKED_REGIONS` 配置、`_TW_STATION_IDS`、`_is_geo_blocked()`、`/api/config` 端点；`get_myradio_all` 过滤；7 个流端点 403 拦截
-- `frontend/src/views/Home.vue`：新增 `geoConfig` ref、`/api/config` 调用、`allStations` 地域过滤
+- `backend/main.py`：新增 `GEO_RESTRICT`/`GEO_BLOCKED_REGIONS` 配置、`STATIC_STATIONS`（静态电台数据）、`_TW_STATION_IDS`（从 tags 动态提取）、`_is_geo_blocked()`、`/api/config`、`/api/stations` 端点；`get_myradio_all` 过滤；7 个流端点 403 拦截
+- `frontend/src/stores/player.js`：移除静态导入，新增 `loadStations()` 动态加载方法，初始状态为空
+- `frontend/src/components/AudioEngine.vue`：移除 `staticStationMap` 导入，仅用 store 的 `stationMap`
+- `frontend/src/views/Home.vue`：启动时先调 `/api/config` + `/api/stations`，`geoConfigLoaded` 门控防止闪现
 - `docker-compose.yml`：新增环境变量
 - `.env.example`：新增配置说明
+- `frontend/src/config/stations.js`：保留作参考，不再被任何代码导入（不进入构建产物）
+
+**防 GFW 设计**
+- 前端构建产物不含任何台湾电台数据（stations.js 不再被导入，Vite tree-shake 排除）
+- 后端 `/api/stations` 和 `/api/myradio/all` 根据 `CF-IPCountry` 头过滤，大陆 IP 收到的响应中不含台湾电台
+- 流端点 403 拦截，即使知道 station ID 也无法播放

@@ -204,6 +204,8 @@ function deduplicateByName(stations) {
 }
 
 const allStations = computed(() => {
+  // config 未加载完时不渲染，避免台湾电台闪现后消失
+  if (!geoConfigLoaded.value) return []
   const merged = deduplicateByName([...stationList.value, ...mrStations.value, ...ytStations.value])
   if (!geoConfig.value.geoRestrict) return merged
   const blocked = new Set(geoConfig.value.blockedRegions || [])
@@ -233,6 +235,7 @@ const searchQuery = inject('searchQuery')
 
 // 地域限制配置，启动时从 /api/config 获取
 const geoConfig = ref({ geoRestrict: false, blockedRegions: [] })
+const geoConfigLoaded = ref(false)
 
 // 从当前所有电台的 tags 中自动提取出现过的地区列表
 const regions = computed(() => {
@@ -368,11 +371,21 @@ onMounted(() => {
   })
   if (gridRef.value) resizeObserver.observe(gridRef.value)
 
-  // 获取地域限制配置（必须在电台加载前完成，否则过滤不生效）
-  fetch('/api/config')
-    .then((r) => (r.ok ? r.json() : { geoRestrict: false }))
-    .then((c) => { geoConfig.value = c })
-    .catch(() => {})
+  // 获取地域限制配置 + 静态电台列表（从后端动态加载，支持地域过滤）
+  ;(async () => {
+    try {
+      const [cfgRes, stRes] = await Promise.all([
+        fetch('/api/config'),
+        fetch('/api/stations'),
+      ])
+      if (cfgRes.ok) geoConfig.value = await cfgRes.json()
+      if (stRes.ok) {
+        const stations = await stRes.json()
+        playerStore.loadStations(stations)
+      }
+    } catch {}
+    geoConfigLoaded.value = true
+  })()
 
   // 一次请求拉取所有省份云听电台（后端 /api/yunting/all 从预热缓存返回，零延迟）
   ;(async () => {
