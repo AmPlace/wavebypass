@@ -3,7 +3,7 @@
   <footer class="fixed inset-x-0 bottom-0 z-40 px-4 pb-4 sm:px-6 sm:pb-6">
     <!-- 毛玻璃播放器容器。 -->
     <div
-      class="mx-auto flex h-20 max-w-4xl items-center justify-between gap-3 rounded-3xl border border-white/20 bg-white/70 px-4 shadow-lg shadow-black/[0.06] backdrop-blur-xl dark:border-white/10 dark:bg-black/70 dark:shadow-black/30 sm:px-5"
+      class="relative mx-auto flex h-20 max-w-4xl items-center justify-between gap-3 rounded-3xl border border-white/20 bg-white/70 px-4 shadow-lg shadow-black/[0.06] backdrop-blur-xl dark:border-white/10 dark:bg-black/70 dark:shadow-black/30 sm:px-5"
     >
       <!-- 左侧：当前电台与直播状态。 -->
       <section class="flex min-w-0 basis-[40%] items-center gap-3">
@@ -46,11 +46,11 @@
         </div>
       </section>
 
-      <!-- 中间：播放 / 暂停按钮。 -->
-      <section class="flex basis-[30%] justify-center">
+      <!-- 中间：播放 / 暂停按钮（绝对居中，不受左右 basis 影响）。 -->
+      <section class="absolute inset-0 flex items-center justify-center pointer-events-none">
         <button
           type="button"
-          class="flex size-12 items-center justify-center rounded-full bg-neutral-950 text-white shadow-sm shadow-black/10 transition-all duration-200 ease-out hover:scale-[1.03] hover:bg-black active:scale-95 dark:bg-white dark:text-black dark:hover:bg-neutral-100"
+          class="pointer-events-auto flex size-12 items-center justify-center rounded-full bg-neutral-950 text-white shadow-sm shadow-black/10 transition-all duration-200 ease-out hover:scale-[1.03] hover:bg-black active:scale-95 dark:bg-white dark:text-black dark:hover:bg-neutral-100"
           :aria-label="isPlaying ? '暂停播放' : '开始播放'"
           @click="playerStore.togglePlay()"
         >

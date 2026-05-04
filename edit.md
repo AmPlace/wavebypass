@@ -30,6 +30,15 @@
 **style.css**
 - 新增 `.scrollbar-hide` 工具类：`::-webkit-scrollbar { display: none }` + `scrollbar-width: none`（Firefox）+ `-ms-overflow-style: none`（IE）
 
+**修复：播放按钮不居中**
+- 原因：左 40% / 中 30% / 右 30% 不对称，播放按钮在中间 section 内居中，但中间 section 本身偏右
+- 修复：播放器容器加 `relative`，播放按钮 section 改为 `absolute inset-0 flex items-center justify-center pointer-events-none`，按钮本身加 `pointer-events-auto`，绝对定位在容器正中间，不参与 flex 布局分配
+- 左右 section 仍各占 40%/30%，文字和音量条正常显示，不受影响
+
+**修复：顶栏在灵动岛设备遮挡标签**
+- 原因：`pt-20`(80px) 是固定值，灵动岛 `safe-area-inset-top` ≈ 47px，加上 `h-12`(48px) 总高 95px，80px 不够
+- 修复：`pt-20` 改为 `pt-[calc(env(safe-area-inset-top)+3.5rem)]`，用 CSS 原生 `calc()` + `env()` 自适应任意设备
+
 ## 2026-05-04 修改：虚拟滚动改用 @vueuse/core，滚动容器重构，修复移动端卡片间距
 
 **背景**
