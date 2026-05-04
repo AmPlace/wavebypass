@@ -1144,6 +1144,13 @@ def _find_rb_url(station_id: str, name: str = "", region: str | None = None) -> 
 
 def _find_fallback_url(station_id: str, name: str = "") -> str | None:
     """统一回退链：云听 → myradio → RB。按顺序尝试，第一个命中即返回。"""
+    # yt_* 电台：直接查 YUNTING_URL_CACHE（_find_yunting_url 会跳过 yt_ 前缀）
+    if station_id.startswith("yt_"):
+        cached = YUNTING_URL_CACHE.get(station_id)
+        if cached:
+            url = cached.get("url") if isinstance(cached, dict) else cached
+            if url:
+                return url
     region = _infer_rb_region(station_id)
     for finder in (_find_yunting_url, _find_myradio_url):
         url = finder(station_id, name)
@@ -1167,7 +1174,14 @@ def _collect_all_urls(station_id: str, name: str = "") -> list[str]:
             seen.add(url)
             urls.append(url)
 
-    # 当前主源
+    # yt_* 电台：优先用 yunting m3u8（比 CURRENT_STREAMS 里的直连 mp3 更可靠）
+    # 有些电台（如畅行876）的直连流被浏览器 Range 头打回 400，但 yunting m3u8 正常
+    if station_id.startswith("yt_"):
+        cached = YUNTING_URL_CACHE.get(station_id)
+        if cached:
+            _add(cached.get("url") if isinstance(cached, dict) else cached)
+
+    # 当前主源（fetcher 注册的直连流，可能不如 yunting m3u8 稳定）
     _add(CURRENT_STREAMS.get(station_id))
 
     # mr_* 电台：MYRADIO_CACHE 里可能还没写入 CURRENT_STREAMS
@@ -1176,7 +1190,7 @@ def _collect_all_urls(station_id: str, name: str = "") -> list[str]:
         if mr:
             _add(mr.get("url"))
 
-    # 云听
+    # 云听（非 yt_ 电台的跨源匹配）
     _add(_find_yunting_url(station_id, name))
 
     # myradio
@@ -1252,10 +1266,15 @@ async def proxy_stream(url: str = Query(...)) -> StreamingResponse:
     if not url.startswith(("http://", "https://")):
         raise HTTPException(status_code=400, detail="仅支持 http/https 地址。")
 
+    # 自动添加基于 URL 来源的 Referer 头，部分 CDN（如 qingting.fm）要求自引用 Referer
+    parsed = urlparse(url)
+    referer = f"{parsed.scheme}://{parsed.netloc}/"
+    headers = {**CDN_REQUEST_HEADERS, "Referer": referer}
+
     async def _stream():
         try:
             async with httpx.AsyncClient(verify=False, follow_redirects=True) as client:
-                async with client.stream("GET", url, headers=CDN_REQUEST_HEADERS, timeout=HTTP_TIMEOUT) as resp:
+                async with client.stream("GET", url, headers=headers, timeout=HTTP_TIMEOUT) as resp:
                     resp.raise_for_status()
                     async for chunk in resp.aiter_bytes(8192):
                         yield chunk

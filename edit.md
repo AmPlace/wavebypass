@@ -755,3 +755,31 @@ RB 电台只用于后端回退匹配，不再出现在前端卡片列表里。�
 
 **改动文件**
 - `frontend/src/views/Home.vue`：新增 `T2S`、`normalizeForDedup`，更新 `deduplicateByName`
+
+---
+
+## 2026-05-04 修复：qingting.fm 等 CDN 代理请求返回 400
+
+**现象**
+邯郸新闻综合广播（yt_783）的 all-urls 包含 `[yunting m3u8, qingting mp3]`。yunting m3u8 失败后，qingting.fm 的 mp3 直连播放失败，回退到后端代理 `/api/proxy/stream?url=https://lhttp.qingting.fm/live/5072/64k.mp3` 也返回 400。但手动在浏览器打开该 URL 可以播放。
+
+**根因**
+qingting.fm 的 CDN 要求请求携带自引用 `Referer` 头（`Referer: https://lhttp.qingting.fm/...`），否则返回 400。后端 `/api/proxy/stream` 仅使用 `CDN_REQUEST_HEADERS`（包含 `User-Agent` 和 `Accept`），缺少 `Referer`。
+
+Chrome 直接打开能播放是因为浏览器自动设置了 Referer 头（同源或地址栏 URL）。
+
+**修复**
+`/api/proxy/stream` 端点自动从目标 URL 提取 origin 作为 `Referer` 头：
+```python
+parsed = urlparse(url)
+referer = f"{parsed.scheme}://{parsed.netloc}/"
+headers = {**CDN_REQUEST_HEADERS, "Referer": referer}
+```
+
+这对所有 CDN 都安全——大部分 CDN 不检查 Referer，少数检查的（如 qingting.fm）接受自引用 Referer。
+
+**备注**
+这与泉州电台的防盗链处理思路一致：`get_cdn_headers_for_station()` 已经为 `qz_*` 电台设置了 `Referer: https://wxqz2.qztv.cn`，但那只对已知电台生效。`/api/proxy/stream` 是通用代理，需要对任意 URL 生效。
+
+**改动文件**
+- `backend/main.py`：`proxy_stream` 端点添加基于 URL origin 的 `Referer` 头
