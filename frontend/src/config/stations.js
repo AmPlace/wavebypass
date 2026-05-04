@@ -53,7 +53,7 @@ export const stationList = [
     id: 'pop917',
     name: 'POP Radio 91.7',
     logoText: 'POP',
-    logoUrl: '/logos/pop917.png',
+    logoUrl: '/logos/pop917.jpg',
     tags: ['music', 'TW'],
   },
   {
