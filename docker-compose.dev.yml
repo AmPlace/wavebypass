@@ -1,27 +1,41 @@
 services:
   backend:
-    image: ghcr.io/AmPlace/wavebypass-backend:latest
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+
     container_name: wavebypass-backend
+
     ports:
       - "8000:8000"
+
+
     environment:
       HITFM_COOKIE: ${HITFM_COOKIE:-}
       GEO_RESTRICT: ${GEO_RESTRICT:-}
       GEO_BLOCKED_REGIONS: ${GEO_BLOCKED_REGIONS:-TW}
+
     networks:
       - wavebypass-net
+
     restart: unless-stopped
 
-  # 前端服务
   frontend:
-    image: ghcr.io/AmPlace/wavebypass-frontend:latest
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+
     container_name: wavebypass-frontend
+
     depends_on:
       - backend
+
     ports:
       - "127.0.0.1:80:80"
+
     networks:
       - wavebypass-net
+
     restart: unless-stopped
 
 networks:
