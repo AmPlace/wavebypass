@@ -703,6 +703,29 @@ async def proxy_ts_chunk(
         }
     )
 
+@app.get("/api/proxy/stream")
+async def proxy_stream(url: str = Query(...)) -> StreamingResponse:
+    """通用音频流代理：接受任意 URL，流式转发，绕过浏览器 CORS 限制。"""
+
+    if not url.startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="仅支持 http/https 地址。")
+
+    # 自动添加基于 URL 来源的 Referer 头，部分 CDN（如 qingting.fm）要求自引用 Referer
+    parsed = urlparse(url)
+    referer = f"{parsed.scheme}://{parsed.netloc}/"
+    headers = {**CDN_REQUEST_HEADERS, "Referer": referer}
+
+    async def _stream():
+        try:
+            async with httpx.AsyncClient(verify=False, follow_redirects=True) as client:
+                async with client.stream("GET", url, headers=headers, timeout=HTTP_TIMEOUT) as resp:
+                    resp.raise_for_status()
+                    async for chunk in resp.aiter_bytes(8192):
+                        yield chunk
+        except Exception:
+            return
+
+    return StreamingResponse(_stream(), media_type="audio/mpeg")
 
 @app.get("/api/{station_id}/stream")
 async def proxy_direct_audio_stream(station_id: str, request: Request = None) -> StreamingResponse:
@@ -1393,30 +1416,6 @@ async def get_reachable_urls(station_id: str, name: str = "", request: Request =
         media_type="application/json",
     )
 
-
-@app.get("/api/proxy/stream")
-async def proxy_stream(url: str = Query(...)) -> StreamingResponse:
-    """通用音频流代理：接受任意 URL，流式转发，绕过浏览器 CORS 限制。"""
-
-    if not url.startswith(("http://", "https://")):
-        raise HTTPException(status_code=400, detail="仅支持 http/https 地址。")
-
-    # 自动添加基于 URL 来源的 Referer 头，部分 CDN（如 qingting.fm）要求自引用 Referer
-    parsed = urlparse(url)
-    referer = f"{parsed.scheme}://{parsed.netloc}/"
-    headers = {**CDN_REQUEST_HEADERS, "Referer": referer}
-
-    async def _stream():
-        try:
-            async with httpx.AsyncClient(verify=False, follow_redirects=True) as client:
-                async with client.stream("GET", url, headers=headers, timeout=HTTP_TIMEOUT) as resp:
-                    resp.raise_for_status()
-                    async for chunk in resp.aiter_bytes(8192):
-                        yield chunk
-        except Exception:
-            return
-
-    return StreamingResponse(_stream(), media_type="audio/mpeg")
 
 
 @app.get("/api/{station_id}/stream-url")
