@@ -1,10 +1,7 @@
 <div align="center">
 
 # 📻 WaveBypass
-![GitHub Stars](https://img.shields.io/github/stars/amplace/wavebypass?style=social)
-![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=flat-square&logo=FastAPI&logoColor=white)
-![Docker](https://img.shields.io/badge/Docker-2496ED?style=flat-square&logo=docker&logoColor=white)
-[![License](https://img.shields.io/github/license/amplace/wavebypass)](./LICENSE)
+[![Demo](https://img.shields.io/badge/Demo-在线体验-blue?style=flat-square)](https://fm.bgm.gs) ![Stars](https://img.shields.io/github/stars/amplace/wavebypass?style=flat-square) ![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=flat-square&logo=FastAPI&logoColor=white) ![Docker](https://img.shields.io/badge/Docker-2496ED?style=flat-square&logo=docker&logoColor=white) [![License](https://img.shields.io/github/license/amplace/wavebypass)](./LICENSE)
 
 **跨地区网络电台聚合网关与现代化 Web 播放器**
 
