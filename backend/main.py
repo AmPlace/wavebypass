@@ -8,6 +8,7 @@ import asyncio
 import logging
 import os
 import time
+import json
 from collections.abc import AsyncIterator
 from urllib.parse import quote, urljoin, urlparse
 
@@ -370,7 +371,6 @@ async def _fetch_one_province(prov: str) -> list[dict] | None:
 
 def _write_yunting_caches(prov: str, stations: list[dict], now: float) -> None:
     """将单个省份的电台数据写入三层缓存。"""
-    import json
 
     # 电台 API 原始数据不含 provinceCode，注入后前端 /api/yunting/all 可按省份分组
     for s in stations:
@@ -495,7 +495,6 @@ async def get_config(request: Request) -> dict:
 @app.get("/api/stations")
 async def get_stations(request: Request) -> Response:
     """返回静态电台列表，根据地域限制过滤。前端启动时调用替代本地 stations.js。"""
-    import json
 
     if not GEO_RESTRICT:
         stations = STATIC_STATIONS
@@ -897,7 +896,6 @@ async def _myradio_refresh_task() -> None:
 @app.get("/api/myradio/all")
 async def get_myradio_all(request: Request) -> Response:
     """返回所有已缓存的 myradio 电台列表（从预热缓存读取）。"""
-    import json
 
     stations = [
         {"id": k.replace("mr_", ""), "name": v["name"], "url": v["url"],
@@ -937,7 +935,7 @@ async def proxy_yunting_stations(province_code: str) -> Response:
 
     # 只缓存 data 数组（不存整个 {code, message, data} 包装），前端和 EPG 端点都直接遍历数组
     # 云听 API 返回的 URL 是 http://，HTTPS 页面会拦截混合内容，统一改为 https://
-    import json
+    
     stations = resp.json().get("data", [])
     for s in stations:
         s.setdefault("provinceCode", province_code)  # 注入省份代码，供前端 /api/yunting/all 分组
@@ -970,7 +968,7 @@ async def proxy_yunting_all() -> Response:
     优先读预合并缓存 YUNTING_ALL_CACHE（预热时填充），命中时零 JSON 解析。
     未命中时从各省缓存拼接，缺失的省份实时拉取。
     """
-    import json
+    
 
     now = time.time()
 
@@ -1023,7 +1021,7 @@ async def yunting_epg() -> Response:
     EPG 过期时从 YUNTING_CACHE（2h）补充；两者都过期才拉云听 API。
     返回格式：{"contentId": "节目名", ...}
     """
-    import json
+    
 
     now = time.time()
     merged: dict[str, str] = {}
@@ -1162,7 +1160,7 @@ def _find_yunting_url(station_id: str, name: str = "") -> str | None:
 
     name 由前端 AudioEngine 从 stations.js 的 stationMap 中获取并传递，无需后端维护额外字典。
     """
-    import json
+    
 
     if station_id.startswith(("yt_", "rb_")):
         return None
@@ -1262,7 +1260,6 @@ def _find_rb_url(station_id: str, name: str = "", region: str | None = None) -> 
 
     region: 限定只搜索指定国家的 RB 数据（如 'TW'、'CN'），防止跨区误匹配。
     """
-    import json as _json
 
     if station_id.startswith("rb_"):
         return None
@@ -1280,7 +1277,7 @@ def _find_rb_url(station_id: str, name: str = "", region: str | None = None) -> 
         if not cached:
             continue
         try:
-            for item in _json.loads(cached["data"]):
+            for item in json.loads(cached["data"]):
                 rb_name = _normalize_name(item.get("name") or "")
                 if not rb_name:
                     continue
@@ -1316,7 +1313,6 @@ def _collect_all_urls(station_id: str, name: str = "") -> list[str]:
 
     顺序：当前主源 → 云听 → myradio → RB
     """
-    import json as _json
 
     urls: list[str] = []
     seen: set[str] = set()
@@ -1358,7 +1354,7 @@ def _collect_all_urls(station_id: str, name: str = "") -> list[str]:
 @app.get("/api/{station_id}/all-urls")
 async def get_all_urls(station_id: str, name: str = "", request: Request = None) -> Response:
     """返回电台所有可用流 URL（去重有序），供前端逐个尝试直连。"""
-    import json
+    
 
     if request and _is_geo_blocked(station_id, request):
         raise HTTPException(status_code=403, detail="该电台因地域限制不可用。")
@@ -1389,7 +1385,7 @@ async def get_reachable_urls(station_id: str, name: str = "", request: Request =
 
     前端拿到后直接按顺序尝试，不可达的 URL 已被过滤，省掉每个 5s 超时。
     """
-    import json
+    
 
     if request and _is_geo_blocked(station_id, request):
         raise HTTPException(status_code=403, detail="该电台因地域限制不可用。")
@@ -1427,7 +1423,7 @@ async def get_stream_url(station_id: str, name: str = "", request: Request = Non
     name 参数由前端从 stations.js 的 stationMap 中获取并传递，用于云听回退时按名称匹配。
     """
 
-    import json
+    
 
     if request and _is_geo_blocked(station_id, request):
         raise HTTPException(status_code=403, detail="该电台因地域限制不可用。")
