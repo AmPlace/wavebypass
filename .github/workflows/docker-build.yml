@@ -3,9 +3,8 @@ name: Build and Push Docker Image
 on:
   push:
     branches:
-      - master  # 确保这里和你实际的分支名一致
+      - master  
 
-# 重要：给 GITHUB_TOKEN 写入镜像库的权限
 permissions:
   packages: write
   contents: read

@@ -1,25 +1,18 @@
-/* 引入 Tailwind 的基础样式层。 */
 @tailwind base;
 
-/* 引入 Tailwind 的组件样式层。 */
 @tailwind components;
 
-/* 引入 Tailwind 的工具类样式层。 */
 @tailwind utilities;
 
-/* 全局页面基础样式。 */
 @layer base {
-  /* 让浏览器根据当前主题渲染滚动条、表单控件等原生元素。 */
   html {
     color-scheme: light;
   }
 
-  /* 深色模式下同步原生控件色彩。 */
   html.dark {
     color-scheme: dark;
   }
 
-  /* 页面默认去掉浏览器外边距，并使用抗锯齿字体渲染。 */
   body {
     margin: 0;
     min-width: 320px;
@@ -27,14 +20,12 @@
     -moz-osx-font-smoothing: grayscale;
   }
 
-  /* 按钮默认继承字体，避免不同浏览器按钮字体不一致。 */
   button,
   input {
     font: inherit;
   }
 }
 
-/* 自定义一些小型组件样式，主要服务音量滑动条。 */
 @layer components {
   /* 去掉 Firefox range 轨道默认边框。 */
   input[type='range']::-moz-range-track {
@@ -48,7 +39,6 @@
   }
 }
 
-/* 隐藏横向滚动条（用于地区筛选 pill 横向滚动） */
 .scrollbar-hide::-webkit-scrollbar {
   display: none;
 }

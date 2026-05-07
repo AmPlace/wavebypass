@@ -1,9 +1,3 @@
-// src/config/stations.js
-// tags 数组同时包含地区和类型，用于前端筛选
-// 地区：TW = 台湾，CN = 中国大陆
-// 类型：music = 音乐，news = 新闻，talk = 谈话
-
-// 1. 数组格式：专门给 Home.vue 循环渲染列表用
 export const stationList = [
   {
     id: 'hitfm',
@@ -87,8 +81,6 @@ export const stationList = [
   }
 ]
 
-// 2. 字典/映射格式：利用上面的数组自动生成！
-// 专门给 BottomPlayer.vue 和 AudioEngine.vue 做快速查找用
 export const stationMap = stationList.reduce((map, station) => {
   map[station.id] = station
   return map

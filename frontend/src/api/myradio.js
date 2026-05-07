@@ -1,10 +1,3 @@
-// src/api/myradio.js
-// myradio.tw 电台 API 模块 — 台湾电台直链
-//
-// 请求链路：前端 → 后端 /api/myradio/all（24h 缓存）→ myradio-dev.zeabur.app
-// 电台 id 前缀 mr_，与 rb_（Radio Browser）和 yt_（云听）区分
-
-// 根据电台名称关键词自动推断类型标签
 const NAME_TYPE_KEYWORDS = [
   { keywords: ['音樂', 'music', '金曲', '古典', 'hit'], type: 'music' },
   { keywords: ['新聞', 'news', '資訊', '交通'], type: 'news' },
@@ -20,7 +13,6 @@ function inferType(name) {
   return 'other'
 }
 
-// 拉取所有 myradio 电台，返回映射后的 station 数组
 export async function fetchMyradioStations() {
   try {
     const ctrl = new AbortController()

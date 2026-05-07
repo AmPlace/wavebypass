@@ -1,13 +1,9 @@
 <template>
-  <!-- 底部悬浮播放器：使用 fixed 和安全区 padding 适配移动端底部手势区域。 -->
   <footer class="fixed inset-x-0 bottom-0 z-40 px-4 pb-4 sm:px-6 sm:pb-6">
-    <!-- 毛玻璃播放器容器。 -->
     <div
       class="relative mx-auto flex h-20 max-w-4xl items-center justify-between gap-3 rounded-3xl border border-white/20 bg-white/70 px-4 shadow-lg shadow-black/[0.06] backdrop-blur-xl dark:border-white/10 dark:bg-black/70 dark:shadow-black/30 sm:px-5"
     >
-      <!-- 左侧：当前电台与直播状态。 -->
       <section class="flex min-w-0 basis-[40%] items-center gap-3">
-        <!-- 状态点：播放中是绿色呼吸点，加载中是克制的小转圈，错误时是红点。 -->
         <span class="relative flex size-3 shrink-0 items-center justify-center">
           <span
             v-if="isLoading"
@@ -24,7 +20,6 @@
           ></span>
         </span>
 
-        <!-- 电台名称，超出时跑马灯滚动。 -->
         <div ref="nameWrapperRef" class="min-w-0 overflow-hidden">
           <p
             ref="nameRef"
@@ -46,7 +41,6 @@
         </div>
       </section>
 
-      <!-- 中间：播放 / 暂停按钮（绝对居中，不受左右 basis 影响）。 -->
       <section class="absolute inset-0 flex items-center justify-center pointer-events-none">
         <button
           type="button"
@@ -54,7 +48,6 @@
           :aria-label="isPlaying ? '暂停播放' : '开始播放'"
           @click="playerStore.togglePlay()"
         >
-          <!-- 暂停图标。 -->
           <svg
             v-if="isPlaying"
             class="size-5"
@@ -132,22 +125,12 @@
 </template>
 
 <script setup>
-// computed 用于根据当前电台 ID 计算展示名称。
 import { computed, nextTick, ref, watch } from 'vue'
-
-// storeToRefs 用于保持 Pinia state 的响应式。
 import { storeToRefs } from 'pinia'
-
-// 引入播放器状态仓库。
 import { usePlayerStore } from '../stores/player'
 
-// 获取播放器 store。
 const playerStore = usePlayerStore()
-
-// 解构播放器状态。
 const { currentStation, isPlaying, isLoading, volume, playbackError } = storeToRefs(playerStore)
-
-// 跑马灯：检测文字是否溢出容器
 const nameRef = ref(null)
 const statusRef = ref(null)
 const isNameOverflow = ref(false)
@@ -162,16 +145,12 @@ function checkOverflow() {
   }
 }
 
-// 电台名或状态文案变化时重新检测溢出
 watch([currentStation, playbackError, isLoading], () => nextTick(checkOverflow))
 
-// 根据当前电台 ID 从 store 的 stationMap 获取展示名称（含 Radio Browser 动态电台）
 const currentStationName = computed(() => {
   return playerStore.stationMap[currentStation.value]?.name || currentStation.value || '未选择电台'
 })
 
-// 底部状态文案。
-// 有错误时展示错误；没有错误时保持简洁的 Live 状态。
 const statusText = computed(() => {
   if (playbackError.value) {
     return playbackError.value
@@ -184,8 +163,6 @@ const statusText = computed(() => {
   return 'Live'
 })
 
-// 状态圆点颜色。
-// 错误时显示红色；播放中显示绿色；空闲时显示灰色。
 const statusDotClass = computed(() => {
   if (playbackError.value) {
     return 'bg-red-500'

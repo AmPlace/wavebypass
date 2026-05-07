@@ -1,52 +1,33 @@
 <template>
-  <!--
-    这是一个无视觉 UI 的全局音频控制器。
-    audio 标签保留在页面里，但通过 hidden 隐藏，由 Pinia 状态和 hls.js 来驱动播放。
-  -->
+
   <audio ref="audioRef" hidden playsinline @error="handleAudioError"></audio>
 </template>
 
 <script setup>
-// 后端 API 基础地址，为空时使用当前域名
 const API_BASE = import.meta.env.VITE_API_BASE_URL || ''
 
-// Vue 响应式工具
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
-
-// storeToRefs 把 Pinia state 转为响应式 ref
 import { storeToRefs } from 'pinia'
-
-// 引入播放器全局状态仓库
 import { usePlayerStore } from '../stores/player'
 
-// 获取播放器 store 实例
 const playerStore = usePlayerStore()
-
-// 从 store 解构响应式状态
 const { currentStation, isPlaying, volume } = storeToRefs(playerStore)
-
-// 保存隐藏 audio 元素的 DOM 引用
 const audioRef = ref(null)
 const hlsRef = ref(null)
 
-// 需要自定义中转地址的电台
 const directStreamStationMap = {
 }
 
-// 当前播放模式：direct = 直连，proxy = 后端中转
 const directStreamMode = ref('')
 
-// 从 store 的 stationMap 动态查找 directUrl，支持静态电台 + Radio Browser 动态电台
 function getDirectUrl(stationId) {
   return playerStore.stationMap[stationId]?.directUrl
 }
 
-// 判断电台是否有 directUrl（支持动态电台）
 function hasDirectUrl(stationId) {
   return Boolean(getDirectUrl(stationId))
 }
 
-// 更新系统控制中心和锁屏的播放信息
 function updateSystemMediaSession(stationId) {
   if ('mediaSession' in navigator) {
     const meta = playerStore.stationMap[stationId] || {}
@@ -68,8 +49,7 @@ function updateSystemMediaSession(stationId) {
   }
 }
 
-// 云听电台 EPG 更新时自动刷新 MediaSession 显示
-// playerStore.updateStationEpg() 会更新 stationMap[id].subtitle，触发此 watcher
+// 电台 EPG 更新时自动刷新 MediaSession 显示
 watch(
   () => {
     const id = currentStation.value
@@ -81,7 +61,6 @@ watch(
 )
 
 // ========== 多源回退状态 ==========
-// 当前 station 的所有候选 URL 和已尝试索引
 let _fallbackUrls = []
 let _fallbackIndex = 0
 let _fallbackStationId = ''
@@ -123,11 +102,9 @@ async function playAudioSafely() {
   }
 }
 
-// 直连失败后回退到后端中转
 function fallbackToProxyStream(stationId) {
   if (!audioRef.value) return
 
-  // 已经是中转模式还失败，说明两种都不行，放弃
   if (directStreamMode.value === 'proxy') {
     playerStore.setPlaybackError('后端中转音频流连接失败，请稍后重试。')
     playerStore.togglePlay(false)
@@ -146,12 +123,10 @@ function fallbackToProxyStream(stationId) {
   playAudioSafely()
 }
 
-// ========== 工具函数 ==========
 function isHlsUrl(url) {
   return /\.m3u8(\?|$)/i.test(url)
 }
 
-// 播放指定 URL：自动识别 HLS/直连，设置播放器并播放
 async function playUrl(url, stationId, mode) {
   destroyHls()
   directStreamMode.value = mode
@@ -185,20 +160,16 @@ async function playUrl(url, stationId, mode) {
   updateSystemMediaSession(stationId)
 }
 
-// ========== 并发探测（三重防护） ==========
-// 1. 可达性预检：fetch(mode:'no-cors') 快速过滤不可达的 URL（iOS Safari 不会卡死）
-// 2. 资源泄露清理：胜出后立即销毁所有失败者的 Audio/HLS 实例
-// 3. HLS 防假解析：等 FRAG_LOADED（第一个切片真正下载成功），而非仅 MANIFEST_PARSED
+// ========== 并发探测 ==========
+// 1. 可达性预检：fetch(no-cors) 快速过滤不可达 URL
+// 2. 胜出后立即销毁所有失败者的 Audio/HLS 实例（防资源泄露）
+// 3. HLS 等 FRAG_LOADED（切片真正下载成功）而非仅 MANIFEST_PARSED
 
-// 将 http:// 升级为 https://（已有 https 或非 http 开头的 URL 不变）
 function upgradeHttps(url) {
   return url.startsWith('http://') ? 'https://' + url.slice(7) : url
 }
 
-// 快速可达性检查：fetch HEAD(no-cors)，不可达的直接排除
-// iOS Safari 不阻塞 fetch，只阻塞 <audio> preload，所以这个在 iOS 上也能正常工作
-// tryHttps: true 时对 http:// URL 先升级为 https:// 尝试
-// 返回 [testUrl, origUrl] 元组数组，testUrl 是实际测试的 URL（可能已升级 https），origUrl 是原始 URL
+// 快速可达性检查：HEAD(no-cors)，返回 [testUrl, origUrl] 元组数组
 async function filterReachable(urls, { tryHttps = false } = {}) {
   const checks = urls.map((url) => {
     const testUrl = tryHttps ? upgradeHttps(url) : url
@@ -214,14 +185,10 @@ async function filterReachable(urls, { tryHttps = false } = {}) {
 async function probeParallel(urls, stationId, mode, { tryHttps = false } = {}) {
   if (!urls.length) return null
 
-  // 第一步：快速过滤不可达 URL（~2-3s，并行 HEAD，不下载数据）
-  // tryHttps 时对 http:// URL 升级为 https:// 再测试，通过的 reachable 列表已是 https
   const reachable = await filterReachable(urls, { tryHttps })
   if (!reachable.length) return null
   console.log(`[探测] ${reachable.length}/${urls.length} 个源可达${tryHttps ? '（已升级 HTTPS）' : ''}`)
 
-  // 第二步：并发加载可达 URL，第一个真正可播的胜出
-  // 用 Set 跟踪活跃的 probe，胜出后立即清理所有失败者（防资源泄露）
   const activeHls = new Set()
   const activeAudio = new Set()
 
@@ -238,8 +205,7 @@ async function probeParallel(urls, stationId, mode, { tryHttps = false } = {}) {
 
   const promises = reachable.map(([url, origUrl], i) => {
     if (isHlsUrl(url) && Hls?.isSupported()) {
-      // HLS 探测：等 FRAG_LOADED（第一个切片真正下载成功），防 MANIFEST_PARSED 假解析
-      return new Promise((resolve) => {
+        return new Promise((resolve) => {
         const probeEl = new Audio()
         const hls = new Hls({ autoStartLoad: true, maxBufferLength: 1 })
         activeHls.add(hls)
@@ -257,13 +223,11 @@ async function probeParallel(urls, stationId, mode, { tryHttps = false } = {}) {
           if (result) cleanupAll() // 胜出：清理其余所有 probe
           resolve(result)
         }
-        // 等第一个 TS 切片真正加载成功（不只是 m3u8 解析成功）
         hls.on(Hls.Events.FRAG_LOADED, () => done({ url, origUrl, index: i, type: 'hls' }))
         hls.on(Hls.Events.ERROR, (_e, d) => { if (d?.fatal) done(null) })
         setTimeout(() => done(null), 10_000)
       })
     }
-    // 直连流探测：<audio preload=auto>，canplay 表示可播
     return new Promise((resolve) => {
       const probeEl = new Audio()
       activeAudio.add(probeEl)
@@ -286,7 +250,7 @@ async function probeParallel(urls, stationId, mode, { tryHttps = false } = {}) {
     })
   })
 
-  // 全局超时兜底
+  // 全局超时
   const result = await Promise.race([
     Promise.any(promises).catch(() => null),
     new Promise((resolve) => setTimeout(() => { cleanupAll(); resolve(null) }, 12_000)),
@@ -296,10 +260,6 @@ async function probeParallel(urls, stationId, mode, { tryHttps = false } = {}) {
 }
 
 // ========== 多源回退：并发直连探测 → 并发中转探测 ==========
-// 以 HitFM 为例：
-//   阶段1：并发探测 [主源CDN, 云听m3u8, myradio mp3, RB mp3] → 最快成功的胜出
-//   阶段1 全败 → 阶段2：并发探测 [主源中转, 云听中转, myradio中转, RB中转]
-//   阶段2 全败 → 报错
 async function tryFallbackUrls() {
   destroyHls()
   const stationId = _fallbackStationId
@@ -311,20 +271,17 @@ async function tryFallbackUrls() {
     return
   }
 
-  // 阶段 1：并发直连探测，HTTP URL 自动升级 HTTPS
-  // 有的电台源已有 SSL 但后端返回的是 http://，升级后可省掉中转流量
+  // 并发直连探测，HTTP URL 自动升级 HTTPS
   console.log(`[回退] 并发直连探测 ${urls.length} 个源...`)
   let winner = await probeParallel(urls, stationId, 'direct', { tryHttps: true })
   if (winner) _directProbeWinner = winner
 
-  // 阶段 2a：直连探测成功但播放失败后重试 → 直接用原 URL 走中转，不再重复探测
   if (!winner && _directProbeWinner) {
     const proxyUrl = `${API_BASE}/api/proxy/stream?url=${encodeURIComponent(_directProbeWinner.origUrl)}`
     console.log(`[回退] 直连播放失败，直接中转源 #${_directProbeWinner.index + 1}...`)
     winner = { url: proxyUrl, origUrl: _directProbeWinner.origUrl, index: _directProbeWinner.index, type: 'proxy' }
   }
 
-  // 阶段 2b：直连全败 → 并发中转探测
   if (!winner) {
     const proxyUrls = urls.map((u) => `${API_BASE}/api/proxy/stream?url=${encodeURIComponent(u)}`)
     console.log(`[回退] 直连全败，并发中转探测 ${proxyUrls.length} 个源...`)
@@ -350,30 +307,25 @@ async function tryFallbackUrls() {
   }
 }
 
-// audio 元素 @error 回调：加载失败时触发
 function handleAudioError() {
   const stationId = currentStation.value
 
-  // directStreamStationMap 的电台：直接走自定义中转
   if (directStreamStationMap[stationId]) {
     fallbackToProxyStream(stationId)
     return
   }
 
-  // 有多源回退 URL 时，尝试下一个
   if (_fallbackUrls.length > 1 && _fallbackIndex < _fallbackUrls.length && _fallbackStationId === stationId) {
     tryFallbackUrls()
     return
   }
 
-  // 已经是中转模式还失败
   if (directStreamMode.value === 'proxy') {
     playerStore.setPlaybackError('后端中转音频流连接失败，请稍后重试。')
     playerStore.togglePlay(false)
     return
   }
 
-  // 有 directUrl 的电台（RB 等），回退后端中转
   if (hasDirectUrl(stationId)) {
     fallbackToProxyStream(stationId)
     return
@@ -383,7 +335,6 @@ function handleAudioError() {
   playerStore.togglePlay(false)
 }
 
-// 从后端获取电台所有候选 URL（不带探测，由前端并发探测）
 async function fetchAllUrls(stationId) {
   const stName = playerStore.stationMap[stationId]?.name || ''
   try {
@@ -414,7 +365,7 @@ function loadStation(stationId) {
   _fallbackStationId = stationId
   _directProbeWinner = null
 
-  // 优先级 1：directStreamStationMap 里的电台，用自定义直连地址
+  // directStreamStationMap 里的电台，用自定义直连地址
   if (directStreamStationMap[stationId]) {
     directStreamMode.value = 'direct'
     audioRef.value.src = directStreamStationMap[stationId].directUrl
@@ -422,14 +373,11 @@ function loadStation(stationId) {
     return
   }
 
-  // 优先级 2：store 的 stationMap 里有 directUrl 的电台（含 Radio Browser 动态电台）
-  // 没有 livePath 的用 <audio> 直连，有 livePath 的优先尝试 HLS
   const directUrl = getDirectUrl(stationId)
   const hasLivePath = playerStore.stationMap[stationId]?.livePath
 
   if (directUrl && !hasLivePath) {
     directStreamMode.value = 'direct'
-    // 预取回退 URL（后台加载，失败时已就绪）
     fetchAllUrls(stationId).then((urls) => {
       if (_fallbackStationId === stationId) _fallbackUrls = urls
     })
@@ -438,8 +386,6 @@ function loadStation(stationId) {
     return
   }
 
-  // 优先级 3：directPlay 电台（myradio、云听、静态台等，无 directUrl 也无 livePath）
-  // 从后端获取所有候选 URL，逐个尝试（直连→中转），全部失败报错
   if (!hasLivePath && playerStore.stationMap[stationId]?.directPlay) {
     ;(async () => {
       const urls = await fetchAllUrls(stationId)
@@ -453,13 +399,11 @@ function loadStation(stationId) {
         return
       }
 
-      // 复用 tryFallbackUrls 的直连→中转逻辑
       await tryFallbackUrls()
     })()
     return
   }
 
-  // 优先级 4：HLS 播放（m3u8 电台，或有 livePath + directUrl 的电台）
   if (Hls?.isSupported()) {
     const canDirectPlay = playerStore.stationMap[stationId]?.directPlay
     let triedDirect = false
@@ -467,7 +411,6 @@ function loadStation(stationId) {
     async function startHlsWithFallback() {
       let hlsUrl = playlistUrl
 
-      // directPlay 电台：先尝试直连 CDN 的 m3u8，节省后端流量
       if (canDirectPlay) {
         try {
           const stName = playerStore.stationMap[stationId]?.name || ''
@@ -503,7 +446,6 @@ function loadStation(stationId) {
         if (!data?.fatal) return
         console.warn('HLS 播放发生致命错误。', data)
 
-        // directPlay 直连失败 → 回退后端代理重试一次
         if (canDirectPlay && directStreamMode.value === 'direct' && !triedDirect) {
           triedDirect = true
           directStreamMode.value = 'proxy'
@@ -511,7 +453,6 @@ function loadStation(stationId) {
           startHlsWithFallback()
           return
         }
-        // 同时有 directUrl 的电台 → 直连 mp3 回退
         if (directUrl) {
           destroyHls()
           directStreamMode.value = 'direct'
@@ -519,7 +460,6 @@ function loadStation(stationId) {
           playAudioSafely()
           return
         }
-        // 尝试多源回退 URL（跨源：云听/myradio/RB）
         if (_fallbackUrls.length > 1 && _fallbackStationId === stationId) {
           destroyHls()
           tryFallbackUrls()
@@ -529,7 +469,6 @@ function loadStation(stationId) {
         playerStore.togglePlay(false)
       })
 
-      // 预取回退 URL（后台加载，HLS 失败时已就绪）
       if (canDirectPlay) {
         fetchAllUrls(stationId).then((urls) => {
           if (_fallbackStationId === stationId) _fallbackUrls = urls
@@ -541,7 +480,6 @@ function loadStation(stationId) {
     return
   }
 
-  // Safari 原生 HLS 支持（无 hls.js 时的降级路径）
   if (audioRef.value.canPlayType('application/vnd.apple.mpegurl')) {
     const canDirectPlay = playerStore.stationMap[stationId]?.directPlay
 

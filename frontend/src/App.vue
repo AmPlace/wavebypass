@@ -1,25 +1,15 @@
 <template>
-  <!-- 全局应用壳：同时作为虚拟滚动的滚动容器，h-dvh 让滚动条在浏览器最右边。 -->
-  <!-- 用 dvh 而非 vh：iOS Safari 的 100vh 包含地址栏高度，dvh 是排除地址栏后的动态视口高度。 -->
   <div ref="scrollRef" class="h-dvh overflow-y-auto bg-gray-100 font-sans text-neutral-950 antialiased transition-colors duration-300 dark:bg-neutral-900 dark:text-neutral-50">
-    <!-- 顶部固定工具栏：状态栏安全区 + 三栏布局（左占位/中预留/右按钮） -->
     <div class="fixed inset-x-0 top-0 z-50 bg-gray-100 dark:bg-neutral-900">
-      <!-- 安全区留白（刘海屏等） -->
       <div class="h-[env(safe-area-inset-top)]"></div>
-      <!-- 实际工具栏 -->
       <div class="flex h-12 items-center justify-between px-4 sm:px-6">
-        <!-- 左侧：占位（未来可放返回按钮等） -->
         <div class="w-10"></div>
-        <!-- 中间：预留电台/电视切换按钮位置 -->
         <div></div>
-        <!-- 右侧：搜索 + 主题切换 -->
         <div class="flex items-center gap-2">
-          <!-- 搜索框：默认收起为圆形图标，点击展开为输入框 -->
           <div
             class="relative flex items-center rounded-full border border-black/5 bg-white/70 shadow-sm shadow-black/[0.04] backdrop-blur-xl transition-all duration-300 ease-out dark:border-white/10 dark:bg-neutral-950/60"
             :class="searchExpanded ? 'w-48 sm:w-56' : 'size-10'"
           >
-            <!-- 搜索图标按钮：点击展开/收起 -->
             <button
               type="button"
               class="flex size-10 shrink-0 items-center justify-center text-neutral-700 transition-colors hover:text-neutral-900 dark:text-neutral-200 dark:hover:text-white"
@@ -31,7 +21,6 @@
                 <path d="M16.5 16.5L21 21" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
               </svg>
             </button>
-            <!-- 输入框：展开后显示，收起后隐藏 -->
             <input
               ref="searchInputRef"
               v-model="searchQuery"
@@ -43,14 +32,12 @@
             />
           </div>
 
-          <!-- 主题切换按钮 -->
           <button
             type="button"
             class="flex size-10 items-center justify-center rounded-full border border-black/5 bg-white/70 text-neutral-700 shadow-sm shadow-black/[0.04] backdrop-blur-xl transition-all duration-200 ease-out hover:scale-[1.03] hover:bg-white active:scale-95 dark:border-white/10 dark:bg-neutral-950/60 dark:text-neutral-200 dark:hover:bg-neutral-950"
             :aria-label="isDark ? '切换到浅色模式' : '切换到深色模式'"
             @click="toggleTheme"
           >
-            <!-- 深色模式图标。 -->
             <svg
               v-if="isDark"
               class="size-5"
@@ -73,7 +60,6 @@
               />
             </svg>
 
-            <!-- 浅色模式图标。 -->
             <svg
               v-else
               class="size-5"
@@ -94,13 +80,10 @@
       </div>
     </div>
 
-    <!-- 主体选台页面。 -->
     <Home />
 
-    <!-- 底部播放器。 -->
     <BottomPlayer />
 
-    <!-- 隐藏音频引擎，负责真实 HLS 播放。 -->
     <AudioEngine />
   </div>
 </template>
@@ -115,29 +98,22 @@ const THEME_STORAGE_KEY = 'wavebypass-theme'
 const isDark = ref(false)
 let mediaQuery = null
 
-// 滚动容器 ref，同时作为虚拟滚动的滚动容器，通过 provide 传给 Home.vue 使用。
 const scrollRef = ref(null)
 provide('scrollRef', scrollRef)
 
-// 【新增核心功能】：动态修改手机状态栏颜色
+// 动态修改Safari iOS状态栏颜色
 function updateThemeColor(isDarkMode) {
-  // 查找是否已经有 theme-color 标签
   let metaThemeColor = document.querySelector('meta[name="theme-color"]')
   
   if (!metaThemeColor) {
-    // 如果没有，就动态创建一个插入到 <head> 中
     metaThemeColor = document.createElement('meta')
     metaThemeColor.name = 'theme-color'
     document.head.appendChild(metaThemeColor)
   }
   
-  // 完美对接你的 Tailwind 背景色：
-  // 浅色模式你的背景是 bg-gray-100，对应 Hex 色值是 #f3f4f6
-  // 深色模式你的背景是 bg-neutral-900，对应 Hex 色值是 #171717
   metaThemeColor.content = isDarkMode ? '#171717' : '#f3f4f6'
 }
 
-// 核心判断逻辑
 function applyTheme() {
   const savedTheme = window.localStorage.getItem(THEME_STORAGE_KEY)
   const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches
@@ -147,38 +123,26 @@ function applyTheme() {
   isDark.value = shouldUseDark
   document.documentElement.classList.toggle('dark', shouldUseDark)
   
-  // 每次切换主题时，同步修改手机状态栏颜色！
   updateThemeColor(shouldUseDark)
 }
 
-// 【关键修复】：将 applyTheme() 移出 onMounted！
-// 直接在 script setup 顶层同步执行，组件还没挂载到 DOM 时就先算好主题，
-// 彻底解决第一次进入时”慢半拍”不跟随系统的问题。
 applyTheme()
 
-// ========== 搜索功能 ==========
-// 搜索关键词，通过 provide 传递给 Home.vue 做电台过滤
 const searchQuery = ref('')
 provide('searchQuery', searchQuery)
 
-// 搜索框展开状态：默认收起为圆形图标，点击展开为输入框
 const searchExpanded = ref(false)
-// 输入框 ref，展开后自动聚焦
 const searchInputRef = ref(null)
 
-// 点击搜索图标：切换展开/收起
 function toggleSearch() {
   searchExpanded.value = !searchExpanded.value
-  // 展开后自动聚焦输入框
   if (searchExpanded.value) {
     nextTick(() => searchInputRef.value?.focus())
   } else {
-    // 收起时清空搜索内容
     searchQuery.value = ''
   }
 }
 
-// 输入框失焦且内容为空时自动收起
 function onSearchBlur() {
   if (!searchQuery.value.trim()) {
     searchExpanded.value = false
