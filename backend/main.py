@@ -91,12 +91,6 @@ STATIC_STATIONS = [
     {"id": "qz_fm904", "name": "泉州交通广播 90.4", "logoText": "FM904", "logoUrl": "/logos/qz904.png", "tags": ["CN", "福建", "news"]},
     {"id": "qz_fm1059", "name": "泉州刺桐之声 105.9", "logoText": "FM1059", "logoUrl": "/logos/qz1059.png", "tags": ["CN", "福建", "talk"]},
     {"id": "qz_fm923", "name": "泉州经济生活 92.3", "logoText": "FM923", "logoUrl": "/logos/qz923.png", "tags": ["CN", "福建", "news"]},
-    {"id": "cityfm", "name": "城市广播网", "logoText": "城", "directUrl": "https://fm901.cityfm.com.tw:8083/901", "logoUrl": "/logos/twcsgbw.jpg", "tags": ["music", "TW"]},
-    {"id": "bcc_news", "name": "中广新闻网", "logoText": "新闻", "directUrl": "https://stream.rcs.revma.com/fgtx07f3qtzuv", "logoUrl": "/logos/twzgxww.png", "tags": ["news", "TW"]},
-    {"id": "bcc_pop", "name": "中广流行网", "logoText": "流行", "directUrl": "https://stream.rcs.revma.com/s1zttsg3qtzuv", "logoUrl": "/logos/twzglxw.jpg", "tags": ["music", "TW"]},
-    {"id": "bcc_music", "name": "中广音乐网", "logoText": "音乐", "directUrl": "https://stream.rcs.revma.com/ks4vsmg3qtzuv", "logoUrl": "/logos/twzgyyw.jpg", "tags": ["music", "TW"]},
-    {"id": "igot531", "name": "iGO531", "logoText": "531", "directUrl": "https://stream.rcs.revma.com/1qxn2vg3qtzuv", "logoUrl": "/logos/twigo531.jpg", "tags": ["music", "TW"]},
-    {"id": "bcc_rural", "name": "中广乡亲网", "logoText": "乡亲", "directUrl": "https://stream.rcs.revma.com/p2e3rfg3qtzuv", "logoUrl": "/logos/twzgxqw.png", "tags": ["talk", "TW"]},
 ]
 
 # 从 STATIC_STATIONS 的 tags 动态提取各地区电台 ID（不硬编码）
