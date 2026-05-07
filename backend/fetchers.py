@@ -317,7 +317,10 @@ async def resolve_myradio_url(client, url: str) -> str:
             "http://best.olis.com.tw:8080/best_api/index.php/Basic/GetHLS",
         data={"station": station},
         )
-        return get_mybest_url.json()["data"]["hlsurl"]
+        before_mybest_url = get_mybest_url.json()["data"]["hlsurl"]
+        if before_mybest_url.startswith("http://"):
+            real_mybest_url = before_mybest_url.replace("http://", "https://", 1)
+            return real_mybest_url
     if url.startswith("myAline"):
         station = url.split(":")[1]
         if station == "1":
@@ -329,6 +332,9 @@ async def resolve_myradio_url(client, url: str) -> str:
                 "https://ipget.apple-line.com/youngPlayer.php"
             )
         return get_aline_url.text.strip()
+    if url.startswith("http://"):
+        url = url.replace("http://", "https://", 1)
+        return url
 
 
 async def fetch_myradio_all() -> list[dict]:
