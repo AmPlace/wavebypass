@@ -20,4 +20,9 @@ Thumbs.db
 .env
 .env.*
 !.env.example
-*.md
+radiobrowser.md
+plan-yt.md
+edit.md
+geo-limit.md
+1.md
+release.md
