@@ -1326,7 +1326,10 @@ def _collect_all_urls(station_id: str, name: str = "") -> list[str]:
     if station_id.startswith("mr_"):
         mr = MYRADIO_CACHE.get(station_id)
         if mr:
-            _add(mr.get("url"))
+            url = mr.get("url")
+            if isinstance(url, dict):
+                url = url.get("hlsurl") or url.get("url")
+            _add(url)
 
     # 云听（非 yt_ 电台的跨源匹配）
     _add(_find_yunting_url(station_id, name))

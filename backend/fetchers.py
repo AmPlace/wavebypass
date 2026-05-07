@@ -300,6 +300,36 @@ MYRADIO_TIMEOUT = httpx.Timeout(15.0)
 _mr_sem = asyncio.Semaphore(5)
 _myradio_build_id: str | None = None
 
+async def resolve_myradio_url(client, url: str) -> str:
+    """处理 myradio 的特殊 url 格式，解析成真实的 m3u8/mp3 地址"""
+    if url.startswith(("http://", "https://")):
+        return url
+    if url.startswith("myPop"):
+        station = url.split(":")[1]
+        get_mypop_url = await client.post(
+            "http://pop.olis.com.tw:8080/pop_api/index.php/Basic/GetHLS",
+        data={"station": station},
+        )
+        return get_mypop_url.json()["data"]["hlsurl"][station]
+    if url.startswith("myBest"):
+        station = url.split(":")[1]
+        get_mybest_url = await client.post(
+            "http://best.olis.com.tw:8080/best_api/index.php/Basic/GetHLS",
+        data={"station": station},
+        )
+        return get_mybest_url.json()["data"]["hlsurl"]
+    if url.startswith("myAline"):
+        station = url.split(":")[1]
+        if station == "1":
+            get_aline_url = await client.get(
+                "https://ipget.apple-line.com/alinePlayer.php"
+            )
+        else: 
+            get_aline_url = await client.get(
+                "https://ipget.apple-line.com/youngPlayer.php"
+            )
+        return get_aline_url.text.strip()
+
 
 async def fetch_myradio_all() -> list[dict]:
     """抓取 myradio 全量台湾电台。返回 [{id, name, url, logo, freq, tag, codec}]。"""
@@ -330,17 +360,19 @@ async def fetch_myradio_all() -> list[dict]:
                     r = await client.get(url, headers=headers)
                     r.raise_for_status()
                     radio = r.json()["pageProps"]["radio"]
+                    real_url = await resolve_myradio_url(client, radio["url"])
+                    logger.info("myradio %s url=%s type=%s", sid, real_url, type(real_url))
                     return {
                         "id": radio["id"],
                         "name": radio["name"],
-                        "url": radio["url"],
+                        "url": real_url,
                         "logo": f"https://images.myradio.com.tw/images/{radio['id']}.jpg",
                         "freq": radio.get("des", ""),
                         "tag": radio.get("tag", ""),
                         "codec": radio.get("codec", 0),
                     }
                 except Exception as exc:
-                    logger.debug("myradio %s 详情获取失败: %s", sid, exc)
+                    logger.error("myradio %s 详情获取失败: %s", sid, exc)
             return None
 
         results = await asyncio.gather(*[_fetch_one(sid) for sid in ids])
