@@ -1,6 +1,6 @@
 services:
   backend:
-    image: ghcr.io/AmPlace/wavebypass-backend:latest
+    image: ghcr.io/amplace/wavebypass-backend:latest
     container_name: wavebypass-backend
     ports:
       - "8000:8000"
@@ -14,7 +14,7 @@ services:
 
   # 前端服务
   frontend:
-    image: ghcr.io/AmPlace/wavebypass-frontend:latest
+    image: ghcr.io/amplace/wavebypass-frontend:latest
     container_name: wavebypass-frontend
     depends_on:
       - backend
