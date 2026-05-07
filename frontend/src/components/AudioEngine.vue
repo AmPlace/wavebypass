@@ -29,12 +29,8 @@ const { currentStation, isPlaying, volume } = storeToRefs(playerStore)
 const audioRef = ref(null)
 const hlsRef = ref(null)
 
-// 需要自定义中转地址的电台（如 ufo 用 /stream 而不是 /live）
+// 需要自定义中转地址的电台
 const directStreamStationMap = {
-  ufo: {
-    directUrl: playerStore.stationMap.ufo?.directUrl,
-    proxyUrl: `${API_BASE}/api/ufo/stream`,
-  },
 }
 
 // 当前播放模式：direct = 直连，proxy = 后端中转
@@ -418,7 +414,7 @@ function loadStation(stationId) {
   _fallbackStationId = stationId
   _directProbeWinner = null
 
-  // 优先级 1：directStreamStationMap 里的电台（如 ufo），用自定义直连地址
+  // 优先级 1：directStreamStationMap 里的电台，用自定义直连地址
   if (directStreamStationMap[stationId]) {
     directStreamMode.value = 'direct'
     audioRef.value.src = directStreamStationMap[stationId].directUrl
@@ -463,7 +459,7 @@ function loadStation(stationId) {
     return
   }
 
-  // 优先级 4：HLS 播放（m3u8 电台，或有 livePath + directUrl 的电台如 ufo）
+  // 优先级 4：HLS 播放（m3u8 电台，或有 livePath + directUrl 的电台）
   if (Hls?.isSupported()) {
     const canDirectPlay = playerStore.stationMap[stationId]?.directPlay
     let triedDirect = false
@@ -515,7 +511,7 @@ function loadStation(stationId) {
           startHlsWithFallback()
           return
         }
-        // ufo 等同时有 directUrl 的电台 → 直连 mp3 回退
+        // 同时有 directUrl 的电台 → 直连 mp3 回退
         if (directUrl) {
           destroyHls()
           directStreamMode.value = 'direct'

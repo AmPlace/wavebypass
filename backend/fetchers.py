@@ -73,61 +73,6 @@ async def fetch_hichannel_engine(station_name: str, api_url: str, referer: str, 
     logger.info(f"[{station_name}] 抓取验证成功")
     return real_url
 
-# UFO Radio 的公开入口地址。
-# 访问这个地址后，Revma 会 302 跳转到带 rj-token 的真实音频流地址。
-UFO_STREAM_ENTRY_URL = "https://stream.rcs.revma.com/em90w4aeewzuv"
-
-
-# UFO Radio 请求头。
-# 这里使用浏览器 UA，减少流媒体服务因为默认 Python UA 拒绝请求的概率。
-UFO_HEADERS = {
-    "Accept": "*/*",
-    "User-Agent": DEFAULT_UA,  # 直接用全局定义的变量
-}
-
-# UFO 跳转解析超时时间。
-# 这里只需要拿到响应头和最终 URL，不需要把整个音频流读完。
-UFO_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
-
-
-
-async def fetch_ufo() -> str:
-    """抓取 UFO Radio 的最新直连音频流地址。
-
-    UFO Radio 不是 HLS/m3u8，而是入口地址自动跳转到带短 token 的音频流。
-    这里用 stream=True 只拿响应头和最终跳转地址，不读取无限长的直播音频正文。
-    """
-
-    # 创建异步客户端并允许自动跟随 302 跳转。
-    async with httpx.AsyncClient(
-        timeout=UFO_TIMEOUT,
-        follow_redirects=True,
-        verify=False,
-    ) as client:
-        # 构造 GET 请求。
-        request = client.build_request("GET", UFO_STREAM_ENTRY_URL, headers=UFO_HEADERS)
-
-        # 使用 stream=True，避免把直播音频流读入内存。
-        response = await client.send(request, stream=True)
-
-        try:
-            # 非 2xx 状态说明入口或跳转后的真实流不可用。
-            response.raise_for_status()
-
-            # response.url 是跟随跳转后的最终地址，例如 n01.rcs.revma.com/...?...。
-            final_stream_url = str(response.url)
-        finally:
-            # 这里只需要最终 URL，拿到后立即关闭响应流。
-            await response.aclose()
-
-    # 基础校验：真实播放地址必须是 http 或 https URL。
-    if not final_stream_url.startswith(("http://", "https://")):
-        raise ValueError("UFO Radio 返回内容不是有效音频流 URL。")
-
-    # 记录最终跳转域名，方便部署时观察 token 是否更新。
-    logger.info("UFO Radio 跳转后的真实音频流地址：%s", final_stream_url)
-
-    return final_stream_url
 
 async def hitfm_factory(name: str, cid: str) -> str:
     """Hit FM 专用工厂函数：自动填充 Hit FM 的共有配置"""
@@ -406,7 +351,6 @@ async def fetch_myradio_all() -> list[dict]:
 # key 是前端或 API 使用的电台 ID，value 是负责刷新该电台真实播放地址的异步函数。
 STATION_FETCHER_MAP: dict[str, StationFetcher] = {
     "hitfm": fetch_hitfm,
-    "ufo": fetch_ufo,
     "hitfm_taichung": fetch_hitfm_taichung,
     "hitfm_tainan": fetch_hitfm_tainan,
     "hitfm_yilan": fetch_hitfm_yilan,

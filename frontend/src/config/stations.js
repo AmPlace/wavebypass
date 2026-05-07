@@ -41,15 +41,6 @@ export const stationList = [
     tags: ['music', 'TW'],
   },
   {
-    id: 'ufo',
-    name: 'UFO Radio',
-    logoText: 'U',
-    logoUrl: '/logos/uforadio.png',
-    directUrl: 'https://stream.rcs.revma.com/em90w4aeewzuv',
-    livePath: 'ufo/live',
-    tags: ['talk', 'TW'],
-  },
-  {
     id: 'pop917',
     name: 'POP Radio 91.7',
     logoText: 'POP',
@@ -83,55 +74,7 @@ export const stationList = [
     logoText: 'FM923',
     logoUrl: '/logos/qz923.png',
     tags: ['CN', '福建', 'news'],
-  },
-  {
-    id: 'cityfm',
-    name: '城市广播网',
-    logoText: '城',
-    directUrl: 'https://fm901.cityfm.com.tw:8083/901',
-    logoUrl: '/logos/twcsgbw.jpg',
-    tags: ['music', 'TW'],
-  },
-  {
-    id: 'bcc_news',
-    name: '中广新闻网',
-    logoText: '新闻',
-    directUrl: 'https://stream.rcs.revma.com/fgtx07f3qtzuv',
-    logoUrl: '/logos/twzgxww.png',
-    tags: ['news', 'TW'],
-  },
-  {
-    id: 'bcc_pop',
-    name: '中广流行网',
-    logoText: '流行',
-    directUrl: 'https://stream.rcs.revma.com/s1zttsg3qtzuv',
-    logoUrl: '/logos/twzglxw.jpg',
-    tags: ['music', 'TW'],
-  },
-  {
-    id: 'bcc_music',
-    name: '中广音乐网',
-    logoText: '音乐',
-    directUrl: 'https://stream.rcs.revma.com/ks4vsmg3qtzuv',
-    logoUrl: '/logos/twzgyyw.jpg',
-    tags: ['music', 'TW'],
-  },
-  {
-    id: 'igot531',
-    name: 'iGO531',
-    logoText: '531',
-    directUrl: 'https://stream.rcs.revma.com/1qxn2vg3qtzuv',
-    logoUrl: '/logos/twigo531.jpg',
-    tags: ['music', 'TW'],
-  },
-  {
-    id: 'bcc_rural',
-    name: '中广乡亲网',
-    logoText: '乡亲',
-    directUrl: 'https://stream.rcs.revma.com/p2e3rfg3qtzuv',
-    logoUrl: '/logos/twzgxqw.png',
-    tags: ['talk', 'TW'],
-  },
+  }
 ]
 
 // 2. 字典/映射格式：利用上面的数组自动生成！

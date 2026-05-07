@@ -69,7 +69,7 @@ TOKEN_REFRESH_HTTP_STATUS_CODES = {401, 403, 404, 410}
 
 # 非 HLS 的直连音频电台。
 # 这些电台不走 playlist.m3u8，而是前端直接请求 /api/{station_id}/stream。
-DIRECT_STREAM_STATIONS = {"ufo"}
+DIRECT_STREAM_STATIONS = {""}
 
 
 # ========== 地域限制配置 ==========
@@ -86,7 +86,6 @@ STATIC_STATIONS = [
     {"id": "hitfm_tainan", "name": "Hit FM 台南", "logoText": "台南", "logoUrl": "/logos/hitfm.png", "tags": ["music", "TW"]},
     {"id": "hitfm_yilan", "name": "Hit FM 宜兰", "logoText": "宜兰", "logoUrl": "/logos/hitfm.png", "tags": ["music", "TW"]},
     {"id": "hitfm_hualian", "name": "Hit FM 花莲", "logoText": "花莲", "logoUrl": "/logos/hitfm.png", "tags": ["music", "TW"]},
-    {"id": "ufo", "name": "UFO Radio", "logoText": "U", "logoUrl": "/logos/uforadio.png", "directUrl": "https://stream.rcs.revma.com/em90w4aeewzuv", "livePath": "ufo/live", "tags": ["talk", "TW"]},
     {"id": "pop917", "name": "POP Radio 91.7", "logoText": "POP", "logoUrl": "/logos/pop917.jpg", "tags": ["music", "TW"]},
     {"id": "qz_fm889", "name": "泉州新闻综合 88.9", "logoText": "FM889", "logoUrl": "/logos/qz889.png", "tags": ["CN", "福建", "news"]},
     {"id": "qz_fm904", "name": "泉州交通广播 90.4", "logoText": "FM904", "logoUrl": "/logos/qz904.png", "tags": ["CN", "福建", "news"]},
@@ -526,7 +525,6 @@ async def get_station_playlist(
     if request and _is_geo_blocked(station_id, request):
         raise HTTPException(status_code=403, detail="该电台因地域限制不可用。")
 
-    # UFO 这类电台不是 HLS，没有 playlist.m3u8。
     if station_id in DIRECT_STREAM_STATIONS:
         raise HTTPException(status_code=400, detail="该电台是直连音频流，请使用 /api/{station_id}/stream。")
 
@@ -727,11 +725,10 @@ async def proxy_stream(url: str = Query(...)) -> StreamingResponse:
     return StreamingResponse(_stream(), media_type="audio/mpeg")
 
 @app.get("/api/{station_id}/stream")
-async def proxy_direct_audio_stream(station_id: str, request: Request = None) -> StreamingResponse:
+async def proxy_direct_audio_stream(station_id: str, request: None) -> StreamingResponse:
     """代理直连音频流电台。
 
     该接口已使用全局 HTTP 连接池进行优化，避免重复建立连接。
-    UFO Radio 这类源是一个持续输出的 MP3/AAC 音频流。
     这里使用边读边传，避免把无限直播流读入内存。
     """
     if request and _is_geo_blocked(station_id, request):
@@ -758,10 +755,9 @@ async def proxy_direct_audio_stream(station_id: str, request: Request = None) ->
 
     try:
         # 【核心修改 2】：使用全局 http_client 构造和发送请求
-        request = http_client.build_request("GET", real_stream_url, headers=CDN_REQUEST_HEADERS)
-        upstream_response = await http_client.send(request, stream=True)
+        upstream_req = http_client.build_request("GET", real_stream_url, headers=CDN_REQUEST_HEADERS)
+        upstream_response = await http_client.send(upstream_req, stream=True)
 
-        # 如果 token 失效，立即刷新一次 UFO 跳转地址后重试。
         if upstream_response.status_code in TOKEN_REFRESH_HTTP_STATUS_CODES:
             await upstream_response.aclose()
 
@@ -773,8 +769,8 @@ async def proxy_direct_audio_stream(station_id: str, request: Request = None) ->
 
             real_stream_url = await refresh_station_stream_url(station_id)
             # 【核心修改 3】：重试机制里也使用全局 http_client
-            request = http_client.build_request("GET", real_stream_url, headers=CDN_REQUEST_HEADERS)
-            upstream_response = await http_client.send(request, stream=True)
+            upstream_req = http_client.build_request("GET", real_stream_url, headers=CDN_REQUEST_HEADERS)
+            upstream_response = await http_client.send(upstream_req, stream=True)
 
         # 非 2xx 状态说明真实音频流仍然不可用。
         upstream_response.raise_for_status()
