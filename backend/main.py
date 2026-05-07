@@ -87,7 +87,7 @@ STATIC_STATIONS = [
     {"id": "hitfm_yilan", "name": "Hit FM 宜兰", "logoText": "宜兰", "logoUrl": "/logos/hitfm.png", "tags": ["music", "TW"]},
     {"id": "hitfm_hualian", "name": "Hit FM 花莲", "logoText": "花莲", "logoUrl": "/logos/hitfm.png", "tags": ["music", "TW"]},
     {"id": "ufo", "name": "UFO Radio", "logoText": "U", "logoUrl": "/logos/uforadio.png", "directUrl": "https://stream.rcs.revma.com/em90w4aeewzuv", "livePath": "ufo/live", "tags": ["talk", "TW"]},
-    {"id": "pop917", "name": "POP Radio 91.7", "logoText": "POP", "logoUrl": "/logos/pop917.png", "tags": ["music", "TW"]},
+    {"id": "pop917", "name": "POP Radio 91.7", "logoText": "POP", "logoUrl": "/logos/pop917.jpg", "tags": ["music", "TW"]},
     {"id": "qz_fm889", "name": "泉州新闻综合 88.9", "logoText": "FM889", "logoUrl": "/logos/qz889.png", "tags": ["CN", "福建", "news"]},
     {"id": "qz_fm904", "name": "泉州交通广播 90.4", "logoText": "FM904", "logoUrl": "/logos/qz904.png", "tags": ["CN", "福建", "news"]},
     {"id": "qz_fm1059", "name": "泉州刺桐之声 105.9", "logoText": "FM1059", "logoUrl": "/logos/qz1059.png", "tags": ["CN", "福建", "talk"]},
