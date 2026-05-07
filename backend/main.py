@@ -85,7 +85,7 @@ STATIC_STATIONS = [
     {"id": "hitfm_taichung", "name": "Hit FM 台中", "logoText": "台中", "logoUrl": "/logos/hitfm.png", "tags": ["music", "TW"]},
     {"id": "hitfm_tainan", "name": "Hit FM 台南", "logoText": "台南", "logoUrl": "/logos/hitfm.png", "tags": ["music", "TW"]},
     {"id": "hitfm_yilan", "name": "Hit FM 宜兰", "logoText": "宜兰", "logoUrl": "/logos/hitfm.png", "tags": ["music", "TW"]},
-    {"id": "hitfm_hualian", "name": "Hit FM 花莲", "logoText": "花莲", "logoUrl": "/logos/hitfm.png", "tags": ["music", "TW"]},
+    {"id": "hitfm_huadong", "name": "Hit FM 花东", "logoText": "花东", "logoUrl": "/logos/hitfm.png", "tags": ["music", "TW"]},
     {"id": "pop917", "name": "POP Radio 91.7", "logoText": "POP", "logoUrl": "/logos/pop917.jpg", "tags": ["music", "TW"]},
     {"id": "qz_fm889", "name": "泉州新闻综合 88.9", "logoText": "FM889", "logoUrl": "/logos/qz889.png", "tags": ["CN", "福建", "news"]},
     {"id": "qz_fm904", "name": "泉州交通广播 90.4", "logoText": "FM904", "logoUrl": "/logos/qz904.png", "tags": ["CN", "福建", "news"]},

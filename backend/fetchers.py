@@ -90,7 +90,7 @@ async def fetch_hitfm():         return await hitfm_factory("台北", "1")
 async def fetch_hitfm_taichung(): return await hitfm_factory("台中", "2")
 async def fetch_hitfm_tainan():   return await hitfm_factory("台南", "3")
 async def fetch_hitfm_yilan():    return await hitfm_factory("宜兰", "4")
-async def fetch_hitfm_hualian():  return await hitfm_factory("花莲", "5")
+async def fetch_hitfm_huadong():  return await hitfm_factory("花东", "5")
 
 # =========================================
 # POP Radio 91.7
@@ -354,7 +354,7 @@ STATION_FETCHER_MAP: dict[str, StationFetcher] = {
     "hitfm_taichung": fetch_hitfm_taichung,
     "hitfm_tainan": fetch_hitfm_tainan,
     "hitfm_yilan": fetch_hitfm_yilan,
-    "hitfm_hualian": fetch_hitfm_hualian,
+    "hitfm_huadong": fetch_hitfm_huadong,
     "qz_fm889": fetch_qz_fm889,
     "qz_fm904": fetch_qz_fm904,
     "qz_fm1059": fetch_qz_fm1059,

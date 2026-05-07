@@ -34,9 +34,9 @@ export const stationList = [
     tags: ['music', 'TW'],
   },
   {
-    id: 'hitfm_hualian',
-    name: 'Hit FM 花莲',
-    logoText: '花莲',
+    id: 'hitfm_huadong',
+    name: 'Hit FM 花东',
+    logoText: '花东',
     logoUrl: '/logos/hitfm.png',
     tags: ['music', 'TW'],
   },
