@@ -1,0 +1,21 @@
+import { createRouter, createWebHashHistory } from 'vue-router'
+
+const routes = [
+  {
+    path: '/',
+    name: 'radio',
+    component: () => import('../views/Home.vue'),
+  },
+  {
+    path: '/iptv',
+    name: 'iptv',
+    component: () => import('../views/IptvHome.vue'),
+  },
+]
+
+const router = createRouter({
+  history: createWebHashHistory(),
+  routes,
+})
+
+export default router

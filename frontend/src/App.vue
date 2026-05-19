@@ -11,7 +11,7 @@
             :class="activeMode === 'radio'
               ? 'bg-neutral-950 text-white dark:bg-white dark:text-black'
               : 'text-neutral-500 hover:text-neutral-700 dark:text-neutral-400 dark:hover:text-neutral-200'"
-            @click="playerStore.setActiveMode('radio')"
+            @click="router.push('/')"
           >
             Radio
           </button>
@@ -21,7 +21,7 @@
             :class="activeMode === 'iptv'
               ? 'bg-neutral-950 text-white dark:bg-white dark:text-black'
               : 'text-neutral-500 hover:text-neutral-700 dark:text-neutral-400 dark:hover:text-neutral-200'"
-            @click="playerStore.setActiveMode('iptv')"
+            @click="router.push('/iptv')"
           >
             TV
           </button>
@@ -101,7 +101,7 @@
       </div>
     </div>
 
-    <Home />
+    <router-view />
 
     <BottomPlayer />
 
@@ -112,10 +112,10 @@
 </template>
 
 <script setup>
-import { onBeforeUnmount, onMounted, provide, ref, nextTick } from 'vue'
+import { onBeforeUnmount, onMounted, provide, ref, nextTick, watch } from 'vue'
+import { useRouter, useRoute } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import { usePlayerStore } from './stores/player'
-import Home from './views/Home.vue'
 import BottomPlayer from './components/BottomPlayer.vue'
 import AudioEngine from './components/AudioEngine.vue'
 import FullPlayer from './components/FullPlayer.vue'
@@ -129,6 +129,12 @@ provide('scrollRef', scrollRef)
 
 const playerStore = usePlayerStore()
 const { activeMode } = storeToRefs(playerStore)
+const router = useRouter()
+const route = useRoute()
+
+watch(() => route.path, (path) => {
+  playerStore.setActiveMode(path.startsWith('/iptv') ? 'iptv' : 'radio')
+}, { immediate: true })
 
 // 动态修改Safari iOS状态栏颜色
 function updateThemeColor(isDarkMode) {
