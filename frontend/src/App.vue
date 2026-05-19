@@ -4,7 +4,28 @@
       <div class="h-[env(safe-area-inset-top)]"></div>
       <div class="flex h-12 items-center justify-between px-4 sm:px-6">
         <div class="w-10"></div>
-        <div></div>
+        <div class="flex items-center rounded-full border border-black/5 bg-white/70 p-0.5 text-xs font-medium shadow-sm shadow-black/[0.04] backdrop-blur-xl dark:border-white/10 dark:bg-neutral-950/60">
+          <button
+            type="button"
+            class="rounded-full px-3 py-1.5 transition-all sm:px-4"
+            :class="activeMode === 'radio'
+              ? 'bg-neutral-950 text-white dark:bg-white dark:text-black'
+              : 'text-neutral-500 hover:text-neutral-700 dark:text-neutral-400 dark:hover:text-neutral-200'"
+            @click="playerStore.setActiveMode('radio')"
+          >
+            Radio
+          </button>
+          <button
+            type="button"
+            class="rounded-full px-3 py-1.5 transition-all sm:px-4"
+            :class="activeMode === 'iptv'
+              ? 'bg-neutral-950 text-white dark:bg-white dark:text-black'
+              : 'text-neutral-500 hover:text-neutral-700 dark:text-neutral-400 dark:hover:text-neutral-200'"
+            @click="playerStore.setActiveMode('iptv')"
+          >
+            TV
+          </button>
+        </div>
         <div class="flex items-center gap-2">
           <div
             class="relative flex items-center rounded-full border border-black/5 bg-white/70 shadow-sm shadow-black/[0.04] backdrop-blur-xl transition-all duration-300 ease-out dark:border-white/10 dark:bg-neutral-950/60"
@@ -85,14 +106,19 @@
     <BottomPlayer />
 
     <AudioEngine />
+
+    <FullPlayer />
   </div>
 </template>
 
 <script setup>
 import { onBeforeUnmount, onMounted, provide, ref, nextTick } from 'vue'
+import { storeToRefs } from 'pinia'
+import { usePlayerStore } from './stores/player'
 import Home from './views/Home.vue'
 import BottomPlayer from './components/BottomPlayer.vue'
 import AudioEngine from './components/AudioEngine.vue'
+import FullPlayer from './components/FullPlayer.vue'
 
 const THEME_STORAGE_KEY = 'wavebypass-theme'
 const isDark = ref(false)
@@ -100,6 +126,9 @@ let mediaQuery = null
 
 const scrollRef = ref(null)
 provide('scrollRef', scrollRef)
+
+const playerStore = usePlayerStore()
+const { activeMode } = storeToRefs(playerStore)
 
 // 动态修改Safari iOS状态栏颜色
 function updateThemeColor(isDarkMode) {

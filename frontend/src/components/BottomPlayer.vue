@@ -3,7 +3,10 @@
     <div
       class="relative mx-auto flex h-20 max-w-4xl items-center justify-between gap-3 rounded-3xl border border-white/20 bg-white/70 px-4 shadow-lg shadow-black/[0.06] backdrop-blur-xl dark:border-white/10 dark:bg-black/70 dark:shadow-black/30 sm:px-5"
     >
-      <section class="flex min-w-0 basis-[40%] items-center gap-3">
+      <section
+        class="flex min-w-0 basis-[40%] items-center gap-3 cursor-pointer"
+        @click="playerStore.expandPlayer()"
+      >
         <span class="relative flex size-3 shrink-0 items-center justify-center">
           <span
             v-if="isLoading"

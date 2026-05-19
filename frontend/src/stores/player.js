@@ -4,11 +4,13 @@ export const usePlayerStore = defineStore('player', {
   state: () => ({
     isPlaying: false,
     isLoading: false,
-    currentStation: '',  
+    currentStation: '',
     volume: 1,
     playbackError: '',
     stationList: [],
     stationMap: {},
+    isPlayerExpanded: false,
+    activeMode: 'radio',  // 'radio' | 'iptv'
   }),
 
   getters: {
@@ -84,6 +86,18 @@ export const usePlayerStore = defineStore('player', {
     updateStationEpg(stationId, subtitle) {
       const station = this.stationMap[stationId]
       if (station) station.subtitle = subtitle
+    },
+
+    expandPlayer() {
+      this.isPlayerExpanded = true
+    },
+
+    collapsePlayer() {
+      this.isPlayerExpanded = false
+    },
+
+    setActiveMode(mode) {
+      this.activeMode = mode
     },
   },
 })
