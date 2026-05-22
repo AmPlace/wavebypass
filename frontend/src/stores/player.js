@@ -112,7 +112,7 @@ export const usePlayerStore = defineStore('player', {
       })
       // 构建回退队列：直连优先，代理在后
       const list = []
-      const API_BASE = import.meta.env?.VITE_API_BASE_URL || ''
+      const API_BASE = import.meta.env?.VITE_API_BASE_URL || window.location.origin
       const isMpegTsUrl = (url) => /\/(?:rtp|udp)\//i.test(url) || /\.m2?ts(\?|$)/i.test(url)
       const proxyUrlFor = (u) => {
         const ua = u.custom_ua ? `&custom_ua=${encodeURIComponent(u.custom_ua)}` : ''
