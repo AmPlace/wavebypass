@@ -1741,6 +1741,49 @@ async def iptv_wide_playlist(target_url: str = '', proxy_ts: int = 0, custom_ua:
 
 # ── 旧代理（不变）──
 
+@app.get("/api/iptv/proxy/stream")
+async def iptv_proxy_stream(target_url: str = '', custom_ua: str = ''):
+    if not target_url:
+        raise HTTPException(status_code=400, detail="缺少 target_url")
+
+    validate_target_url(target_url)
+    parsed = urlparse(target_url)
+    upstream_headers = {
+        'User-Agent': custom_ua or CDN_REQUEST_HEADERS['User-Agent'],
+        'Accept': '*/*',
+        'Connection': 'keep-alive',
+        'Referer': f'{parsed.scheme}://{parsed.netloc}/',
+    }
+
+    upstream: httpx.Response | None = None
+    try:
+        req = http_client.build_request("GET", target_url, headers=upstream_headers)
+        upstream = await http_client.send(req, stream=True, follow_redirects=True)
+        upstream.raise_for_status()
+    except httpx.HTTPError as exc:
+        if upstream is not None:
+            await upstream.aclose()
+        raise HTTPException(status_code=502, detail=f"拉取直播流失败: {exc}") from exc
+
+    async def stream_bytes():
+        try:
+            async for chunk in upstream.aiter_bytes(64 * 1024):
+                if chunk:
+                    yield chunk
+        finally:
+            await upstream.aclose()
+
+    media_type = upstream.headers.get("content-type") or "video/MP2T"
+    return StreamingResponse(
+        stream_bytes(),
+        media_type=media_type,
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Access-Control-Allow-Origin": "*",
+        },
+    )
+
+
 @app.get("/api/iptv/proxy/playlist.m3u8")
 async def iptv_proxy_playlist(target_url: str = ''):
     if not target_url:

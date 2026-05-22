@@ -113,17 +113,25 @@ export const usePlayerStore = defineStore('player', {
       // 构建回退队列：直连优先，代理在后
       const list = []
       const API_BASE = import.meta.env?.VITE_API_BASE_URL || ''
+      const isMpegTsUrl = (url) => /\/(?:rtp|udp)\//i.test(url) || /\.m2?ts(\?|$)/i.test(url)
+      const proxyUrlFor = (u) => {
+        const ua = u.custom_ua ? `&custom_ua=${encodeURIComponent(u.custom_ua)}` : ''
+        if (isMpegTsUrl(u.url)) {
+          return `${API_BASE}/api/iptv/proxy/stream?target_url=${encodeURIComponent(u.url)}${ua}`
+        }
+        return `${API_BASE}/api/iptv/proxy/wide.m3u8?proxy_ts=1${ua}&target_url=${encodeURIComponent(u.url)}`
+      }
       // 分两组：直连组 + 必须代理组
       const directUrls = []
       const proxyOnlyUrls = []
       for (const u of sorted) {
         if (u.force_proxy || u.custom_ua) {
-          const ua = u.custom_ua ? `&custom_ua=${encodeURIComponent(u.custom_ua)}` : ''
           proxyOnlyUrls.push({
             ...u,
-            url: `${API_BASE}/api/iptv/proxy/wide.m3u8?proxy_ts=1${ua}&target_url=${encodeURIComponent(u.url)}`,
+            url: proxyUrlFor(u),
             original_url: u.url,
-            type: 'proxy',
+            type: isMpegTsUrl(u.url) ? 'direct' : 'proxy',
+            via_proxy: true,
           })
         } else {
           directUrls.push(u)
@@ -136,9 +144,10 @@ export const usePlayerStore = defineStore('player', {
       for (const u of directUrls) {
         list.push({
           ...u,
-          url: `${API_BASE}/api/iptv/proxy/wide.m3u8?proxy_ts=1&target_url=${encodeURIComponent(u.url)}`,
+          url: proxyUrlFor(u),
           original_url: u.url,
-          type: 'proxy',
+          type: isMpegTsUrl(u.url) ? 'direct' : 'proxy',
+          via_proxy: true,
         })
       }
       list.push(...proxyOnlyUrls)

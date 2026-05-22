@@ -448,7 +448,8 @@ function sourceStatusLabel(status) {
 const iptvSourceOptions = computed(() => {
   return playerStore.iptvUrls.map((entry, index) => {
     const targetUrl = sourceTargetUrl(entry)
-    const typeLabel = entry.type === 'proxy' ? '代理' : '直连'
+    const isProxySource = entry.type === 'proxy' || entry.via_proxy
+    const typeLabel = isProxySource ? '代理' : '直连'
     const host = sourceHost(targetUrl)
     const working = Number(entry.is_working)
     const latency = Number(entry.latency_ms) > 0 ? `${entry.latency_ms}ms` : ''
@@ -461,7 +462,7 @@ const iptvSourceOptions = computed(() => {
     return {
       index,
       url: entry.url,
-      type: entry.type,
+      type: isProxySource ? 'proxy' : entry.type,
       typeLabel,
       title: `${index + 1}. ${host}`,
       meta,
@@ -573,7 +574,10 @@ function isHlsUrl(url) {
 }
 
 function isMpegTsUrl(url) {
-  return /\/(?:rtp|udp)\//i.test(url) || /\.m2?ts(\?|$)/i.test(url)
+  return /\/api\/iptv\/proxy\/stream(\?|$)/i.test(url)
+    || /\/(?:rtp|udp)\//i.test(url)
+    || /%2F(?:rtp|udp)%2F/i.test(url)
+    || /\.m2?ts(\?|$)/i.test(url)
 }
 
 function canUseMpegTs() {
@@ -1066,7 +1070,7 @@ async function playCurrentIptvUrl(attemptId = 0) {
   console.log(`[START] ${entry.type}:${entry.url.slice(0, 60)}...`)
   try {
     setSourceRuntimeStatus(idx, 'trying')
-    await tryPlayIptv(entry.url, false, entry.custom_ua || '', attemptId, idx)
+    await tryPlayIptv(entry.url, Boolean(entry.via_proxy), entry.custom_ua || '', attemptId, idx)
     if (!isAttemptActive(attemptId)) return
     setSourceRuntimeStatus(idx, 'playing')
     playerStore.clearPlaybackError()
@@ -1094,6 +1098,9 @@ async function raceProxySources(entries, attemptId = 0) {
 
   const fresh = entries.filter(e => !_racedLosers.has(e.url))
   if (!fresh.length) {
+    if (await fallbackToNextIptvUrl(attemptId)) {
+      return await playCurrentIptvUrl(attemptId)
+    }
     markAllIptvSourcesUnavailable(attemptId)
     return
   }
@@ -1219,6 +1226,9 @@ async function raceProxySources(entries, attemptId = 0) {
 
   if (!result) {
     console.warn('[RACE] 全部代理源探测失败')
+    if (await fallbackToNextIptvUrl(attemptId)) {
+      return await playCurrentIptvUrl(attemptId)
+    }
     markAllIptvSourcesUnavailable(attemptId)
     return
   }
