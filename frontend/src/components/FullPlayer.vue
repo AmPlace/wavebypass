@@ -305,6 +305,7 @@
 <script setup>
 import { computed, ref, watch, onBeforeUnmount, onMounted, nextTick } from 'vue'
 import { storeToRefs } from 'pinia'
+import mpegts from 'mpegts.js'
 import { usePlayerStore } from '../stores/player'
 import { fetchAggregatedChannels } from '../api/iptv'
 
@@ -315,6 +316,7 @@ const { isPlayerExpanded, currentStation, isPlaying, isLoading, volume, stationM
 
 const iptvVideoRef = ref(null)
 const iptvHlsRef = ref(null)
+const iptvMpegtsRef = ref(null)
 const sourceButtonRef = ref(null)
 const sourceMenuOpen = ref(false)
 const sourceMenuStyle = ref({
@@ -532,6 +534,22 @@ function destroyIptvHls() {
   }
 }
 
+function destroyIptvMpegts() {
+  if (!iptvMpegtsRef.value) return
+  const player = iptvMpegtsRef.value
+  iptvMpegtsRef.value = null
+  try {
+    player.destroy()
+  } catch (e) {
+    console.warn('[IPTV] mpegts cleanup failed:', e)
+  }
+}
+
+function destroyIptvEngines() {
+  destroyIptvHls()
+  destroyIptvMpegts()
+}
+
 function resetIptvVideo() {
   if (!iptvVideoRef.value) return
   iptvVideoRef.value.pause()
@@ -554,6 +572,18 @@ function isHlsUrl(url) {
   return /\.m3u8(\?|$)/i.test(url)
 }
 
+function isMpegTsUrl(url) {
+  return /\/(?:rtp|udp)\//i.test(url) || /\.m2?ts(\?|$)/i.test(url)
+}
+
+function canUseMpegTs() {
+  try {
+    return Boolean(mpegts?.getFeatureList?.().mseLivePlayback || mpegts?.isSupported?.())
+  } catch {
+    return false
+  }
+}
+
 function getProxyUrl(url) {
   return `${API_BASE}/api/iptv/proxy/playlist.m3u8?target_url=${encodeURIComponent(url)}`
 }
@@ -574,6 +604,10 @@ function cancelledError() {
 
 function clearCurrentHlsIf(hls) {
   if (iptvHlsRef.value === hls) iptvHlsRef.value = null
+}
+
+function clearCurrentMpegtsIf(player) {
+  if (iptvMpegtsRef.value === player) iptvMpegtsRef.value = null
 }
 
 function cancelActiveProxyRace() {
@@ -721,6 +755,51 @@ function attachRuntimeHlsErrorHandlers(hls, sourceUrl, usingProxy, attemptId, so
   hls.on(Hls.Events.ERROR, onError)
 }
 
+function attachRuntimeMpegtsErrorHandlers(player, sourceUrl, usingProxy, attemptId, sourceIndex = -1) {
+  let switching = false
+  const setRuntimeStatus = (status) => {
+    if (sourceIndex >= 0) setSourceRuntimeStatus(sourceIndex, status)
+    else setSourceRuntimeStatusByUrl(sourceUrl, status)
+  }
+
+  const cleanup = () => {
+    player.off(mpegts.Events.ERROR, onError)
+    player.off(mpegts.Events.LOADING_COMPLETE, onComplete)
+  }
+
+  const switchToFallback = async (reason) => {
+    if (switching || !isAttemptActive(attemptId)) return
+    switching = true
+    console.warn(`[IPTV] MPEG-TS 播放中断，切备用源: ${reason}`)
+    cleanup()
+    setRuntimeStatus('failed')
+    if (usingProxy) _racedLosers.add(sourceUrl)
+    try {
+      player.destroy()
+    } catch (e) {
+      console.warn('[IPTV] mpegts runtime cleanup failed:', e)
+    }
+    clearCurrentMpegtsIf(player)
+
+    const nextAttemptId = ++_playAttemptId
+    if (await fallbackToNextIptvUrl(nextAttemptId)) {
+      return await playCurrentIptvUrl(nextAttemptId)
+    }
+    markAllIptvSourcesUnavailable(nextAttemptId)
+  }
+
+  const onError = (type, detail, info) => {
+    switchToFallback(`${type || 'mpegts error'}:${detail || info?.msg || ''}`)
+  }
+
+  const onComplete = () => {
+    switchToFallback('mpegts loading complete')
+  }
+
+  player.on(mpegts.Events.ERROR, onError)
+  player.on(mpegts.Events.LOADING_COMPLETE, onComplete)
+}
+
 async function tryPlayIptv(url, usingProxy = false, customUa = '', attemptId = 0, sourceIndex = -1) {
   if (!isAttemptActive(attemptId)) throw cancelledError()
   if (!iptvVideoRef.value) throw new Error('播放器未就绪')
@@ -732,14 +811,22 @@ async function tryPlayIptv(url, usingProxy = false, customUa = '', attemptId = 0
 
   setRuntimeStatus('trying')
 
-  if (!isHlsUrl(url)) {
+  const useHls = isHlsUrl(url)
+  const useMpegTs = !useHls && isMpegTsUrl(url)
+
+  if (!useHls && !useMpegTs) {
     setRuntimeStatus('failed')
-    throw new Error('非 HLS 格式')
+    throw new Error('不支持的播放格式')
+  }
+
+  if (useMpegTs && !canUseMpegTs()) {
+    setRuntimeStatus('failed')
+    throw new Error('当前浏览器不支持 MPEG-TS 播放')
   }
 
   cancelCurrentStartup()
   cancelActiveProxyRace()
-  destroyIptvHls()
+  destroyIptvEngines()
   resetIptvVideo()
   playerStore.setLoading(true)
   console.log(`[START] ${usingProxy ? '(proxy) ' : ''}${url.slice(0, 80)}...`)
@@ -749,7 +836,9 @@ async function tryPlayIptv(url, usingProxy = false, customUa = '', attemptId = 0
     let settling = false
     let timer = null
     let hlsInstance = null
+    let mpegtsInstance = null
     const hlsEventFns = []
+    const mpegtsEventFns = []
     let nativeCleanup = null  // 原生 HLS listener cleanup
     let cancelStartup = null
 
@@ -762,6 +851,8 @@ async function tryPlayIptv(url, usingProxy = false, customUa = '', attemptId = 0
       timer = null
       for (const [evt, fn] of hlsEventFns) hlsInstance?.off(evt, fn)
       hlsEventFns.length = 0
+      for (const [evt, fn] of mpegtsEventFns) mpegtsInstance?.off(evt, fn)
+      mpegtsEventFns.length = 0
       if (nativeCleanup) {
         nativeCleanup()
         nativeCleanup = null
@@ -774,6 +865,15 @@ async function tryPlayIptv(url, usingProxy = false, customUa = '', attemptId = 0
         hlsInstance.destroy()
         clearCurrentHlsIf(hlsInstance)
         hlsInstance = null
+      }
+      if (mpegtsInstance) {
+        try {
+          mpegtsInstance.destroy()
+        } catch (e) {
+          console.warn('[IPTV] mpegts failure cleanup failed:', e)
+        }
+        clearCurrentMpegtsIf(mpegtsInstance)
+        mpegtsInstance = null
       }
     }
 
@@ -810,6 +910,7 @@ async function tryPlayIptv(url, usingProxy = false, customUa = '', attemptId = 0
           return
         }
         if (hlsInstance) attachRuntimeHlsErrorHandlers(hlsInstance, url, usingProxy, attemptId, sourceIndex)
+        if (mpegtsInstance) attachRuntimeMpegtsErrorHandlers(mpegtsInstance, url, usingProxy, attemptId, sourceIndex)
         playerStore.togglePlay(true)
         setRuntimeStatus('playing')
         settled = true
@@ -839,6 +940,54 @@ async function tryPlayIptv(url, usingProxy = false, customUa = '', attemptId = 0
       setRuntimeStatus('failed')
       clearStartupCancel()
       reject(err)
+    }
+
+    // MPEG-TS over MSE path
+    if (useMpegTs) {
+      const player = mpegts.createPlayer({
+        type: 'mse',
+        isLive: true,
+        cors: true,
+        url,
+      }, {
+        enableWorker: true,
+        lazyLoad: false,
+        liveBufferLatencyChasing: true,
+        statisticsInfoReportInterval: 1000,
+      })
+      mpegtsInstance = player
+      iptvMpegtsRef.value = player
+
+      const video = iptvVideoRef.value
+      const onMediaInfo = () => safeResolve()
+      const onStats = (stats) => {
+        if ((stats?.decodedFrames || 0) > 0) safeResolve()
+      }
+      const onMpegtsError = (type, detail, info) => {
+        safeReject(new Error(`${type || 'mpegts error'}:${detail || info?.msg || ''}`))
+      }
+      const onVideoReady = () => safeResolve()
+      const onVideoError = () => safeReject(new Error('MPEG-TS 视频错误'))
+
+      player.on(mpegts.Events.MEDIA_INFO, onMediaInfo)
+      player.on(mpegts.Events.STATISTICS_INFO, onStats)
+      player.on(mpegts.Events.ERROR, onMpegtsError)
+      mpegtsEventFns.push([mpegts.Events.MEDIA_INFO, onMediaInfo])
+      mpegtsEventFns.push([mpegts.Events.STATISTICS_INFO, onStats])
+      mpegtsEventFns.push([mpegts.Events.ERROR, onMpegtsError])
+      video.addEventListener('loadedmetadata', onVideoReady)
+      video.addEventListener('canplay', onVideoReady)
+      video.addEventListener('error', onVideoError)
+      nativeCleanup = () => {
+        video.removeEventListener('loadedmetadata', onVideoReady)
+        video.removeEventListener('canplay', onVideoReady)
+        video.removeEventListener('error', onVideoError)
+      }
+
+      player.attachMediaElement(video)
+      player.load()
+      timer = setTimeout(() => safeReject(new Error('MPEG-TS 加载超时')), 12_000)
+      return
     }
 
     // HLS path
@@ -939,7 +1088,7 @@ async function raceProxySources(entries, attemptId = 0) {
   if (!isAttemptActive(attemptId)) return
   cancelCurrentStartup()
   cancelActiveProxyRace()
-  destroyIptvHls()
+  destroyIptvEngines()
   resetIptvVideo()
   playerStore.setLoading(true)
 
@@ -1142,8 +1291,8 @@ async function raceProxySources(entries, attemptId = 0) {
 
 async function handleIptvError(e) {
   console.warn('[IPTV] video error:', e?.target?.error?.message || '')
-  // hls.js 接管中 → 由 hls.js ERROR 事件处理
-  if (iptvHlsRef.value) return
+  // hls.js / mpegts.js 接管中 → 由各自 ERROR 事件处理
+  if (iptvHlsRef.value || iptvMpegtsRef.value) return
   // 起播阶段（Promise 还没 resolve）→ 由 Promise reject 处理
   if (playerStore.isLoading) return
   // 播放中途暴毙 → 触发 fallback
@@ -1257,7 +1406,7 @@ onBeforeUnmount(() => {
   _playAttemptId++
   cancelCurrentStartup()
   cancelActiveProxyRace()
-  destroyIptvHls()
+  destroyIptvEngines()
 })
 </script>
 
