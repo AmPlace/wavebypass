@@ -119,17 +119,27 @@ export const usePlayerStore = defineStore('player', {
       for (const u of sorted) {
         if (u.force_proxy || u.custom_ua) {
           const ua = u.custom_ua ? `&custom_ua=${encodeURIComponent(u.custom_ua)}` : ''
-          proxyOnlyUrls.push({ url: `${API_BASE}/api/iptv/proxy/wide.m3u8?proxy_ts=1${ua}&target_url=${encodeURIComponent(u.url)}`, type: 'proxy' })
+          proxyOnlyUrls.push({
+            ...u,
+            url: `${API_BASE}/api/iptv/proxy/wide.m3u8?proxy_ts=1${ua}&target_url=${encodeURIComponent(u.url)}`,
+            original_url: u.url,
+            type: 'proxy',
+          })
         } else {
           directUrls.push(u)
         }
       }
       // 先所有直连，再所有直连的代理回退，最后是必须代理的
       for (const u of directUrls) {
-        list.push({ url: u.url, type: 'direct' })
+        list.push({ ...u, url: u.url, original_url: u.url, type: 'direct' })
       }
       for (const u of directUrls) {
-        list.push({ url: `${API_BASE}/api/iptv/proxy/wide.m3u8?proxy_ts=1&target_url=${encodeURIComponent(u.url)}`, type: 'proxy' })
+        list.push({
+          ...u,
+          url: `${API_BASE}/api/iptv/proxy/wide.m3u8?proxy_ts=1&target_url=${encodeURIComponent(u.url)}`,
+          original_url: u.url,
+          type: 'proxy',
+        })
       }
       list.push(...proxyOnlyUrls)
       this.currentIptvChannel = channel
