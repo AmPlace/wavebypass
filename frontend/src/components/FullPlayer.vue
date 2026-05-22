@@ -145,6 +145,18 @@
                   />
                   <svg class="size-4 text-neutral-400" viewBox="0 0 24 24" fill="none"><path d="M4 10v4a1 1 0 0 0 1 1h3l4.2 3.15A.5.5 0 0 0 13 17.75V6.25a.5.5 0 0 0-.8-.4L8 9H5a1 1 0 0 0-1 1Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M16 9a4 4 0 0 1 0 6M18.5 6.5a7.5 7.5 0 0 1 0 11" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
                 </template>
+
+                <!-- 全屏按钮 -->
+                <button
+                  type="button"
+                  class="flex size-10 items-center justify-center rounded-full text-neutral-400 transition-colors hover:text-neutral-700 dark:hover:text-neutral-200"
+                  aria-label="全屏"
+                  @click="toggleFullscreen"
+                >
+                  <svg class="size-5" viewBox="0 0 24 24" fill="none">
+                    <path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z" fill="currentColor"/>
+                  </svg>
+                </button>
               </div>
             </div>
 
@@ -241,6 +253,16 @@ function toggleIptvMute() {
   if (!iptvVideoRef.value) return
   iptvMuted.value = !iptvMuted.value
   iptvVideoRef.value.muted = iptvMuted.value
+}
+
+function toggleFullscreen() {
+  const el = iptvVideoRef.value
+  if (!el) return
+  if (document.fullscreenElement) {
+    document.exitFullscreen()
+  } else {
+    el.requestFullscreen().catch(() => {})
+  }
 }  // 跟踪当前播放的 URL，防止重复设置
 
 const isIptvMode = computed(() => Boolean(playerStore.currentIptvChannel))
