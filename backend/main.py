@@ -477,7 +477,7 @@ async def proxy_ts_chunk(
     upstream_response: httpx.Response | None = None
 
     try:
-        upstream_response = await http_client.stream("GET", target_url, headers=upstream_headers, follow_redirects=True)
+        upstream_response = await http_client.get(target_url, follow_redirects=True, headers=upstream_headers)
 
         upstream_response.raise_for_status()
     except httpx.HTTPError as exc:
