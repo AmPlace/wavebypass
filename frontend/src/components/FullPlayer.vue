@@ -155,8 +155,12 @@
                     v-for="ch in iptvChannelList"
                     :key="ch.name"
                     type="button"
+                    :disabled="isIptvUntested(ch)"
                     class="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left transition-colors hover:bg-neutral-200/60 dark:hover:bg-neutral-700/60"
-                    :class="{ 'bg-neutral-200/80 dark:bg-neutral-700/80': isCurrentIptv(ch) }"
+                    :class="{
+                      'bg-neutral-200/80 dark:bg-neutral-700/80': isCurrentIptv(ch),
+                      'cursor-not-allowed opacity-40 hover:bg-transparent dark:hover:bg-transparent': isIptvUntested(ch),
+                    }"
                     @click="playerStore.playIptvChannel(ch)"
                   >
                     <div class="flex size-9 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-black/5 bg-white text-xs font-semibold text-neutral-600 dark:border-white/10 dark:bg-neutral-800 dark:text-neutral-300">
@@ -231,6 +235,10 @@ async function loadIptvChannels() {
 function isCurrentIptv(ch) {
   const current = playerStore.currentIptvChannel
   return current && current.name === ch.name
+}
+
+function isIptvUntested(ch) {
+  return ch.urls.every(u => u.is_working === -1)
 }
 
 // 切换到 IPTV 模式时加载频道列表

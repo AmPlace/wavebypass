@@ -51,9 +51,11 @@
             type="button"
             :aria-label="`播放 ${ch.name}`"
             :style="{ height: `${cardSize}px` }"
+            :disabled="isAllFailed(ch)"
             class="group rounded-3xl border border-white/70 bg-gray-50/80 p-3 text-left shadow-sm shadow-black/[0.03] outline-none backdrop-blur-xl transition-[background-color,transform,box-shadow,border-color] duration-300 ease-out hover:scale-[1.02] hover:bg-white/90 active:scale-95 dark:border-white/10 dark:bg-neutral-800/50 dark:shadow-black/20 dark:hover:bg-neutral-800/75"
             :class="{
               'ring-2 ring-black dark:ring-white': isCurrentChannel(ch),
+              'cursor-not-allowed opacity-40 hover:scale-100 hover:bg-gray-50/80 dark:hover:bg-neutral-800/50': isAllFailed(ch),
             }"
             @click="playChannel(ch)"
           >
@@ -80,6 +82,18 @@
                   class="mt-0.5 line-clamp-1 text-[0.7rem] text-gray-400 dark:text-gray-500"
                 >
                   {{ ch.group_name }}
+                </span>
+                <span
+                  v-if="isUntested(ch)"
+                  class="mt-1 rounded-full bg-neutral-200 px-1.5 py-0.5 text-[0.6rem] text-neutral-500 dark:bg-neutral-700 dark:text-neutral-400"
+                >
+                  未测试
+                </span>
+                <span
+                  v-else-if="isAllFailed(ch)"
+                  class="mt-1 rounded-full bg-red-100 px-1.5 py-0.5 text-[0.6rem] text-red-500 dark:bg-red-900/30 dark:text-red-400"
+                >
+                  不可用
                 </span>
               </div>
             </div>
@@ -136,11 +150,17 @@ function isCurrentChannel(ch) {
   return current && current.name === ch.name
 }
 
+function isUntested(ch) {
+  return ch.urls.every(u => u.is_working === -1)
+}
+
+function isAllFailed(ch) {
+  return ch.urls.every(u => u.is_working === 0)
+}
+
 function playChannel(ch) {
-  if (!ch.urls || !ch.urls.length) {
-    console.warn('该频道无可用播放源')
-    return
-  }
+  if (isAllFailed(ch)) return
+  if (!ch.urls || !ch.urls.length) return
   playerStore.playIptvChannel(ch)
 }
 
