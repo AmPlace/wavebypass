@@ -3,6 +3,7 @@ import logging
 import os
 import time
 import json
+from datetime import datetime, timezone
 from collections.abc import AsyncIterator
 from urllib.parse import quote, urljoin, urlparse
 
@@ -1355,6 +1356,53 @@ async def test_all_subscriptions():
     return {"total": total}
 
 
+@app.post("/api/iptv/subscriptions/{sub_id}/test-all")
+async def test_subscription(sub_id: int):
+    """测速单个订阅源的所有频道"""
+    sub = await db.get_subscription(sub_id)
+    if not sub:
+        raise HTTPException(status_code=404, detail="订阅不存在")
+
+    channels = await db.get_channels(sub_id)
+    if not channels:
+        raise HTTPException(status_code=400, detail="该订阅无频道")
+
+    await db.reset_channel_statuses(sub_id)
+    _test_progress[sub_id] = {"total": len(channels), "tested": 0, "working": 0, "failed": 0}
+    _global_test_progress.update({"total": len(channels), "tested": 0, "working": 0, "failed": 0})
+    logger.info("开始测速订阅 %s: %d 个频道", sub['title'], len(channels))
+    asyncio.create_task(_run_speed_test_sub(sub_id, channels))
+    return {"total": len(channels)}
+
+
+async def _run_speed_test_sub(sub_id: int, channels: list[dict]):
+    semaphore = asyncio.Semaphore(10)
+
+    async def _limited_test(ch):
+        async with semaphore:
+            try:
+                return ch, await asyncio.wait_for(_test_single_channel(ch), timeout=12)
+            except asyncio.TimeoutError:
+                return ch, {"working": False, "latency_ms": 0}
+
+    tasks = [_limited_test(ch) for ch in channels]
+    for coro in asyncio.as_completed(tasks):
+        try:
+            ch, result = await coro
+            await db.update_channel_status(ch['id'], is_working=1 if result['working'] else 0, latency_ms=result['latency_ms'])
+        except Exception as e:
+            logger.warning("测速异常: %s", e)
+        _test_progress[sub_id]['tested'] += 1
+        _global_test_progress['tested'] += 1
+        if result.get('working'):
+            _test_progress[sub_id]['working'] += 1
+            _global_test_progress['working'] += 1
+        else:
+            _test_progress[sub_id]['failed'] += 1
+            _global_test_progress['failed'] += 1
+    await db.update_subscription(sub_id, last_tested=datetime.now(timezone.utc).isoformat())
+
+
 async def _run_speed_test_global(channels: list[dict]):
     semaphore = asyncio.Semaphore(10)
 
@@ -1386,6 +1434,11 @@ async def _run_speed_test_global(channels: list[dict]):
         total = _global_test_progress['total']
         if tested % 50 == 0 or tested == total:
             logger.info("测速进度: %d/%d (可用:%d 不可用:%d)", tested, total, _global_test_progress['working'], _global_test_progress['failed'])
+    # 测速完成，更新所有订阅的 last_tested
+    now = datetime.now(timezone.utc).isoformat()
+    subs = await db.get_subscriptions()
+    for sub in subs:
+        await db.update_subscription(sub['id'], last_tested=now)
 
 
 @app.get("/api/iptv/test-status")
@@ -1396,9 +1449,11 @@ async def global_test_status():
 async def _test_single_channel(ch: dict) -> dict:
     """测速单个频道：GET URL → 判断是否 M3U8 → HEAD 第一个 TS 分片"""
     url = ch['url']
+    custom_ua = ch.get('custom_ua', '')
+    headers = {'User-Agent': custom_ua} if custom_ua else {}
     start = time.time()
     try:
-        resp = await http_client.get(url, follow_redirects=True, timeout=8)
+        resp = await http_client.get(url, follow_redirects=True, timeout=8, headers=headers)
         latency = (time.time() - start) * 1000
 
         content_type = resp.headers.get('content-type', '').lower()
@@ -1409,7 +1464,7 @@ async def _test_single_channel(ch: dict) -> dict:
             ts_url = _find_first_ts_url(resp.text, url)
             if ts_url:
                 ts_start = time.time()
-                ts_resp = await http_client.head(ts_response_url(ts_url), follow_redirects=True, timeout=5)
+                ts_resp = await http_client.head(ts_response_url(ts_url), follow_redirects=True, timeout=5, headers=headers)
                 ts_latency = (time.time() - ts_start) * 1000
                 if ts_resp.status_code < 400:
                     return {"working": True, "latency_ms": round(latency + ts_latency, 1)}

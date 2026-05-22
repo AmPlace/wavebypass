@@ -95,7 +95,8 @@
                 <span class="size-1.5 rounded-full" :class="sub.valid ? 'bg-emerald-400' : 'bg-red-400'"></span>
                 {{ sub.channel_count }} 个频道
               </span>
-              <span v-if="sub.last_updated">更新于 {{ formatTime(sub.last_updated) }}</span>
+              <span v-if="sub.last_tested">测速 {{ formatTime(sub.last_tested) }}</span>
+              <span v-else-if="sub.last_updated">更新于 {{ formatTime(sub.last_updated) }}</span>
             </div>
           </div>
         </div>
@@ -106,6 +107,13 @@
             @click="handleRefresh(sub)"
           >
             刷新
+          </button>
+          <button
+            type="button"
+            class="rounded-lg bg-neutral-100 px-2.5 py-1 text-xs text-neutral-600 transition-colors hover:bg-neutral-200 dark:bg-neutral-700 dark:text-neutral-300 dark:hover:bg-neutral-600"
+            @click="handleTestSub(sub)"
+          >
+            测速
           </button>
           <button
             type="button"
@@ -199,13 +207,26 @@ async function handleRefresh(sub) {
   }
 }
 
+async function handleTestSub(sub) {
+  if (testRunning.value) return
+  try {
+    const res = await fetch(`${API_BASE}/api/iptv/subscriptions/${sub.id}/test-all`, { method: 'POST' })
+    const data = await res.json()
+    testRunning.value = true
+    testProgress.value = { total: data.total || 0, tested: 0, working: 0, failed: 0 }
+    testTimer = setInterval(pollTestStatus, 1000)
+  } catch (e) {
+    alert(`测速失败: ${e.message}`)
+  }
+}
+
 async function handleTestAll() {
   if (testRunning.value) return
   try {
-    await testAllGlobal()
+    const res = await testAllGlobal()
     testRunning.value = true
-    testProgress.value = { total: 0, tested: 0, working: 0, failed: 0 }
-    testTimer = setInterval(pollTestStatus, 2000)
+    testProgress.value = { total: res.total || 0, tested: 0, working: 0, failed: 0 }
+    testTimer = setInterval(pollTestStatus, 1000)
   } catch (e) {
     alert(`启动测速失败: ${e.message}`)
   }

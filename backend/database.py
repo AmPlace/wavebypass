@@ -20,7 +20,8 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     last_updated  TEXT DEFAULT '',
     created_at    TEXT NOT NULL,
     custom_ua     TEXT DEFAULT '',
-    force_proxy   INTEGER DEFAULT 0
+    force_proxy   INTEGER DEFAULT 0,
+    last_tested   TEXT DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS channels (
@@ -60,6 +61,7 @@ async def initialize():
         for col, typ, default in [
             ('custom_ua', 'TEXT', "''"),
             ('force_proxy', 'INTEGER', '0'),
+            ('last_tested', 'TEXT', "''"),
         ]:
             try:
                 conn.execute(f"ALTER TABLE subscriptions ADD COLUMN {col} {typ} DEFAULT {default}")
