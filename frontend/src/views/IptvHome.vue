@@ -132,17 +132,16 @@ onMounted(loadChannels)
 watch(searchQuery, () => { loadChannels() })
 
 function isCurrentChannel(ch) {
-  // 简单匹配：当前播放的 URL 是否在该频道的 urls 中
-  return false // 后续播放功能接入后实现
+  const current = playerStore.currentIptvChannel
+  return current && current.name === ch.name
 }
 
 function playChannel(ch) {
-  // 找到最优可用链接
-  const best = ch.urls.find(u => u.is_working === 1) || ch.urls[0]
-  if (best) {
-    console.log('播放:', ch.name, best.url)
-    // 后续接入播放器
+  if (!ch.urls || !ch.urls.length) {
+    console.warn('该频道无可用播放源')
+    return
   }
+  playerStore.playIptvChannel(ch)
 }
 
 function pillClass(active) {

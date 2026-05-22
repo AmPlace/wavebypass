@@ -11,6 +11,10 @@ export const usePlayerStore = defineStore('player', {
     stationMap: {},
     isPlayerExpanded: false,
     activeMode: 'radio',  // 'radio' | 'iptv'
+    // IPTV 播放状态
+    currentIptvChannel: null,  // { name, group_name, logo_url, urls: [...] }
+    iptvUrls: [],              // 当前频道的所有可用链接
+    iptvUrlIndex: 0,           // 当前尝试的链接索引
   }),
 
   getters: {
@@ -98,6 +102,32 @@ export const usePlayerStore = defineStore('player', {
 
     setActiveMode(mode) {
       this.activeMode = mode
+    },
+
+    playIptvChannel(channel) {
+      const sorted = [...channel.urls].sort((a, b) => {
+        if (a.is_working !== b.is_working) return b.is_working - a.is_working
+        return (a.latency_ms || 9999) - (b.latency_ms || 9999)
+      })
+      this.currentIptvChannel = channel
+      this.iptvUrls = sorted
+      this.iptvUrlIndex = 0
+      this.playbackError = ''
+      this.isLoading = true
+      this.isPlaying = true
+    },
+
+    iptvFallbackNext() {
+      if (this.iptvUrlIndex < this.iptvUrls.length - 1) {
+        this.iptvUrlIndex++
+        this.playbackError = `源不可用，正在切换备用源 (${this.iptvUrlIndex + 1}/${this.iptvUrls.length})`
+        this.isLoading = true
+        return true
+      }
+      this.playbackError = '所有播放源均不可用'
+      this.isPlaying = false
+      this.isLoading = false
+      return false
     },
   },
 })

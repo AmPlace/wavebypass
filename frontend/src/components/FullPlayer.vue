@@ -2,7 +2,7 @@
   <Teleport to="body">
     <Transition name="slide-up">
       <div
-        v-if="isPlayerExpanded"
+        v-show="isPlayerExpanded"
         class="fixed inset-0 z-50 flex flex-col bg-gray-100 dark:bg-neutral-900"
       >
         <!-- 顶部栏 -->
@@ -24,7 +24,19 @@
 
           <!-- 左栏：媒体展示区 -->
           <div class="flex flex-1 flex-col items-center justify-center overflow-hidden rounded-3xl bg-gradient-to-br from-rose-400/20 via-fuchsia-400/20 to-amber-300/20 dark:from-rose-500/10 dark:via-fuchsia-500/10 dark:to-amber-500/10 lg:flex-[3]">
-            <div class="flex flex-col items-center gap-5 p-8">
+
+            <!-- IPTV 视频播放 -->
+            <video
+              v-if="isIptvMode"
+              ref="iptvVideoRef"
+              class="h-full w-full object-contain"
+              playsinline
+              preload="auto"
+              @error="handleIptvError"
+            ></video>
+
+            <!-- 电台 logo 展示 -->
+            <div v-else class="flex flex-col items-center gap-5 p-8">
               <div
                 class="flex size-28 items-center justify-center overflow-hidden rounded-full border border-white/40 bg-white/30 shadow-xl shadow-black/10 backdrop-blur-sm transition-transform duration-500 sm:size-36 dark:border-white/10 dark:bg-white/10"
                 :class="{ 'animate-pulse': isLoading }"
@@ -143,20 +155,31 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, ref, watch, onBeforeUnmount } from 'vue'
 import { storeToRefs } from 'pinia'
 import { usePlayerStore } from '../stores/player'
+
+const API_BASE = import.meta.env.VITE_API_BASE_URL || ''
 
 const playerStore = usePlayerStore()
 const { isPlayerExpanded, currentStation, isPlaying, isLoading, volume, stationMap, stationList } = storeToRefs(playerStore)
 
+const iptvVideoRef = ref(null)
+const iptvHlsRef = ref(null)
+
+const isIptvMode = computed(() => Boolean(playerStore.currentIptvChannel))
+
 const currentStationData = computed(() => stationMap.value[currentStation.value])
 
-const currentStationName = computed(() => currentStationData.value?.name || '未选择电台')
+const currentStationName = computed(() => {
+  if (playerStore.currentIptvChannel) return playerStore.currentIptvChannel.name
+  return currentStationData.value?.name || '未选择电台'
+})
 
 const statusText = computed(() => {
   if (playerStore.playbackError) return playerStore.playbackError
   if (isLoading.value) return '正在连接'
+  if (playerStore.currentIptvChannel) return playerStore.currentIptvChannel.group_name || 'IPTV'
   const subtitle = currentStationData.value?.subtitle
   if (subtitle) return subtitle
   return 'Live'
@@ -179,6 +202,117 @@ function playNext() {
   const nextIdx = idx >= list.length - 1 ? 0 : idx + 1
   playerStore.switchStation(list[nextIdx].id)
 }
+
+// ── IPTV 视频播放 ──
+
+function destroyIptvHls() {
+  if (iptvHlsRef.value) {
+    iptvHlsRef.value.destroy()
+    iptvHlsRef.value = null
+  }
+}
+
+function resetIptvVideo() {
+  if (!iptvVideoRef.value) return
+  iptvVideoRef.value.pause()
+  iptvVideoRef.value.removeAttribute('src')
+  iptvVideoRef.value.load()
+}
+
+function isHlsUrl(url) {
+  return /\.m3u8(\?|$)/i.test(url)
+}
+
+function getProxyUrl(url) {
+  return `${API_BASE}/api/iptv/proxy/playlist.m3u8?target_url=${encodeURIComponent(url)}`
+}
+
+async function tryPlayIptv(url) {
+  destroyIptvHls()
+  resetIptvVideo()
+
+  if (isHlsUrl(url) && typeof Hls !== 'undefined' && Hls.isSupported()) {
+    const hls = new Hls({
+      enableWorker: true, lowLatencyMode: true, autoStartLoad: true,
+      startFragPrefetch: true, liveSyncDurationCount: 2,
+      liveMaxLatencyDurationCount: 5, maxBufferLength: 10,
+    })
+    iptvHlsRef.value = hls
+    hls.loadSource(url)
+    hls.attachMedia(iptvVideoRef.value)
+    await new Promise((resolve, reject) => {
+      hls.on(Hls.Events.MANIFEST_PARSED, resolve)
+      hls.on(Hls.Events.ERROR, (_e, d) => { if (d?.fatal) reject(d) })
+      setTimeout(reject, 10_000)
+    })
+  } else if (iptvVideoRef.value.canPlayType('application/vnd.apple.mpegurl')) {
+    iptvVideoRef.value.src = url
+    await new Promise((resolve, reject) => {
+      iptvVideoRef.value.addEventListener('loadedmetadata', resolve, { once: true })
+      iptvVideoRef.value.addEventListener('error', reject, { once: true })
+      setTimeout(reject, 10_000)
+    })
+  } else {
+    iptvVideoRef.value.src = url
+    iptvVideoRef.value.load()
+    await new Promise((resolve, reject) => {
+      iptvVideoRef.value.addEventListener('canplay', resolve, { once: true })
+      iptvVideoRef.value.addEventListener('error', reject, { once: true })
+      setTimeout(reject, 10_000)
+    })
+  }
+
+  iptvVideoRef.value.volume = volume.value
+  await iptvVideoRef.value.play()
+  playerStore.clearPlaybackError()
+  playerStore.setLoading(false)
+  playerStore.togglePlay(true)
+}
+
+async function playCurrentIptvUrl() {
+  if (!iptvVideoRef.value || !playerStore.currentIptvChannel) return
+  const urls = playerStore.iptvUrls
+  const idx = playerStore.iptvUrlIndex
+  if (idx >= urls.length) return
+
+  const originalUrl = urls[idx].url
+  try {
+    await tryPlayIptv(originalUrl)
+  } catch {
+    try {
+      await tryPlayIptv(getProxyUrl(originalUrl))
+    } catch {
+      if (playerStore.iptvFallbackNext()) {
+        playCurrentIptvUrl()
+      }
+    }
+  }
+}
+
+function handleIptvError() {
+  if (playerStore.iptvFallbackNext()) {
+    playCurrentIptvUrl()
+  }
+}
+
+watch(() => playerStore.currentIptvChannel, (ch) => {
+  if (ch) playCurrentIptvUrl()
+})
+
+watch(isPlaying, (playing) => {
+  if (!iptvVideoRef.value || !isIptvMode.value) return
+  playing ? iptvVideoRef.value.play().catch(() => {}) : iptvVideoRef.value.pause()
+})
+
+watch(volume, (v) => {
+  if (iptvVideoRef.value) iptvVideoRef.value.volume = v
+})
+
+watch(() => playerStore.iptvUrlIndex, () => {
+  if (isIptvMode.value && isPlaying.value) playCurrentIptvUrl()
+})
+
+onBeforeUnmount(() => destroyIptvHls())
 </script>
 
 <style scoped>

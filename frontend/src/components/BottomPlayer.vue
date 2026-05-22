@@ -148,9 +148,12 @@ function checkOverflow() {
   }
 }
 
-watch([currentStation, playbackError, isLoading], () => nextTick(checkOverflow))
+watch([currentStation, playbackError, isLoading, () => playerStore.currentIptvChannel], () => nextTick(checkOverflow))
 
 const currentStationName = computed(() => {
+  if (playerStore.currentIptvChannel) {
+    return playerStore.currentIptvChannel.name
+  }
   return playerStore.stationMap[currentStation.value]?.name || currentStation.value || '未选择电台'
 })
 
@@ -161,6 +164,10 @@ const statusText = computed(() => {
 
   if (isLoading.value) {
     return '正在连接'
+  }
+
+  if (playerStore.currentIptvChannel) {
+    return playerStore.currentIptvChannel.group_name || 'IPTV'
   }
 
   return 'Live'
