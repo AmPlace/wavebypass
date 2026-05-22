@@ -1344,6 +1344,7 @@ async def test_all_subscriptions():
 
     await db.reset_channel_statuses_all()
     _global_test_progress.update({"total": total, "tested": 0, "working": 0, "failed": 0})
+    logger.info("开始测速: %d 个频道", total)
     asyncio.create_task(_run_speed_test_global(all_channels))
     return {"total": total}
 
@@ -1353,21 +1354,32 @@ async def _run_speed_test_global(channels: list[dict]):
 
     async def _limited_test(ch):
         async with semaphore:
-            return ch, await _test_single_channel(ch)
+            try:
+                return ch, await asyncio.wait_for(_test_single_channel(ch), timeout=12)
+            except asyncio.TimeoutError:
+                logger.warning("测速超时: %s", ch.get('name', ch.get('url', ''))[:60])
+                return ch, {"working": False, "latency_ms": 0}
 
     tasks = [_limited_test(ch) for ch in channels]
     for coro in asyncio.as_completed(tasks):
-        ch, result = await coro
-        await db.update_channel_status(
-            ch['id'],
-            is_working=1 if result['working'] else 0,
-            latency_ms=result['latency_ms'],
-        )
+        try:
+            ch, result = await coro
+            await db.update_channel_status(
+                ch['id'],
+                is_working=1 if result['working'] else 0,
+                latency_ms=result['latency_ms'],
+            )
+        except Exception as e:
+            logger.warning("测速异常: %s", e)
         _global_test_progress['tested'] += 1
-        if result['working']:
+        if result.get('working'):
             _global_test_progress['working'] += 1
         else:
             _global_test_progress['failed'] += 1
+        tested = _global_test_progress['tested']
+        total = _global_test_progress['total']
+        if tested % 50 == 0 or tested == total:
+            logger.info("测速进度: %d/%d (可用:%d 不可用:%d)", tested, total, _global_test_progress['working'], _global_test_progress['failed'])
 
 
 @app.get("/api/iptv/test-status")

@@ -260,6 +260,8 @@ function toggleFullscreen() {
   if (!el) return
   if (document.fullscreenElement) {
     document.exitFullscreen()
+  } else if (el.webkitEnterFullscreen) {
+    el.webkitEnterFullscreen()  // iOS 私有 API
   } else {
     el.requestFullscreen().catch(() => {})
   }
