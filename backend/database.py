@@ -18,7 +18,9 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     channel_count INTEGER DEFAULT 0,
     valid         INTEGER DEFAULT 1,
     last_updated  TEXT DEFAULT '',
-    created_at    TEXT NOT NULL
+    created_at    TEXT NOT NULL,
+    custom_ua     TEXT DEFAULT '',
+    force_proxy   INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS channels (
@@ -54,6 +56,15 @@ async def initialize():
     def _init():
         conn = _connect()
         conn.executescript(_SCHEMA)
+        # 兼容已有数据库：补充新字段
+        for col, typ, default in [
+            ('custom_ua', 'TEXT', "''"),
+            ('force_proxy', 'INTEGER', '0'),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE subscriptions ADD COLUMN {col} {typ} DEFAULT {default}")
+            except sqlite3.OperationalError:
+                pass  # 字段已存在
         conn.close()
     await asyncio.to_thread(_init)
 
@@ -80,13 +91,13 @@ async def set_setting(key: str, value: str):
 
 # ── Subscriptions ──
 
-async def add_subscription(title: str, url: str, channel_count: int = 0) -> int:
+async def add_subscription(title: str, url: str, channel_count: int = 0, custom_ua: str = '', force_proxy: int = 0) -> int:
     def _add():
         conn = _connect()
         now = datetime.now(timezone.utc).isoformat()
         cur = conn.execute(
-            "INSERT INTO subscriptions(title, url, channel_count, created_at) VALUES(?, ?, ?, ?)",
-            (title, url, channel_count, now),
+            "INSERT INTO subscriptions(title, url, channel_count, created_at, custom_ua, force_proxy) VALUES(?, ?, ?, ?, ?, ?)",
+            (title, url, channel_count, now, custom_ua, force_proxy),
         )
         conn.commit()
         sid = cur.lastrowid
@@ -191,7 +202,7 @@ async def get_aggregated_channels(group: str = '', search: str = '') -> list[dic
     def _get():
         conn = _connect()
         query = """
-            SELECT c.*, s.title as sub_title
+            SELECT c.*, s.title as sub_title, s.custom_ua, s.force_proxy
             FROM channels c
             JOIN subscriptions s ON c.subscription_id = s.id
         """

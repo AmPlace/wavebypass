@@ -367,14 +367,14 @@ function getProxyUrl(url) {
   return `${API_BASE}/api/iptv/proxy/playlist.m3u8?target_url=${encodeURIComponent(url)}`
 }
 
-async function tryPlayIptv(url, usingProxy = false) {
+async function tryPlayIptv(url, usingProxy = false, customUa = '') {
   destroyIptvHls()
   resetIptvVideo()
   console.log(`[START] ${usingProxy ? '(proxy) ' : ''}${url.slice(0, 80)}...`)
 
   try {
     if (isHlsUrl(url) && canUseHls()) {
-      const hls = new Hls({
+      const hlsConfig = {
         enableWorker: true,
         lowLatencyMode: false,
         liveDurationInfinity: true,
@@ -386,7 +386,13 @@ async function tryPlayIptv(url, usingProxy = false) {
         nudgeMaxRetry: 3,
         maxBufferLength: 30,
         maxBufferHole: 0.5,
-      })
+      }
+      if (customUa) {
+        hlsConfig.xhrSetup = (xhr) => {
+          xhr.setRequestHeader('User-Agent', customUa)
+        }
+      }
+      const hls = new Hls(hlsConfig)
       iptvHlsRef.value = hls
       hls.loadSource(url)
       hls.attachMedia(iptvVideoRef.value)
@@ -427,8 +433,9 @@ async function tryPlayIptv(url, usingProxy = false) {
         if (d.type === Hls.ErrorTypes.NETWORK_ERROR && !usingProxy) {
           console.log('[FALLBACK] 直连失败，切到代理')
           hls.destroy()
-          const proxyUrl = `${API_BASE}/api/iptv/proxy/wide.m3u8?proxy_ts=1&target_url=${encodeURIComponent(url)}`
-          tryPlayIptv(proxyUrl, true)
+          const uaParam = customUa ? `&custom_ua=${encodeURIComponent(customUa)}` : ''
+          const proxyUrl = `${API_BASE}/api/iptv/proxy/wide.m3u8?proxy_ts=1${uaParam}&target_url=${encodeURIComponent(url)}`
+          tryPlayIptv(proxyUrl, true, customUa)
           return
         }
         if (d.fatal) {
@@ -441,10 +448,9 @@ async function tryPlayIptv(url, usingProxy = false) {
             hls.recoverMediaError()
           } else {
             _recoveryCount = 0
-            console.log('[REBUILD] ' + (forceProxyTs ? 'retry proxy' : 'switch to proxy'))
+            console.log('[REBUILD] ' + (usingProxy ? 'retry proxy' : 'switch to proxy'))
             hls.destroy()
-            // 网络错误时强制走代理
-            tryPlayIptv(url, d.type === Hls.ErrorTypes.NETWORK_ERROR ? true : forceProxyTs)
+            tryPlayIptv(url, d.type === Hls.ErrorTypes.NETWORK_ERROR || usingProxy, customUa)
           }
         }
       })
@@ -493,10 +499,21 @@ async function playCurrentIptvUrl() {
   const idx = playerStore.iptvUrlIndex
   if (idx >= urls.length) return
 
+  const ch = playerStore.currentIptvChannel
   const originalUrl = urls[idx].url
-  console.log(`[START] ${originalUrl.slice(0, 60)}...`)
+  const customUa = ch.custom_ua || ''
+  const forceProxy = Boolean(ch.force_proxy) || Boolean(customUa)
+  console.log(`[DEBUG] custom_ua:"${customUa}" force_proxy:${ch.force_proxy} forceProxy:${forceProxy} ch:`, JSON.stringify({ custom_ua: ch.custom_ua, force_proxy: ch.force_proxy }))
+
+  let playUrl = originalUrl
+  if (forceProxy) {
+    const uaParam = customUa ? `&custom_ua=${encodeURIComponent(customUa)}` : ''
+    playUrl = `${API_BASE}/api/iptv/proxy/wide.m3u8?proxy_ts=1${uaParam}&target_url=${encodeURIComponent(originalUrl)}`
+  }
+
+  console.log(`[START] force:${forceProxy} ua:${customUa.slice(0, 20) || '默认'} url:${playUrl.slice(0, 60)}...`)
   try {
-    await tryPlayIptv(originalUrl)
+    await tryPlayIptv(playUrl, forceProxy, customUa)
   } catch (e) {
     console.warn('[IPTV] 失败:', e?.message)
     playerStore.setPlaybackError(`失败: ${e?.message}`)

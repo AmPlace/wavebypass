@@ -22,11 +22,11 @@ export async function fetchSubscriptions() {
   return res.json()
 }
 
-export async function addSubscription(url, title = '') {
+export async function addSubscription(url, title = '', custom_ua = '', force_proxy = false) {
   const res = await request('/api/iptv/subscriptions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ url, title }),
+    body: JSON.stringify({ url, title, custom_ua, force_proxy }),
   })
   return res.json()
 }

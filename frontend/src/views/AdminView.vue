@@ -46,22 +46,36 @@
     </div>
 
     <!-- 添加订阅 -->
-    <div class="mb-6 flex gap-2">
-      <input
-        v-model="addUrl"
-        type="url"
-        placeholder="输入 M3U/M3U8 订阅链接…"
-        class="min-w-0 flex-1 rounded-xl border border-neutral-200 bg-white/70 px-4 py-2.5 text-sm text-neutral-800 outline-none backdrop-blur-xl transition-colors focus:border-neutral-400 dark:border-neutral-600 dark:bg-neutral-800/70 dark:text-neutral-200 dark:focus:border-neutral-500"
-        @keydown.enter="handleAdd"
-      />
-      <button
-        type="button"
-        class="shrink-0 rounded-xl bg-neutral-950 px-4 py-2.5 text-sm font-medium text-white transition-all hover:scale-[1.03] active:scale-95 disabled:opacity-50 dark:bg-white dark:text-black"
-        :disabled="!addUrl.trim() || addLoading"
-        @click="handleAdd"
-      >
-        {{ addLoading ? '解析中…' : '添加' }}
-      </button>
+    <div class="mb-6 space-y-2">
+      <div class="flex gap-2">
+        <input
+          v-model="addUrl"
+          type="url"
+          placeholder="输入 M3U/M3U8 订阅链接…"
+          class="min-w-0 flex-1 rounded-xl border border-neutral-200 bg-white/70 px-4 py-2.5 text-sm text-neutral-800 outline-none backdrop-blur-xl transition-colors focus:border-neutral-400 dark:border-neutral-600 dark:bg-neutral-800/70 dark:text-neutral-200 dark:focus:border-neutral-500"
+          @keydown.enter="handleAdd"
+        />
+        <button
+          type="button"
+          class="shrink-0 rounded-xl bg-neutral-950 px-4 py-2.5 text-sm font-medium text-white transition-all hover:scale-[1.03] active:scale-95 disabled:opacity-50 dark:bg-white dark:text-black"
+          :disabled="!addUrl.trim() || addLoading"
+          @click="handleAdd"
+        >
+          {{ addLoading ? '解析中…' : '添加' }}
+        </button>
+      </div>
+      <div class="flex items-center gap-2">
+        <input
+          v-model="addUa"
+          type="text"
+          placeholder="自定义 User-Agent（可选）"
+          class="min-w-0 flex-1 rounded-xl border border-neutral-200 bg-white/70 px-4 py-2 text-xs text-neutral-600 outline-none backdrop-blur-xl transition-colors focus:border-neutral-400 dark:border-neutral-600 dark:bg-neutral-800/70 dark:text-neutral-300 dark:focus:border-neutral-500"
+        />
+        <label class="flex items-center gap-1.5 text-xs text-neutral-500 dark:text-neutral-400 cursor-pointer">
+          <input v-model="addForceProxy" type="checkbox" class="size-3.5 rounded accent-neutral-950 dark:accent-white" />
+          强制中转
+        </label>
+      </div>
     </div>
 
     <p v-if="addError" class="mb-4 text-xs text-red-500">{{ addError }}</p>
@@ -129,6 +143,8 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL || ''
 const subscriptions = ref([])
 const loading = ref(false)
 const addUrl = ref('')
+const addUa = ref('')
+const addForceProxy = ref(false)
 const addError = ref('')
 const addLoading = ref(false)
 const testRunning = ref(false)
@@ -153,8 +169,10 @@ async function handleAdd() {
   addLoading.value = true
   addError.value = ''
   try {
-    await addSubscription(url)
+    await addSubscription(url, '', addUa.value.trim(), addForceProxy.value)
     addUrl.value = ''
+    addUa.value = ''
+    addForceProxy.value = false
     await loadSubscriptions()
   } catch (e) {
     addError.value = e.message

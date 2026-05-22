@@ -1199,12 +1199,15 @@ async def add_subscription(request: Request):
     body = await request.json()
     url = (body.get('url') or '').strip()
     title = (body.get('title') or '').strip()
+    custom_ua = (body.get('custom_ua') or '').strip()
+    force_proxy = 1 if body.get('force_proxy') else 0
     if not url:
         raise HTTPException(status_code=400, detail="url 不能为空")
 
     # 拉取 M3U8
+    headers = {'User-Agent': custom_ua} if custom_ua else {}
     try:
-        resp = await http_client.get(url, follow_redirects=True, timeout=15)
+        resp = await http_client.get(url, follow_redirects=True, timeout=15, headers=headers)
         resp.raise_for_status()
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"拉取订阅源失败: {exc}") from exc
@@ -1220,7 +1223,7 @@ async def add_subscription(request: Request):
     if not title:
         title = _guess_sub_title(url, channels)
 
-    sub_id = await db.add_subscription(title=title, url=url, channel_count=len(channels))
+    sub_id = await db.add_subscription(title=title, url=url, channel_count=len(channels), custom_ua=custom_ua, force_proxy=force_proxy)
     await db.add_channels_bulk(sub_id, channels)
 
     return {"id": sub_id, "title": title, "url": url, "channel_count": len(channels)}
@@ -1254,8 +1257,9 @@ async def refresh_subscription(sub_id: int):
     if not sub:
         raise HTTPException(status_code=404, detail="订阅不存在")
 
+    headers = {'User-Agent': sub['custom_ua']} if sub.get('custom_ua') else {}
     try:
-        resp = await http_client.get(sub['url'], follow_redirects=True, timeout=15)
+        resp = await http_client.get(sub['url'], follow_redirects=True, timeout=15, headers=headers)
         resp.raise_for_status()
     except httpx.HTTPError as exc:
         await db.update_subscription(sub_id, valid=0)
@@ -1300,6 +1304,8 @@ async def aggregated_channels(group: str = '', search: str = ''):
                 'logo_url': ch['logo_url'],
                 'tvg_id': ch['tvg_id'],
                 'tvg_name': ch['tvg_name'],
+                'custom_ua': ch.get('custom_ua', ''),
+                'force_proxy': ch.get('force_proxy', 0),
                 'urls': [],
             }
         merged[key]['urls'].append({
@@ -1490,11 +1496,12 @@ _WIDE_WINDOW = 20
 _WIDE_TTL = 300    
 
 
-async def _wide_refresher(cache_key: str, target_url: str):
+async def _wide_refresher(cache_key: str, target_url: str, custom_ua: str = ''):
     """后台任务：每 2s 拉一次上游，更新分片队列"""
+    _h = {'User-Agent': custom_ua} if custom_ua else {}
     while True:
         try:
-            resp = await http_client.get(target_url, follow_redirects=True, timeout=6)
+            resp = await http_client.get(target_url, follow_redirects=True, timeout=6, headers=_h)
             resp.raise_for_status()
             lines = resp.text.splitlines()
 
@@ -1542,14 +1549,16 @@ async def _wide_refresher(cache_key: str, target_url: str):
 
 
 @app.get("/api/iptv/proxy/wide.m3u8")
-async def iptv_wide_playlist(target_url: str = '', proxy_ts: int = 0):
+async def iptv_wide_playlist(target_url: str = '', proxy_ts: int = 0, custom_ua: str = ''):
     if not target_url:
         raise HTTPException(status_code=400, detail="缺少 target_url")
 
+    _headers = {'User-Agent': custom_ua} if custom_ua else {}
+
     def _rewrite_ts(seg_url: str) -> str:
-        # 只重写 HTTP TS，HTTPS 直连不需要代理
         if proxy_ts and urlparse(seg_url).scheme == 'http':
-            return f'/api/iptv/proxy/chunk.ts?target_url={quote(seg_url, safe="")}'
+            ua = f'&custom_ua={quote(custom_ua, safe="")}' if custom_ua else ''
+            return f'/api/iptv/proxy/chunk.ts?target_url={quote(seg_url, safe="")}{ua}'
         return seg_url
 
     cache_key = quote(target_url, safe='')
@@ -1562,7 +1571,7 @@ async def iptv_wide_playlist(target_url: str = '', proxy_ts: int = 0):
 
         for attempt in range(4):
             try:
-                resp = await http_client.get(target_url, follow_redirects=True, timeout=6)
+                resp = await http_client.get(target_url, follow_redirects=True, timeout=6, headers=_headers)
                 resp.raise_for_status()
                 lines = resp.text.splitlines()
                 media_seq = 0
@@ -1596,7 +1605,7 @@ async def iptv_wide_playlist(target_url: str = '', proxy_ts: int = 0):
         }
         _wide_cache[cache_key] = cache
         _wide_cache[cache_key + '_ts'] = time.time()
-        asyncio.create_task(_wide_refresher(cache_key, target_url))
+        asyncio.create_task(_wide_refresher(cache_key, target_url, custom_ua))
 
         # 返回扩展窗口 playlist
         if queue:
@@ -1613,7 +1622,7 @@ async def iptv_wide_playlist(target_url: str = '', proxy_ts: int = 0):
                 headers={'Cache-Control': 'no-cache, no-store, must-revalidate'})
         # 直接转发
         try:
-            resp = await http_client.get(target_url, follow_redirects=True, timeout=6)
+            resp = await http_client.get(target_url, follow_redirects=True, timeout=6, headers=_headers)
             return Response(content=resp.text, media_type="application/x-mpegURL")
         except httpx.HTTPError as exc:
             raise HTTPException(status_code=502, detail=f"拉取失败: {exc}") from exc
@@ -1624,7 +1633,7 @@ async def iptv_wide_playlist(target_url: str = '', proxy_ts: int = 0):
     queue = cache['queue']
     if not queue:
         try:
-            resp = await http_client.get(target_url, follow_redirects=True, timeout=6)
+            resp = await http_client.get(target_url, follow_redirects=True, timeout=6, headers=_headers)
             return Response(content=resp.text, media_type="application/x-mpegURL")
         except httpx.HTTPError as exc:
             raise HTTPException(status_code=502, detail=f"拉取失败: {exc}") from exc
@@ -1669,13 +1678,13 @@ async def iptv_proxy_playlist(target_url: str = ''):
 
 
 @app.get("/api/iptv/proxy/chunk.ts")
-async def iptv_proxy_chunk(target_url: str = ''):
+async def iptv_proxy_chunk(target_url: str = '', custom_ua: str = ''):
     if not target_url:
         raise HTTPException(status_code=400, detail="缺少 target_url")
 
     try:
         upstream = await http_client.get(target_url, follow_redirects=True, headers={
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130.0.0.0 Safari/537.36',
+            'User-Agent': custom_ua or 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130.0.0.0 Safari/537.36',
         })
         upstream.raise_for_status()
     except httpx.HTTPError as exc:
