@@ -92,7 +92,7 @@ def parse_m3u(text: str) -> list[dict]:
             'name': name,
             'url': url,
             'logo_url': attrs.get('tvg-logo', ''),
-            'group_name': attrs.get('group-title', ''),
+            'group_name': attrs.get('group-title', '') or '其他',
             'tvg_id': attrs.get('tvg-id', ''),
             'tvg_name': attrs.get('tvg-name', ''),
         })
@@ -126,7 +126,7 @@ def parse_m3u(text: str) -> list[dict]:
             pending_extinf = {
                 'name': name,
                 'logo_url': attrs.get('tvg-logo', ''),
-                'group_name': attrs.get('group-title', '') or current_group,
+                'group_name': attrs.get('group-title', '') or current_group or '其他',
                 'tvg_id': attrs.get('tvg-id', ''),
                 'tvg_name': attrs.get('tvg-name', ''),
             }
