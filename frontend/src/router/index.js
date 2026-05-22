@@ -11,6 +11,11 @@ const routes = [
     name: 'iptv',
     component: () => import('../views/IptvHome.vue'),
   },
+  {
+    path: '/admin',
+    name: 'admin',
+    component: () => import('../views/AdminView.vue'),
+  },
 ]
 
 const router = createRouter({
