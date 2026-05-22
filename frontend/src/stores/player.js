@@ -110,12 +110,35 @@ export const usePlayerStore = defineStore('player', {
         if (a.is_working !== b.is_working) return b.is_working - a.is_working
         return (a.latency_ms || 9999) - (b.latency_ms || 9999)
       })
+      // 构建回退队列：直连优先，代理在后
+      const list = []
+      const API_BASE = import.meta.env?.VITE_API_BASE_URL || ''
+      // 分两组：直连组 + 必须代理组
+      const directUrls = []
+      const proxyOnlyUrls = []
+      for (const u of sorted) {
+        if (u.force_proxy || u.custom_ua) {
+          const ua = u.custom_ua ? `&custom_ua=${encodeURIComponent(u.custom_ua)}` : ''
+          proxyOnlyUrls.push({ url: `${API_BASE}/api/iptv/proxy/wide.m3u8?proxy_ts=1${ua}&target_url=${encodeURIComponent(u.url)}`, type: 'proxy' })
+        } else {
+          directUrls.push(u)
+        }
+      }
+      // 先所有直连，再所有直连的代理回退，最后是必须代理的
+      for (const u of directUrls) {
+        list.push({ url: u.url, type: 'direct' })
+      }
+      for (const u of directUrls) {
+        list.push({ url: `${API_BASE}/api/iptv/proxy/wide.m3u8?proxy_ts=1&target_url=${encodeURIComponent(u.url)}`, type: 'proxy' })
+      }
+      list.push(...proxyOnlyUrls)
       this.currentIptvChannel = channel
-      this.iptvUrls = sorted
+      this.iptvUrls = list
       this.iptvUrlIndex = 0
       this.playbackError = ''
       this.isLoading = true
-      this.isPlaying = true
+      this.isPlaying = false
+      // isPlaying 由实际播放事件设置，不提前设
     },
 
     iptvFallbackNext() {

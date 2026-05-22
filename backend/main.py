@@ -1313,8 +1313,6 @@ async def aggregated_channels(group: str = '', search: str = ''):
                 'logo_url': ch['logo_url'],
                 'tvg_id': ch['tvg_id'],
                 'tvg_name': ch['tvg_name'],
-                'custom_ua': ch.get('custom_ua', ''),
-                'force_proxy': ch.get('force_proxy', 0),
                 'urls': [],
             }
         merged[key]['urls'].append({
@@ -1322,6 +1320,8 @@ async def aggregated_channels(group: str = '', search: str = ''):
             'is_working': ch['is_working'],
             'latency_ms': ch['latency_ms'],
             'sub_title': ch.get('sub_title', ''),
+            'custom_ua': ch.get('custom_ua', ''),
+            'force_proxy': ch.get('force_proxy', 0),
         })
 
     # 排序：可用优先，然后按延迟
