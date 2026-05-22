@@ -15,6 +15,9 @@ services:
       GEO_RESTRICT: ${GEO_RESTRICT:-}
       GEO_BLOCKED_REGIONS: ${GEO_BLOCKED_REGIONS:-TW}
 
+    volumes:
+      - wavebypass-data:/app/data
+
     networks:
       - wavebypass-net
 
@@ -41,3 +44,6 @@ services:
 networks:
   wavebypass-net:
     driver: bridge
+
+volumes:
+  wavebypass-data:

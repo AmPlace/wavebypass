@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from contextlib import asynccontextmanager
 from fetchers import STATION_FETCHER_MAP, yunting
+import database
 
 
 TOKEN_REFRESH_INTERVAL_SECONDS = 18_000
@@ -292,6 +293,7 @@ async def _yunting_refresh_task() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    await database.initialize()
     asyncio.create_task(refresh_tokens_task())
     asyncio.create_task(_yunting_refresh_task())
     asyncio.create_task(_myradio_refresh_task())
