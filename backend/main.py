@@ -1187,3 +1187,380 @@ async def _prefetch_rb() -> None:
             except Exception as exc:
                 logger.warning("RB %s 预热失败: %s", code, exc)
         await asyncio.sleep(RB_CACHE_TTL)
+
+
+# =====================================================================
+# IPTV 订阅管理
+# =====================================================================
+
+from m3u8_parser import parse_m3u, deduplicate_channels
+import database as db
+
+@app.post("/api/iptv/subscriptions")
+async def add_subscription(request: Request):
+    body = await request.json()
+    url = (body.get('url') or '').strip()
+    title = (body.get('title') or '').strip()
+    if not url:
+        raise HTTPException(status_code=400, detail="url 不能为空")
+
+    # 拉取 M3U8
+    try:
+        resp = await http_client.get(url, follow_redirects=True, timeout=15)
+        resp.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"拉取订阅源失败: {exc}") from exc
+
+    # 解析
+    channels = parse_m3u(resp.text)
+    if not channels:
+        raise HTTPException(status_code=400, detail="未解析到任何频道")
+
+    channels = deduplicate_channels(channels)
+
+    # 自动检测标题
+    if not title:
+        title = _guess_sub_title(url, channels)
+
+    sub_id = await db.add_subscription(title=title, url=url, channel_count=len(channels))
+    await db.add_channels_bulk(sub_id, channels)
+
+    return {"id": sub_id, "title": title, "url": url, "channel_count": len(channels)}
+
+
+@app.get("/api/iptv/subscriptions")
+async def list_subscriptions():
+    return await db.get_subscriptions()
+
+
+@app.get("/api/iptv/subscriptions/{sub_id}")
+async def get_subscription(sub_id: int):
+    sub = await db.get_subscription(sub_id)
+    if not sub:
+        raise HTTPException(status_code=404, detail="订阅不存在")
+    return sub
+
+
+@app.delete("/api/iptv/subscriptions/{sub_id}")
+async def delete_subscription(sub_id: int):
+    sub = await db.get_subscription(sub_id)
+    if not sub:
+        raise HTTPException(status_code=404, detail="订阅不存在")
+    await db.delete_subscription(sub_id)
+    return {"ok": True}
+
+
+@app.post("/api/iptv/subscriptions/{sub_id}/refresh")
+async def refresh_subscription(sub_id: int):
+    sub = await db.get_subscription(sub_id)
+    if not sub:
+        raise HTTPException(status_code=404, detail="订阅不存在")
+
+    try:
+        resp = await http_client.get(sub['url'], follow_redirects=True, timeout=15)
+        resp.raise_for_status()
+    except httpx.HTTPError as exc:
+        await db.update_subscription(sub_id, valid=0)
+        raise HTTPException(status_code=502, detail=f"刷新失败: {exc}") from exc
+
+    channels = parse_m3u(resp.text)
+    channels = deduplicate_channels(channels)
+    await db.add_channels_bulk(sub_id, channels)
+    await db.update_subscription(sub_id, valid=1, channel_count=len(channels))
+
+    return {"channel_count": len(channels)}
+
+
+# ── 频道 ──
+
+@app.get("/api/iptv/subscriptions/{sub_id}/channels")
+async def list_channels(sub_id: int, group: str = '', search: str = ''):
+    sub = await db.get_subscription(sub_id)
+    if not sub:
+        raise HTTPException(status_code=404, detail="订阅不存在")
+    channels = await db.get_channels(sub_id, group=group, search=search)
+    groups = await db.get_channel_groups(sub_id)
+    return {"channels": channels, "groups": groups, "total": len(channels)}
+
+
+# ── 前端聚合频道列表（跨源去重，每个频道保留所有可用链接）──
+
+@app.get("/api/iptv/channels")
+async def aggregated_channels(group: str = '', search: str = ''):
+    raw = await db.get_aggregated_channels(group=group, search=search)
+    groups = await db.get_all_channel_groups()
+
+    # 按清洗名聚合
+    from m3u8_parser import normalize_channel_name
+    merged: dict[str, dict] = {}
+    for ch in raw:
+        key = normalize_channel_name(ch['name'])
+        if key not in merged:
+            merged[key] = {
+                'name': ch['name'],
+                'group_name': ch['group_name'],
+                'logo_url': ch['logo_url'],
+                'tvg_id': ch['tvg_id'],
+                'tvg_name': ch['tvg_name'],
+                'urls': [],
+            }
+        merged[key]['urls'].append({
+            'url': ch['url'],
+            'is_working': ch['is_working'],
+            'latency_ms': ch['latency_ms'],
+            'sub_title': ch.get('sub_title', ''),
+        })
+
+    # 排序：可用优先，然后按延迟
+    result = sorted(merged.values(), key=lambda c: (
+        0 if any(u['is_working'] == 1 for u in c['urls']) else 1,
+        min((u['latency_ms'] for u in c['urls'] if u['is_working'] == 1), default=9999),
+    ))
+
+    return {"channels": result, "groups": groups, "total": len(result)}
+
+
+# ── 测速 ──
+
+# 测速进度存储（内存）
+_test_progress: dict[int, dict] = {}
+_global_test_progress: dict = {}
+
+
+@app.post("/api/iptv/test-all")
+async def test_all_subscriptions():
+    """测速所有订阅源的所有频道"""
+    subs = await db.get_subscriptions()
+    if not subs:
+        raise HTTPException(status_code=400, detail="无订阅源")
+
+    total = 0
+    all_channels = []
+    for sub in subs:
+        channels = await db.get_channels(sub['id'])
+        all_channels.extend(channels)
+        total += len(channels)
+
+    if not total:
+        raise HTTPException(status_code=400, detail="无频道可测速")
+
+    await db.reset_channel_statuses_all()
+    _global_test_progress.update({"total": total, "tested": 0, "working": 0, "failed": 0})
+    asyncio.create_task(_run_speed_test_global(all_channels))
+    return {"total": total}
+
+
+async def _run_speed_test_global(channels: list[dict]):
+    semaphore = asyncio.Semaphore(10)
+
+    async def _limited_test(ch):
+        async with semaphore:
+            return ch, await _test_single_channel(ch)
+
+    tasks = [_limited_test(ch) for ch in channels]
+    for coro in asyncio.as_completed(tasks):
+        ch, result = await coro
+        await db.update_channel_status(
+            ch['id'],
+            is_working=1 if result['working'] else 0,
+            latency_ms=result['latency_ms'],
+        )
+        _global_test_progress['tested'] += 1
+        if result['working']:
+            _global_test_progress['working'] += 1
+        else:
+            _global_test_progress['failed'] += 1
+
+
+@app.get("/api/iptv/test-status")
+async def global_test_status():
+    return _global_test_progress
+
+
+async def _test_single_channel(ch: dict) -> dict:
+    """测速单个频道：GET URL → 判断是否 M3U8 → HEAD 第一个 TS 分片"""
+    url = ch['url']
+    start = time.time()
+    try:
+        resp = await http_client.get(url, follow_redirects=True, timeout=8)
+        latency = (time.time() - start) * 1000
+
+        content_type = resp.headers.get('content-type', '').lower()
+        is_m3u8 = any(t in content_type for t in ('mpegurl', 'm3u8', 'x-mpegurl')) or url.endswith('.m3u8')
+
+        if is_m3u8 and resp.status_code == 200:
+            # 解析 M3U8 找第一个 TS 分片
+            ts_url = _find_first_ts_url(resp.text, url)
+            if ts_url:
+                ts_start = time.time()
+                ts_resp = await http_client.head(ts_response_url(ts_url), follow_redirects=True, timeout=5)
+                ts_latency = (time.time() - ts_start) * 1000
+                if ts_resp.status_code < 400:
+                    return {"working": True, "latency_ms": round(latency + ts_latency, 1)}
+            # M3U8 可达就算可用
+            return {"working": True, "latency_ms": round(latency, 1)}
+
+        if resp.status_code < 400:
+            return {"working": True, "latency_ms": round(latency, 1)}
+
+        return {"working": False, "latency_ms": 0}
+    except Exception:
+        return {"working": False, "latency_ms": 0}
+
+
+def _find_first_ts_url(m3u8_text: str, base_url: str) -> str | None:
+    """从 M3U8 文本中找第一个 TS 分片 URL"""
+    base = base_url.rsplit('/', 1)[0] + '/'
+    for line in m3u8_text.splitlines():
+        line = line.strip()
+        if line and not line.startswith('#') and (
+            '.ts' in line or '.aac' in line or '.mp4' in line or '.fmp4' in line
+        ):
+            if line.startswith('http'):
+                return line
+            return base + line
+    return None
+
+
+def ts_response_url(ts_url: str) -> str:
+    return ts_url
+
+
+@app.post("/api/iptv/subscriptions/{sub_id}/test-all")
+async def test_all_channels(sub_id: int):
+    sub = await db.get_subscription(sub_id)
+    if not sub:
+        raise HTTPException(status_code=404, detail="订阅不存在")
+
+    channels = await db.get_channels(sub_id)
+    if not channels:
+        raise HTTPException(status_code=400, detail="无频道可测速")
+
+    # 重置状态
+    await db.reset_channel_statuses(sub_id)
+    _test_progress[sub_id] = {"total": len(channels), "tested": 0, "working": 0, "failed": 0}
+
+    asyncio.create_task(_run_speed_test(sub_id, channels))
+    return {"total": len(channels)}
+
+
+async def _run_speed_test(sub_id: int, channels: list[dict]):
+    semaphore = asyncio.Semaphore(10)
+
+    async def _limited_test(ch):
+        async with semaphore:
+            return ch, await _test_single_channel(ch)
+
+    tasks = [_limited_test(ch) for ch in channels]
+    for coro in asyncio.as_completed(tasks):
+        ch, result = await coro
+        await db.update_channel_status(
+            ch['id'],
+            is_working=1 if result['working'] else 0,
+            latency_ms=result['latency_ms'],
+        )
+        prog = _test_progress[sub_id]
+        prog['tested'] += 1
+        if result['working']:
+            prog['working'] += 1
+        else:
+            prog['failed'] += 1
+
+
+@app.get("/api/iptv/subscriptions/{sub_id}/test-status")
+async def test_status(sub_id: int):
+    return _test_progress.get(sub_id, {"total": 0, "tested": 0, "working": 0, "failed": 0})
+
+
+# ── 播放代理 ──
+
+@app.get("/api/iptv/proxy/playlist.m3u8")
+async def iptv_proxy_playlist(target_url: str = ''):
+    if not target_url:
+        raise HTTPException(status_code=400, detail="缺少 target_url")
+
+    try:
+        resp = await http_client.get(target_url, follow_redirects=True, timeout=8)
+        resp.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"拉取 M3U8 失败: {exc}") from exc
+
+    rewritten = rewrite_m3u8_text(resp.text, target_url, 'iptv')
+    return Response(content=rewritten, media_type="application/x-mpegURL")
+
+
+@app.get("/api/iptv/proxy/chunk.ts")
+async def iptv_proxy_chunk(target_url: str = ''):
+    if not target_url:
+        raise HTTPException(status_code=400, detail="缺少 target_url")
+
+    try:
+        req = http_client.build_request("GET", target_url, headers={
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130.0.0.0 Safari/537.36',
+        })
+        upstream = await http_client.send(req, stream=True)
+        upstream.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"拉取分片失败: {exc}") from exc
+
+    async def stream_chunks():
+        async for chunk in upstream.aiter_bytes(chunk_size=65536):
+            yield chunk
+
+    return StreamingResponse(stream_chunks(), media_type="video/MP2T")
+
+
+# ── 导出 M3U8 ──
+
+@app.get("/api/iptv/export.m3u")
+async def export_m3u(tested_only: bool = True):
+    subs = await db.get_subscriptions()
+    if not subs:
+        raise HTTPException(status_code=404, detail="无订阅源")
+
+    lines = ["#EXTM3U"]
+    for sub in subs:
+        channels = await db.get_channels(sub['id'])
+        if tested_only:
+            channels = [ch for ch in channels if ch['is_working'] == 1]
+        for ch in channels:
+            attrs = []
+            if ch['tvg_name']:
+                attrs.append(f'tvg-name="{ch["tvg_name"]}"')
+            if ch['tvg_id']:
+                attrs.append(f'tvg-id="{ch["tvg_id"]}"')
+            if ch['logo_url']:
+                attrs.append(f'tvg-logo="{ch["logo_url"]}"')
+            if ch['group_name']:
+                attrs.append(f'group-title="{ch["group_name"]}"')
+            attr_str = ' '.join(attrs)
+            lines.append(f'#EXTINF:-1 {attr_str},{ch["name"]}')
+            lines.append(ch['url'])
+
+    content = '\n'.join(lines)
+    return Response(
+        content=content,
+        media_type="audio/x-mpegurl",
+        headers={"Content-Disposition": 'attachment; filename="wavebypass_iptv.m3u"'},
+    )
+
+
+# ── 工具函数 ──
+
+def _guess_sub_title(url: str, channels: list[dict]) -> str:
+    """从 URL 或频道分组推测订阅源标题"""
+    # 尝试从分组名推断
+    groups = set(ch.get('group_name', '') for ch in channels if ch.get('group_name'))
+    if groups:
+        return ' / '.join(sorted(groups)[:3])
+
+    # 从 URL 文件名推断
+    parsed = urlparse(url)
+    path = parsed.path.rstrip('/')
+    if path:
+        name = path.split('/')[-1]
+        name = name.replace('.m3u', '').replace('.m3u8', '').replace('.txt', '')
+        if name:
+            return name
+
+    return parsed.netloc or '未知订阅源'

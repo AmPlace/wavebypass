@@ -186,6 +186,43 @@ async def get_channel_groups(sub_id: int) -> list[str]:
     return await asyncio.to_thread(_get)
 
 
+async def get_aggregated_channels(group: str = '', search: str = '') -> list[dict]:
+    """跨所有订阅源聚合频道：按清洗名去重，每个频道保留所有可用链接"""
+    def _get():
+        conn = _connect()
+        query = """
+            SELECT c.*, s.title as sub_title
+            FROM channels c
+            JOIN subscriptions s ON c.subscription_id = s.id
+        """
+        params: list = []
+        where = []
+        if group:
+            where.append("c.group_name = ?")
+            params.append(group)
+        if search:
+            where.append("c.name LIKE ?")
+            params.append(f"%{search}%")
+        if where:
+            query += " WHERE " + " AND ".join(where)
+        query += " ORDER BY c.name, c.is_working DESC, c.latency_ms ASC"
+        rows = conn.execute(query, params).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    return await asyncio.to_thread(_get)
+
+
+async def get_all_channel_groups() -> list[str]:
+    def _get():
+        conn = _connect()
+        rows = conn.execute(
+            "SELECT DISTINCT group_name FROM channels WHERE group_name != '' ORDER BY group_name"
+        ).fetchall()
+        conn.close()
+        return [r['group_name'] for r in rows]
+    return await asyncio.to_thread(_get)
+
+
 async def update_channel_status(ch_id: int, is_working: int, latency_ms: float = 0):
     def _update():
         conn = _connect()
@@ -206,6 +243,15 @@ async def reset_channel_statuses(sub_id: int):
             "UPDATE channels SET is_working=-1, latency_ms=0, last_tested='' WHERE subscription_id=?",
             (sub_id,),
         )
+        conn.commit()
+        conn.close()
+    await asyncio.to_thread(_reset)
+
+
+async def reset_channel_statuses_all():
+    def _reset():
+        conn = _connect()
+        conn.execute("UPDATE channels SET is_working=-1, latency_ms=0, last_tested=''")
         conn.commit()
         conn.close()
     await asyncio.to_thread(_reset)
