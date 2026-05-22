@@ -23,13 +23,16 @@
         <div class="flex min-h-0 flex-1 flex-col gap-4 px-4 pb-4 sm:px-6 lg:flex-row lg:gap-6 lg:px-8">
 
           <!-- 左栏：媒体展示区 -->
-          <div class="flex flex-1 flex-col items-center justify-center overflow-hidden rounded-3xl bg-gradient-to-br from-rose-400/20 via-fuchsia-400/20 to-amber-300/20 dark:from-rose-500/10 dark:via-fuchsia-500/10 dark:to-amber-500/10 lg:flex-[3]">
+          <div
+            class="flex flex-1 flex-col items-center justify-center overflow-hidden rounded-3xl lg:flex-[3]"
+            :class="isIptvMode ? 'bg-transparent' : 'bg-gradient-to-br from-rose-400/20 via-fuchsia-400/20 to-amber-300/20 dark:from-rose-500/10 dark:via-fuchsia-500/10 dark:to-amber-500/10'"
+          >
 
             <!-- IPTV 视频 -->
             <video
               v-if="isIptvMode"
               ref="iptvVideoRef"
-              class="h-full w-full object-contain"
+              class="w-full h-full object-contain rounded-lg"
               playsinline
               preload="auto"
               :muted="iptvMuted"
