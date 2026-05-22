@@ -1472,6 +1472,171 @@ async def test_status(sub_id: int):
 
 # ── 播放代理 ──
 
+# 扩展窗口代理：定期拉上游 playlist
+_wide_cache: dict[str, dict] = {}
+_WIDE_WINDOW = 20  
+_WIDE_TTL = 300    
+
+
+async def _wide_refresher(cache_key: str, target_url: str):
+    """后台任务：每 2s 拉一次上游，更新分片队列"""
+    while True:
+        try:
+            resp = await http_client.get(target_url, follow_redirects=True, timeout=6)
+            resp.raise_for_status()
+            lines = resp.text.splitlines()
+
+            # 解析 EXTINF + URL 对，同时追踪 MEDIA-SEQUENCE
+            segments = []
+            target_duration = 6
+            media_seq = 0
+            i = 0
+            while i < len(lines):
+                line = lines[i].strip()
+                if line.startswith('#EXT-X-TARGETDURATION:'):
+                    target_duration = int(line.split(':')[1])
+                elif line.startswith('#EXT-X-MEDIA-SEQUENCE:'):
+                    media_seq = int(line.split(':')[1])
+                elif line.startswith('#EXTINF:'):
+                    dur = line.split(':')[1].rstrip(',')
+                    url = lines[i + 1].strip() if i + 1 < len(lines) else ''
+                    if url and not url.startswith('#'):
+                        abs_url = urljoin(target_url, url)
+                        segments.append({'dur': dur, 'url': abs_url, 'seq': media_seq})
+                        media_seq += 1
+                    i += 1
+                i += 1
+
+            cache = _wide_cache.get(cache_key)
+            if not cache:
+                return
+            # 5 分钟无请求则自动停拉
+            if time.time() - _wide_cache.get(cache_key + '_ts', 0) > _WIDE_TTL:
+                del _wide_cache[cache_key]
+                del _wide_cache[cache_key + '_ts']
+                return
+            cache['target_duration'] = target_duration
+            seen = cache.get('seen', set())
+            for seg in segments:
+                if seg['url'] not in seen:
+                    cache['queue'].append(seg)
+                    seen.add(seg['url'])
+            while len(cache['queue']) > _WIDE_WINDOW:
+                cache['queue'].popleft()
+            cache['seen'] = seen
+        except Exception:
+            pass
+        await asyncio.sleep(2)
+
+
+@app.get("/api/iptv/proxy/wide.m3u8")
+async def iptv_wide_playlist(target_url: str = '', proxy_ts: int = 0):
+    if not target_url:
+        raise HTTPException(status_code=400, detail="缺少 target_url")
+
+    def _rewrite_ts(seg_url: str) -> str:
+        # 只重写 HTTP TS，HTTPS 直连不需要代理
+        if proxy_ts and urlparse(seg_url).scheme == 'http':
+            return f'/api/iptv/proxy/chunk.ts?target_url={quote(seg_url, safe="")}'
+        return seg_url
+
+    cache_key = quote(target_url, safe='')
+    if cache_key not in _wide_cache:
+        # 首次：快速连拉积累分片
+        from collections import deque
+        queue = deque(maxlen=_WIDE_WINDOW)
+        seen = set()
+        target_dur = 6
+
+        for attempt in range(4):
+            try:
+                resp = await http_client.get(target_url, follow_redirects=True, timeout=6)
+                resp.raise_for_status()
+                lines = resp.text.splitlines()
+                media_seq = 0
+                i = 0
+                while i < len(lines):
+                    line = lines[i].strip()
+                    if line.startswith('#EXT-X-TARGETDURATION:'):
+                        target_dur = int(line.split(':')[1])
+                    elif line.startswith('#EXT-X-MEDIA-SEQUENCE:'):
+                        media_seq = int(line.split(':')[1])
+                    elif line.startswith('#EXTINF:'):
+                        dur = line.split(':')[1].rstrip(',')
+                        url = lines[i + 1].strip() if i + 1 < len(lines) else ''
+                        if url and not url.startswith('#'):
+                            abs_url = urljoin(target_url, url)
+                            if abs_url not in seen:
+                                queue.append({'dur': dur, 'url': abs_url, 'seq': media_seq})
+                                seen.add(abs_url)
+                            media_seq += 1
+                        i += 1
+                    i += 1
+            except Exception:
+                pass
+            if attempt < 3:
+                await asyncio.sleep(0.3)
+
+        cache = {
+            'queue': queue,
+            'seen': seen,
+            'target_duration': target_dur,
+        }
+        _wide_cache[cache_key] = cache
+        _wide_cache[cache_key + '_ts'] = time.time()
+        asyncio.create_task(_wide_refresher(cache_key, target_url))
+
+        # 返回扩展窗口 playlist
+        if queue:
+            lines = [
+                '#EXTM3U', '#EXT-X-VERSION:3',
+                f'#EXT-X-TARGETDURATION:{target_dur}',
+                f'#EXT-X-MEDIA-SEQUENCE:{queue[0]["seq"]}',
+            ]
+            for seg in queue:
+                lines.append(f'#EXTINF:{seg["dur"]},')
+                lines.append(_rewrite_ts(seg['url']))
+            content = '\n'.join(lines)
+            return Response(content=content, media_type="application/x-mpegURL",
+                headers={'Cache-Control': 'no-cache, no-store, must-revalidate'})
+        # 直接转发
+        try:
+            resp = await http_client.get(target_url, follow_redirects=True, timeout=6)
+            return Response(content=resp.text, media_type="application/x-mpegURL")
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=502, detail=f"拉取失败: {exc}") from exc
+
+    # 已存在缓存：返回扩展 playlist
+    _wide_cache[cache_key + '_ts'] = time.time()
+    cache = _wide_cache[cache_key]
+    queue = cache['queue']
+    if not queue:
+        try:
+            resp = await http_client.get(target_url, follow_redirects=True, timeout=6)
+            return Response(content=resp.text, media_type="application/x-mpegURL")
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=502, detail=f"拉取失败: {exc}") from exc
+
+    target_dur = cache.get('target_duration', 6)
+    lines = [
+        '#EXTM3U',
+        '#EXT-X-VERSION:3',
+        f'#EXT-X-TARGETDURATION:{target_dur}',
+        f'#EXT-X-MEDIA-SEQUENCE:{queue[0]["seq"]}',
+    ]
+    for seg in queue:
+        lines.append(f'#EXTINF:{seg["dur"]},')
+        lines.append(_rewrite_ts(seg['url']))
+    content = '\n'.join(lines)
+    return Response(
+        content=content,
+        media_type="application/x-mpegURL",
+        headers={'Cache-Control': 'no-cache, no-store, must-revalidate'},
+    )
+
+
+# ── 旧代理（不变）──
+
 @app.get("/api/iptv/proxy/playlist.m3u8")
 async def iptv_proxy_playlist(target_url: str = ''):
     if not target_url:
@@ -1484,7 +1649,11 @@ async def iptv_proxy_playlist(target_url: str = ''):
         raise HTTPException(status_code=502, detail=f"拉取 M3U8 失败: {exc}") from exc
 
     rewritten = rewrite_m3u8_text(resp.text, target_url, 'iptv')
-    return Response(content=rewritten, media_type="application/x-mpegURL")
+    return Response(
+        content=rewritten,
+        media_type="application/x-mpegURL",
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+    )
 
 
 @app.get("/api/iptv/proxy/chunk.ts")
@@ -1493,18 +1662,14 @@ async def iptv_proxy_chunk(target_url: str = ''):
         raise HTTPException(status_code=400, detail="缺少 target_url")
 
     try:
-        upstream = await http_client.stream("GET", target_url, follow_redirects=True, headers={
+        upstream = await http_client.get(target_url, follow_redirects=True, headers={
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130.0.0.0 Safari/537.36',
         })
         upstream.raise_for_status()
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"拉取分片失败: {exc}") from exc
 
-    async def stream_chunks():
-        async for chunk in upstream.aiter_bytes(chunk_size=65536):
-            yield chunk
-
-    return StreamingResponse(stream_chunks(), media_type="video/MP2T")
+    return Response(content=upstream.content, media_type="video/MP2T")
 
 
 # ── 导出 M3U8 ──

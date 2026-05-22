@@ -161,7 +161,20 @@ function isAllFailed(ch) {
 function playChannel(ch) {
   if (isAllFailed(ch)) return
   if (!ch.urls || !ch.urls.length) return
-  playerStore.playIptvChannel(ch)
+  const videoEl = playerStore.iptvVideoEl
+  const sorted = [...ch.urls].sort((a, b) => {
+    if (a.is_working !== b.is_working) return b.is_working - a.is_working
+    return (a.latency_ms || 9999) - (b.latency_ms || 9999)
+  })
+  // 仅调 play() 满足 iOS 手势，不设 src
+  if (videoEl) videoEl.play().catch(() => {})
+  // 更新 store，触发 FullPlayer watch 接管播放
+  playerStore.currentIptvChannel = ch
+  playerStore.iptvUrls = sorted
+  playerStore.iptvUrlIndex = 0
+  playerStore.playbackError = ''
+  playerStore.isLoading = true
+  playerStore.isPlaying = true
 }
 
 function pillClass(active) {
