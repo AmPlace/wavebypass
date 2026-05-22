@@ -93,18 +93,27 @@ async def set_setting(key: str, value: str):
 
 # ── Subscriptions ──
 
+class DuplicateSubscriptionError(Exception):
+    pass
+
+
 async def add_subscription(title: str, url: str, channel_count: int = 0, custom_ua: str = '', force_proxy: int = 0) -> int:
     def _add():
         conn = _connect()
-        now = datetime.now(timezone.utc).isoformat()
-        cur = conn.execute(
-            "INSERT INTO subscriptions(title, url, channel_count, created_at, custom_ua, force_proxy) VALUES(?, ?, ?, ?, ?, ?)",
-            (title, url, channel_count, now, custom_ua, force_proxy),
-        )
-        conn.commit()
-        sid = cur.lastrowid
-        conn.close()
-        return sid
+        try:
+            now = datetime.now(timezone.utc).isoformat()
+            cur = conn.execute(
+                "INSERT INTO subscriptions(title, url, channel_count, created_at, custom_ua, force_proxy) VALUES(?, ?, ?, ?, ?, ?)",
+                (title, url, channel_count, now, custom_ua, force_proxy),
+            )
+            conn.commit()
+            return cur.lastrowid
+        except sqlite3.IntegrityError as exc:
+            if 'subscriptions.url' in str(exc):
+                raise DuplicateSubscriptionError(url) from exc
+            raise
+        finally:
+            conn.close()
     return await asyncio.to_thread(_add)
 
 
@@ -121,6 +130,15 @@ async def get_subscription(sub_id: int) -> dict | None:
     def _get():
         conn = _connect()
         row = conn.execute("SELECT * FROM subscriptions WHERE id=?", (sub_id,)).fetchone()
+        conn.close()
+        return dict(row) if row else None
+    return await asyncio.to_thread(_get)
+
+
+async def get_subscription_by_url(url: str) -> dict | None:
+    def _get():
+        conn = _connect()
+        row = conn.execute("SELECT * FROM subscriptions WHERE url=?", (url,)).fetchone()
         conn.close()
         return dict(row) if row else None
     return await asyncio.to_thread(_get)

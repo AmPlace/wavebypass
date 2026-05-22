@@ -1205,6 +1205,13 @@ async def add_subscription(request: Request):
     if not url:
         raise HTTPException(status_code=400, detail="url 不能为空")
 
+    existing = await db.get_subscription_by_url(url)
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"订阅源已存在: {existing.get('title') or url}",
+        )
+
     # 拉取 M3U8
     headers = {'User-Agent': custom_ua} if custom_ua else {}
     try:
@@ -1224,7 +1231,10 @@ async def add_subscription(request: Request):
     if not title:
         title = _guess_sub_title(url, channels)
 
-    sub_id = await db.add_subscription(title=title, url=url, channel_count=len(channels), custom_ua=custom_ua, force_proxy=force_proxy)
+    try:
+        sub_id = await db.add_subscription(title=title, url=url, channel_count=len(channels), custom_ua=custom_ua, force_proxy=force_proxy)
+    except db.DuplicateSubscriptionError as exc:
+        raise HTTPException(status_code=409, detail="订阅源已存在") from exc
     await db.add_channels_bulk(sub_id, channels)
 
     return {"id": sub_id, "title": title, "url": url, "channel_count": len(channels)}
