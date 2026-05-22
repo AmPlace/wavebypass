@@ -123,28 +123,57 @@
             <div class="min-h-0 flex-1 overflow-y-auto scrollbar-hide">
               <p class="mb-2 text-xs font-medium text-neutral-400 dark:text-neutral-500">频道列表</p>
               <div class="space-y-1">
-                <button
-                  v-for="station in channelList"
-                  :key="station.id"
-                  type="button"
-                  class="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left transition-colors hover:bg-neutral-200/60 dark:hover:bg-neutral-700/60"
-                  :class="{ 'bg-neutral-200/80 dark:bg-neutral-700/80': currentStation === station.id }"
-                  @click="playerStore.switchStation(station.id)"
-                >
-                  <div class="flex size-9 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-black/5 bg-white text-xs font-semibold text-neutral-600 dark:border-white/10 dark:bg-neutral-800 dark:text-neutral-300">
-                    <img v-if="station.logoUrl" class="h-full w-full object-cover" :src="station.logoUrl" :alt="station.name" />
-                    <span v-else>{{ station.logoText }}</span>
-                  </div>
-                  <div class="min-w-0 flex-1">
-                    <p class="truncate text-sm font-medium text-neutral-800 dark:text-neutral-200">{{ station.name }}</p>
-                    <p v-if="station.subtitle" class="truncate text-xs text-neutral-400 dark:text-neutral-500">{{ station.subtitle }}</p>
-                  </div>
-                  <div
-                    v-if="currentStation === station.id"
-                    class="size-2 shrink-0 rounded-full"
-                    :class="isPlaying ? 'bg-emerald-500' : 'bg-neutral-300 dark:bg-neutral-600'"
-                  ></div>
-                </button>
+                <!-- 电台列表 -->
+                <template v-if="!isIptvMode">
+                  <button
+                    v-for="station in channelList"
+                    :key="station.id"
+                    type="button"
+                    class="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left transition-colors hover:bg-neutral-200/60 dark:hover:bg-neutral-700/60"
+                    :class="{ 'bg-neutral-200/80 dark:bg-neutral-700/80': currentStation === station.id }"
+                    @click="playerStore.switchStation(station.id)"
+                  >
+                    <div class="flex size-9 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-black/5 bg-white text-xs font-semibold text-neutral-600 dark:border-white/10 dark:bg-neutral-800 dark:text-neutral-300">
+                      <img v-if="station.logoUrl" class="h-full w-full object-cover" :src="station.logoUrl" :alt="station.name" />
+                      <span v-else>{{ station.logoText }}</span>
+                    </div>
+                    <div class="min-w-0 flex-1">
+                      <p class="truncate text-sm font-medium text-neutral-800 dark:text-neutral-200">{{ station.name }}</p>
+                      <p v-if="station.subtitle" class="truncate text-xs text-neutral-400 dark:text-neutral-500">{{ station.subtitle }}</p>
+                    </div>
+                    <div
+                      v-if="currentStation === station.id"
+                      class="size-2 shrink-0 rounded-full"
+                      :class="isPlaying ? 'bg-emerald-500' : 'bg-neutral-300 dark:bg-neutral-600'"
+                    ></div>
+                  </button>
+                </template>
+
+                <!-- IPTV 列表 -->
+                <template v-else>
+                  <button
+                    v-for="ch in iptvChannelList"
+                    :key="ch.name"
+                    type="button"
+                    class="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left transition-colors hover:bg-neutral-200/60 dark:hover:bg-neutral-700/60"
+                    :class="{ 'bg-neutral-200/80 dark:bg-neutral-700/80': isCurrentIptv(ch) }"
+                    @click="playerStore.playIptvChannel(ch)"
+                  >
+                    <div class="flex size-9 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-black/5 bg-white text-xs font-semibold text-neutral-600 dark:border-white/10 dark:bg-neutral-800 dark:text-neutral-300">
+                      <img v-if="ch.logo_url" class="h-full w-full object-cover" :src="ch.logo_url" :alt="ch.name" />
+                      <span v-else>{{ ch.name.slice(0, 2) }}</span>
+                    </div>
+                    <div class="min-w-0 flex-1">
+                      <p class="truncate text-sm font-medium text-neutral-800 dark:text-neutral-200">{{ ch.name }}</p>
+                      <p v-if="ch.group_name" class="truncate text-xs text-neutral-400 dark:text-neutral-500">{{ ch.group_name }}</p>
+                    </div>
+                    <div
+                      v-if="isCurrentIptv(ch)"
+                      class="size-2 shrink-0 rounded-full"
+                      :class="isPlaying ? 'bg-emerald-500' : 'bg-neutral-300 dark:bg-neutral-600'"
+                    ></div>
+                  </button>
+                </template>
               </div>
             </div>
           </div>
@@ -155,9 +184,10 @@
 </template>
 
 <script setup>
-import { computed, ref, watch, onBeforeUnmount } from 'vue'
+import { computed, ref, watch, onBeforeUnmount, onMounted } from 'vue'
 import { storeToRefs } from 'pinia'
 import { usePlayerStore } from '../stores/player'
+import { fetchAggregatedChannels } from '../api/iptv'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || ''
 
@@ -186,6 +216,31 @@ const statusText = computed(() => {
 })
 
 const channelList = computed(() => stationList.value)
+
+const iptvChannelList = ref([])
+
+async function loadIptvChannels() {
+  try {
+    const data = await fetchAggregatedChannels()
+    iptvChannelList.value = data.channels || []
+  } catch (e) {
+    console.error('加载 IPTV 频道失败:', e)
+  }
+}
+
+function isCurrentIptv(ch) {
+  const current = playerStore.currentIptvChannel
+  return current && current.name === ch.name
+}
+
+// 切换到 IPTV 模式时加载频道列表
+watch(isIptvMode, (isIptv) => {
+  if (isIptv && !iptvChannelList.value.length) loadIptvChannels()
+})
+
+onMounted(() => {
+  if (isIptvMode.value) loadIptvChannels()
+})
 
 function playPrev() {
   const list = stationList.value
