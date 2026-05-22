@@ -209,14 +209,7 @@ def parse_m3u(text: str) -> list[dict]:
 
 def deduplicate_channels(channels: list[dict]) -> list[dict]:
     """
-    按清洗后的频道名去重，同名频道保留第一个。
+    同名频道保留所有 URL，每个 URL 作为独立记录。
+    跨源合并由聚合端点（aggregated_channels）处理。
     """
-    seen: dict[str, int] = {}
-    result: list[dict] = []
-    for ch in channels:
-        key = normalize_channel_name(ch['name'])
-        if key in seen:
-            continue
-        seen[key] = len(result)
-        result.append(ch)
-    return result
+    return channels
