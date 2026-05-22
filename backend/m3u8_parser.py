@@ -1,5 +1,11 @@
 import re
+import os
 from typing import Optional
+from alias import Alias, format_name
+
+# 加载频道别名表
+_ALIAS_PATH = os.path.join(os.path.dirname(__file__), 'config', 'alias.txt')
+_channel_alias = Alias(_ALIAS_PATH)
 
 # ── 正则：从 #EXTINF 行提取属性 ──
 
@@ -50,13 +56,34 @@ _T2S = {
     '齊':'齐','龍':'龙',
 }
 
+# 分组名噪音：清洗时去掉的通用后缀/前缀
+_GROUP_NOISE = re.compile(
+    r'(?:频道|频道$|-MCP$|[-_]\d+$)'  # 频道、-MCP、数字后缀
+    r'|[\[\(（【]\s*(?:高清|标清|超清|4K|HD|SD|FHD|UHD|HEVC|H\.?265|H\.?264)\s*[\]\)）】]'  # 分辨率标签
+    r'|^[\s\-_]+|[\s\-_]+$'  # 首尾空白/分隔符
+)
+
+
+def normalize_group_name(name: str) -> str:
+    """通用分组名归一化：去噪音 + 繁简转换 + 去分隔符"""
+    if not name:
+        return '其他'
+    s = name.strip()
+    s = _GROUP_NOISE.sub('', s)
+    s = ''.join(_T2S.get(c, c) for c in s)
+    s = re.sub(r'[\s\-_|/]+', '', s)
+    return s if s else '其他'
+
 
 def _to_simplified(s: str) -> str:
     return ''.join(_T2S.get(c, c) for c in s)
 
 
 def normalize_channel_name(name: str) -> str:
-    """清洗频道名，用于去重比较。"""
+    """清洗频道名，用于去重比较。优先用别名表匹配主名。"""
+    primary = _channel_alias.get_primary(name)
+    if primary != name:
+        return format_name(primary)
     s = name.strip()
     s = _STRIP_RE.sub('', s)
     s = _PROVIDER_RE.sub('', s)
@@ -142,6 +169,32 @@ def parse_m3u(text: str) -> list[dict]:
 
         pending_extinf = None
         i += 1
+
+    if channels:
+        return channels
+
+    # 回退：txt 格式（频道名,URL / 分类,#genre#）
+    lines = text.splitlines()
+    current_group = '其他'
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        if '#genre#' in line:
+            current_group = line.split(',')[0].strip() or '其他'
+            continue
+        if line.startswith(('http://', 'https://', 'rtmp://', 'rtsp://')):
+            continue
+        parts = line.split(',', 1)
+        if len(parts) == 2 and parts[1].strip().startswith(('http://', 'https://', 'rtmp://', 'rtsp://')):
+            channels.append({
+                'name': parts[0].strip(),
+                'url': parts[1].strip(),
+                'logo_url': '',
+                'group_name': current_group,
+                'tvg_id': '',
+                'tvg_name': '',
+            })
 
     return channels
 
