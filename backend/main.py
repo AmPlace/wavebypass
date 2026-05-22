@@ -1389,7 +1389,7 @@ async def _run_speed_test_sub(sub_id: int, channels: list[dict]):
     for coro in asyncio.as_completed(tasks):
         try:
             ch, result = await coro
-            await db.update_channel_status(ch['id'], is_working=1 if result['working'] else 0, latency_ms=result['latency_ms'])
+            await db.update_channel_status(ch['id'], is_working = 1 if result['working'] is True else (-1 if result['working'] == -1 else 0), latency_ms=result['latency_ms'])
         except Exception as e:
             logger.warning("测速异常: %s", e)
         _test_progress[sub_id]['tested'] += 1
@@ -1420,7 +1420,7 @@ async def _run_speed_test_global(channels: list[dict]):
             ch, result = await coro
             await db.update_channel_status(
                 ch['id'],
-                is_working=1 if result['working'] else 0,
+                is_working = 1 if result['working'] is True else (-1 if result['working'] == -1 else 0),
                 latency_ms=result['latency_ms'],
             )
         except Exception as e:
@@ -1449,6 +1449,9 @@ async def global_test_status():
 async def _test_single_channel(ch: dict) -> dict:
     """测速单个频道：GET URL → 判断是否 M3U8 → HEAD 第一个 TS 分片"""
     url = ch['url']
+    # RTSP/RTMP 暂不支持 HTTP 测速，标记为未测试
+    if url.startswith(('rtsp://', 'rtmp://')):
+        return {"working": -1, "latency_ms": 0}
     custom_ua = ch.get('custom_ua', '')
     headers = {'User-Agent': custom_ua} if custom_ua else {}
     start = time.time()
@@ -1527,7 +1530,7 @@ async def _run_speed_test(sub_id: int, channels: list[dict]):
         ch, result = await coro
         await db.update_channel_status(
             ch['id'],
-            is_working=1 if result['working'] else 0,
+            is_working = 1 if result['working'] is True else (-1 if result['working'] == -1 else 0),
             latency_ms=result['latency_ms'],
         )
         prog = _test_progress[sub_id]
