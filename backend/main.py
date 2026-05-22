@@ -477,9 +477,7 @@ async def proxy_ts_chunk(
     upstream_response: httpx.Response | None = None
 
     try:
-        upstream_req = http_client.build_request("GET", target_url, headers=upstream_headers)
-
-        upstream_response = await http_client.send(upstream_req, stream=True)
+        upstream_response = await http_client.stream("GET", target_url, headers=upstream_headers, follow_redirects=True)
 
         upstream_response.raise_for_status()
     except httpx.HTTPError as exc:
@@ -1495,10 +1493,9 @@ async def iptv_proxy_chunk(target_url: str = ''):
         raise HTTPException(status_code=400, detail="缺少 target_url")
 
     try:
-        req = http_client.build_request("GET", target_url, headers={
+        upstream = await http_client.stream("GET", target_url, follow_redirects=True, headers={
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130.0.0.0 Safari/537.36',
         })
-        upstream = await http_client.send(req, stream=True)
         upstream.raise_for_status()
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"拉取分片失败: {exc}") from exc
