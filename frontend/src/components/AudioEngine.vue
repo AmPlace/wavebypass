@@ -528,6 +528,7 @@ watch(currentStation, (stationId) => {
 watch(isPlaying, (nextIsPlaying) => {
   if (!audioRef.value) return
   if (nextIsPlaying) {
+    if (playerStore.currentIptvChannel) return // IPTV 模式下 AudioEngine 不播
     playAudioSafely()
     return
   }

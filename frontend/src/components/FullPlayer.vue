@@ -542,7 +542,11 @@ watch(() => playerStore.currentIptvChannel, async (ch) => {
 
 watch(isPlaying, (playing) => {
   if (!iptvVideoRef.value || !isIptvMode.value) return
-  playing ? iptvVideoRef.value.play().catch(() => {}) : iptvVideoRef.value.pause()
+  // 用户手动暂停后不自动恢复
+  if (playing && iptvVideoRef.value.paused) {
+    iptvVideoRef.value.play().catch(() => {})
+  }
+  if (!playing) iptvVideoRef.value.pause()
 })
 
 watch(volume, (v) => {
