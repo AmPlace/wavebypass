@@ -541,6 +541,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(refresh_tokens_task())
     asyncio.create_task(_yunting_refresh_task())
     asyncio.create_task(_myradio_refresh_task())
+    asyncio.create_task(_epg_refresh_loop())
     asyncio.create_task(_prefetch_rb())
     asyncio.create_task(_rtsp_hls_cleanup_task())
     yield
@@ -1433,6 +1434,18 @@ async def _prefetch_rb() -> None:
         await asyncio.sleep(RB_CACHE_TTL)
 
 
+_EPG_REFRESH_INTERVAL = 6 * 3600
+
+
+async def _epg_refresh_loop() -> None:
+    while True:
+        try:
+            await _epg.refresh_epg_sources(http_client)
+        except Exception:
+            logger.exception("EPG 刷新异常")
+        await asyncio.sleep(_EPG_REFRESH_INTERVAL)
+
+
 # =====================================================================
 # IPTV 订阅管理
 # =====================================================================
@@ -1559,7 +1572,6 @@ async def aggregated_channels(group: str = '', search: str = ''):
         if primary_name and primary_name != display_name:
             display_name = primary_name
 
-        # 分组匹配优先级：模板 > alias主名在模板中 > 原始分组 > "其他"
         primary = _channel_alias.get_primary(ch['name'])
         tmpl_cat = channel_template.match(primary) or channel_template.match(ch['name'])
         raw_grp = ch['group_name'] or '其他'
@@ -1567,10 +1579,11 @@ async def aggregated_channels(group: str = '', search: str = ''):
 
         if key not in merged:
             merged[key] = {
+                'canonical_key': key,
                 'name': display_name,
                 'group_name': grp,
                 'logo_url': ch['logo_url'],
-                'tvg_id': ch['tvg_id'],
+                'tvg_id': key,
                 'tvg_name': ch['tvg_name'],
                 'urls': [],
             }
@@ -1581,7 +1594,50 @@ async def aggregated_channels(group: str = '', search: str = ''):
             'sub_title': ch.get('sub_title', ''),
             'custom_ua': ch.get('custom_ua', ''),
             'force_proxy': ch.get('force_proxy', 0),
+            'raw_name': ch['name'],
+            'raw_tvg_id': ch.get('tvg_id', ''),
+            'raw_tvg_name': ch.get('tvg_name', ''),
+            'raw_group': ch.get('group_name', ''),
         })
+
+    # 生成 tvg_id_candidates
+    for ch in merged.values():
+        raw_ids = list(dict.fromkeys(u['raw_tvg_id'] for u in ch['urls'] if u['raw_tvg_id']))
+        raw_names = list(dict.fromkeys(u['raw_tvg_name'] or u['raw_name'] for u in ch['urls'] if u['raw_tvg_name'] or u['raw_name']))
+        all_raw = [ch['canonical_key'], ch['tvg_id']] + raw_ids + raw_names + [ch['name']]
+        candidates = list(dict.fromkeys(c for c in all_raw if c))
+        normalized_candidates = list(dict.fromkeys(normalize_channel_name(c) for c in candidates if c))
+        ch['tvg_id_candidates'] = candidates[:20]
+        ch['normalized_candidates'] = normalized_candidates[:20]
+
+        # 确保 tvg_name 不为空：优先取 display_name
+        if not ch.get('tvg_name'):
+            ch['tvg_name'] = ch['name']
+
+    # 合并 EPG 绑定信息
+    epg_maps = {}
+    try:
+        maps = await db.get_all_channel_epg_maps()
+        epg_maps = {m['canonical_key']: m for m in maps}
+    except Exception:
+        pass
+
+    for ch in merged.values():
+        em = epg_maps.get(ch['canonical_key'])
+        if em:
+            ch['epg_source_id'] = em.get('epg_source_id')
+            ch['epg_channel_id'] = em.get('epg_channel_id') or ''
+            ch['epg_match_type'] = em.get('match_type', '')
+            ch['epg_confidence'] = em.get('confidence', 0)
+            ch['epg_match_status'] = em.get('match_status', 'unmatched')
+            ch['epg_locked'] = bool(em.get('locked'))
+        else:
+            ch['epg_source_id'] = None
+            ch['epg_channel_id'] = ''
+            ch['epg_match_type'] = ''
+            ch['epg_confidence'] = 0
+            ch['epg_match_status'] = 'unmatched'
+            ch['epg_locked'] = False
 
     # 排序：可用优先，然后按延迟
     result = sorted(merged.values(), key=lambda c: (
@@ -1589,11 +1645,9 @@ async def aggregated_channels(group: str = '', search: str = ''):
         min((u['latency_ms'] for u in c['urls'] if u['is_working'] == 1), default=9999),
     ))
 
-    # 分组在聚合后筛选（归一化后的 group_name 才能和前端选择匹配）
     if group:
         result = [c for c in result if c['group_name'] == group]
 
-    # groups 返回所有可用分组（未筛选前），供前端渲染分组 pill 按钮
     groups = sorted(set(c['group_name'] for c in merged.values()))
 
     return {"channels": result, "groups": groups, "total": len(result)}
@@ -2123,6 +2177,127 @@ async def iptv_proxy_chunk(target_url: str = '', custom_ua: str = ''):
     return Response(content=upstream.content, media_type="video/MP2T")
 
 
+# ── EPG ──
+
+import epg as _epg
+
+
+@app.post("/api/iptv/epg/sources")
+async def add_epg_source(request: Request):
+    body = await request.json()
+    url = (body.get('url') or '').strip()
+    name = (body.get('name') or '').strip() or url
+    if not url:
+        raise HTTPException(status_code=400, detail="缺少 url")
+    try:
+        sid = await db.add_epg_source(name, url)
+        return {"id": sid, "name": name, "url": url}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@app.get("/api/iptv/epg/sources")
+async def list_epg_sources():
+    return await db.get_epg_sources()
+
+
+@app.delete("/api/iptv/epg/sources/{source_id}")
+async def delete_epg_source(source_id: int):
+    await db.delete_epg_source(source_id)
+    return {"ok": True}
+
+
+@app.post("/api/iptv/epg/refresh")
+async def refresh_epg():
+    asyncio.create_task(_epg.refresh_epg_sources(http_client))
+    return {"ok": True}
+
+
+@app.get("/api/iptv/epg/programs/{canonical_key}")
+async def get_epg_programs(canonical_key: str, date: str = '', tz: str = ''):
+    em = await db.get_channel_epg_map(canonical_key)
+    if not em or not em.get('epg_channel_id'):
+        return {"canonical_key": canonical_key, "match_status": em['match_status'] if em else 'unmatched', "current": None, "next": None, "programs": []}
+
+    sid = em['epg_source_id']
+    cid = em['epg_channel_id']
+    now = datetime.now(timezone.utc).isoformat()
+    end_of_day = (datetime.now(timezone.utc).replace(hour=23, minute=59, second=59)).isoformat()
+
+    programs = await db.get_epg_programs(sid, cid, start_after=now, start_before=end_of_day)
+    current = None
+    next_prog = None
+    for p in programs:
+        if p['start'] <= now < p['stop']:
+            total = (datetime.fromisoformat(p['stop']) - datetime.fromisoformat(p['start'])).total_seconds()
+            elapsed = (datetime.now(timezone.utc) - datetime.fromisoformat(p['start'])).total_seconds()
+            current = {
+                'title': p['title'],
+                'start': p['start'], 'stop': p['stop'],
+                'progress': max(0, min(1, elapsed / total)) if total > 0 else 0,
+                'remaining_minutes': max(0, int((datetime.fromisoformat(p['stop']) - datetime.now(timezone.utc)).total_seconds() / 60)),
+            }
+        elif not current and p['start'] > now:
+            if not next_prog:
+                next_prog = {'title': p['title'], 'start': p['start'], 'stop': p['stop']}
+
+    schedule = [{
+        'title': p['title'], 'start': p['start'], 'stop': p['stop'],
+        'status': 'current' if (p['start'] <= now < p['stop']) else ('past' if p['stop'] <= now else 'future'),
+    } for p in programs]
+
+    return {
+        "canonical_key": canonical_key, "epg_source_id": sid, "epg_channel_id": cid,
+        "match_status": em.get('match_status', 'unmatched'),
+        "current": current, "next": next_prog, "programs": schedule,
+    }
+
+
+@app.post("/api/iptv/epg/batch-current")
+async def batch_current_programs(request: Request):
+    body = await request.json()
+    keys = body.get('canonical_keys', [])
+    if not keys:
+        return {}
+    return await db.batch_get_current_programs(keys)
+
+
+@app.put("/api/iptv/epg/bind/{canonical_key}")
+async def bind_epg_channel(canonical_key: str, request: Request):
+    body = await request.json()
+    await db.upsert_channel_epg_map(
+        canonical_key,
+        epg_source_id=body.get('epg_source_id'),
+        epg_channel_id=body.get('epg_channel_id'),
+        match_type='manual',
+        confidence=100,
+        match_status='locked',
+        match_detail='{"matched_by":"manual"}',
+        locked=1,
+    )
+    return {"ok": True}
+
+
+@app.delete("/api/iptv/epg/bind/{canonical_key}")
+async def unbind_epg_channel(canonical_key: str):
+    await db.upsert_channel_epg_map(
+        canonical_key,
+        epg_channel_id='',
+        match_type='',
+        confidence=0,
+        match_status='unmatched',
+        match_detail='',
+        locked=0,
+    )
+    return {"ok": True}
+
+
+@app.get("/api/iptv/epg/match-status")
+async def epg_match_status():
+    maps = await db.get_all_channel_epg_maps()
+    return [{"canonical_key": m['canonical_key'], "status": m['match_status'], "epg_channel_id": m.get('epg_channel_id', ''), "confidence": m.get('confidence', 0)} for m in maps]
+
+
 # ── 导出 M3U8 ──
 
 @app.get("/api/iptv/export.m3u")
@@ -2140,8 +2315,9 @@ async def export_m3u(tested_only: bool = True):
             attrs = []
             if ch['tvg_name']:
                 attrs.append(f'tvg-name="{ch["tvg_name"]}"')
-            if ch['tvg_id']:
-                attrs.append(f'tvg-id="{ch["tvg_id"]}"')
+            export_tvg = ch.get('epg_channel_id') or ch.get('tvg_id') or ch.get('canonical_key', '')
+            if export_tvg:
+                attrs.append(f'tvg-id="{export_tvg}"')
             if ch['logo_url']:
                 attrs.append(f'tvg-logo="{ch["logo_url"]}"')
             if ch['group_name']:
