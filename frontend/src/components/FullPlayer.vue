@@ -553,6 +553,7 @@ function destroyIptvEngines() {
 
 function resetIptvVideo() {
   if (!iptvVideoRef.value) return
+  stopPlaybackWatchdogs()
   iptvVideoRef.value.pause()
   iptvVideoRef.value.removeAttribute('src')
   iptvVideoRef.value.load()
@@ -1002,6 +1003,15 @@ async function tryPlayIptv(url, usingProxy = false, customUa = '', attemptId = 0
         maxLiveSyncPlaybackRate: 1, nudgeOffset: 0.1, nudgeMaxRetry: 3,
         maxBufferLength: 30, maxBufferHole: 0.5,
       }
+      if (isIOS) {
+        Object.assign(hlsConfig, {
+          liveSyncDuration: 30,
+          liveMaxLatencyDuration: 90,
+          maxBufferLength: 60,
+          maxMaxBufferLength: 90,
+          liveSyncOnStallIncrease: 5,
+        })
+      }
       if (customUa) hlsConfig.xhrSetup = (xhr) => { xhr.setRequestHeader('User-Agent', customUa) }
       const hls = new Hls(hlsConfig)
       hlsInstance = hls
@@ -1315,40 +1325,292 @@ async function handleIptvError(e) {
 
 let _stallRecovering = false
 let _lastRecoveryTime = 0
+let _lastVideoProgressAt = 0
+let _lastVideoCurrentTime = 0
+let _stallRecoveryTimer = null
+let _lastVideoFrameAt = 0
+let _lastPresentedFrames = 0
+let _lastVideoFrameMediaTime = 0
+let _videoFrameCallbackId = null
+let _videoFrameWatchTimer = null
+let _videoFrameWatchVideo = null
+let _videoFrameWatchSeq = 0
+let _lastAvSyncRecoveryTime = 0
+let _lastReconnectTime = 0
+let _lastBufferNudgeTime = 0
 
-function doRecovery(v) {
-  _stallRecovering = true
-  // 轻量 nudge：回退一小段位置触发浏览器重新拉数据
-  // 不用 load()，避免重建整个播放管线导致白屏
-  const wasMuted = v.muted
-  v.muted = true
-  v.currentTime = Math.max(v.currentTime - 0.5, v.currentTime - 1)
-  v.play().then(() => {
-    setTimeout(() => {
-      v.muted = wasMuted
-      iptvMuted.value = wasMuted
-    }, 500)
-    _stallRecovering = false
-  }).catch(() => {
-    _stallRecovering = false
-  })
+function stopVideoFrameWatch() {
+  _videoFrameWatchSeq++
+  if (_videoFrameCallbackId !== null && _videoFrameWatchVideo?.cancelVideoFrameCallback) {
+    try {
+      _videoFrameWatchVideo.cancelVideoFrameCallback(_videoFrameCallbackId)
+    } catch {}
+  }
+  _videoFrameCallbackId = null
+  _videoFrameWatchVideo = null
+  if (_videoFrameWatchTimer) {
+    clearInterval(_videoFrameWatchTimer)
+    _videoFrameWatchTimer = null
+  }
 }
 
-function onVideoTimeUpdate() {}
+function stopPlaybackWatchdogs() {
+  clearStallRecoveryTimer()
+  stopVideoFrameWatch()
+  _lastVideoProgressAt = 0
+  _lastVideoCurrentTime = 0
+  _lastVideoFrameAt = 0
+  _lastPresentedFrames = 0
+  _lastVideoFrameMediaTime = 0
+}
+
+function clearStallRecoveryTimer() {
+  if (!_stallRecoveryTimer) return
+  clearTimeout(_stallRecoveryTimer)
+  _stallRecoveryTimer = null
+}
+
+function markVideoProgress(v) {
+  if (!v) return
+  const currentTime = v.currentTime || 0
+  if (!_lastVideoProgressAt || Math.abs(currentTime - _lastVideoCurrentTime) > 0.05) {
+    _lastVideoProgressAt = Date.now()
+    _lastVideoCurrentTime = currentTime
+    if (!_stallRecovering) clearStallRecoveryTimer()
+  }
+}
+
+function seekNearLiveEdge(v) {
+  const ranges = v?.seekable
+  if (!ranges?.length) return false
+  const last = ranges.length - 1
+  const liveEdge = ranges.end(last)
+  const rangeStart = ranges.start(last)
+  if (!Number.isFinite(liveEdge)) return false
+  if (liveEdge - v.currentTime < 8) return false
+
+  v.currentTime = Math.max(rangeStart, liveEdge - 2)
+  return true
+}
+
+function getForwardBuffer(v) {
+  if (!v?.buffered?.length || !Number.isFinite(v.currentTime)) return 0
+  for (let i = 0; i < v.buffered.length; i += 1) {
+    const start = v.buffered.start(i)
+    const end = v.buffered.end(i)
+    if (v.currentTime >= start && v.currentTime <= end) {
+      return Math.max(0, end - v.currentTime)
+    }
+  }
+  return 0
+}
+
+function getLiveLatency(v) {
+  const ranges = v?.seekable
+  if (!ranges?.length || !Number.isFinite(v.currentTime)) return 0
+  const liveEdge = ranges.end(ranges.length - 1)
+  return Number.isFinite(liveEdge) ? Math.max(0, liveEdge - v.currentTime) : 0
+}
+
+function seekToStableLivePoint(v, targetBehindEdge = 8) {
+  const ranges = v?.seekable
+  if (!ranges?.length || !Number.isFinite(v.currentTime)) return false
+  const last = ranges.length - 1
+  const liveEdge = ranges.end(last)
+  const rangeStart = ranges.start(last)
+  if (!Number.isFinite(liveEdge)) return false
+
+  const target = Math.max(rangeStart, liveEdge - targetBehindEdge)
+  if (target <= v.currentTime + 0.5) return false
+  v.currentTime = target
+  return true
+}
+
+async function doRecovery(v, reason = 'stalled') {
+  if (!v || v.paused || _stallRecovering) return
+  if (Date.now() - _lastRecoveryTime < 10_000) return
+
+  _stallRecovering = true
+  _lastRecoveryTime = Date.now()
+  console.warn(`[IPTV] ${reason} 持续无进展，尝试恢复`, {
+    currentTime: v.currentTime,
+    readyState: v.readyState,
+    networkState: v.networkState,
+  })
+
+  try {
+    await v.play()
+    if (Date.now() - _lastVideoProgressAt > 3000) {
+      seekNearLiveEdge(v)
+    }
+  } catch (e) {
+    console.warn('[IPTV] stalled 恢复 play() 失败:', e?.message || e)
+  } finally {
+    _stallRecovering = false
+  }
+}
+
+async function reconnectCurrentIptvSource(reason = 'stalled') {
+  if (!isIptvMode.value || !playerStore.currentIptvChannel) return
+  if (Date.now() - _lastReconnectTime < 15_000) return
+  _lastReconnectTime = Date.now()
+
+  const idx = playerStore.iptvUrlIndex
+  setSourceRuntimeStatus(idx, 'trying')
+  playerStore.setLoading(true)
+  playerStore.setPlaybackError('播放卡住，正在重新连接当前源')
+  console.warn(`[IPTV] ${reason}，重新连接当前源 #${idx + 1}`)
+
+  const attemptId = ++_playAttemptId
+  await playCurrentIptvUrl(attemptId)
+}
+
+function seekForwardTiny(v) {
+  if (!v || !Number.isFinite(v.currentTime)) return false
+  const ranges = v.seekable
+  const nextTime = v.currentTime + 0.08
+  if (ranges?.length) {
+    for (let i = 0; i < ranges.length; i += 1) {
+      if (nextTime >= ranges.start(i) && nextTime <= ranges.end(i)) {
+        v.currentTime = nextTime
+        return true
+      }
+    }
+    return seekNearLiveEdge(v)
+  }
+  v.currentTime = nextTime
+  return true
+}
+
+async function recoverAvSync(v, reason = 'video-frame-stall') {
+  if (!v || v.paused || _stallRecovering) return
+  if (Date.now() - _lastAvSyncRecoveryTime < 8000) return
+  _lastAvSyncRecoveryTime = Date.now()
+
+  console.warn(`[IPTV] ${reason}，尝试音画重同步`, {
+    currentTime: v.currentTime,
+    readyState: v.readyState,
+    networkState: v.networkState,
+    presentedFrames: _lastPresentedFrames,
+    frameAgeMs: _lastVideoFrameAt ? Date.now() - _lastVideoFrameAt : null,
+  })
+
+  try {
+    await v.play()
+    if (!seekForwardTiny(v)) seekNearLiveEdge(v)
+    setTimeout(() => {
+      const current = iptvVideoRef.value
+      if (!current || current.paused || !isIptvMode.value) return
+      const noProgress = Date.now() - _lastVideoProgressAt > 5000
+      const noFrame = _lastVideoFrameAt && Date.now() - _lastVideoFrameAt > 5000
+      if (noProgress || noFrame) reconnectCurrentIptvSource(`${reason} 恢复后仍无进展`)
+    }, 5500)
+  } catch (e) {
+    console.warn('[IPTV] 音画重同步失败:', e?.message || e)
+  }
+}
+
+function scheduleStallRecovery(reason) {
+  const v = iptvVideoRef.value
+  if (!v || v.paused || _stallRecovering) return
+  if (!_lastVideoProgressAt) markVideoProgress(v)
+  if (_stallRecoveryTimer) return
+
+  _stallRecoveryTimer = setTimeout(() => {
+    _stallRecoveryTimer = null
+    if (!iptvVideoRef.value || iptvVideoRef.value.paused) return
+    if (Date.now() - _lastVideoProgressAt < 6000) return
+    doRecovery(iptvVideoRef.value, reason)
+  }, 6500)
+}
+
+function onVideoTimeUpdate() {
+  markVideoProgress(iptvVideoRef.value)
+}
+
+function startVideoFrameWatch(v = iptvVideoRef.value) {
+  if (!isIOS || !isIptvMode.value || !v?.requestVideoFrameCallback) return
+  if (_videoFrameWatchVideo === v && _videoFrameWatchTimer) return
+
+  stopVideoFrameWatch()
+  _videoFrameWatchVideo = v
+  _lastVideoFrameAt = Date.now()
+  _lastVideoFrameMediaTime = v.currentTime || 0
+  const seq = ++_videoFrameWatchSeq
+
+  const onFrame = (_now, metadata = {}) => {
+    if (seq !== _videoFrameWatchSeq || _videoFrameWatchVideo !== v) return
+    _lastVideoFrameAt = Date.now()
+    _lastPresentedFrames = metadata.presentedFrames || _lastPresentedFrames
+    _lastVideoFrameMediaTime = Number.isFinite(metadata.mediaTime)
+      ? metadata.mediaTime
+      : (v.currentTime || _lastVideoFrameMediaTime)
+    _videoFrameCallbackId = v.requestVideoFrameCallback(onFrame)
+  }
+
+  _videoFrameCallbackId = v.requestVideoFrameCallback(onFrame)
+  _videoFrameWatchTimer = setInterval(() => {
+    if (seq !== _videoFrameWatchSeq || !isIptvMode.value || v.paused || v.ended) return
+    const now = Date.now()
+    const frameAge = now - _lastVideoFrameAt
+    const progressAge = now - _lastVideoProgressAt
+    const currentTime = v.currentTime || 0
+    const mediaDrift = currentTime - _lastVideoFrameMediaTime
+    const bufferAhead = getForwardBuffer(v)
+    const liveLatency = getLiveLatency(v)
+
+    if (bufferAhead > 0 && bufferAhead < 0.6 && liveLatency > 9 && now - _lastBufferNudgeTime > 8000) {
+      _lastBufferNudgeTime = now
+      if (seekToStableLivePoint(v, 8)) {
+        console.warn('[IPTV] 前方缓冲过低，提前跳过可能卡顿点', {
+          bufferAhead,
+          liveLatency,
+          currentTime,
+        })
+        return
+      }
+    }
+
+    if (frameAge > 2500 && progressAge < 2500 && mediaDrift > 0.35) {
+      recoverAvSync(v, '视频帧停滞但播放时钟仍在前进')
+      return
+    }
+
+    if (frameAge > 5000 && progressAge > 5000) {
+      scheduleStallRecovery('video-frame-watchdog')
+    }
+
+    if (frameAge > 12_000 && progressAge > 12_000) {
+      reconnectCurrentIptvSource('视频帧和播放进度长时间停滞')
+    }
+  }, 1200)
+}
 
 function onVideoStalled() {
   const v = iptvVideoRef.value
-  if (!v || v.paused || _stallRecovering) return
-  if (Date.now() - _lastRecoveryTime < 10_000) return
-  console.warn('[IPTV] stalled 兜底恢复')
-  _lastRecoveryTime = Date.now()
-  doRecovery(v)
+  if (!v || v.paused) return
+  console.warn('[IPTV] stalled observed', {
+    currentTime: v.currentTime,
+    readyState: v.readyState,
+    networkState: v.networkState,
+  })
+  scheduleStallRecovery('stalled')
 }
 
 function onVideoEvent(evt) {
   if (evt === 'playing') {
+    markVideoProgress(iptvVideoRef.value)
+    startVideoFrameWatch(iptvVideoRef.value)
+    clearStallRecoveryTimer()
     playerStore.setLoading(false)
     playerStore.togglePlay(true)
+  }
+  if (evt === 'pause') {
+    clearStallRecoveryTimer()
+    stopVideoFrameWatch()
+  }
+  if (evt === 'waiting') {
+    scheduleStallRecovery('waiting')
   }
 }
 
@@ -1414,6 +1676,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('resize', updateSourceMenuPosition)
   window.removeEventListener('orientationchange', updateSourceMenuPosition)
   _playAttemptId++
+  stopPlaybackWatchdogs()
   cancelCurrentStartup()
   cancelActiveProxyRace()
   destroyIptvEngines()
