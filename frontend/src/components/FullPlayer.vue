@@ -542,7 +542,10 @@ function destroyIptvMpegts() {
   try {
     player.destroy()
   } catch (e) {
-    console.warn('[IPTV] mpegts cleanup failed:', e)
+    const message = e?.message || ''
+    if (!message.includes('removeAllListeners')) {
+      console.warn('[IPTV] mpegts cleanup failed:', e)
+    }
   }
 }
 
@@ -779,12 +782,15 @@ function attachRuntimeMpegtsErrorHandlers(player, sourceUrl, usingProxy, attempt
     cleanup()
     setRuntimeStatus('failed')
     if (usingProxy) _racedLosers.add(sourceUrl)
+    clearCurrentMpegtsIf(player)
     try {
       player.destroy()
     } catch (e) {
-      console.warn('[IPTV] mpegts runtime cleanup failed:', e)
+      const message = e?.message || ''
+      if (!message.includes('removeAllListeners')) {
+        console.warn('[IPTV] mpegts runtime cleanup failed:', e)
+      }
     }
-    clearCurrentMpegtsIf(player)
 
     const nextAttemptId = ++_playAttemptId
     if (await fallbackToNextIptvUrl(nextAttemptId)) {
@@ -798,7 +804,20 @@ function attachRuntimeMpegtsErrorHandlers(player, sourceUrl, usingProxy, attempt
   }
 
   const onComplete = () => {
-    switchToFallback('mpegts loading complete')
+    if (switching || !isAttemptActive(attemptId)) return
+    switching = true
+    cleanup()
+    setRuntimeStatus('trying')
+    clearCurrentMpegtsIf(player)
+    try {
+      player.destroy()
+    } catch (e) {
+      const message = e?.message || ''
+      if (!message.includes('removeAllListeners')) {
+        console.warn('[IPTV] mpegts complete cleanup failed:', e)
+      }
+    }
+    reconnectCurrentIptvSource('mpegts loading complete')
   }
 
   player.on(mpegts.Events.ERROR, onError)

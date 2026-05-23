@@ -1755,14 +1755,21 @@ async def iptv_proxy_stream(target_url: str = '', custom_ua: str = ''):
         'Referer': f'{parsed.scheme}://{parsed.netloc}/',
     }
 
+    stream_timeout = httpx.Timeout(None, connect=10.0)
+    stream_client = httpx.AsyncClient(
+        timeout=stream_timeout,
+        follow_redirects=True,
+        verify=CDN_VERIFY_SSL,
+    )
     upstream: httpx.Response | None = None
     try:
-        req = http_client.build_request("GET", target_url, headers=upstream_headers)
-        upstream = await http_client.send(req, stream=True, follow_redirects=True)
+        req = stream_client.build_request("GET", target_url, headers=upstream_headers)
+        upstream = await stream_client.send(req, stream=True)
         upstream.raise_for_status()
     except httpx.HTTPError as exc:
         if upstream is not None:
             await upstream.aclose()
+        await stream_client.aclose()
         raise HTTPException(status_code=502, detail=f"拉取直播流失败: {exc}") from exc
 
     async def stream_bytes():
@@ -1772,11 +1779,11 @@ async def iptv_proxy_stream(target_url: str = '', custom_ua: str = ''):
                     yield chunk
         finally:
             await upstream.aclose()
+            await stream_client.aclose()
 
-    media_type = upstream.headers.get("content-type") or "video/MP2T"
     return StreamingResponse(
         stream_bytes(),
-        media_type=media_type,
+        media_type="video/MP2T",
         headers={
             "Cache-Control": "no-cache, no-store, must-revalidate",
             "Access-Control-Allow-Origin": "*",
