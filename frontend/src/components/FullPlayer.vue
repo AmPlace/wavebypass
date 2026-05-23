@@ -357,6 +357,7 @@ import { storeToRefs } from 'pinia'
 import mpegts from 'mpegts.js'
 import { usePlayerStore } from '../stores/player'
 import { fetchAggregatedChannels } from '../api/iptv'
+import { useEpg } from '../composables/useEpg'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || ''
 
@@ -478,13 +479,21 @@ const currentChannelSubtitle = computed(() => {
   return statusText.value
 })
 
-const currentProgram = computed(() => ({
-  title: currentStationName.value,
-  start: '17:30',
-  end: '18:30',
-  remaining: 20,
-  progress: 64,
-}))
+const currentProgram = computed(() => {
+  const epg = playerStore.currentEpgProgram
+  if (epg) {
+    const startD = new Date(epg.start)
+    const stopD = new Date(epg.stop)
+    return {
+      title: epg.title,
+      start: startD.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }),
+      end: stopD.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }),
+      remaining: epg.remaining_minutes,
+      progress: Math.round(epg.progress * 100),
+    }
+  }
+  return { title: currentStationName.value, start: '', end: '', remaining: 0, progress: 0 }
+})
 
 const currentProgramProgressPercent = computed(() => `${currentProgram.value.progress}%`)
 
@@ -510,14 +519,26 @@ const isPlaybackConfirmed = computed(() => (
   !playerStore.playbackError && !isLoading.value && isPlaying.value
 ))
 
-const displaySchedule = computed(() => [
-  { time: '17:00', title: '上一档节目名字', past: true },
-  { time: '17:30', title: currentProgram.value.title, current: true },
-  { time: '18:00', title: '名作シアター「真夏の夜の夢」' },
-  { time: '18:30', title: '世界のドキュメンタリー「水の記憶」' },
-  { time: '19:00', title: 'クラシック名演集 ベートーヴェン特集' },
-  { time: '19:30', title: 'NEWS LIVE 24' },
-])
+const displaySchedule = computed(() => {
+  const epg = playerStore.currentEpgProgram
+  if (epg) {
+    // EPG 有数据时用 EPG schedule
+    const schedule = _epgSchedule.value || []
+    return schedule.map(p => {
+      const startD = new Date(p.start)
+      return {
+        time: startD.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }),
+        title: p.title,
+        current: p.status === 'current',
+        past: p.status === 'past',
+      }
+    })
+  }
+  // 没有 EPG 时回退
+  return [
+    { time: '', title: currentProgram.value.title, current: true },
+  ]
+})
 
 const displayChannelRows = computed(() => {
   if (isIptvMode.value) {
@@ -2251,6 +2272,19 @@ watch(() => playerStore.iptvUrlIndex, () => {
   if (isIptvMode.value && isPlaying.value) {
     const attemptId = ++_playAttemptId
     playCurrentIptvUrl(attemptId)
+  }
+})
+
+// EPG 集成
+const { current: _epgCurrent, next: _epgNext, schedule: _epgSchedule, fetchPrograms: _epgFetch } = useEpg()
+
+watch(() => playerStore.currentIptvChannel, (ch) => {
+  if (ch?.canonical_key) {
+    _epgFetch(ch.canonical_key).then(() => {
+      playerStore.currentEpgProgram = _epgCurrent.value
+    })
+  } else {
+    playerStore.currentEpgProgram = null
   }
 })
 

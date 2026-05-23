@@ -167,7 +167,8 @@ const statusText = computed(() => {
   }
 
   if (playerStore.currentIptvChannel) {
-    return playerStore.currentIptvChannel.group_name || 'IPTV'
+    const prog = playerStore.currentEpgProgram
+    return prog?.title || playerStore.currentIptvChannel.group_name || 'IPTV'
   }
 
   return 'Live'

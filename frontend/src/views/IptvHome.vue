@@ -85,6 +85,12 @@
                   {{ ch.group_name }}
                 </span>
                 <span
+                  v-if="epgMap[ch.canonical_key]?.current?.title"
+                  class="mt-0.5 line-clamp-1 text-[0.65rem] text-gray-500 dark:text-gray-400 italic"
+                >
+                  {{ epgMap[ch.canonical_key].current.title }}
+                </span>
+                <span
                   v-if="isUntested(ch)"
                   class="mt-1 rounded-full bg-neutral-200 px-1.5 py-0.5 text-[0.6rem] text-neutral-500 dark:bg-neutral-700 dark:text-neutral-400"
                 >
@@ -110,6 +116,7 @@ import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch, wat
 import { useScroll, useThrottleFn } from '@vueuse/core'
 import { usePlayerStore } from '../stores/player'
 import { fetchAggregatedChannels } from '../api/iptv'
+import { useEpg } from '../composables/useEpg'
 
 const playerStore = usePlayerStore()
 const { currentStation } = storeToRefs(playerStore)
@@ -123,6 +130,7 @@ const allChannels = ref([])
 const allGroups = ref([])
 const selectedGroup = ref('')
 const loading = ref(false)
+const epgMap = ref({})
 const DEFAULT_LOGO_URL = '/logos/default.png'
 
 function useDefaultLogo(event) {
@@ -139,6 +147,11 @@ async function loadChannels() {
     allChannels.value = data.channels || []
     if (!selectedGroup.value && !searchQuery.value.trim()) {
       allGroups.value = data.groups || []
+    }
+    // 批量拉 EPG 摘要
+    const keys = (data.channels || []).map(c => c.canonical_key).filter(Boolean)
+    if (keys.length) {
+      useEpg().batchCurrent(keys).then(m => { epgMap.value = m || {} })
     }
   } catch (e) {
     console.error('加载频道失败:', e)
