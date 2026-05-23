@@ -121,6 +121,7 @@
                     class="h-full w-full object-cover"
                     :src="station.logoUrl"
                     :alt="`${station.name} logo`"
+                    @error="useDefaultLogo"
                   />
                   <span v-else>{{ station.logoText }}</span>
                 </div>
@@ -160,6 +161,14 @@ const ytLoading = ref(false)
 
 const mrStations = ref([])
 const mrLoading = ref(false)
+const DEFAULT_LOGO_URL = '/logos/default.png'
+
+function useDefaultLogo(event) {
+  const img = event?.target
+  if (!img || img.dataset.logoFallback === '1') return
+  img.dataset.logoFallback = '1'
+  img.src = DEFAULT_LOGO_URL
+}
 
 // EPG：初始 subtitle 从云听 API，定期 /api/yunting/epg 刷新，同步到 store 触发 MediaSession
 const epgMap = ref({})

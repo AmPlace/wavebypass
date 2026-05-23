@@ -55,6 +55,7 @@
                   class="h-full w-full object-cover"
                   :src="currentStationData.logoUrl"
                   :alt="currentStationName"
+                  @error="useDefaultLogo"
                 />
                 <span v-else class="text-3xl font-semibold text-neutral-700 dark:text-neutral-200">
                   {{ currentStationData?.logoText || '?' }}
@@ -201,7 +202,7 @@
                     @click="playerStore.switchStation(station.id)"
                   >
                     <div class="flex size-9 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-black/5 bg-white text-xs font-semibold text-neutral-600 dark:border-white/10 dark:bg-neutral-800 dark:text-neutral-300">
-                      <img v-if="station.logoUrl" class="h-full w-full object-cover" :src="station.logoUrl" :alt="station.name" />
+                      <img v-if="station.logoUrl" class="h-full w-full object-cover" :src="station.logoUrl" :alt="station.name" @error="useDefaultLogo" />
                       <span v-else>{{ station.logoText }}</span>
                     </div>
                     <div class="min-w-0 flex-1">
@@ -231,7 +232,7 @@
                     @click="playerStore.playIptvChannel(ch)"
                   >
                     <div class="flex size-9 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-black/5 bg-white text-xs font-semibold text-neutral-600 dark:border-white/10 dark:bg-neutral-800 dark:text-neutral-300">
-                      <img v-if="ch.logo_url" class="h-full w-full object-cover" :src="ch.logo_url" :alt="ch.name" />
+                      <img v-if="ch.logo_url" class="h-full w-full object-cover" :src="ch.logo_url" :alt="ch.name" @error="useDefaultLogo" />
                       <span v-else>{{ ch.name.slice(0, 2) }}</span>
                     </div>
                     <div class="min-w-0 flex-1">
@@ -327,10 +328,18 @@ const sourceMenuStyle = ref({
 })
 const sourceMenuListMaxHeight = ref('260px')
 const iptvSourceRuntimeStatus = ref({})
+const DEFAULT_LOGO_URL = '/logos/default.png'
 
 const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
   (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
 const iptvMuted = ref(isIOS)  // iOS 静音绕过自动播放限制
+
+function useDefaultLogo(event) {
+  const img = event?.target
+  if (!img || img.dataset.logoFallback === '1') return
+  img.dataset.logoFallback = '1'
+  img.src = DEFAULT_LOGO_URL
+}
 
 function toggleIptvMute() {
   if (!iptvVideoRef.value) return

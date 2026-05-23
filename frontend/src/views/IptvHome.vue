@@ -69,6 +69,7 @@
                     class="h-full w-full object-cover"
                     :src="ch.logo_url"
                     :alt="ch.name"
+                    @error="useDefaultLogo"
                   />
                   <span v-else>{{ ch.name.slice(0, 2) }}</span>
                 </div>
@@ -122,6 +123,14 @@ const allChannels = ref([])
 const allGroups = ref([])
 const selectedGroup = ref('')
 const loading = ref(false)
+const DEFAULT_LOGO_URL = '/logos/default.png'
+
+function useDefaultLogo(event) {
+  const img = event?.target
+  if (!img || img.dataset.logoFallback === '1') return
+  img.dataset.logoFallback = '1'
+  img.src = DEFAULT_LOGO_URL
+}
 
 async function loadChannels() {
   loading.value = true
