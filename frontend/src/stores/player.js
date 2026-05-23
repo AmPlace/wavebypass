@@ -113,28 +113,36 @@ export const usePlayerStore = defineStore('player', {
       // 构建回退队列：直连优先，代理在后
       const list = []
       const API_BASE = import.meta.env?.VITE_API_BASE_URL || window.location.origin
+      const sourceUrl = (u) => String(u?.url || '').trim()
       const isMpegTsUrl = (url) => /\/(?:rtp|udp)\//i.test(url) || /\.m2?ts(\?|$)/i.test(url)
+      const isRtspUrl = (url) => /^rtsp:\/\//i.test(url)
       const proxyUrlFor = (u) => {
+        const url = sourceUrl(u)
         const ua = u.custom_ua ? `&custom_ua=${encodeURIComponent(u.custom_ua)}` : ''
-        if (isMpegTsUrl(u.url)) {
-          return `${API_BASE}/api/iptv/proxy/stream?target_url=${encodeURIComponent(u.url)}${ua}`
+        if (isRtspUrl(url)) {
+          return `${API_BASE}/api/iptv/proxy/rtsp.m3u8?target_url=${encodeURIComponent(url)}${ua}`
         }
-        return `${API_BASE}/api/iptv/proxy/wide.m3u8?proxy_ts=1${ua}&target_url=${encodeURIComponent(u.url)}`
+        if (isMpegTsUrl(url)) {
+          return `${API_BASE}/api/iptv/proxy/stream?target_url=${encodeURIComponent(url)}${ua}`
+        }
+        return `${API_BASE}/api/iptv/proxy/wide.m3u8?proxy_ts=1${ua}&target_url=${encodeURIComponent(url)}`
       }
       // 分两组：直连组 + 必须代理组
       const directUrls = []
       const proxyOnlyUrls = []
       for (const u of sorted) {
-        if (u.force_proxy || u.custom_ua) {
+        const url = sourceUrl(u)
+        if (!url) continue
+        if (isRtspUrl(url) || u.force_proxy || u.custom_ua) {
           proxyOnlyUrls.push({
             ...u,
             url: proxyUrlFor(u),
-            original_url: u.url,
-            type: isMpegTsUrl(u.url) ? 'direct' : 'proxy',
+            original_url: url,
+            type: isMpegTsUrl(url) ? 'direct' : 'proxy',
             via_proxy: true,
           })
         } else {
-          directUrls.push(u)
+          directUrls.push({ ...u, url })
         }
       }
       // 先所有直连，再所有直连的代理回退，最后是必须代理的
@@ -142,11 +150,12 @@ export const usePlayerStore = defineStore('player', {
         list.push({ ...u, url: u.url, original_url: u.url, type: 'direct' })
       }
       for (const u of directUrls) {
+        const url = sourceUrl(u)
         list.push({
           ...u,
           url: proxyUrlFor(u),
-          original_url: u.url,
-          type: isMpegTsUrl(u.url) ? 'direct' : 'proxy',
+          original_url: url,
+          type: isMpegTsUrl(url) ? 'direct' : 'proxy',
           via_proxy: true,
         })
       }
