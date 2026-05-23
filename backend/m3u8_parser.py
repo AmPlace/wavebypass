@@ -79,20 +79,36 @@ def _to_simplified(s: str) -> str:
     return ''.join(_T2S.get(c, c) for c in s)
 
 
-# 常见源后缀，去重前先去掉
-_SOURCE_SUFFIX_RE = re.compile(r'-?(?:MCP|mcp|源|线路|备用|直播|官方)$')
+def _primary_channel_key(primary: str) -> str:
+    compact = re.sub(r'[\s\-_]+', '', _to_simplified(primary)).lower()
+    if compact in {'cctv4k', 'cctv8k'}:
+        return compact
+    return format_name(primary)
+
+
+# 常见来源/线路后缀，去重前先去掉
+_SOURCE_SUFFIX_RE = re.compile(
+    r'(?:[\s\-_]*(?:MCP|IPTV|直播|官方)|-?(?:源|线路|备用))+$',
+    re.IGNORECASE,
+)
+
+
+def clean_channel_display_name(name: str) -> str:
+    s = _SOURCE_SUFFIX_RE.sub('', name.strip()).strip()
+    return s or name.strip()
 
 
 def normalize_channel_name(name: str) -> str:
     """清洗频道名，用于去重比较。优先用别名表匹配主名。"""
     # 先去源后缀再匹配 alias
-    stripped = _SOURCE_SUFFIX_RE.sub('', name.strip())
+    stripped = clean_channel_display_name(name)
     # 多种尝试：原名 → 去后缀 → format_name
     for candidate in [name, stripped, format_name(stripped), format_name(name)]:
         primary = _channel_alias.get_primary(candidate)
-        if primary and primary != candidate:
-            return format_name(primary)
-    s = name.strip()
+        known_alias = _channel_alias.alias_to_primary.get(candidate) == primary
+        if primary and (primary != candidate or known_alias):
+            return _primary_channel_key(primary)
+    s = stripped
     s = _STRIP_RE.sub('', s)
     s = _PROVIDER_RE.sub('', s)
     s = _to_simplified(s)

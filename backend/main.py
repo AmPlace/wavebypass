@@ -1548,12 +1548,16 @@ async def aggregated_channels(group: str = '', search: str = ''):
     # 搜索在 SQL 层过滤（性能好），分组在聚合后过滤（归一化后才准）
     raw = await db.get_aggregated_channels(group='', search=search)
 
-    from m3u8_parser import normalize_channel_name, _channel_alias
+    from m3u8_parser import clean_channel_display_name, normalize_channel_name, _channel_alias
     from template import channel_template, normalize_group_name
 
     merged: dict[str, dict] = {}
     for ch in raw:
         key = normalize_channel_name(ch['name'])
+        display_name = clean_channel_display_name(ch['name'])
+        primary_name = _channel_alias.get_primary(display_name)
+        if primary_name and primary_name != display_name:
+            display_name = primary_name
 
         # 分组匹配优先级：模板 > alias主名在模板中 > 原始分组 > "其他"
         primary = _channel_alias.get_primary(ch['name'])
@@ -1563,7 +1567,7 @@ async def aggregated_channels(group: str = '', search: str = ''):
 
         if key not in merged:
             merged[key] = {
-                'name': ch['name'],
+                'name': display_name,
                 'group_name': grp,
                 'logo_url': ch['logo_url'],
                 'tvg_id': ch['tvg_id'],
