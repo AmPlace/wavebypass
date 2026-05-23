@@ -3,252 +3,300 @@
     <Transition name="slide-up">
       <div
         v-show="isPlayerExpanded"
-        class="fixed inset-0 z-50 flex flex-col bg-gray-100 dark:bg-neutral-900"
+        class="full-player fixed inset-0 z-50 overflow-y-auto bg-[#f7f7f6] text-neutral-950"
       >
-        <!-- 顶部栏 -->
-        <div class="flex h-12 shrink-0 items-center justify-between px-4 sm:px-6">
-          <button
-            type="button"
-            class="flex size-10 items-center justify-center rounded-full text-neutral-600 transition-colors hover:bg-neutral-200/60 dark:text-neutral-300 dark:hover:bg-neutral-700/60"
-            aria-label="收起播放器"
-            @click="playerStore.collapsePlayer()"
-          >
-            <svg class="size-5" viewBox="0 0 24 24" fill="none"><path d="M19 12H5M12 5l-7 7 7 7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          </button>
+        <div class="player-layout">
+          <main class="player-main">
+            <section class="media-card">
+              <div class="mobile-live-pill" aria-hidden="true">
+                <div class="pill-logo">
+                  <img
+                    v-if="currentArtworkUrl"
+                    :src="currentArtworkUrl"
+                    :alt="currentStationName"
+                    @error="useDefaultLogo"
+                  />
+                  <span v-else>{{ currentStationName.slice(0, 1) }}</span>
+                </div>
+                <span class="mini-eq active"></span>
+              </div>
 
-          <div class="w-10"></div>
-        </div>
-
-        <!-- 主内容区 -->
-        <div class="flex min-h-0 flex-1 flex-col gap-4 px-4 pb-4 sm:px-6 lg:flex-row lg:gap-6 lg:px-8">
-
-          <!-- 左栏：媒体展示区 -->
-          <div
-            class="flex flex-1 flex-col items-center justify-center overflow-hidden rounded-3xl lg:flex-[3]"
-            :class="isIptvMode ? 'bg-transparent' : 'bg-gradient-to-br from-rose-400/20 via-fuchsia-400/20 to-amber-300/20 dark:from-rose-500/10 dark:via-fuchsia-500/10 dark:to-amber-500/10'"
-          >
-
-            <!-- IPTV 视频 -->
-            <video
-              v-if="isIptvMode"
-              ref="iptvVideoRef"
-              class="w-full h-full object-contain rounded-lg"
-              playsinline
-              preload="auto"
-              :muted="iptvMuted"
-              @error="handleIptvError"
-              @playing="onVideoEvent('playing')"
-              @pause="onVideoEvent('pause')"
-              @waiting="onVideoEvent('waiting')"
-              @stalled="onVideoStalled"
-              @timeupdate="onVideoTimeUpdate"
-            ></video>
-
-            <!-- 电台 logo 展示 -->
-            <div v-if="!isIptvMode" class="flex flex-col items-center gap-5 p-8">
-              <div
-                class="flex size-28 items-center justify-center overflow-hidden rounded-full border border-white/40 bg-white/30 shadow-xl shadow-black/10 backdrop-blur-sm transition-transform duration-500 sm:size-36 dark:border-white/10 dark:bg-white/10"
-                :class="{ 'animate-pulse': isLoading }"
+              <button
+                type="button"
+                class="overlay-btn overlay-back"
+                aria-label="收起播放器"
+                @click="playerStore.collapsePlayer()"
               >
-                <img
-                  v-if="currentStationData?.logoUrl"
-                  class="h-full w-full object-cover"
-                  :src="currentStationData.logoUrl"
-                  :alt="currentStationName"
-                  @error="useDefaultLogo"
-                />
-                <span v-else class="text-3xl font-semibold text-neutral-700 dark:text-neutral-200">
-                  {{ currentStationData?.logoText || '?' }}
-                </span>
-              </div>
-              <div class="text-center">
-                <p class="text-lg font-semibold text-neutral-900 dark:text-neutral-100">{{ currentStationName }}</p>
-                <p class="mt-1 text-sm text-neutral-500 dark:text-neutral-400">{{ statusText }}</p>
-              </div>
-            </div>
-          </div>
+                <svg viewBox="0 0 24 24" fill="none"><path d="M19 12H5M12 5l-7 7 7 7" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </button>
 
-          <!-- 右栏：控制面板 -->
-          <div class="flex flex-1 flex-col gap-4 overflow-hidden lg:flex-[2]">
-            <!-- 播放控制 -->
-            <div class="flex flex-col items-center gap-3">
-              <p class="text-center text-2xl font-bold text-neutral-900 dark:text-neutral-50">
-                {{ currentStationName }}
-              </p>
-              <p class="text-center text-sm text-neutral-500 dark:text-neutral-400">
-                {{ statusText }}
+              <button
+                type="button"
+                class="overlay-btn overlay-info"
+                aria-label="频道信息"
+              >
+                <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="8.5" stroke="currentColor" stroke-width="2"/><path d="M12 10.8v5.2M12 7.8h.01" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
+              </button>
+
+              <video
+                v-if="isIptvMode"
+                ref="iptvVideoRef"
+                class="media-video"
+                playsinline
+                preload="auto"
+                :muted="iptvMuted"
+                @error="handleIptvError"
+                @playing="onVideoEvent('playing')"
+                @pause="onVideoEvent('pause')"
+                @waiting="onVideoEvent('waiting')"
+                @stalled="onVideoStalled"
+                @timeupdate="onVideoTimeUpdate"
+              ></video>
+
+              <div v-else class="radio-art-stage">
+                <div class="radio-art">
+                  <img
+                    v-if="currentArtworkUrl"
+                    :src="currentArtworkUrl"
+                    :alt="currentStationName"
+                    @error="useDefaultLogo"
+                  />
+                  <span v-else>{{ currentStationData?.logoText || '?' }}</span>
+                </div>
+              </div>
+            </section>
+
+            <section class="now-panel">
+              <h1>{{ currentStationName }}</h1>
+              <p>{{ currentChannelSubtitle }}</p>
+
+              <div class="program-progress">
+                <div class="progress-track">
+                  <div class="progress-fill" :style="{ width: currentProgramProgressPercent }"></div>
+                  <span class="progress-knob" :style="{ left: currentProgramProgressPercent }"></span>
+                </div>
+                <div class="progress-times">
+                  <span>{{ currentProgram.start }}</span>
+                  <span>{{ currentProgram.end }}</span>
+                </div>
+              </div>
+
+              <p class="program-state">
+                <span class="state-dot" :class="playbackStateClass"></span>
+                <span>{{ fullPlayerStatusText }}</span>
+                <span v-if="showProgramRemaining">·</span>
+                <span v-if="showProgramRemaining">剩余 {{ currentProgram.remaining }} 分钟</span>
               </p>
 
-              <div class="mt-2 flex items-center gap-6">
-                <button
-                  type="button"
-                  class="flex size-10 items-center justify-center rounded-full text-neutral-400 transition-colors hover:text-neutral-700 dark:hover:text-neutral-200"
-                  aria-label="上一个"
-                  @click="playPrev"
-                >
-                  <svg class="size-6" viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h2v12H6zm3.5 6l8.5 6V6z"/></svg>
+              <div class="transport-row">
+                <button type="button" class="transport-side" aria-label="上一个" @click="playPrev">
+                  <svg viewBox="0 0 24 24" fill="currentColor"><path d="M5.5 5.5h2.6v13H5.5zm4.8 6.5 8.2 6.1V5.9z"/></svg>
                 </button>
-
                 <button
                   type="button"
-                  class="flex size-14 items-center justify-center rounded-full bg-neutral-950 text-white shadow-lg shadow-black/20 transition-all duration-200 hover:scale-105 active:scale-95 dark:bg-white dark:text-black"
+                  class="transport-main"
                   :aria-label="isPlaying ? '暂停' : '播放'"
                   @click="playerStore.togglePlay()"
                 >
-                  <svg v-if="isPlaying" class="size-6" viewBox="0 0 24 24" fill="none"><path d="M8 5v14M16 5v14" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/></svg>
-                  <svg v-else class="ml-0.5 size-6" viewBox="0 0 24 24" fill="none"><path d="M8 5.75v12.5c0 .72.78 1.17 1.4.8l10.1-6.25a.94.94 0 0 0 0-1.6L9.4 4.95A.93.93 0 0 0 8 5.75Z" fill="currentColor"/></svg>
+                  <svg v-if="isPlaying" viewBox="0 0 24 24" fill="none"><path d="M8.5 5.5v13M15.5 5.5v13" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/></svg>
+                  <svg v-else viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.6v12.8c0 .75.83 1.2 1.46.78l9.65-6.39a.95.95 0 0 0 0-1.58L9.46 4.82A.94.94 0 0 0 8 5.6Z"/></svg>
                 </button>
-
-                <button
-                  type="button"
-                  class="flex size-10 items-center justify-center rounded-full text-neutral-400 transition-colors hover:text-neutral-700 dark:hover:text-neutral-200"
-                  aria-label="下一个"
-                  @click="playNext"
-                >
-                  <svg class="size-6" viewBox="0 0 24 24" fill="currentColor"><path d="M16 6h2v12h-2zM4 18l8.5-6L4 6z"/></svg>
+                <button type="button" class="transport-side" aria-label="下一个" @click="playNext">
+                  <svg viewBox="0 0 24 24" fill="currentColor"><path d="M15.9 5.5h2.6v13h-2.6zM5.5 18.1l8.2-6.1-8.2-6.1z"/></svg>
                 </button>
               </div>
 
-              <!-- 音量 / 静音（iOS 不支持音量条，改用静音切换按钮）-->
-              <div class="flex flex-wrap items-center justify-center gap-2 sm:gap-3">
-                <!-- iOS: 静音切换按钮 -->
+              <div class="utility-row">
                 <button
                   v-if="isIOS && isIptvMode"
                   type="button"
-                  class="flex size-10 shrink-0 items-center justify-center rounded-full text-neutral-400 transition-colors hover:text-neutral-700 dark:hover:text-neutral-200"
+                  class="utility-btn"
                   :aria-label="iptvMuted ? '取消静音' : '静音'"
                   @click="toggleIptvMute()"
                 >
-                  <!-- 静音图标 -->
-                  <svg v-if="iptvMuted" class="size-5" viewBox="0 0 24 24" fill="none">
+                  <svg v-if="iptvMuted" viewBox="0 0 24 24" fill="none">
                     <path d="M4 10v4a1 1 0 0 0 1 1h3l4.2 3.15A.5.5 0 0 0 13 17.75V6.25a.5.5 0 0 0-.8-.4L8 9H5a1 1 0 0 0-1 1Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
-                    <path d="m22 2-20 20" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+                    <path d="m21 3-18 18" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/>
                   </svg>
-                  <!-- 有声音图标 -->
-                  <svg v-else class="size-5" viewBox="0 0 24 24" fill="none">
+                  <svg v-else viewBox="0 0 24 24" fill="none">
                     <path d="M4 10v4a1 1 0 0 0 1 1h3l4.2 3.15A.5.5 0 0 0 13 17.75V6.25a.5.5 0 0 0-.8-.4L8 9H5a1 1 0 0 0-1 1Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
                     <path d="M16 9a4 4 0 0 1 0 6M18.5 6.5a7.5 7.5 0 0 1 0 11" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
                   </svg>
                 </button>
 
-                <!-- 非 iOS: 音量滑动条 -->
-                <template v-if="!isIOS || !isIptvMode">
-                  <div class="flex min-w-0 shrink items-center gap-2">
-                    <svg class="size-4 shrink-0 text-neutral-400" viewBox="0 0 24 24" fill="none"><path d="M4 10v4a1 1 0 0 0 1 1h3l4.2 3.15A.5.5 0 0 0 13 17.75V6.25a.5.5 0 0 0-.8-.4L8 9H5a1 1 0 0 0-1 1Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M16 9a4 4 0 0 1 0 6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
-                    <input
-                      class="h-1 w-20 cursor-pointer appearance-none rounded-full bg-neutral-300 accent-neutral-950 outline-none sm:w-24 dark:bg-neutral-700 dark:accent-white [&::-moz-range-thumb]:size-3 [&::-moz-range-thumb]:appearance-none [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:border-0 [&::-moz-range-thumb]:bg-neutral-950 dark:[&::-moz-range-thumb]:bg-white [&::-webkit-slider-thumb]:size-3 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-neutral-950 dark:[&::-webkit-slider-thumb]:bg-white"
-                      type="range"
-                      min="0"
-                      max="1"
-                      step="0.01"
-                      :value="volume"
-                      aria-label="音量"
-                      @input="playerStore.setVolume($event.target.value)"
-                    />
-                    <svg class="size-4 shrink-0 text-neutral-400" viewBox="0 0 24 24" fill="none"><path d="M4 10v4a1 1 0 0 0 1 1h3l4.2 3.15A.5.5 0 0 0 13 17.75V6.25a.5.5 0 0 0-.8-.4L8 9H5a1 1 0 0 0-1 1Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M16 9a4 4 0 0 1 0 6M18.5 6.5a7.5 7.5 0 0 1 0 11" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
-                  </div>
-                </template>
+                <div v-if="!isIOS || !isIptvMode" class="volume-control">
+                  <svg viewBox="0 0 24 24" fill="none"><path d="M4 10v4a1 1 0 0 0 1 1h3l4.2 3.15A.5.5 0 0 0 13 17.75V6.25a.5.5 0 0 0-.8-.4L8 9H5a1 1 0 0 0-1 1Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+                  <input
+                    type="range"
+                    min="0"
+                    max="1"
+                    step="0.01"
+                    :value="volume"
+                    aria-label="音量"
+                    @input="playerStore.setVolume($event.target.value)"
+                  />
+                </div>
 
-                <!-- 全屏按钮 -->
-                <button
-                  type="button"
-                  class="flex size-10 shrink-0 items-center justify-center rounded-full text-neutral-400 transition-colors hover:text-neutral-700 dark:hover:text-neutral-200"
-                  aria-label="全屏"
-                  @click="toggleFullscreen"
-                >
-                  <svg class="size-5" viewBox="0 0 24 24" fill="none">
-                    <path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z" fill="currentColor"/>
-                  </svg>
+                <button type="button" class="utility-btn" aria-label="全屏" @click="toggleFullscreen">
+                  <svg viewBox="0 0 24 24" fill="none"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z" fill="currentColor"/></svg>
                 </button>
 
-                <div v-if="isIptvMode && iptvSourceOptions.length" class="relative">
-                  <button
-                    ref="sourceButtonRef"
-                    type="button"
-                    class="relative flex size-10 shrink-0 items-center justify-center rounded-full text-neutral-400 transition-colors hover:text-neutral-700 dark:hover:text-neutral-200"
-                    :aria-expanded="sourceMenuOpen"
-                    aria-controls="iptv-source-menu"
-                    aria-label="切换播放源"
-                    @click.stop="toggleSourceMenu"
+                <button
+                  v-if="isIptvMode && iptvSourceOptions.length"
+                  ref="sourceButtonRef"
+                  type="button"
+                  class="utility-btn relative"
+                  :aria-expanded="sourceMenuOpen"
+                  aria-controls="iptv-source-menu"
+                  aria-label="切换播放源"
+                  @click.stop="toggleSourceMenu"
+                >
+                  <svg viewBox="0 0 24 24" fill="none"><path d="M6 7.5h12M6 12h12M6 16.5h8" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>
+                  <span class="source-dot" :class="currentIptvSourceStatusClass"></span>
+                </button>
+              </div>
+            </section>
+
+            <section class="mobile-panel">
+              <div class="panel-tabs">
+                <button
+                  type="button"
+                  :class="{ active: activePlayerPanel === 'channels' }"
+                  @click="activePlayerPanel = 'channels'"
+                >
+                  频道列表
+                </button>
+                <button
+                  type="button"
+                  :class="{ active: activePlayerPanel === 'schedule' }"
+                  @click="activePlayerPanel = 'schedule'"
+                >
+                  节目单
+                </button>
+              </div>
+
+              <div v-if="activePlayerPanel === 'channels'" class="channel-panel">
+                <button
+                  v-for="item in displayChannelRows"
+                  :key="item.key"
+                  type="button"
+                  class="channel-row"
+                  :class="{ active: item.active }"
+                  @click="item.select"
+                >
+                  <span class="channel-logo">
+                    <img v-if="item.logo" :src="item.logo" :alt="item.name" @error="useDefaultLogo" />
+                    <span v-else>{{ item.name.slice(0, 2) }}</span>
+                  </span>
+                  <span class="channel-copy">
+                    <span class="channel-title">
+                      {{ item.name }}
+                      <span v-if="item.live" class="live-dot"></span>
+                    </span>
+                    <span class="channel-subtitle">{{ item.summary }}</span>
+                  </span>
+                  <svg
+                    v-if="item.playing"
+                    class="eq-icon active"
+                    viewBox="0 0 24 24"
+                    aria-hidden="true"
                   >
-                    <svg class="size-5" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                      <path d="M6 7.5h12M6 12h12M6 16.5h8" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/>
-                      <path d="M17 15.25 19.25 17.5 17 19.75" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
-                    </svg>
-                    <span
-                      class="absolute right-1.5 top-1.5 size-2 rounded-full"
-                      :class="currentIptvSourceStatusClass"
-                    ></span>
-                  </button>
+                    <rect x="4" y="8" width="2.5" height="8" rx="1.25" />
+                    <rect x="8.5" y="5" width="2.5" height="14" rx="1.25" />
+                    <rect x="13" y="3" width="2.5" height="18" rx="1.25" />
+                    <rect x="17.5" y="6" width="2.5" height="12" rx="1.25" />
+                  </svg>
+                </button>
+              </div>
+
+              <div v-else class="schedule-panel">
+                <div class="schedule-date">
+                  <span>今天 · 2月22日</span>
+                  <svg viewBox="0 0 24 24" fill="none"><path d="m7 10 5 5 5-5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </div>
+                <div class="timeline">
+                  <div v-for="program in displaySchedule" :key="program.time" class="timeline-row" :class="{ current: program.current, past: program.past }">
+                    <span class="timeline-time">{{ program.time }}</span>
+                    <span class="timeline-dot"></span>
+                    <span class="timeline-title">
+                      {{ program.title }}
+                      <span v-if="program.current" class="tag live-tag">直播中</span>
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </section>
+          </main>
+
+          <aside class="side-panel">
+            <div class="panel-tabs">
+              <button
+                type="button"
+                :class="{ active: activePlayerPanel === 'channels' }"
+                @click="activePlayerPanel = 'channels'"
+              >
+                频道列表
+              </button>
+              <button
+                type="button"
+                :class="{ active: activePlayerPanel === 'schedule' }"
+                @click="activePlayerPanel = 'schedule'"
+              >
+                节目单
+              </button>
+            </div>
+
+            <div v-if="activePlayerPanel === 'channels'" class="channel-panel desktop-panel-scroll">
+              <button
+                v-for="item in displayChannelRows"
+                :key="item.key"
+                type="button"
+                class="channel-row"
+                :class="{ active: item.active }"
+                @click="item.select"
+              >
+                <span class="channel-logo">
+                  <img v-if="item.logo" :src="item.logo" :alt="item.name" @error="useDefaultLogo" />
+                  <span v-else>{{ item.name.slice(0, 2) }}</span>
+                </span>
+                <span class="channel-copy">
+                  <span class="channel-title">
+                    {{ item.name }}
+                    <span v-if="item.live" class="live-dot"></span>
+                  </span>
+                  <span class="channel-subtitle">{{ item.summary }}</span>
+                </span>
+                <svg
+                  v-if="item.playing"
+                  class="eq-icon active"
+                  viewBox="0 0 24 24"
+                  aria-hidden="true"
+                >
+                  <rect x="4" y="8" width="2.5" height="8" rx="1.25" />
+                  <rect x="8.5" y="5" width="2.5" height="14" rx="1.25" />
+                  <rect x="13" y="3" width="2.5" height="18" rx="1.25" />
+                  <rect x="17.5" y="6" width="2.5" height="12" rx="1.25" />
+                </svg>
+              </button>
+            </div>
+
+            <div v-else class="schedule-panel desktop-panel-scroll">
+              <div class="schedule-date">
+                <span>今天 · 2月22日</span>
+                <svg viewBox="0 0 24 24" fill="none"><path d="m7 10 5 5 5-5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </div>
+              <div class="timeline">
+                <div v-for="program in displaySchedule" :key="program.time" class="timeline-row" :class="{ current: program.current, past: program.past }">
+                  <span class="timeline-time">{{ program.time }}</span>
+                  <span class="timeline-dot"></span>
+                  <span class="timeline-title">
+                    {{ program.title }}
+                    <span v-if="program.current" class="tag live-tag">直播中</span>
+                  </span>
                 </div>
               </div>
             </div>
-
-            <!-- 分割线 -->
-            <div class="h-px bg-neutral-200 dark:bg-neutral-700"></div>
-
-            <!-- 频道列表 -->
-            <div class="min-h-0 flex-1 overflow-y-auto scrollbar-hide">
-              <p class="mb-2 text-xs font-medium text-neutral-400 dark:text-neutral-500">频道列表</p>
-              <div class="space-y-1">
-                <!-- 电台列表 -->
-                <template v-if="!isIptvMode">
-                  <button
-                    v-for="station in channelList"
-                    :key="station.id"
-                    type="button"
-                    class="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left transition-colors hover:bg-neutral-200/60 dark:hover:bg-neutral-700/60"
-                    :class="{ 'bg-neutral-200/80 dark:bg-neutral-700/80': currentStation === station.id }"
-                    @click="playerStore.switchStation(station.id)"
-                  >
-                    <div class="flex size-9 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-black/5 bg-white text-xs font-semibold text-neutral-600 dark:border-white/10 dark:bg-neutral-800 dark:text-neutral-300">
-                      <img v-if="station.logoUrl" class="h-full w-full object-cover" :src="station.logoUrl" :alt="station.name" @error="useDefaultLogo" />
-                      <span v-else>{{ station.logoText }}</span>
-                    </div>
-                    <div class="min-w-0 flex-1">
-                      <p class="truncate text-sm font-medium text-neutral-800 dark:text-neutral-200">{{ station.name }}</p>
-                      <p v-if="station.subtitle" class="truncate text-xs text-neutral-400 dark:text-neutral-500">{{ station.subtitle }}</p>
-                    </div>
-                    <div
-                      v-if="currentStation === station.id"
-                      class="size-2 shrink-0 rounded-full"
-                      :class="isPlaying ? 'bg-emerald-500' : 'bg-neutral-300 dark:bg-neutral-600'"
-                    ></div>
-                  </button>
-                </template>
-
-                <!-- IPTV 列表 -->
-                <template v-else>
-                  <button
-                    v-for="ch in iptvChannelList"
-                    :key="ch.name"
-                    type="button"
-                    :disabled="isIptvUntested(ch)"
-                    class="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left transition-colors hover:bg-neutral-200/60 dark:hover:bg-neutral-700/60"
-                    :class="{
-                      'bg-neutral-200/80 dark:bg-neutral-700/80': isCurrentIptv(ch),
-                      'cursor-not-allowed opacity-40 hover:bg-transparent dark:hover:bg-transparent': isIptvUntested(ch),
-                    }"
-                    @click="playerStore.playIptvChannel(ch)"
-                  >
-                    <div class="flex size-9 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-black/5 bg-white text-xs font-semibold text-neutral-600 dark:border-white/10 dark:bg-neutral-800 dark:text-neutral-300">
-                      <img v-if="ch.logo_url" class="h-full w-full object-cover" :src="ch.logo_url" :alt="ch.name" @error="useDefaultLogo" />
-                      <span v-else>{{ ch.name.slice(0, 2) }}</span>
-                    </div>
-                    <div class="min-w-0 flex-1">
-                      <p class="truncate text-sm font-medium text-neutral-800 dark:text-neutral-200">{{ ch.name }}</p>
-                      <p v-if="ch.group_name" class="truncate text-xs text-neutral-400 dark:text-neutral-500">{{ ch.group_name }}</p>
-                    </div>
-                    <div
-                      v-if="isCurrentIptv(ch)"
-                      class="size-2 shrink-0 rounded-full"
-                      :class="isPlaying ? 'bg-emerald-500' : 'bg-neutral-300 dark:bg-neutral-600'"
-                    ></div>
-                  </button>
-                </template>
-              </div>
-            </div>
-          </div>
+          </aside>
         </div>
       </div>
     </Transition>
@@ -328,6 +376,7 @@ const sourceMenuStyle = ref({
 })
 const sourceMenuListMaxHeight = ref('260px')
 const iptvSourceRuntimeStatus = ref({})
+const activePlayerPanel = ref('channels')
 const DEFAULT_LOGO_URL = '/logos/default.png'
 
 const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
@@ -418,6 +467,98 @@ const statusText = computed(() => {
 const channelList = computed(() => stationList.value)
 
 const iptvChannelList = ref([])
+
+const currentArtworkUrl = computed(() => {
+  if (playerStore.currentIptvChannel) return playerStore.currentIptvChannel.logo_url || ''
+  return currentStationData.value?.logoUrl || ''
+})
+
+const currentChannelSubtitle = computed(() => {
+  if (playerStore.currentIptvChannel) return playerStore.currentIptvChannel.group_name || '直播频道'
+  return statusText.value
+})
+
+const currentProgram = computed(() => ({
+  title: currentStationName.value,
+  start: '17:30',
+  end: '18:30',
+  remaining: 20,
+  progress: 64,
+}))
+
+const currentProgramProgressPercent = computed(() => `${currentProgram.value.progress}%`)
+
+const fullPlayerStatusText = computed(() => {
+  if (playerStore.playbackError) return playerStore.playbackError
+  if (isLoading.value) return '正在连接'
+  if (isPlaying.value) return '直播中'
+  return '已暂停'
+})
+
+const showProgramRemaining = computed(() => (
+  !playerStore.playbackError && !isLoading.value && isPlaying.value
+))
+
+const playbackStateClass = computed(() => {
+  if (playerStore.playbackError) return 'error'
+  if (isLoading.value) return 'loading'
+  if (isPlaying.value) return 'playing'
+  return 'idle'
+})
+
+const isPlaybackConfirmed = computed(() => (
+  !playerStore.playbackError && !isLoading.value && isPlaying.value
+))
+
+const displaySchedule = computed(() => [
+  { time: '17:00', title: '上一档节目名字', past: true },
+  { time: '17:30', title: currentProgram.value.title, current: true },
+  { time: '18:00', title: '名作シアター「真夏の夜の夢」' },
+  { time: '18:30', title: '世界のドキュメンタリー「水の記憶」' },
+  { time: '19:00', title: 'クラシック名演集 ベートーヴェン特集' },
+  { time: '19:30', title: 'NEWS LIVE 24' },
+])
+
+const displayChannelRows = computed(() => {
+  if (isIptvMode.value) {
+    const channels = iptvChannelList.value.length
+      ? iptvChannelList.value
+      : (playerStore.currentIptvChannel ? [playerStore.currentIptvChannel] : [])
+    return channels.map((ch, index) => {
+      const active = isCurrentIptv(ch)
+      const playing = active && isPlaybackConfirmed.value
+      return {
+        key: `iptv-${ch.name}-${index}`,
+        name: ch.name,
+        logo: ch.logo_url || '',
+        live: playing,
+        playing,
+        active,
+        summary: active
+          ? `当前：${currentProgram.value.title} · 剩余 ${currentProgram.value.remaining} 分钟`
+          : `${ch.group_name || '直播频道'} · ${15 + (index % 5) * 5} 分钟`,
+        select: () => playerStore.playIptvChannel(ch),
+      }
+    })
+  }
+
+  return channelList.value.map((station, index) => {
+    const active = currentStation.value === station.id
+    const playing = active && isPlaybackConfirmed.value
+    return {
+      key: `radio-${station.id}`,
+      name: station.name,
+      logo: station.logoUrl || '',
+      live: playing,
+      playing,
+      active,
+      summary: active
+        ? `当前：${station.subtitle || station.name} · 剩余 ${currentProgram.value.remaining} 分钟`
+        : `${station.subtitle || '直播电台'} · ${15 + (index % 5) * 5} 分钟`,
+      select: () => playerStore.switchStation(station.id),
+    }
+  })
+})
 
 function sourceTargetUrl(entry) {
   if (!entry?.url) return ''
@@ -2141,5 +2282,1048 @@ onBeforeUnmount(() => {
 }
 .slide-up-leave-to {
   transform: translateY(100%);
+}
+
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.16s ease;
+}
+
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+}
+
+.full-player {
+  --accent: #35c87a;
+  --gold: #c79a2b;
+  --muted: #8d9299;
+  --line: rgba(17, 24, 39, 0.08);
+  --layout-width: min(1580px, calc(100% - 88px));
+  --layout-height: 100dvh;
+  --layout-gap: clamp(36px, 3.4vw, 60px);
+  --layout-padding: clamp(28px, 4vh, 44px) 0 clamp(24px, 3.2vh, 36px);
+  --media-width: min(100%, 1040px, calc(58dvh * 1.8605));
+  --media-height: auto;
+  --media-radius: 8px;
+  --media-shadow: 0 18px 42px rgba(15, 23, 42, 0.18);
+  --panel-inline: 22px;
+  --title-size: clamp(26px, 2.4vw, 36px);
+  --title-weight: 750;
+  --subtitle-size: 15px;
+  --meta-size: 14px;
+  --control-gap: clamp(38px, 5vw, 60px);
+  --control-main-size: 62px;
+  --control-main-icon: 26px;
+  --control-side-size: 44px;
+  --control-side-icon: 28px;
+  --utility-gap: 30px;
+  --utility-size: 30px;
+  --utility-icon: 22px;
+  --tab-gap: 30px;
+  --tab-min-height: 42px;
+  --tab-size: 15px;
+  --tab-weight: 400;
+  --tab-active-weight: 600;
+  --tab-line-width: 46px;
+  --channel-grid: 64px minmax(0, 1fr) 34px;
+  --channel-gap: 16px;
+  --channel-logo-size: 58px;
+  --channel-min-height: 78px;
+  --channel-margin: 12px;
+  --channel-padding: 10px 14px 10px 8px;
+  --channel-title-size: 16px;
+  --channel-title-weight: 500;
+  --channel-subtitle-size: 13px;
+  --channel-subtitle-color: rgba(107, 114, 128, 0.68);
+  --eq-width: 22px;
+  --eq-height: 22px;
+  --eq-opacity: 0.35;
+  --timeline-grid: 66px 46px minmax(0, 1fr);
+  --timeline-line-left: 89px;
+  --timeline-row-height: 84px;
+  --timeline-time-size: 15px;
+  --timeline-title-size: 18px;
+  overflow: hidden;
+  min-height: 100dvh;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "PingFang SC", "Hiragino Sans", "Microsoft YaHei", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+.full-player,
+.full-player *,
+.full-player *::before,
+.full-player *::after {
+  box-sizing: border-box;
+}
+
+.player-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.72fr) minmax(340px, 0.9fr);
+  gap: var(--layout-gap);
+  width: var(--layout-width);
+  height: var(--layout-height);
+  margin: 0 auto;
+  padding: var(--layout-padding);
+}
+
+.player-main {
+  display: flex;
+  min-height: 0;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.media-card {
+  position: relative;
+  box-sizing: border-box;
+  overflow: hidden;
+  width: var(--media-width);
+  height: var(--media-height);
+  aspect-ratio: 16 / 8.6;
+  border-radius: var(--media-radius);
+  background: #0b0d12;
+  box-shadow: var(--media-shadow);
+}
+
+.media-video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #050505;
+}
+
+.radio-art-stage {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  background:
+    radial-gradient(circle at 30% 20%, rgba(255, 255, 255, 0.32), transparent 36%),
+    linear-gradient(135deg, #dfe8f2, #f4f1eb 52%, #e7f0ed);
+}
+
+.radio-art {
+  display: grid;
+  place-items: center;
+  width: min(28vw, 190px);
+  aspect-ratio: 1;
+  overflow: hidden;
+  border-radius: 24px;
+  background: rgba(255, 255, 255, 0.72);
+  color: #111827;
+  font-size: 44px;
+  font-weight: 700;
+  box-shadow: 0 18px 40px rgba(15, 23, 42, 0.16);
+}
+
+.radio-art img,
+.pill-logo img,
+.channel-logo img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.overlay-btn {
+  position: absolute;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.62);
+  color: #fff;
+  cursor: pointer;
+  backdrop-filter: blur(12px);
+  transition: transform 0.16s ease, background 0.16s ease;
+}
+
+.overlay-btn:hover {
+  background: rgba(15, 23, 42, 0.76);
+  transform: translateY(-1px);
+}
+
+.overlay-btn svg {
+  width: 23px;
+  height: 23px;
+}
+
+.overlay-back {
+  top: 24px;
+  left: 24px;
+}
+
+.overlay-info {
+  top: 24px;
+  right: 24px;
+}
+
+.mobile-live-pill {
+  position: absolute;
+  top: 16px;
+  left: 50%;
+  z-index: 3;
+  display: none;
+  align-items: center;
+  justify-content: space-between;
+  width: 180px;
+  height: 48px;
+  padding: 6px 14px 6px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.72);
+  transform: translateX(-50%);
+  backdrop-filter: blur(18px);
+}
+
+.pill-logo {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  overflow: hidden;
+  border-radius: 11px;
+  background: #e5e7eb;
+  color: #111;
+  font-weight: 600;
+}
+
+.mini-eq {
+  width: var(--eq-width);
+  height: var(--eq-height);
+  background: linear-gradient(90deg, currentColor 12%, transparent 12% 22%, currentColor 22% 34%, transparent 34% 45%, currentColor 45% 57%, transparent 57% 68%, currentColor 68% 80%, transparent 80% 90%, currentColor 90%);
+  color: #a7adb5;
+  mask: linear-gradient(to top, transparent 10%, #000 10%);
+  opacity: var(--eq-opacity);
+}
+
+.eq-icon {
+  display: block;
+  width: var(--eq-width);
+  height: var(--eq-height);
+  color: var(--accent);
+  fill: currentColor;
+  opacity: 0;
+}
+
+.mini-eq.active,
+.eq-icon.active {
+  color: var(--accent);
+  opacity: 0.9;
+}
+
+.now-panel {
+  padding: 18px var(--panel-inline) 0;
+  text-align: left;
+}
+
+.now-panel h1 {
+  margin: 0;
+  font-size: var(--title-size);
+  line-height: 1.18;
+  font-weight: var(--title-weight);
+  letter-spacing: -0.03em;
+}
+
+.now-panel > p {
+  margin: 10px 0 0;
+  color: rgba(17, 24, 39, 0.42);
+  font-size: var(--subtitle-size);
+  font-weight: 500;
+  line-height: 1.2;
+}
+
+.program-progress {
+  margin-top: 18px;
+}
+
+.progress-track {
+  position: relative;
+  height: 2px;
+  border-radius: 999px;
+  background: rgba(199, 154, 43, 0.24);
+}
+
+.progress-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--gold);
+}
+
+.progress-knob {
+  position: absolute;
+  top: 50%;
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(199, 154, 43, 0.55);
+  border-radius: 999px;
+  background: #fff;
+  transform: translate(-50%, -50%);
+  box-shadow: 0 0 0 1px rgba(199, 154, 43, 0.2);
+}
+
+.progress-times,
+.program-state {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 14px;
+  color: #111827;
+  font-size: var(--meta-size);
+  font-weight: 400;
+}
+
+.program-state {
+  justify-content: center;
+  gap: 7px;
+  color: rgba(17, 24, 39, 0.56);
+  font-weight: 500;
+}
+
+.state-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: rgba(107, 114, 128, 0.45);
+}
+
+.state-dot.playing {
+  background: var(--gold);
+}
+
+.state-dot.playing + span {
+  color: var(--gold);
+}
+
+.state-dot.loading {
+  border: 1px solid rgba(17, 24, 39, 0.22);
+  border-top-color: var(--gold);
+  background: transparent;
+  animation: spin 0.9s linear infinite;
+}
+
+.state-dot.error {
+  background: rgba(239, 68, 68, 0.75);
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.transport-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--control-gap);
+  margin-top: 20px;
+}
+
+.transport-side,
+.transport-main,
+.utility-btn {
+  display: grid;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  color: #090a0c;
+  cursor: pointer;
+}
+
+.transport-side {
+  width: var(--control-side-size);
+  height: var(--control-side-size);
+}
+
+.transport-side svg {
+  width: var(--control-side-icon);
+  height: var(--control-side-icon);
+}
+
+.transport-main {
+  width: var(--control-main-size);
+  height: var(--control-main-size);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.72);
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.08), inset 0 0 0 1px rgba(255, 255, 255, 0.8);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}
+
+.transport-main svg {
+  width: var(--control-main-icon);
+  height: var(--control-main-icon);
+}
+
+.utility-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--utility-gap);
+  margin-top: 14px;
+  min-height: 30px;
+}
+
+.utility-btn {
+  position: relative;
+  width: var(--utility-size);
+  height: var(--utility-size);
+  color: rgba(17, 24, 39, 0.42);
+}
+
+.utility-btn svg {
+  width: var(--utility-icon);
+  height: var(--utility-icon);
+}
+
+.source-dot {
+  position: absolute;
+  top: 6px;
+  right: 5px;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+}
+
+.volume-control {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: rgba(17, 24, 39, 0.42);
+}
+
+.volume-control svg {
+  width: 21px;
+  height: 21px;
+}
+
+.volume-control input {
+  width: 70px;
+  accent-color: #111827;
+}
+
+.side-panel {
+  min-width: 0;
+  min-height: 0;
+  padding-top: 14px;
+}
+
+.mobile-panel {
+  display: none;
+}
+
+.panel-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--tab-gap);
+  border-bottom: 1px solid var(--line);
+}
+
+.panel-tabs button {
+  position: relative;
+  min-height: var(--tab-min-height);
+  border: 0;
+  background: transparent;
+  color: rgba(17, 24, 39, 0.42);
+  font-size: var(--tab-size);
+  font-weight: var(--tab-weight);
+  letter-spacing: 0;
+  text-align: left;
+  cursor: pointer;
+}
+
+.panel-tabs button.active {
+  color: #111827;
+  font-weight: var(--tab-active-weight);
+}
+
+.panel-tabs button.active::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  bottom: -1px;
+  width: var(--tab-line-width);
+  height: 3px;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+.desktop-panel-scroll {
+  max-height: calc(100dvh - 126px);
+  overflow-y: auto;
+  padding-right: 8px;
+}
+
+.channel-panel {
+  padding-top: 24px;
+}
+
+.channel-row {
+  display: grid;
+  grid-template-columns: var(--channel-grid);
+  align-items: center;
+  gap: var(--channel-gap);
+  width: 100%;
+  min-height: var(--channel-min-height);
+  margin-bottom: var(--channel-margin);
+  padding: var(--channel-padding);
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.channel-row.active {
+  background: rgba(15, 23, 42, 0.055);
+}
+
+.channel-logo {
+  display: grid;
+  place-items: center;
+  width: var(--channel-logo-size);
+  height: var(--channel-logo-size);
+  overflow: hidden;
+  border-radius: 8px;
+  background: #fff;
+  color: #111827;
+  font-size: 14px;
+  font-weight: 600;
+  box-shadow: 0 6px 16px rgba(15, 23, 42, 0.08);
+}
+
+.channel-copy {
+  display: block;
+  min-width: 0;
+}
+
+.channel-title {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  color: #111827;
+  font-size: var(--channel-title-size);
+  font-weight: var(--channel-title-weight);
+  line-height: 1.25;
+}
+
+.channel-title > :first-child {
+  min-width: 0;
+}
+
+.channel-subtitle {
+  display: block;
+  margin-top: 6px;
+  overflow: hidden;
+  color: var(--channel-subtitle-color);
+  font-size: var(--channel-subtitle-size);
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tag {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: rgba(17, 24, 39, 0.08);
+  color: #8a8f97;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.live-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--accent);
+  opacity: 0.72;
+}
+
+.live-label {
+  color: var(--accent);
+  font-size: 15px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.schedule-panel {
+  padding-top: 30px;
+}
+
+.schedule-date {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: #111827;
+  font-size: 24px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+
+.schedule-date svg {
+  width: 21px;
+  height: 21px;
+}
+
+.timeline {
+  position: relative;
+  margin-top: 34px;
+}
+
+.timeline::before {
+  content: "";
+  position: absolute;
+  top: 13px;
+  bottom: 24px;
+  left: var(--timeline-line-left);
+  width: 2px;
+  background: rgba(17, 24, 39, 0.11);
+}
+
+.timeline-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: var(--timeline-grid);
+  align-items: center;
+  min-height: var(--timeline-row-height);
+  color: #111827;
+}
+
+.timeline-time {
+  color: rgba(17, 24, 39, 0.42);
+  font-size: var(--timeline-time-size);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.timeline-dot {
+  position: relative;
+  z-index: 1;
+  width: 15px;
+  height: 15px;
+  border: 2px solid #c6cbd1;
+  border-radius: 999px;
+  background: #f7f7f6;
+  justify-self: center;
+}
+
+.timeline-row.current .timeline-dot {
+  border-color: var(--accent);
+  background: var(--accent);
+  box-shadow: 0 0 22px rgba(47, 189, 115, 0.55);
+}
+
+.timeline-row.past {
+  opacity: 0.4;
+}
+
+.timeline-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: var(--timeline-title-size);
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.live-tag {
+  border: 1px solid rgba(47, 189, 115, 0.62);
+  background: rgba(47, 189, 115, 0.08);
+  color: #20a760;
+}
+
+@media (max-width: 980px) {
+  .full-player {
+    --layout-width: 100%;
+    --layout-height: auto;
+    --layout-padding: 0 0 calc(env(safe-area-inset-bottom) + 128px);
+    --media-width: 100vw;
+    --media-height: clamp(220px, 56vw, 245px);
+    --media-radius: 0;
+    --media-shadow: none;
+    --panel-inline: 32px;
+    --title-size: 21px;
+    --title-weight: 500;
+    --subtitle-size: 13px;
+    --meta-size: 12px;
+    --control-gap: 28px;
+    --control-main-size: 56px;
+    --control-main-icon: 22px;
+    --control-side-size: 42px;
+    --control-side-icon: 22px;
+    --utility-gap: 32px;
+    --utility-size: 38px;
+    --utility-icon: 18px;
+    --tab-gap: 0;
+    --tab-min-height: 32px;
+    --tab-size: 14px;
+    --tab-weight: 550;
+    --tab-active-weight: 600;
+    --tab-line-width: 32px;
+    --channel-grid: 44px minmax(0, 1fr) 22px;
+    --channel-gap: 14px;
+    --channel-logo-size: 44px;
+    --channel-min-height: 68px;
+    --channel-margin: 0;
+    --channel-padding: 6px 30px;
+    --channel-title-size: 14px;
+    --channel-title-weight: 500;
+    --channel-subtitle-size: 11px;
+    --channel-subtitle-color: rgba(10, 10, 10, 0.34);
+    --eq-width: 20px;
+    --eq-height: 22px;
+    --eq-opacity: 0.16;
+    --timeline-grid: 56px 30px minmax(0, 1fr);
+    --timeline-line-left: 70px;
+    --timeline-row-height: 58px;
+    --timeline-time-size: 13px;
+    --timeline-title-size: 15px;
+    overflow-y: auto;
+    background: #f8f8f7;
+  }
+
+  .player-layout {
+    display: block;
+    width: var(--layout-width);
+    min-height: 100dvh;
+    padding: var(--layout-padding);
+  }
+
+  .media-card {
+    width: var(--media-width);
+    height: var(--media-height);
+    margin-left: calc(50% - 50vw);
+    aspect-ratio: auto;
+    border-radius: var(--media-radius);
+    box-shadow: var(--media-shadow);
+  }
+
+  .media-video {
+    position: absolute;
+    inset: 0;
+    object-fit: cover;
+    object-position: center 45%;
+  }
+
+  .radio-art-stage {
+    position: absolute;
+    inset: 0;
+  }
+
+  .mobile-live-pill {
+    display: none;
+  }
+
+  .overlay-btn {
+    top: 16px;
+    display: grid;
+    width: 44px;
+    height: 44px;
+    background: rgba(0, 0, 0, 0.36);
+    color: #fff;
+    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: blur(18px);
+  }
+
+  .overlay-btn:hover {
+    background: rgba(0, 0, 0, 0.44);
+    transform: none;
+  }
+
+  .overlay-btn svg {
+    width: 23px;
+    height: 23px;
+  }
+
+  .overlay-back {
+    left: 24px;
+  }
+
+  .overlay-info {
+    right: 24px;
+  }
+
+  .now-panel {
+    padding: 22px var(--panel-inline) 0;
+    text-align: center;
+  }
+
+  .now-panel h1 {
+    font-size: var(--title-size);
+    line-height: 1.16;
+    font-weight: var(--title-weight);
+    letter-spacing: -0.03em;
+    font-synthesis: none;
+  }
+
+  .now-panel > p {
+    margin-top: 6px;
+    font-size: var(--subtitle-size);
+    font-weight: 400;
+    color: rgba(17, 24, 39, 0.44);
+  }
+
+  .program-progress {
+    margin-top: 16px;
+  }
+
+  .progress-knob {
+    width: 11px;
+    height: 11px;
+  }
+
+  .progress-times {
+    margin-top: 8px;
+    font-size: var(--meta-size);
+    font-weight: 400;
+  }
+
+  .program-state {
+    margin-top: 8px;
+    color: rgba(10, 10, 10, 0.46);
+    font-size: var(--meta-size);
+    font-weight: 400;
+  }
+
+  .transport-row {
+    gap: var(--control-gap);
+    margin-top: 16px;
+  }
+
+  .transport-side {
+    width: var(--control-side-size);
+    height: var(--control-side-size);
+  }
+
+  .transport-side svg {
+    width: var(--control-side-icon);
+    height: var(--control-side-icon);
+  }
+
+  .transport-main {
+    width: var(--control-main-size);
+    height: var(--control-main-size);
+  }
+
+  .transport-main svg {
+    width: var(--control-main-icon);
+    height: var(--control-main-icon);
+  }
+
+  .utility-row {
+    gap: var(--utility-gap);
+    margin-top: 10px;
+  }
+
+  .utility-btn {
+    width: var(--utility-size);
+    height: var(--utility-size);
+  }
+
+  .utility-btn svg {
+    width: var(--utility-icon);
+    height: var(--utility-icon);
+  }
+
+  .volume-control {
+    display: grid;
+    place-items: center;
+    width: var(--utility-size);
+    height: var(--utility-size);
+  }
+
+  .volume-control svg {
+    width: var(--utility-icon);
+    height: var(--utility-icon);
+  }
+
+  .volume-control input {
+    display: none;
+  }
+
+  .side-panel {
+    display: none;
+  }
+
+  .mobile-panel {
+    display: block;
+    padding: 22px 0 0;
+  }
+
+  .panel-tabs {
+    gap: var(--tab-gap);
+    padding: 0 52px;
+    border-bottom: 0;
+  }
+
+  .panel-tabs button {
+    min-height: var(--tab-min-height);
+    font-size: var(--tab-size);
+    font-weight: var(--tab-weight);
+    text-align: center;
+  }
+
+  .panel-tabs button.active {
+    font-weight: var(--tab-active-weight);
+  }
+
+  .panel-tabs button.active::after {
+    left: 50%;
+    bottom: -10px;
+    width: var(--tab-line-width);
+    transform: translateX(-50%);
+  }
+
+  .channel-panel {
+    padding-top: 14px;
+  }
+
+  .channel-row {
+    grid-template-columns: var(--channel-grid);
+    min-height: var(--channel-min-height);
+    margin-bottom: var(--channel-margin);
+    padding: var(--channel-padding);
+    border-bottom: 1px solid rgba(10, 10, 10, 0.045);
+    border-radius: 0;
+  }
+
+  .channel-row:last-child {
+    border-bottom: 0;
+  }
+
+  .channel-row.active {
+    background: transparent;
+  }
+
+  .channel-logo {
+    width: var(--channel-logo-size);
+    height: var(--channel-logo-size);
+    border-radius: 13px;
+    font-weight: 500;
+    box-shadow: 0 3px 8px rgba(15, 23, 42, 0.035);
+  }
+
+  .channel-title {
+    gap: 6px;
+    font-size: var(--channel-title-size);
+    font-weight: var(--channel-title-weight);
+    line-height: 1.22;
+    letter-spacing: -0.01em;
+    font-synthesis: none;
+  }
+
+  .channel-subtitle {
+    margin-top: 5px;
+    font-size: var(--channel-subtitle-size);
+    font-weight: 400;
+    color: var(--channel-subtitle-color);
+  }
+
+  .channel-row .eq-icon {
+    align-self: center;
+    justify-self: end;
+  }
+
+  .channel-row .eq-icon.active {
+    opacity: 0.9;
+  }
+
+  .tag {
+    min-height: 18px;
+    padding: 1px 7px;
+    font-size: 11px;
+  }
+
+  .schedule-panel {
+    padding: 24px 30px 0;
+  }
+
+  .schedule-date {
+    font-size: 20px;
+    font-weight: 720;
+  }
+
+  .timeline {
+    margin-top: 24px;
+  }
+
+  .timeline-row {
+    grid-template-columns: var(--timeline-grid);
+    min-height: var(--timeline-row-height);
+  }
+
+  .timeline::before {
+    left: var(--timeline-line-left);
+  }
+
+  .timeline-title {
+    font-size: var(--timeline-title-size);
+    font-weight: 700;
+  }
+
+  .timeline-time {
+    font-size: var(--timeline-time-size);
+    font-weight: 500;
+  }
+
+  .timeline-dot {
+    width: 11px;
+    height: 11px;
+  }
+
+  .timeline-row.current .timeline-dot {
+    width: 14px;
+    height: 14px;
+    box-shadow: 0 0 0 6px rgba(53, 200, 122, 0.14);
+  }
+
+  .live-tag {
+    min-height: 26px;
+    font-size: 13px;
+  }
+}
+
+@media (max-width: 520px) {
+  .full-player {
+    --panel-inline: 30px;
+    --media-height: clamp(220px, 56vw, 245px);
+    --title-size: 21px;
+    --title-weight: 500;
+    --subtitle-size: 13px;
+    --meta-size: 12px;
+    --control-gap: 24px;
+    --control-main-size: 56px;
+    --control-main-icon: 22px;
+    --control-side-size: 42px;
+    --control-side-icon: 22px;
+    --utility-gap: 32px;
+    --utility-size: 38px;
+    --utility-icon: 18px;
+    --channel-padding: 6px 30px;
+    --channel-grid: 44px minmax(0, 1fr) 22px;
+    --channel-logo-size: 44px;
+    --channel-min-height: 68px;
+    --channel-title-size: 14px;
+    --channel-title-weight: 500;
+    --channel-subtitle-size: 11px;
+    --channel-subtitle-color: rgba(10, 10, 10, 0.34);
+    --eq-width: 20px;
+    --eq-height: 22px;
+    --eq-opacity: 0.16;
+    --timeline-grid: 56px 30px minmax(0, 1fr);
+    --timeline-line-left: 70px;
+  }
 }
 </style>
