@@ -16,6 +16,7 @@ export const usePlayerStore = defineStore('player', {
     iptvUrls: [],              // 当前频道的所有可用链接
     iptvUrlIndex: 0,           // 当前尝试的链接索引
     iptvVideoEl: null,         // FullPlayer 中的 video 元素引用（iOS 同步播放用）
+    currentEpgProgram: null,   // EPG: { title, start, stop, progress, remaining_minutes }
   }),
 
   getters: {
