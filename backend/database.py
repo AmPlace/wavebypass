@@ -41,6 +41,51 @@ CREATE TABLE IF NOT EXISTS channels (
 
 CREATE INDEX IF NOT EXISTS idx_channels_sub ON channels(subscription_id);
 CREATE INDEX IF NOT EXISTS idx_channels_name ON channels(name);
+
+CREATE TABLE IF NOT EXISTS epg_sources (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    name            TEXT NOT NULL,
+    url             TEXT NOT NULL UNIQUE,
+    enabled         INTEGER DEFAULT 1,
+    last_fetched_at TEXT DEFAULT '',
+    last_status     TEXT DEFAULT '',
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS epg_channels (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_id        INTEGER NOT NULL REFERENCES epg_sources(id) ON DELETE CASCADE,
+    channel_id       TEXT NOT NULL,
+    display_names    TEXT NOT NULL,
+    normalized_names TEXT NOT NULL,
+    UNIQUE(source_id, channel_id)
+);
+CREATE INDEX IF NOT EXISTS idx_epg_channels_src_ch ON epg_channels(source_id, channel_id);
+
+CREATE TABLE IF NOT EXISTS epg_programs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_id   INTEGER NOT NULL REFERENCES epg_sources(id) ON DELETE CASCADE,
+    channel_id  TEXT NOT NULL,
+    start       TEXT NOT NULL,
+    stop        TEXT NOT NULL,
+    title       TEXT NOT NULL,
+    description TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_epg_programs_ch_time ON epg_programs(source_id, channel_id, start, stop);
+
+CREATE TABLE IF NOT EXISTS channel_epg_map (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    canonical_key   TEXT NOT NULL UNIQUE,
+    epg_source_id   INTEGER,
+    epg_channel_id  TEXT,
+    match_type      TEXT DEFAULT '',
+    confidence      INTEGER DEFAULT 0,
+    match_status    TEXT DEFAULT 'unmatched',
+    match_detail    TEXT DEFAULT '',
+    locked          INTEGER DEFAULT 0,
+    updated_at      TEXT NOT NULL
+);
 """
 
 
@@ -286,3 +331,186 @@ async def reset_channel_statuses_all():
         conn.commit()
         conn.close()
     await asyncio.to_thread(_reset)
+
+
+# ── EPG ──
+
+async def add_epg_source(name: str, url: str) -> int:
+    def _add():
+        conn = _connect()
+        now = datetime.now(timezone.utc).isoformat()
+        cur = conn.execute(
+            "INSERT INTO epg_sources(name, url, created_at, updated_at) VALUES(?, ?, ?, ?)",
+            (name, url, now, now),
+        )
+        conn.commit()
+        sid = cur.lastrowid
+        conn.close()
+        return sid
+    return await asyncio.to_thread(_add)
+
+
+async def get_epg_sources() -> list[dict]:
+    def _get():
+        conn = _connect()
+        rows = conn.execute("SELECT * FROM epg_sources ORDER BY id").fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    return await asyncio.to_thread(_get)
+
+
+async def delete_epg_source(source_id: int):
+    def _delete():
+        conn = _connect()
+        conn.execute("DELETE FROM epg_sources WHERE id=?", (source_id,))
+        conn.commit()
+        conn.close()
+    await asyncio.to_thread(_delete)
+
+
+async def update_epg_source(source_id: int, **kwargs):
+    def _update():
+        conn = _connect()
+        now = datetime.now(timezone.utc).isoformat()
+        kwargs['updated_at'] = now
+        sets = ', '.join(f"{k}=?" for k in kwargs)
+        conn.execute(f"UPDATE epg_sources SET {sets} WHERE id=?", (*kwargs.values(), source_id))
+        conn.commit()
+        conn.close()
+    await asyncio.to_thread(_update)
+
+
+async def replace_epg_channels(source_id: int, channels: list[dict]):
+    def _replace():
+        conn = _connect()
+        conn.execute("DELETE FROM epg_channels WHERE source_id=?", (source_id,))
+        conn.executemany(
+            "INSERT INTO epg_channels(source_id, channel_id, display_names, normalized_names) VALUES(?, ?, ?, ?)",
+            [(source_id, ch['channel_id'], ch['display_names'], ch['normalized_names']) for ch in channels],
+        )
+        conn.commit()
+        conn.close()
+    await asyncio.to_thread(_replace)
+
+
+async def replace_epg_programs(source_id: int, programs: list[dict]):
+    def _replace():
+        conn = _connect()
+        conn.execute("DELETE FROM epg_programs WHERE source_id=?", (source_id,))
+        conn.executemany(
+            "INSERT INTO epg_programs(source_id, channel_id, start, stop, title, description) VALUES(?, ?, ?, ?, ?, ?)",
+            [(source_id, p['channel_id'], p['start'], p['stop'], p['title'], p.get('description', '')) for p in programs],
+        )
+        conn.commit()
+        conn.close()
+    await asyncio.to_thread(_replace)
+
+
+async def get_epg_channels(source_id: int) -> list[dict]:
+    def _get():
+        conn = _connect()
+        rows = conn.execute("SELECT * FROM epg_channels WHERE source_id=?", (source_id,)).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    return await asyncio.to_thread(_get)
+
+
+async def get_epg_programs(source_id: int, channel_id: str, start_after: str = '', start_before: str = '') -> list[dict]:
+    def _get():
+        conn = _connect()
+        query = "SELECT * FROM epg_programs WHERE source_id=? AND channel_id=?"
+        params: list = [source_id, channel_id]
+        if start_after:
+            query += " AND stop >= ?"
+            params.append(start_after)
+        if start_before:
+            query += " AND start <= ?"
+            params.append(start_before)
+        query += " ORDER BY start"
+        rows = conn.execute(query, params).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    return await asyncio.to_thread(_get)
+
+
+async def batch_get_current_programs(canonical_keys: list[str]) -> dict:
+    """批量查当前节目：返回 {canonical_key: {current, next}} 或 {}"""
+    def _get():
+        conn = _connect()
+        now = datetime.now(timezone.utc).isoformat()
+        result = {}
+        for key in canonical_keys:
+            row = conn.execute(
+                "SELECT epg_source_id, epg_channel_id FROM channel_epg_map WHERE canonical_key=? AND match_status IN ('matched','locked')",
+                (key,),
+            ).fetchone()
+            if not row:
+                result[key] = None
+                continue
+            sid = row['epg_source_id']
+            cid = row['epg_channel_id']
+            current = conn.execute(
+                "SELECT title, start, stop, description FROM epg_programs WHERE source_id=? AND channel_id=? AND start <= ? AND stop > ? ORDER BY start LIMIT 1",
+                (sid, cid, now, now),
+            ).fetchone()
+            if current:
+                c = dict(current)
+                c['start_ts'] = c['start']
+                c['stop_ts'] = c['stop']
+                now_ts = datetime.now(timezone.utc)
+                try:
+                    start_dt = datetime.fromisoformat(c['start'])
+                    stop_dt = datetime.fromisoformat(c['stop'])
+                    total = (stop_dt - start_dt).total_seconds()
+                    elapsed = (now_ts - start_dt).total_seconds()
+                    c['progress'] = max(0, min(1, elapsed / total)) if total > 0 else 0
+                    c['remaining_minutes'] = max(0, int((stop_dt - now_ts).total_seconds() / 60))
+                except Exception:
+                    c['progress'] = 0
+                    c['remaining_minutes'] = 0
+            next_prog = conn.execute(
+                "SELECT title, start, stop FROM epg_programs WHERE source_id=? AND channel_id=? AND start >= ? ORDER BY start LIMIT 1",
+                (sid, cid, now),
+            ).fetchone()
+            result[key] = {
+                'current': dict(current) if current else None,
+                'next': dict(next_prog) if next_prog else None,
+            }
+        conn.close()
+        return result
+    return await asyncio.to_thread(_get)
+
+
+async def get_channel_epg_map(key: str = '') -> dict | None:
+    def _get():
+        conn = _connect()
+        row = conn.execute("SELECT * FROM channel_epg_map WHERE canonical_key=?", (key,)).fetchone()
+        conn.close()
+        return dict(row) if row else None
+    return await asyncio.to_thread(_get)
+
+
+async def get_all_channel_epg_maps() -> list[dict]:
+    def _get():
+        conn = _connect()
+        rows = conn.execute("SELECT * FROM channel_epg_map ORDER BY canonical_key").fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    return await asyncio.to_thread(_get)
+
+
+async def upsert_channel_epg_map(key: str, **kwargs):
+    def _upsert():
+        conn = _connect()
+        now = datetime.now(timezone.utc).isoformat()
+        kwargs['updated_at'] = now
+        cols = ', '.join(kwargs.keys())
+        placeholders = ', '.join('?' for _ in kwargs)
+        sets = ', '.join(f"{k}=excluded.{k}" for k in kwargs)
+        conn.execute(
+            f"INSERT INTO channel_epg_map(canonical_key, {cols}) VALUES(?, {placeholders}) ON CONFLICT(canonical_key) DO UPDATE SET {sets}",
+            (key, *kwargs.values()),
+        )
+        conn.commit()
+        conn.close()
+    await asyncio.to_thread(_upsert)
