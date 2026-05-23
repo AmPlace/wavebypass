@@ -4,6 +4,8 @@ ENV PYTHONUNBUFFERED=1
 
 ENV PYTHONDONTWRITEBYTECODE=1
 
+ENV RTSP_HLS_ROOT=/tmp/wavebypass_rtsp_hls
+
 WORKDIR /app
 
 RUN apt-get update \

@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 import json
@@ -298,11 +299,12 @@ async def _yunting_refresh_task() -> None:
         await asyncio.sleep(YUNTING_REFRESH_INTERVAL)
 
 
-RTSP_HLS_ROOT = Path(__file__).resolve().parent / "data" / "rtsp_hls"
+RTSP_HLS_ROOT = Path(os.getenv("RTSP_HLS_ROOT") or (Path(tempfile.gettempdir()) / "wavebypass_rtsp_hls"))
 RTSP_HLS_SESSIONS: dict[str, dict] = {}
 RTSP_HLS_IDLE_TTL = 90
 RTSP_HLS_START_TIMEOUT = 18
 RTSP_SEGMENT_RE = re.compile(r"^seg_\d+\.ts$")
+RTSP_SESSION_ID_RE = re.compile(r"^[0-9a-f]{24}$")
 
 
 def _ffmpeg_bin() -> str | None:
@@ -324,8 +326,9 @@ def _ffmpeg_bin() -> str | None:
     return shutil.which("ffmpeg")
 
 
-def _rtsp_session_id(target_url: str, custom_ua: str = "") -> str:
-    return hashlib.sha256(f"{target_url}\n{custom_ua}".encode("utf-8")).hexdigest()[:24]
+def _rtsp_session_id(target_url: str, custom_ua: str = "", compat: bool = False) -> str:
+    mode = "compat" if compat else "copy"
+    return hashlib.sha256(f"{target_url}\n{custom_ua}\n{mode}".encode("utf-8")).hexdigest()[:24]
 
 
 def _validate_rtsp_url(target_url: str) -> None:
@@ -345,18 +348,46 @@ def _rtsp_proc_returncode(proc) -> int | None:
     return getattr(proc, "returncode", None)
 
 
+def _delete_rtsp_session_dir(session_id: str, session: dict | None = None) -> None:
+    if not RTSP_SESSION_ID_RE.fullmatch(session_id):
+        return
+    raw_dir = session.get("dir") if session else None
+    session_dir = Path(raw_dir) if raw_dir else RTSP_HLS_ROOT / session_id
+    try:
+        root = RTSP_HLS_ROOT.resolve()
+        target = session_dir.resolve()
+        if target.parent == root and target.name == session_id:
+            shutil.rmtree(target, ignore_errors=True)
+    except Exception:
+        logger.warning("清理 RTSP 临时目录失败: %s", session_dir, exc_info=True)
+
+
+def _clear_stale_rtsp_hls_dirs() -> None:
+    try:
+        RTSP_HLS_ROOT.mkdir(parents=True, exist_ok=True)
+        for child in RTSP_HLS_ROOT.iterdir():
+            if child.is_dir() and RTSP_SESSION_ID_RE.fullmatch(child.name):
+                shutil.rmtree(child, ignore_errors=True)
+    except Exception:
+        logger.warning("清理旧 RTSP 临时目录失败: %s", RTSP_HLS_ROOT, exc_info=True)
+
+
 async def _stop_rtsp_session(session_id: str) -> None:
     session = RTSP_HLS_SESSIONS.pop(session_id, None)
     if not session:
+        _delete_rtsp_session_dir(session_id)
         return
     proc = session.get("process")
-    if proc and _rtsp_proc_returncode(proc) is None:
-        proc.terminate()
-        try:
-            await asyncio.wait_for(asyncio.to_thread(proc.wait), timeout=5)
-        except (asyncio.TimeoutError, subprocess.TimeoutExpired):
-            proc.kill()
-            await asyncio.to_thread(proc.wait)
+    try:
+        if proc and _rtsp_proc_returncode(proc) is None:
+            proc.terminate()
+            try:
+                await asyncio.wait_for(asyncio.to_thread(proc.wait), timeout=5)
+            except (asyncio.TimeoutError, subprocess.TimeoutExpired):
+                proc.kill()
+                await asyncio.to_thread(proc.wait)
+    finally:
+        _delete_rtsp_session_dir(session_id, session)
 
 
 async def _rtsp_hls_cleanup_task():
@@ -398,14 +429,14 @@ def _drain_rtsp_stderr(session_id: str, pipe) -> None:
             pass
 
 
-async def _ensure_rtsp_hls_session(target_url: str, custom_ua: str = "") -> tuple[str, Path]:
+async def _ensure_rtsp_hls_session(target_url: str, custom_ua: str = "", compat: bool = False) -> tuple[str, Path]:
     _validate_rtsp_url(target_url)
     ffmpeg = _ffmpeg_bin()
     if not ffmpeg:
         raise HTTPException(status_code=503, detail="未找到 ffmpeg，请安装 ffmpeg 或设置 FFMPEG_BIN")
 
     RTSP_HLS_ROOT.mkdir(parents=True, exist_ok=True)
-    session_id = _rtsp_session_id(target_url, custom_ua)
+    session_id = _rtsp_session_id(target_url, custom_ua, compat)
     session_dir = RTSP_HLS_ROOT / session_id
     playlist_path = session_dir / "index.m3u8"
     session = RTSP_HLS_SESSIONS.get(session_id)
@@ -417,31 +448,46 @@ async def _ensure_rtsp_hls_session(target_url: str, custom_ua: str = "") -> tupl
     if session:
         await _stop_rtsp_session(session_id)
 
-    if session_dir.exists():
-        shutil.rmtree(session_dir, ignore_errors=True)
+    _delete_rtsp_session_dir(session_id)
     session_dir.mkdir(parents=True, exist_ok=True)
 
     headers = []
     if custom_ua:
         headers.extend(["-user_agent", custom_ua])
 
+    video_args = [
+        "-c:v", "copy",
+    ]
+    if compat:
+        video_args = [
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-tune", "zerolatency",
+            "-profile:v", "baseline",
+            "-level", "3.1",
+            "-pix_fmt", "yuv420p",
+            "-x264-params", "keyint=50:min-keyint=50:scenecut=0",
+            "-force_key_frames", "expr:gte(t,n_forced*2)",
+        ]
+
     cmd = [
         ffmpeg,
         "-hide_banner",
         "-loglevel", "warning",
         "-nostdin",
+        "-fflags", "+genpts",
         "-rtsp_transport", "tcp",
         *headers,
         "-i", target_url,
         "-map", "0:v:0?",
         "-map", "0:a:0?",
-        "-c:v", "copy",
+        *video_args,
         "-c:a", "aac",
         "-b:a", "128k",
         "-f", "hls",
         "-hls_time", "2",
         "-hls_list_size", "8",
-        "-hls_flags", "delete_segments+append_list+omit_endlist",
+        "-hls_flags", "delete_segments+append_list+omit_endlist+independent_segments",
         "-hls_segment_filename", str(session_dir / "seg_%05d.ts"),
         "-hls_base_url", f"/api/iptv/proxy/rtsp/segments/{session_id}/",
         str(playlist_path),
@@ -467,6 +513,7 @@ async def _ensure_rtsp_hls_session(target_url: str, custom_ua: str = "") -> tupl
         "dir": session_dir,
         "last_access": time.time(),
         "target_url": target_url,
+        "compat": compat,
         "stderr_tail": "",
     }
     threading.Thread(target=_drain_rtsp_stderr, args=(session_id, proc.stderr), daemon=True).start()
@@ -490,6 +537,7 @@ async def _ensure_rtsp_hls_session(target_url: str, custom_ua: str = "") -> tupl
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await database.initialize()
+    _clear_stale_rtsp_hls_dirs()
     asyncio.create_task(refresh_tokens_task())
     asyncio.create_task(_yunting_refresh_task())
     asyncio.create_task(_myradio_refresh_task())
@@ -1829,12 +1877,12 @@ async def _wide_refresher(cache_key: str, target_url: str, custom_ua: str = ''):
 
 
 @app.get("/api/iptv/proxy/wide.m3u8")
-async def iptv_wide_playlist(target_url: str = '', proxy_ts: int = 0, custom_ua: str = ''):
+async def iptv_wide_playlist(target_url: str = '', proxy_ts: int = 0, custom_ua: str = '', compat: int = 0):
     if not target_url:
         raise HTTPException(status_code=400, detail="缺少 target_url")
 
     if urlparse(target_url).scheme.lower() == "rtsp":
-        return await iptv_proxy_rtsp_playlist(target_url=target_url, custom_ua=custom_ua)
+        return await iptv_proxy_rtsp_playlist(target_url=target_url, custom_ua=custom_ua, compat=compat)
 
     _headers = {'User-Agent': custom_ua} if custom_ua else {}
 
@@ -1942,12 +1990,12 @@ async def iptv_wide_playlist(target_url: str = '', proxy_ts: int = 0, custom_ua:
 # ── 旧代理（不变）──
 
 @app.get("/api/iptv/proxy/rtsp.m3u8")
-async def iptv_proxy_rtsp_playlist(target_url: str = '', custom_ua: str = ''):
+async def iptv_proxy_rtsp_playlist(target_url: str = '', custom_ua: str = '', compat: int = 0):
     if not target_url:
         raise HTTPException(status_code=400, detail="缺少 target_url")
 
     try:
-        session_id, playlist_path = await _ensure_rtsp_hls_session(target_url, custom_ua)
+        session_id, playlist_path = await _ensure_rtsp_hls_session(target_url, custom_ua, compat=bool(compat))
     except HTTPException:
         raise
     except Exception as exc:
@@ -2034,12 +2082,12 @@ async def iptv_proxy_stream(target_url: str = '', custom_ua: str = ''):
 
 
 @app.get("/api/iptv/proxy/playlist.m3u8")
-async def iptv_proxy_playlist(target_url: str = ''):
+async def iptv_proxy_playlist(target_url: str = '', compat: int = 0):
     if not target_url:
         raise HTTPException(status_code=400, detail="缺少 target_url")
 
     if urlparse(target_url).scheme.lower() == "rtsp":
-        return await iptv_proxy_rtsp_playlist(target_url=target_url)
+        return await iptv_proxy_rtsp_playlist(target_url=target_url, compat=compat)
 
     try:
         resp = await http_client.get(target_url, follow_redirects=True, timeout=8)

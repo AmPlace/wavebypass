@@ -29,3 +29,4 @@ geo-limit.md
 proud-wibbling-goblet.md
 tools/
 *.db
+backend/data/rtsp_hls/

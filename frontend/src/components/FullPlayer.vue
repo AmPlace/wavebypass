@@ -457,7 +457,8 @@ const iptvSourceOptions = computed(() => {
     const health = working === 1 ? '检测可用' : working === 0 ? '检测不可用' : '未检测'
     const healthLabel = runtimeStatus === 'idle' || health !== '未检测' ? health : ''
     const ua = entry.custom_ua ? 'UA' : ''
-    const meta = [sourceStatusLabel(runtimeStatus), healthLabel, latency, ua].filter(Boolean).join(' · ')
+    const transcode = entry.rtsp_compat ? '转码' : ''
+    const meta = [sourceStatusLabel(runtimeStatus), healthLabel, latency, ua, transcode].filter(Boolean).join(' · ')
 
     return {
       index,

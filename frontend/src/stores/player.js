@@ -116,11 +116,14 @@ export const usePlayerStore = defineStore('player', {
       const sourceUrl = (u) => String(u?.url || '').trim()
       const isMpegTsUrl = (url) => /\/(?:rtp|udp)\//i.test(url) || /\.m2?ts(\?|$)/i.test(url)
       const isRtspUrl = (url) => /^rtsp:\/\//i.test(url)
-      const proxyUrlFor = (u) => {
+      const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+        (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
+      const proxyUrlFor = (u, options = {}) => {
         const url = sourceUrl(u)
         const ua = u.custom_ua ? `&custom_ua=${encodeURIComponent(u.custom_ua)}` : ''
         if (isRtspUrl(url)) {
-          return `${API_BASE}/api/iptv/proxy/rtsp.m3u8?target_url=${encodeURIComponent(url)}${ua}`
+          const compat = options.compat ? '&compat=1' : ''
+          return `${API_BASE}/api/iptv/proxy/rtsp.m3u8?target_url=${encodeURIComponent(url)}${ua}${compat}`
         }
         if (isMpegTsUrl(url)) {
           return `${API_BASE}/api/iptv/proxy/stream?target_url=${encodeURIComponent(url)}${ua}`
@@ -141,6 +144,16 @@ export const usePlayerStore = defineStore('player', {
             type: isMpegTsUrl(url) ? 'direct' : 'proxy',
             via_proxy: true,
           })
+          if (isIOS && isRtspUrl(url)) {
+            proxyOnlyUrls.push({
+              ...u,
+              url: proxyUrlFor(u, { compat: true }),
+              original_url: url,
+              type: 'proxy',
+              via_proxy: true,
+              rtsp_compat: true,
+            })
+          }
         } else {
           directUrls.push({ ...u, url })
         }
