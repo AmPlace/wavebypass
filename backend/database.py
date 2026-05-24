@@ -108,10 +108,16 @@ async def initialize():
             ('custom_ua', 'TEXT', "''"),
             ('force_proxy', 'INTEGER', '0'),
             ('last_tested', 'TEXT', "''"),
-            ('source_type', 'TEXT', "'hls'"),
         ]:
             try:
                 conn.execute(f"ALTER TABLE subscriptions ADD COLUMN {col} {typ} DEFAULT {default}")
+            except sqlite3.OperationalError:
+                pass  # 字段已存在
+        for col, typ, default in [
+            ('source_type', 'TEXT', "'hls'"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE channels ADD COLUMN {col} {typ} DEFAULT {default}")
             except sqlite3.OperationalError:
                 pass  # 字段已存在
         conn.close()

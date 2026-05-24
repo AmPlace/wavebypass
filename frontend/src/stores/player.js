@@ -115,12 +115,24 @@ export const usePlayerStore = defineStore('player', {
       const list = []
       const API_BASE = import.meta.env?.VITE_API_BASE_URL || window.location.origin
       const sourceUrl = (u) => String(u?.url || '').trim()
+      const inferSourceType = (url) => {
+        const value = String(url || '').trim().toLowerCase()
+        if (value.startsWith('rtsp://')) return 'rtsp'
+        if (/\/(?:rtp|udp)\//i.test(value) || /%2f(?:rtp|udp)%2f/i.test(value)) return 'mpegts'
+        if (/\.(?:ts|m2ts|mts)(?:[?#]|$)/i.test(value)) return 'mpegts'
+        return 'hls'
+      }
+      const sourceType = (u) => {
+        const inferred = inferSourceType(sourceUrl(u))
+        const declared = u?.source_type
+        return declared && declared !== 'hls' ? declared : inferred
+      }
       const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
         (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
       const proxyUrlFor = (u, options = {}) => {
         const url = sourceUrl(u)
         const ua = u.custom_ua ? `&custom_ua=${encodeURIComponent(u.custom_ua)}` : ''
-        const st = u.source_type || 'hls'
+        const st = sourceType(u)
         if (st === 'rtsp') {
           const compat = options.compat ? '&compat=1' : ''
           return `${API_BASE}/api/iptv/proxy/rtsp.m3u8?target_url=${encodeURIComponent(url)}${ua}${compat}`
@@ -136,7 +148,7 @@ export const usePlayerStore = defineStore('player', {
       for (const u of sorted) {
         const url = sourceUrl(u)
         if (!url) continue
-        const st = u.source_type || 'hls'
+        const st = sourceType(u)
         if (st === 'rtsp' || u.force_proxy || u.custom_ua) {
           proxyOnlyUrls.push({
             ...u,
@@ -158,7 +170,7 @@ export const usePlayerStore = defineStore('player', {
             })
           }
         } else {
-          directUrls.push({ ...u, url })
+          directUrls.push({ ...u, url, source_type: st })
         }
       }
       // 先所有直连，再所有直连的代理回退，最后是必须代理的
@@ -167,12 +179,14 @@ export const usePlayerStore = defineStore('player', {
       }
       for (const u of directUrls) {
         const url = sourceUrl(u)
+        const st = sourceType(u)
         list.push({
           ...u,
           url: proxyUrlFor(u),
           original_url: url,
-          type: isMpegTsUrl(url) ? 'direct' : 'proxy',
+          type: st === 'mpegts' ? 'direct' : 'proxy',
           via_proxy: true,
+          source_type: st,
         })
       }
       list.push(...proxyOnlyUrls)

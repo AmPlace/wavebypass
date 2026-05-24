@@ -226,11 +226,17 @@ def parse_m3u(text: str) -> list[dict]:
 
 
 def detect_source_type(url: str) -> str:
-    if url.startswith('rtsp://'):
+    value = (url or '').strip().lower()
+    if value.startswith('rtsp://'):
         return 'rtsp'
-    if '/rtp/' in url or '/udp/' in url:
+    if '/rtp/' in value or '/udp/' in value or '%2frtp%2f' in value or '%2fudp%2f' in value:
         return 'mpegts'
-    if url.endswith('.ts') or url.endswith('.m2ts') or url.endswith('.mts') or '.ts?' in url:
+    if (
+        value.endswith(('.ts', '.m2ts', '.mts'))
+        or '.ts?' in value
+        or '.m2ts?' in value
+        or '.mts?' in value
+    ):
         return 'mpegts'
     return 'hls'
 

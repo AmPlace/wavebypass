@@ -1561,7 +1561,7 @@ async def aggregated_channels(group: str = '', search: str = ''):
     # 搜索在 SQL 层过滤（性能好），分组在聚合后过滤（归一化后才准）
     raw = await db.get_aggregated_channels(group='', search=search)
 
-    from m3u8_parser import clean_channel_display_name, normalize_channel_name, _channel_alias
+    from m3u8_parser import clean_channel_display_name, detect_source_type, normalize_channel_name, _channel_alias
     from template import channel_template, normalize_group_name
 
     merged: dict[str, dict] = {}
@@ -1587,6 +1587,9 @@ async def aggregated_channels(group: str = '', search: str = ''):
                 'tvg_name': ch['tvg_name'],
                 'urls': [],
             }
+        detected_source_type = detect_source_type(ch['url'])
+        stored_source_type = ch.get('source_type')
+        source_type = stored_source_type if stored_source_type and stored_source_type != 'hls' else detected_source_type
         merged[key]['urls'].append({
             'url': ch['url'],
             'is_working': ch['is_working'],
@@ -1594,6 +1597,7 @@ async def aggregated_channels(group: str = '', search: str = ''):
             'sub_title': ch.get('sub_title', ''),
             'custom_ua': ch.get('custom_ua', ''),
             'force_proxy': ch.get('force_proxy', 0),
+            'source_type': source_type,
             'raw_name': ch['name'],
             'raw_tvg_id': ch.get('tvg_id', ''),
             'raw_tvg_name': ch.get('tvg_name', ''),
