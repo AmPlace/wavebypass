@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS channels (
     is_working      INTEGER DEFAULT -1,
     latency_ms      REAL DEFAULT 0,
     last_tested     TEXT DEFAULT '',
+    source_type     TEXT DEFAULT 'hls',
     FOREIGN KEY (subscription_id) REFERENCES subscriptions(id) ON DELETE CASCADE
 );
 
@@ -107,6 +108,7 @@ async def initialize():
             ('custom_ua', 'TEXT', "''"),
             ('force_proxy', 'INTEGER', '0'),
             ('last_tested', 'TEXT', "''"),
+            ('source_type', 'TEXT', "'hls'"),
         ]:
             try:
                 conn.execute(f"ALTER TABLE subscriptions ADD COLUMN {col} {typ} DEFAULT {default}")
@@ -216,10 +218,12 @@ async def add_channels_bulk(sub_id: int, channels: list[dict]):
         conn.execute("DELETE FROM channels WHERE subscription_id=?", (sub_id,))
         now = datetime.now(timezone.utc).isoformat()
         conn.executemany(
-            "INSERT INTO channels(subscription_id, name, url, logo_url, group_name, tvg_id, tvg_name) "
-            "VALUES(?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO channels(subscription_id, name, url, logo_url, group_name, tvg_id, tvg_name, source_type) "
+            "VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
             [
-                (sub_id, ch['name'], ch['url'], ch.get('logo_url', ''), ch.get('group_name', ''), ch.get('tvg_id', ''), ch.get('tvg_name', ''))
+                (sub_id, ch['name'], ch['url'], ch.get('logo_url', ''), ch.get('group_name', ''), ch.get('tvg_id', ''), ch.get('tvg_name', ''), ch.get('source_type', 'hls'))
+
+
                 for ch in channels
             ],
         )

@@ -142,6 +142,7 @@ def parse_m3u(text: str) -> list[dict]:
         channels.append({
             'name': name,
             'url': url,
+            'source_type': detect_source_type(url),
             'logo_url': attrs.get('tvg-logo', ''),
             'group_name': attrs.get('group-title', '') or '其他',
             'tvg_id': attrs.get('tvg-id', ''),
@@ -185,7 +186,7 @@ def parse_m3u(text: str) -> list[dict]:
             continue
 
         if pending_extinf and line.startswith(('http://', 'https://', 'rtmp://', 'rtsp://')):
-            ch = {**pending_extinf, 'url': line}
+            ch = {**pending_extinf, 'url': line, 'source_type': detect_source_type(line)}
             channels.append(ch)
             pending_extinf = None
             i += 1
@@ -214,6 +215,7 @@ def parse_m3u(text: str) -> list[dict]:
             channels.append({
                 'name': parts[0].strip(),
                 'url': parts[1].strip(),
+                'source_type': detect_source_type(parts[1].strip()),
                 'logo_url': '',
                 'group_name': current_group,
                 'tvg_id': '',
@@ -221,6 +223,16 @@ def parse_m3u(text: str) -> list[dict]:
             })
 
     return channels
+
+
+def detect_source_type(url: str) -> str:
+    if url.startswith('rtsp://'):
+        return 'rtsp'
+    if '/rtp/' in url or '/udp/' in url:
+        return 'mpegts'
+    if url.endswith('.ts') or url.endswith('.m2ts') or url.endswith('.mts') or '.ts?' in url:
+        return 'mpegts'
+    return 'hls'
 
 
 def deduplicate_channels(channels: list[dict]) -> list[dict]:
