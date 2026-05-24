@@ -3179,11 +3179,11 @@ onBeforeUnmount(() => {
 }
 
 .state-dot.playing {
-  background: var(--gold);
+  background: var(--accent);
 }
 
 .state-dot.playing + span {
-  color: var(--gold);
+  color: var(--accent);
 }
 
 .state-dot.loading {
