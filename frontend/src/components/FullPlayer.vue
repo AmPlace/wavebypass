@@ -1166,7 +1166,8 @@ function getProxyUrl(url) {
 }
 
 const STARTUP_RACE_LIMIT = 6
-const MPEGTS_RECONNECT_DELAY_MS = 1200
+const MPEGTS_EOF_RECONNECT_DELAY_MS = 300
+const MPEGTS_ERROR_RECONNECT_DELAY_MS = 1200
 const MPEGTS_RECONNECT_WINDOW_MS = 60_000
 const MPEGTS_RECONNECT_LIMIT = 3
 
@@ -1402,8 +1403,22 @@ function attachRuntimeMpegtsErrorHandlers(player, sourceUrl, usingProxy, attempt
     markAllIptvSourcesUnavailable(nextAttemptId)
   }
 
-  const scheduleReconnectCurrentSource = (reason) => {
+  const destroyCurrentPlayer = (label) => {
+    clearCurrentMpegtsIf(player)
+    try {
+      player.destroy()
+    } catch (e) {
+      const message = e?.message || ''
+      if (!message.includes('removeAllListeners')) {
+        console.warn(`[IPTV] mpegts ${label} cleanup failed:`, e)
+      }
+    }
+  }
+
+  const scheduleReconnectCurrentSource = (reason, options = {}) => {
     if (switching || !isAttemptActive(attemptId)) return
+    const destroyBeforeDelay = options.destroyBeforeDelay !== false
+    const delayMs = options.delayMs ?? MPEGTS_ERROR_RECONNECT_DELAY_MS
     const reconnectCount = recordMpegtsReconnect(sourceUrl)
     const video = iptvVideoRef.value
     console.warn('[IPTV] MPEG-TS 播放中断，准备重连当前源', {
@@ -1426,33 +1441,37 @@ function attachRuntimeMpegtsErrorHandlers(player, sourceUrl, usingProxy, attempt
     playerStore.setPlaybackError('直播连接断开，正在重新连接当前源')
     playerStore.setLoading(true)
 
+    if (destroyBeforeDelay) {
+      destroyCurrentPlayer('reconnect')
+    }
+
     completeWatchTimer = setTimeout(async () => {
       completeWatchTimer = null
       if (!isAttemptActive(attemptId)) return
-      clearCurrentMpegtsIf(player)
-      try {
-        player.destroy()
-      } catch (e) {
-        const message = e?.message || ''
-        if (!message.includes('removeAllListeners')) {
-          console.warn('[IPTV] mpegts reconnect cleanup failed:', e)
-        }
+      if (!destroyBeforeDelay) {
+        destroyCurrentPlayer('reconnect')
       }
 
       const nextAttemptId = ++_playAttemptId
       await playCurrentIptvUrl(nextAttemptId, { allowStartupRace: false })
-    }, MPEGTS_RECONNECT_DELAY_MS)
+    }, delayMs)
   }
 
   const onError = (type, detail, info) => {
-    scheduleReconnectCurrentSource(`${type || 'mpegts error'}:${detail || info?.msg || ''}`)
+    scheduleReconnectCurrentSource(`${type || 'mpegts error'}:${detail || info?.msg || ''}`, {
+      destroyBeforeDelay: true,
+      delayMs: MPEGTS_ERROR_RECONNECT_DELAY_MS,
+    })
   }
 
   const onComplete = () => {
     if (switching || !isAttemptActive(attemptId)) return
     if (completeWatchTimer) return
 
-    scheduleReconnectCurrentSource('mpegts EOF')
+    scheduleReconnectCurrentSource('mpegts EOF', {
+      destroyBeforeDelay: false,
+      delayMs: MPEGTS_EOF_RECONNECT_DELAY_MS,
+    })
   }
 
   player.on(mpegts.Events.ERROR, onError)
@@ -1794,7 +1813,7 @@ async function playCurrentIptvUrl(attemptId = 0, options = {}) {
         setSourceRuntimeStatus(idx, 'trying')
         playerStore.setPlaybackError('直播连接断开，正在重新连接当前源')
         playerStore.setLoading(true)
-        await new Promise(resolve => setTimeout(resolve, MPEGTS_RECONNECT_DELAY_MS))
+        await new Promise(resolve => setTimeout(resolve, MPEGTS_ERROR_RECONNECT_DELAY_MS))
         if (!isAttemptActive(attemptId)) return
         const nextAttemptId = ++_playAttemptId
         return await playCurrentIptvUrl(nextAttemptId, { allowStartupRace: false })
