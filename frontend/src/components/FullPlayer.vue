@@ -41,6 +41,7 @@
 
               <video
                 v-if="isIptvMode"
+                v-show="activeIptvEngine !== 'youtube'"
                 ref="iptvVideoRef"
                 class="media-video"
                 playsinline
@@ -53,6 +54,12 @@
                 @stalled="onVideoStalled"
                 @timeupdate="onVideoTimeUpdate"
               ></video>
+              <div
+                v-if="isIptvMode"
+                ref="youtubeHostRef"
+                class="youtube-player-host"
+                :class="{ active: activeIptvEngine === 'youtube' }"
+              ></div>
 
               <div v-else class="radio-art-stage">
                 <div class="radio-art">
@@ -368,6 +375,8 @@ const { isPlayerExpanded, currentStation, isPlaying, isLoading, volume, stationM
 const iptvVideoRef = ref(null)
 const iptvHlsRef = ref(null)
 const iptvMpegtsRef = ref(null)
+const youtubeHostRef = ref(null)
+const activeIptvEngine = ref('video')
 const sourceButtonRef = ref(null)
 const sourceMenuOpen = ref(false)
 const sourceMenuStyle = ref({
@@ -396,12 +405,16 @@ function useDefaultLogo(event) {
 }
 
 function toggleIptvMute() {
-  if (!iptvVideoRef.value) return
   iptvMuted.value = !iptvMuted.value
-  iptvVideoRef.value.muted = iptvMuted.value
+  if (activeIptvEngine.value === 'youtube') {
+    syncYoutubeAudioState()
+    return
+  }
+  if (iptvVideoRef.value) iptvVideoRef.value.muted = iptvMuted.value
 }
 
 function toggleFullscreen() {
+  if (activeIptvEngine.value === 'youtube') return
   const el = iptvVideoRef.value
   if (!el) return
   if (document.fullscreenElement) {
@@ -705,11 +718,43 @@ function sourceStatusLabel(status) {
   return '未尝试'
 }
 
+function syncIptvMediaSession(playbackState = isPlaying.value ? 'playing' : 'paused') {
+  if (!isIptvMode.value || !('mediaSession' in navigator)) return
+  try {
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: currentProgram.value?.title || currentStationName.value,
+      artist: currentStationName.value,
+      artwork: currentArtworkUrl.value ? [{ src: currentArtworkUrl.value }] : [],
+    })
+    navigator.mediaSession.playbackState = playbackState
+    navigator.mediaSession.setActionHandler('play', () => {
+      if (activeIptvEngine.value === 'youtube') {
+        try { _youtubePlayer?.playVideo?.() } catch {}
+      }
+      playerStore.togglePlay(true)
+    })
+    navigator.mediaSession.setActionHandler('pause', () => {
+      if (activeIptvEngine.value === 'youtube') {
+        try { _youtubePlayer?.pauseVideo?.() } catch {}
+      }
+      playerStore.togglePlay(false)
+    })
+    navigator.mediaSession.setActionHandler('stop', () => {
+      if (activeIptvEngine.value === 'youtube') destroyYoutubePlayer()
+      playerStore.togglePlay(false)
+      navigator.mediaSession.playbackState = 'none'
+    })
+  } catch (e) {
+    console.warn('[IPTV] MediaSession 更新失败:', e)
+  }
+}
+
 const iptvSourceOptions = computed(() => {
   return playerStore.iptvUrls.map((entry, index) => {
     const targetUrl = sourceTargetUrl(entry)
     const isProxySource = entry.type === 'proxy' || entry.via_proxy
-    const typeLabel = isProxySource ? '代理' : '直连'
+    const st = sourceType(entry)
+    const typeLabel = st === 'youtube' ? 'YT' : isProxySource ? '代理' : '直连'
     const host = sourceHost(targetUrl)
     const working = Number(entry.is_working)
     const latency = Number(entry.latency_ms) > 0 ? `${entry.latency_ms}ms` : ''
@@ -723,7 +768,7 @@ const iptvSourceOptions = computed(() => {
     return {
       index,
       url: entry.url,
-      type: isProxySource ? 'proxy' : entry.type,
+      type: st === 'youtube' ? 'youtube' : isProxySource ? 'proxy' : entry.type,
       typeLabel,
       title: `${index + 1}. ${host}`,
       meta,
@@ -813,6 +858,7 @@ function destroyIptvMpegts() {
 function destroyIptvEngines() {
   destroyIptvHls()
   destroyIptvMpegts()
+  destroyYoutubePlayer()
 }
 
 function resetIptvVideo() {
@@ -821,6 +867,223 @@ function resetIptvVideo() {
   iptvVideoRef.value.pause()
   iptvVideoRef.value.removeAttribute('src')
   iptvVideoRef.value.load()
+}
+
+function clearYoutubeStartupTimer() {
+  if (!_youtubeStartupTimer) return
+  clearTimeout(_youtubeStartupTimer)
+  _youtubeStartupTimer = null
+}
+
+function destroyYoutubePlayer(resetEngine = true) {
+  clearYoutubeStartupTimer()
+  if (_youtubePlayer) {
+    try {
+      _youtubePlayer.stopVideo?.()
+    } catch {}
+    try {
+      _youtubePlayer.destroy?.()
+    } catch (e) {
+      console.warn('[IPTV] YouTube cleanup failed:', e)
+    }
+    _youtubePlayer = null
+  }
+  if (youtubeHostRef.value) youtubeHostRef.value.innerHTML = ''
+  if (resetEngine && activeIptvEngine.value === 'youtube') {
+    activeIptvEngine.value = 'video'
+  }
+}
+
+function syncYoutubeAudioState() {
+  if (!_youtubePlayer) return
+  try {
+    _youtubePlayer.setVolume?.(Math.round(volume.value * 100))
+    if (iptvMuted.value || volume.value <= 0) _youtubePlayer.mute?.()
+    else _youtubePlayer.unMute?.()
+  } catch {}
+}
+
+async function loadYoutubeIframeApi(timeoutMs = 3000) {
+  const now = Date.now()
+  if (window.YT?.Player) {
+    _youtubeApiReachable = true
+    _youtubeApiCheckedAt = now
+    return true
+  }
+  if (_youtubeApiPromise && now - _youtubeApiCheckedAt < 60_000) return _youtubeApiPromise
+  if (_youtubeApiReachable === false && now - _youtubeApiCheckedAt < 60_000) return false
+
+  _youtubeApiCheckedAt = now
+  _youtubeApiPromise = new Promise((resolve) => {
+    let settled = false
+    const previousReady = window.onYouTubeIframeAPIReady
+    const finish = (ok) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      _youtubeApiReachable = ok
+      _youtubeApiCheckedAt = Date.now()
+      _youtubeApiPromise = null
+      resolve(ok)
+    }
+
+    window.onYouTubeIframeAPIReady = () => {
+      if (typeof previousReady === 'function') {
+        try { previousReady() } catch {}
+      }
+      finish(Boolean(window.YT?.Player))
+    }
+
+    const timer = setTimeout(() => finish(Boolean(window.YT?.Player)), timeoutMs)
+
+    if (!document.querySelector('script[data-wavebypass-youtube-api="1"]')) {
+      const script = document.createElement('script')
+      script.src = 'https://www.youtube.com/iframe_api'
+      script.async = true
+      script.dataset.wavebypassYoutubeApi = '1'
+      script.onerror = () => {
+        script.remove()
+        finish(false)
+      }
+      document.head.appendChild(script)
+    }
+  })
+
+  return _youtubeApiPromise
+}
+
+function preflightYoutubeApiForQueue(urls) {
+  if (!urls?.some((entry) => sourceType(entry) === 'youtube')) return
+  loadYoutubeIframeApi().catch(() => false)
+}
+
+async function handleActiveYoutubeFailure(reason, attemptId, sourceIndex) {
+  if (!isAttemptActive(attemptId)) return
+  console.warn('[IPTV] YouTube 播放中断，切备用源:', reason)
+  setSourceRuntimeStatus(sourceIndex, 'failed')
+  destroyYoutubePlayer()
+  const nextAttemptId = ++_playAttemptId
+  if (await fallbackToNextIptvUrl(nextAttemptId)) {
+    return await playCurrentIptvUrl(nextAttemptId)
+  }
+  markAllIptvSourcesUnavailable(nextAttemptId)
+}
+
+async function startYoutubeCandidate(entry, attemptId = 0, sourceIndex = -1) {
+  if (!isAttemptActive(attemptId)) throw cancelledError()
+  const videoId = youtubeVideoId(entry)
+  if (!videoId) throw new Error('YouTube video_id 缺失')
+
+  const setRuntimeStatus = (status) => {
+    if (sourceIndex >= 0) setSourceRuntimeStatus(sourceIndex, status)
+    else setSourceRuntimeStatusByEntry(entry, status)
+  }
+
+  setRuntimeStatus('trying')
+  playerStore.setLoading(true)
+  cancelCurrentStartup()
+  cancelActiveProxyRace()
+  destroyIptvHls()
+  destroyIptvMpegts()
+  destroyYoutubePlayer(false)
+  resetIptvVideo()
+
+  const reachable = await loadYoutubeIframeApi()
+  if (!isAttemptActive(attemptId)) throw cancelledError()
+  if (!reachable || !window.YT?.Player) {
+    setRuntimeStatus('failed')
+    throw new Error('YouTube API 不可达')
+  }
+  if (!youtubeHostRef.value) throw new Error('YouTube 播放容器未就绪')
+
+  activeIptvEngine.value = 'youtube'
+  youtubeHostRef.value.innerHTML = ''
+  console.log(`[START] YouTube:${videoId}`)
+
+  return new Promise((resolve, reject) => {
+    let settled = false
+    let confirmed = false
+    const cleanupFailure = () => {
+      clearYoutubeStartupTimer()
+      destroyYoutubePlayer()
+    }
+    const safeReject = (err) => {
+      if (settled) return
+      settled = true
+      cleanupFailure()
+      if (isAttemptActive(attemptId)) setRuntimeStatus('failed')
+      reject(err)
+    }
+    const safeResolve = () => {
+      if (settled || !isAttemptActive(attemptId)) return
+      settled = true
+      confirmed = true
+      clearYoutubeStartupTimer()
+      setRuntimeStatus('playing')
+      playerStore.togglePlay(true)
+      playerStore.clearPlaybackError()
+      playerStore.setLoading(false)
+      syncIptvMediaSession('playing')
+      resolve()
+    }
+
+    _youtubeStartupTimer = setTimeout(() => {
+      safeReject(new Error('YouTube 起播超时'))
+    }, 8000)
+
+    _youtubePlayer = new window.YT.Player(youtubeHostRef.value, {
+      videoId,
+      width: '100%',
+      height: '100%',
+      playerVars: {
+        autoplay: 1,
+        playsinline: 1,
+        controls: 1,
+        rel: 0,
+        modestbranding: 1,
+      },
+      events: {
+        onReady: () => {
+          if (!isAttemptActive(attemptId)) {
+            safeReject(cancelledError())
+            return
+          }
+          syncYoutubeAudioState()
+          try {
+            _youtubePlayer?.playVideo?.()
+          } catch (e) {
+            safeReject(e)
+          }
+        },
+        onStateChange: (event) => {
+          if (!isAttemptActive(attemptId)) return
+          const state = event?.data
+          if (state === window.YT.PlayerState.PLAYING || state === window.YT.PlayerState.BUFFERING) {
+            safeResolve()
+            return
+          }
+          if (state === window.YT.PlayerState.PAUSED) {
+            playerStore.togglePlay(false)
+            syncIptvMediaSession('paused')
+            return
+          }
+          if (state === window.YT.PlayerState.ENDED) {
+            playerStore.togglePlay(false)
+            syncIptvMediaSession('none')
+            if (!confirmed) safeReject(new Error('YouTube 直播已结束'))
+          }
+        },
+        onError: (event) => {
+          const err = new Error(`YouTube 错误:${event?.data ?? ''}`)
+          if (!confirmed) {
+            safeReject(err)
+            return
+          }
+          handleActiveYoutubeFailure(err.message, attemptId, sourceIndex)
+        },
+      },
+    })
+  })
 }
 
 function canUseHls() {
@@ -844,11 +1107,50 @@ function isMpegTsUrl(url) {
     || /%2F(?:rtp|udp)%2F/i.test(url)
 }
 
+function parseYoutubeVideoId(url) {
+  try {
+    const parsed = new URL(url)
+    const host = parsed.hostname.toLowerCase()
+    const parts = parsed.pathname.split('/').filter(Boolean)
+    let id = ''
+    if (host === 'youtu.be' || host === 'www.youtu.be') {
+      id = parts[0] || ''
+    } else if (host === 'youtube.com' || host.endsWith('.youtube.com') || host === 'youtube-nocookie.com' || host.endsWith('.youtube-nocookie.com')) {
+      id = parsed.searchParams.get('v') || ''
+      if (!id && parts.length >= 2 && ['live', 'embed', 'shorts'].includes(parts[0])) {
+        id = parts[1]
+      }
+    }
+    return /^[a-zA-Z0-9_-]{11}$/.test(id) ? id : ''
+  } catch {
+    return ''
+  }
+}
+
+function isYoutubeUrl(url) {
+  try {
+    const host = new URL(url).hostname.toLowerCase()
+    return host === 'youtu.be' || host === 'www.youtu.be' || host === 'youtube.com' || host.endsWith('.youtube.com') || host === 'youtube-nocookie.com' || host.endsWith('.youtube-nocookie.com')
+  } catch {
+    return false
+  }
+}
+
 // source_type 优先，兜底回 URL 猜测
 function sourceType(entry) {
   const url = entry?.url || ''
-  const inferred = isHlsUrl(url) ? 'hls' : isMpegTsUrl(url) ? 'mpegts' : 'hls'
+  const inferred = parseYoutubeVideoId(url)
+    ? 'youtube'
+    : isYoutubeUrl(url)
+      ? 'unsupported_youtube_url'
+      : isHlsUrl(url)
+        ? 'hls'
+        : isMpegTsUrl(url) ? 'mpegts' : 'hls'
   return entry?.source_type && entry.source_type !== 'hls' ? entry.source_type : inferred
+}
+
+function youtubeVideoId(entry) {
+  return entry?.youtube_video_id || parseYoutubeVideoId(entry?.original_url || entry?.url || '')
 }
 
 function canUseMpegTs() {
@@ -871,6 +1173,11 @@ let _cleanupActiveRace = null
 let _cancelCurrentStartup = null
 let _suppressIptvUrlWatch = 0
 let _manualIptvStartPending = 0
+let _youtubePlayer = null
+let _youtubeStartupTimer = null
+let _youtubeApiPromise = null
+let _youtubeApiReachable = null
+let _youtubeApiCheckedAt = 0
 
 function isAttemptActive(attemptId) {
   return attemptId === _playAttemptId
@@ -1150,6 +1457,7 @@ async function tryPlayIptv(url, usingProxy = false, customUa = '', attemptId = 0
   cancelCurrentStartup()
   cancelActiveProxyRace()
   destroyIptvEngines()
+  activeIptvEngine.value = 'video'
   resetIptvVideo()
   playerStore.setLoading(true)
   console.log(`[START] ${usingProxy ? '(proxy) ' : ''}${url.slice(0, 80)}...`)
@@ -1407,12 +1715,23 @@ async function playCurrentIptvUrl(attemptId = 0, options = {}) {
   const allowStartupRace = options.allowStartupRace !== false
   const urls = playerStore.iptvUrls
   const idx = playerStore.iptvUrlIndex
+  preflightYoutubeApiForQueue(urls)
   if (idx >= urls.length) {
     markAllIptvSourcesUnavailable(attemptId)
     return
   }
   const entry = urls[idx]
-  const startupRacers = allowStartupRace ? startupRaceEntries(urls, idx) : []
+  const st = sourceType(entry)
+  if (st === 'unsupported_youtube_url') {
+    setSourceRuntimeStatus(idx, 'failed')
+    console.warn('[IPTV] 不支持的 YouTube URL:', entry.url)
+    if (await fallbackToNextIptvUrl(attemptId)) {
+      return await playCurrentIptvUrl(attemptId)
+    }
+    markAllIptvSourcesUnavailable(attemptId)
+    return
+  }
+  const startupRacers = allowStartupRace && st !== 'youtube' ? startupRaceEntries(urls, idx) : []
   if (startupRacers.length > 1) {
     const raced = await raceStartupSources(startupRacers, attemptId)
     if (raced !== false) return raced
@@ -1422,7 +1741,11 @@ async function playCurrentIptvUrl(attemptId = 0, options = {}) {
   console.log(`[START] ${entry.type}:${entry.url.slice(0, 60)}...`)
   try {
     setSourceRuntimeStatus(idx, 'trying')
-    await tryPlayIptv(entry.url, Boolean(entry.via_proxy), entry.custom_ua || '', attemptId, idx)
+    if (st === 'youtube') {
+      await startYoutubeCandidate(entry, attemptId, idx)
+    } else {
+      await tryPlayIptv(entry.url, Boolean(entry.via_proxy), entry.custom_ua || '', attemptId, idx)
+    }
     if (!isAttemptActive(attemptId)) return
     setSourceRuntimeStatus(idx, 'playing')
     playerStore.clearPlaybackError()
@@ -1634,7 +1957,7 @@ async function raceDirectHlsSources(entries, attemptId = 0) {
   resetIptvVideo()
   playerStore.setLoading(true)
 
-  const fresh = entries.filter((entry) => isHlsUrl(entry.url) && !isMpegTsUrl(entry.url))
+  const fresh = entries.filter((entry) => sourceType(entry) === 'hls' && isHlsUrl(entry.url) && !isMpegTsUrl(entry.url))
   if (fresh.length < 2) {
     return false
   }
@@ -1813,7 +2136,7 @@ async function raceProxySources(entries, attemptId = 0) {
   resetIptvVideo()
   playerStore.setLoading(true)
 
-  const fresh = entries.filter(e => !_racedLosers.has(e.url))
+  const fresh = entries.filter(e => sourceType(e) !== 'youtube' && sourceType(e) !== 'unsupported_youtube_url' && !_racedLosers.has(e.url))
   if (!fresh.length) {
     if (await fallbackToNextIptvUrl(attemptId)) {
       return await playCurrentIptvUrl(attemptId)
@@ -2017,6 +2340,7 @@ async function raceProxySources(entries, attemptId = 0) {
 }
 
 async function handleIptvError(e) {
+  if (activeIptvEngine.value === 'youtube') return
   console.warn('[IPTV] video error:', e?.target?.error?.message || '')
   // hls.js / mpegts.js 接管中 → 由各自 ERROR 事件处理
   if (iptvHlsRef.value || iptvMpegtsRef.value) return
@@ -2311,10 +2635,12 @@ function onVideoEvent(evt) {
     clearStallRecoveryTimer()
     playerStore.setLoading(false)
     playerStore.togglePlay(true)
+    syncIptvMediaSession('playing')
   }
   if (evt === 'pause') {
     clearStallRecoveryTimer()
     stopVideoFrameWatch()
+    syncIptvMediaSession('paused')
   }
   if (evt === 'waiting') {
     scheduleStallRecovery('waiting')
@@ -2354,15 +2680,30 @@ watch(isPlayerExpanded, (expanded) => {
 })
 
 watch(isPlaying, (playing) => {
-  if (!iptvVideoRef.value || !isIptvMode.value) return
+  if (!isIptvMode.value) return
+  if (activeIptvEngine.value === 'youtube') {
+    if (!_youtubePlayer) return
+    try {
+      if (playing) _youtubePlayer.playVideo?.()
+      else _youtubePlayer.pauseVideo?.()
+    } catch {}
+    syncIptvMediaSession(playing ? 'playing' : 'paused')
+    return
+  }
+  if (!iptvVideoRef.value) return
   // 用户手动暂停后不自动恢复
   if (playing && iptvVideoRef.value.paused) {
     iptvVideoRef.value.play().catch(() => {})
   }
   if (!playing) iptvVideoRef.value.pause()
+  syncIptvMediaSession(playing ? 'playing' : 'paused')
 })
 
 watch(volume, (v) => {
+  if (activeIptvEngine.value === 'youtube') {
+    syncYoutubeAudioState()
+    return
+  }
   if (iptvVideoRef.value) iptvVideoRef.value.volume = v
 })
 
@@ -2611,6 +2952,22 @@ onBeforeUnmount(() => {
   height: 100%;
   object-fit: contain;
   background: var(--media-placeholder-bg);
+}
+
+.youtube-player-host {
+  position: absolute;
+  inset: 0;
+  display: none;
+  background: #000;
+}
+
+.youtube-player-host.active {
+  display: block;
+}
+
+.youtube-player-host iframe {
+  width: 100%;
+  height: 100%;
 }
 
 .radio-art-stage {

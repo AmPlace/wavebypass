@@ -115,8 +115,37 @@ export const usePlayerStore = defineStore('player', {
       const list = []
       const API_BASE = import.meta.env?.VITE_API_BASE_URL || window.location.origin
       const sourceUrl = (u) => String(u?.url || '').trim()
+      const parseYoutubeVideoId = (url) => {
+        try {
+          const parsed = new URL(url)
+          const host = parsed.hostname.toLowerCase()
+          const parts = parsed.pathname.split('/').filter(Boolean)
+          let id = ''
+          if (host === 'youtu.be' || host === 'www.youtu.be') {
+            id = parts[0] || ''
+          } else if (host === 'youtube.com' || host.endsWith('.youtube.com') || host === 'youtube-nocookie.com' || host.endsWith('.youtube-nocookie.com')) {
+            id = parsed.searchParams.get('v') || ''
+            if (!id && parts.length >= 2 && ['live', 'embed', 'shorts'].includes(parts[0])) {
+              id = parts[1]
+            }
+          }
+          return /^[a-zA-Z0-9_-]{11}$/.test(id) ? id : ''
+        } catch {
+          return ''
+        }
+      }
+      const isYoutubeUrl = (url) => {
+        try {
+          const host = new URL(url).hostname.toLowerCase()
+          return host === 'youtu.be' || host === 'www.youtu.be' || host === 'youtube.com' || host.endsWith('.youtube.com') || host === 'youtube-nocookie.com' || host.endsWith('.youtube-nocookie.com')
+        } catch {
+          return false
+        }
+      }
       const inferSourceType = (url) => {
         const value = String(url || '').trim().toLowerCase()
+        if (parseYoutubeVideoId(url)) return 'youtube'
+        if (isYoutubeUrl(url)) return 'unsupported_youtube_url'
         if (value.startsWith('rtsp://')) return 'rtsp'
         if (/\/(?:rtp|udp)\//i.test(value) || /%2f(?:rtp|udp)%2f/i.test(value)) return 'mpegts'
         if (/\.(?:ts|m2ts|mts)(?:[?#]|$)/i.test(value)) return 'mpegts'
@@ -149,6 +178,21 @@ export const usePlayerStore = defineStore('player', {
         const url = sourceUrl(u)
         if (!url) continue
         const st = sourceType(u)
+        if (st === 'unsupported_youtube_url') continue
+        if (st === 'youtube') {
+          const youtubeVideoId = u.youtube_video_id || parseYoutubeVideoId(url)
+          if (!youtubeVideoId) continue
+          directUrls.push({
+            ...u,
+            url,
+            original_url: url,
+            type: 'youtube',
+            engine: 'youtube',
+            source_type: 'youtube',
+            youtube_video_id: youtubeVideoId,
+          })
+          continue
+        }
         if (st === 'rtsp' || u.force_proxy || u.custom_ua) {
           proxyOnlyUrls.push({
             ...u,
@@ -175,11 +219,12 @@ export const usePlayerStore = defineStore('player', {
       }
       // 先所有直连，再所有直连的代理回退，最后是必须代理的
       for (const u of directUrls) {
-        list.push({ ...u, url: u.url, original_url: u.url, type: 'direct' })
+        list.push({ ...u, url: u.url, original_url: u.url, type: u.type || 'direct' })
       }
       for (const u of directUrls) {
         const url = sourceUrl(u)
         const st = sourceType(u)
+        if (st === 'youtube') continue
         list.push({
           ...u,
           url: proxyUrlFor(u),
@@ -193,8 +238,8 @@ export const usePlayerStore = defineStore('player', {
       this.currentIptvChannel = channel
       this.iptvUrls = list
       this.iptvUrlIndex = 0
-      this.playbackError = ''
-      this.isLoading = true
+      this.playbackError = list.length ? '' : '没有可播放的源'
+      this.isLoading = Boolean(list.length)
       this.isPlaying = false
       // isPlaying 由实际播放事件设置，不提前设
     },

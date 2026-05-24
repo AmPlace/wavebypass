@@ -1,6 +1,7 @@
 import re
 import os
 from typing import Optional
+from urllib.parse import parse_qs, urlparse
 from alias import Alias, format_name
 
 # 加载频道别名表
@@ -26,6 +27,7 @@ _M3U_ENTRY_RE = re.compile(
 # 简单的逐行解析用
 _EXTINF_RE = re.compile(r'#EXTINF:(.+?),(.+)')
 _EXTGRP_RE = re.compile(r'#EXTGRP:\s*(.+)')
+_YOUTUBE_VIDEO_ID_RE = re.compile(r'^[a-zA-Z0-9_-]{11}$')
 
 # 分辨率 / 编码标签，清洗频道名用
 _STRIP_RE = re.compile(
@@ -143,6 +145,7 @@ def parse_m3u(text: str) -> list[dict]:
             'name': name,
             'url': url,
             'source_type': detect_source_type(url),
+            'youtube_video_id': parse_youtube_video_id(url),
             'logo_url': attrs.get('tvg-logo', ''),
             'group_name': attrs.get('group-title', '') or '其他',
             'tvg_id': attrs.get('tvg-id', ''),
@@ -186,7 +189,12 @@ def parse_m3u(text: str) -> list[dict]:
             continue
 
         if pending_extinf and line.startswith(('http://', 'https://', 'rtmp://', 'rtsp://')):
-            ch = {**pending_extinf, 'url': line, 'source_type': detect_source_type(line)}
+            ch = {
+                **pending_extinf,
+                'url': line,
+                'source_type': detect_source_type(line),
+                'youtube_video_id': parse_youtube_video_id(line),
+            }
             channels.append(ch)
             pending_extinf = None
             i += 1
@@ -216,6 +224,7 @@ def parse_m3u(text: str) -> list[dict]:
                 'name': parts[0].strip(),
                 'url': parts[1].strip(),
                 'source_type': detect_source_type(parts[1].strip()),
+                'youtube_video_id': parse_youtube_video_id(parts[1].strip()),
                 'logo_url': '',
                 'group_name': current_group,
                 'tvg_id': '',
@@ -225,8 +234,54 @@ def parse_m3u(text: str) -> list[dict]:
     return channels
 
 
+def parse_youtube_video_id(url: str) -> str:
+    """Extract an embeddable YouTube video id from common share/live URLs."""
+    raw = (url or '').strip()
+    if not raw:
+        return ''
+    try:
+        parsed = urlparse(raw)
+    except ValueError:
+        return ''
+
+    host = (parsed.netloc or '').lower().split('@')[-1].split(':')[0]
+    path_parts = [part for part in parsed.path.split('/') if part]
+    candidate = ''
+
+    if host in {'youtu.be', 'www.youtu.be'}:
+        candidate = path_parts[0] if path_parts else ''
+    elif host == 'youtube.com' or host.endswith('.youtube.com') or host == 'youtube-nocookie.com' or host.endswith('.youtube-nocookie.com'):
+        query_video_id = parse_qs(parsed.query).get('v', [''])[0]
+        if query_video_id:
+            candidate = query_video_id
+        elif len(path_parts) >= 2 and path_parts[0] in {'live', 'embed', 'shorts'}:
+            candidate = path_parts[1]
+
+    if _YOUTUBE_VIDEO_ID_RE.fullmatch(candidate or ''):
+        return candidate
+    return ''
+
+
+def is_youtube_url(url: str) -> bool:
+    try:
+        host = (urlparse((url or '').strip()).netloc or '').lower().split('@')[-1].split(':')[0]
+    except ValueError:
+        return False
+    return (
+        host in {'youtu.be', 'www.youtu.be'}
+        or host == 'youtube.com'
+        or host.endswith('.youtube.com')
+        or host == 'youtube-nocookie.com'
+        or host.endswith('.youtube-nocookie.com')
+    )
+
+
 def detect_source_type(url: str) -> str:
     value = (url or '').strip().lower()
+    if parse_youtube_video_id(url):
+        return 'youtube'
+    if is_youtube_url(url):
+        return 'unsupported_youtube_url'
     if value.startswith('rtsp://'):
         return 'rtsp'
     if '/rtp/' in value or '/udp/' in value or '%2frtp%2f' in value or '%2fudp%2f' in value:

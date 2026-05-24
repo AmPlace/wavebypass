@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS channels (
     latency_ms      REAL DEFAULT 0,
     last_tested     TEXT DEFAULT '',
     source_type     TEXT DEFAULT 'hls',
+    youtube_video_id TEXT DEFAULT '',
     FOREIGN KEY (subscription_id) REFERENCES subscriptions(id) ON DELETE CASCADE
 );
 
@@ -115,6 +116,7 @@ async def initialize():
                 pass  # 字段已存在
         for col, typ, default in [
             ('source_type', 'TEXT', "'hls'"),
+            ('youtube_video_id', 'TEXT', "''"),
         ]:
             try:
                 conn.execute(f"ALTER TABLE channels ADD COLUMN {col} {typ} DEFAULT {default}")
@@ -224,12 +226,20 @@ async def add_channels_bulk(sub_id: int, channels: list[dict]):
         conn.execute("DELETE FROM channels WHERE subscription_id=?", (sub_id,))
         now = datetime.now(timezone.utc).isoformat()
         conn.executemany(
-            "INSERT INTO channels(subscription_id, name, url, logo_url, group_name, tvg_id, tvg_name, source_type) "
-            "VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO channels(subscription_id, name, url, logo_url, group_name, tvg_id, tvg_name, source_type, youtube_video_id) "
+            "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
-                (sub_id, ch['name'], ch['url'], ch.get('logo_url', ''), ch.get('group_name', ''), ch.get('tvg_id', ''), ch.get('tvg_name', ''), ch.get('source_type', 'hls'))
-
-
+                (
+                    sub_id,
+                    ch['name'],
+                    ch['url'],
+                    ch.get('logo_url', ''),
+                    ch.get('group_name', ''),
+                    ch.get('tvg_id', ''),
+                    ch.get('tvg_name', ''),
+                    ch.get('source_type', 'hls'),
+                    ch.get('youtube_video_id', ''),
+                )
                 for ch in channels
             ],
         )
