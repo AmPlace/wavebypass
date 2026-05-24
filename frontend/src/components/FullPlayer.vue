@@ -2804,6 +2804,7 @@ onBeforeUnmount(() => {
   --media-placeholder-bg: #0b0d12;
   --progress-knob-bg: #fff;
   --accent: #35c87a;
+  --black: #111827;
   --gold: #c79a2b;
   --muted: #8d9299;
   --line: rgba(17, 24, 39, 0.08);
@@ -2852,6 +2853,11 @@ onBeforeUnmount(() => {
   --timeline-row-height: 84px;
   --timeline-time-size: 15px;
   --timeline-title-size: 18px;
+  --progress-track: rgba(17, 24, 39, 0.10);
+  --progress-fill: rgba(17, 24, 39, 0.82);
+  --progress-knob-bg: #ffffff;
+  --progress-knob-border: rgba(17, 24, 39, 0.42);
+  --progress-knob-ring: rgba(17, 24, 39, 0.12);
   overflow: hidden;
   min-height: 100dvh;
   isolation: isolate;
@@ -2905,6 +2911,11 @@ onBeforeUnmount(() => {
   --muted: rgba(250, 250, 250, 0.46);
   --line: rgba(255, 255, 255, 0.09);
   --channel-subtitle-color: rgba(250, 250, 250, 0.44);
+  --progress-track: rgba(255, 255, 255, 0.14);
+  --progress-fill: rgba(255, 255, 255, 0.82);
+  --progress-knob-bg: #111113;
+  --progress-knob-border: rgba(255, 255, 255, 0.48);
+  --progress-knob-ring: rgba(255, 255, 255, 0.14);
 }
 
 .full-player,
@@ -3121,13 +3132,13 @@ onBeforeUnmount(() => {
   position: relative;
   height: 2px;
   border-radius: 999px;
-  background: rgba(199, 154, 43, 0.24);
+  background: var(--progress-track);
 }
 
 .progress-fill {
   height: 100%;
   border-radius: inherit;
-  background: var(--gold);
+  background: var(--progress-fill);
 }
 
 .progress-knob {
@@ -3135,11 +3146,11 @@ onBeforeUnmount(() => {
   top: 50%;
   width: 12px;
   height: 12px;
-  border: 2px solid rgba(199, 154, 43, 0.55);
+  border: 2px solid var(--progress-knob-border);
   border-radius: 999px;
   background: var(--progress-knob-bg);
   transform: translate(-50%, -50%);
-  box-shadow: 0 0 0 1px rgba(199, 154, 43, 0.2);
+  box-shadow: 0 0 0 1px var(--progress-knob-ring);
 }
 
 .progress-times,
@@ -3326,7 +3337,7 @@ onBeforeUnmount(() => {
   width: var(--tab-line-width);
   height: 3px;
   border-radius: 999px;
-  background: var(--accent);
+  background: var(--black);
 }
 
 .desktop-panel-scroll {
