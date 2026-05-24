@@ -115,18 +115,17 @@ export const usePlayerStore = defineStore('player', {
       const list = []
       const API_BASE = import.meta.env?.VITE_API_BASE_URL || window.location.origin
       const sourceUrl = (u) => String(u?.url || '').trim()
-      const isMpegTsUrl = (url) => /\/(?:rtp|udp)\//i.test(url) || /\.m2?ts(\?|$)/i.test(url)
-      const isRtspUrl = (url) => /^rtsp:\/\//i.test(url)
       const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
         (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
       const proxyUrlFor = (u, options = {}) => {
         const url = sourceUrl(u)
         const ua = u.custom_ua ? `&custom_ua=${encodeURIComponent(u.custom_ua)}` : ''
-        if (isRtspUrl(url)) {
+        const st = u.source_type || 'hls'
+        if (st === 'rtsp') {
           const compat = options.compat ? '&compat=1' : ''
           return `${API_BASE}/api/iptv/proxy/rtsp.m3u8?target_url=${encodeURIComponent(url)}${ua}${compat}`
         }
-        if (isMpegTsUrl(url)) {
+        if (st === 'mpegts') {
           return `${API_BASE}/api/iptv/proxy/stream?target_url=${encodeURIComponent(url)}${ua}`
         }
         return `${API_BASE}/api/iptv/proxy/wide.m3u8?proxy_ts=1${ua}&target_url=${encodeURIComponent(url)}`
@@ -137,15 +136,17 @@ export const usePlayerStore = defineStore('player', {
       for (const u of sorted) {
         const url = sourceUrl(u)
         if (!url) continue
-        if (isRtspUrl(url) || u.force_proxy || u.custom_ua) {
+        const st = u.source_type || 'hls'
+        if (st === 'rtsp' || u.force_proxy || u.custom_ua) {
           proxyOnlyUrls.push({
             ...u,
             url: proxyUrlFor(u),
             original_url: url,
-            type: isMpegTsUrl(url) ? 'direct' : 'proxy',
+            type: st === 'mpegts' ? 'direct' : 'proxy',
             via_proxy: true,
+            source_type: st,
           })
-          if (isIOS && isRtspUrl(url)) {
+          if (isIOS && st === 'rtsp') {
             proxyOnlyUrls.push({
               ...u,
               url: proxyUrlFor(u, { compat: true }),
@@ -153,6 +154,7 @@ export const usePlayerStore = defineStore('player', {
               type: 'proxy',
               via_proxy: true,
               rtsp_compat: true,
+              source_type: st,
             })
           }
         } else {

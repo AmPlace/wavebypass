@@ -753,7 +753,11 @@ function isMpegTsUrl(url) {
   return /\/api\/iptv\/proxy\/stream(\?|$)/i.test(url)
     || /\/(?:rtp|udp)\//i.test(url)
     || /%2F(?:rtp|udp)%2F/i.test(url)
-    || /\.m2?ts(\?|$)/i.test(url)
+}
+
+// source_type 优先，兜底回 URL 猜测
+function sourceType(entry) {
+  return entry?.source_type || (isHlsUrl(entry?.url || '') ? 'hls' : isMpegTsUrl(entry?.url || '') ? 'mpegts' : 'hls')
 }
 
 function canUseMpegTs() {
@@ -1293,11 +1297,12 @@ function startupRaceEntries(urls, startIndex) {
     const entry = urls[i]
     if (!entry?.url) continue
     if ((entry.type === 'proxy' || entry.via_proxy) && _racedLosers.has(entry.url)) continue
-    if (isHlsUrl(entry.url) && hlsProbeSupported) {
+    const st = sourceType(entry)
+    if (st === 'hls' && hlsProbeSupported) {
       racers.push({ entry, index: i, kind: 'hls' })
       continue
     }
-    if (!isHlsUrl(entry.url) && isMpegTsUrl(entry.url) && mpegtsProbeSupported) {
+    if (st === 'mpegts' && mpegtsProbeSupported) {
       racers.push({ entry, index: i, kind: 'mpegts' })
     }
   }
