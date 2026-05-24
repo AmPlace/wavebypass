@@ -30,3 +30,10 @@ proud-wibbling-goblet.md
 tools/
 *.db
 backend/data/rtsp_hls/
+
+
+backend_dist/
+out/
+release/
+backend/build/
+backend/waveflow-backend.spec

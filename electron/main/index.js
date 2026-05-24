@@ -88,6 +88,13 @@ async function createWindow() {
     minHeight: 680,
     title: 'WaveFlow',
     backgroundColor: '#f8f8f7',
+    titleBarStyle: 'hidden',
+    titleBarOverlay: {
+      color: '#f8f8f7',
+      symbolColor: '#111827',
+      height: 36,
+    },
+    autoHideMenuBar: true,
     show: false,
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.mjs'),
