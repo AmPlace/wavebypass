@@ -16,6 +16,11 @@ const routes = [
     name: 'admin',
     component: () => import('../views/AdminView.vue'),
   },
+  {
+    path: '/admin/epg',
+    name: 'epg-debug',
+    component: () => import('../views/EpgDebug.vue'),
+  },
 ]
 
 const router = createRouter({
