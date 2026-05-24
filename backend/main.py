@@ -29,6 +29,13 @@ M3U8_CACHE_TTL_SECONDS = 3.0
 
 
 HTTP_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
+IPTV_STREAM_READ_TIMEOUT_SECONDS = 12.0
+IPTV_STREAM_RECONNECT_DELAY_SECONDS = 0.25
+IPTV_STREAM_RECONNECT_MAX_DELAY_SECONDS = 2.0
+IPTV_STREAM_NO_DATA_RETRIES = 5
+IPTV_STREAM_NO_DATA_TIMEOUT_SECONDS = 45.0
+IPTV_STREAM_SHORT_CONNECTION_BYTES = 256 * 1024
+IPTV_STREAM_SHORT_CONNECTION_SECONDS = 2.0
 
 # 规避部分Hinet CDN的验证问题
 CDN_VERIFY_SSL = False
@@ -2096,7 +2103,7 @@ async def iptv_proxy_rtsp_segment(session_id: str, filename: str):
 
 
 @app.get("/api/iptv/proxy/stream")
-async def iptv_proxy_stream(target_url: str = '', custom_ua: str = ''):
+async def iptv_proxy_stream(request: Request, target_url: str = '', custom_ua: str = ''):
     if not target_url:
         raise HTTPException(status_code=400, detail="缺少 target_url")
 
@@ -2109,30 +2116,129 @@ async def iptv_proxy_stream(target_url: str = '', custom_ua: str = ''):
         'Referer': f'{parsed.scheme}://{parsed.netloc}/',
     }
 
-    stream_timeout = httpx.Timeout(None, connect=10.0)
+    stream_timeout = httpx.Timeout(None, connect=10.0, read=IPTV_STREAM_READ_TIMEOUT_SECONDS)
     stream_client = httpx.AsyncClient(
         timeout=stream_timeout,
         follow_redirects=True,
         verify=CDN_VERIFY_SSL,
     )
-    upstream: httpx.Response | None = None
-    try:
+
+    async def open_upstream() -> httpx.Response:
         req = stream_client.build_request("GET", target_url, headers=upstream_headers)
-        upstream = await stream_client.send(req, stream=True)
-        upstream.raise_for_status()
+        response: httpx.Response | None = None
+        try:
+            response = await stream_client.send(req, stream=True)
+            response.raise_for_status()
+        except httpx.HTTPError:
+            if response is not None:
+                await response.aclose()
+            raise
+
+        content_length = response.headers.get("content-length")
+        if content_length and content_length.isdigit():
+            length = int(content_length)
+            if 0 < length < IPTV_STREAM_SHORT_CONNECTION_BYTES:
+                logger.warning(
+                    "IPTV MPEG-TS 上游 Content-Length 较小: %s bytes url=%s",
+                    length,
+                    target_url,
+                )
+        return response
+
+    try:
+        initial_upstream = await open_upstream()
     except httpx.HTTPError as exc:
-        if upstream is not None:
-            await upstream.aclose()
         await stream_client.aclose()
         raise HTTPException(status_code=502, detail=f"拉取直播流失败: {exc}") from exc
 
-    async def stream_bytes():
+    async def stream_bytes() -> AsyncIterator[bytes]:
+        upstream: httpx.Response | None = initial_upstream
+        no_data_retries = 0
+        last_data_at = time.monotonic()
         try:
-            async for chunk in upstream.aiter_bytes(64 * 1024):
-                if chunk:
-                    yield chunk
+            while True:
+                if request and await request.is_disconnected():
+                    break
+
+                opened_at = time.monotonic()
+                bytes_this_connection = 0
+                close_reason = "eof"
+
+                try:
+                    async for chunk in upstream.aiter_bytes(64 * 1024):
+                        if request and await request.is_disconnected():
+                            close_reason = "client disconnected"
+                            break
+                        if chunk:
+                            bytes_this_connection += len(chunk)
+                            no_data_retries = 0
+                            last_data_at = time.monotonic()
+                            yield chunk
+                except httpx.ReadTimeout:
+                    close_reason = f"read timeout after {IPTV_STREAM_READ_TIMEOUT_SECONDS:.0f}s"
+                except httpx.HTTPError as exc:
+                    close_reason = f"{type(exc).__name__}: {exc}"
+                finally:
+                    if upstream is not None:
+                        await upstream.aclose()
+                        upstream = None
+
+                if request and await request.is_disconnected():
+                    break
+
+                elapsed = time.monotonic() - opened_at
+                if bytes_this_connection < IPTV_STREAM_SHORT_CONNECTION_BYTES and elapsed < IPTV_STREAM_SHORT_CONNECTION_SECONDS:
+                    logger.warning(
+                        "IPTV MPEG-TS 上游短连接结束: reason=%s bytes=%s elapsed=%.2fs url=%s",
+                        close_reason,
+                        bytes_this_connection,
+                        elapsed,
+                        target_url,
+                    )
+                else:
+                    logger.info(
+                        "IPTV MPEG-TS 上游连接结束，准备重连: reason=%s bytes=%s elapsed=%.2fs",
+                        close_reason,
+                        bytes_this_connection,
+                        elapsed,
+                    )
+
+                if bytes_this_connection == 0:
+                    no_data_retries += 1
+                    no_data_age = time.monotonic() - last_data_at
+                    if no_data_retries >= IPTV_STREAM_NO_DATA_RETRIES or no_data_age > IPTV_STREAM_NO_DATA_TIMEOUT_SECONDS:
+                        logger.warning(
+                            "IPTV MPEG-TS 上游连续无数据，结束代理流: retries=%s no_data_age=%.2fs url=%s",
+                            no_data_retries,
+                            no_data_age,
+                            target_url,
+                        )
+                        break
+
+                delay = min(
+                    IPTV_STREAM_RECONNECT_DELAY_SECONDS * max(1, no_data_retries),
+                    IPTV_STREAM_RECONNECT_MAX_DELAY_SECONDS,
+                )
+                await asyncio.sleep(delay)
+
+                while True:
+                    try:
+                        upstream = await open_upstream()
+                        break
+                    except httpx.HTTPError as exc:
+                        no_data_retries += 1
+                        no_data_age = time.monotonic() - last_data_at
+                        logger.warning(
+                            "IPTV MPEG-TS 上游重连失败: retries=%s no_data_age=%.2fs error=%s url=%s",
+                            no_data_retries,
+                            no_data_age,
+                            exc,
+                            target_url,
+                        )
+                        if no_data_retries >= IPTV_STREAM_NO_DATA_RETRIES or no_data_age > IPTV_STREAM_NO_DATA_TIMEOUT_SECONDS:
+                            return
+                        await asyncio.sleep(min(IPTV_STREAM_RECONNECT_DELAY_SECONDS * no_data_retries, IPTV_STREAM_RECONNECT_MAX_DELAY_SECONDS))
         finally:
-            await upstream.aclose()
             await stream_client.aclose()
 
     return StreamingResponse(
