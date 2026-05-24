@@ -1,6 +1,6 @@
 <template>
-  <div ref="scrollRef" class="h-dvh overflow-y-auto bg-gray-100 font-sans text-neutral-950 antialiased transition-colors duration-300 dark:bg-neutral-900 dark:text-neutral-50">
-    <div class="fixed inset-x-0 top-0 z-50 bg-gray-100 dark:bg-neutral-900">
+  <div ref="scrollRef" class="h-dvh overflow-y-auto bg-[#f8f8f7] font-sans text-neutral-950 antialiased transition-colors duration-300 dark:bg-[#111113] dark:text-neutral-50">
+    <div class="fixed inset-x-0 top-0 z-50 bg-[#f8f8f7] dark:bg-[#111113]">
       <div class="h-[env(safe-area-inset-top)]"></div>
       <div class="flex h-12 items-center justify-between px-4 sm:px-6">
         <div class="w-10"></div>
@@ -141,6 +141,10 @@ const playerStore = usePlayerStore()
 const { activeMode } = storeToRefs(playerStore)
 const router = useRouter()
 const route = useRoute()
+const THEME_CHROME_COLORS = {
+  light: '#f8f8f7',
+  dark: '#111113',
+}
 
 watch(() => route.path, (path) => {
   playerStore.setActiveMode(path.startsWith('/iptv') ? 'iptv' : 'radio')
@@ -149,15 +153,33 @@ watch(() => route.path, (path) => {
 // 动态修改Safari iOS状态栏颜色
 function updateThemeColor(isDarkMode) {
   let metaThemeColor = document.querySelector('meta[name="theme-color"]')
+  let metaStatusBar = document.querySelector('meta[name="apple-mobile-web-app-status-bar-style"]')
+  const themeColor = isDarkMode ? THEME_CHROME_COLORS.dark : THEME_CHROME_COLORS.light
   
   if (!metaThemeColor) {
     metaThemeColor = document.createElement('meta')
     metaThemeColor.name = 'theme-color'
     document.head.appendChild(metaThemeColor)
   }
+
+  if (!metaStatusBar) {
+    metaStatusBar = document.createElement('meta')
+    metaStatusBar.name = 'apple-mobile-web-app-status-bar-style'
+    document.head.appendChild(metaStatusBar)
+  }
   
-  metaThemeColor.content = isDarkMode ? '#171717' : '#f3f4f6'
+  metaThemeColor.setAttribute('content', themeColor)
+  metaStatusBar.content = isDarkMode ? 'black-translucent' : 'default'
+
+  document.documentElement.style.backgroundColor = themeColor
+  document.documentElement.style.colorScheme = isDarkMode ? 'dark' : 'light'
+  if (document.body) {
+    document.body.style.backgroundColor = themeColor
+  }
+  document.getElementById('app')?.style.setProperty('background-color', themeColor)
 }
+
+window.__wavebypassSyncThemeChrome = updateThemeColor
 
 function applyTheme() {
   const savedTheme = window.localStorage.getItem(THEME_STORAGE_KEY)

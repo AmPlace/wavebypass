@@ -3,7 +3,8 @@
     <Transition name="slide-up">
       <div
         v-show="isPlayerExpanded"
-        class="full-player fixed inset-0 z-50 overflow-y-auto bg-[#f7f7f6] text-neutral-950"
+        class="full-player fixed inset-0 z-50 overflow-y-auto"
+        :class="{ 'theme-dark': isFullPlayerDark }"
       >
         <div class="player-layout">
           <main class="player-main">
@@ -182,7 +183,7 @@
                   type="button"
                   class="channel-row"
                   :class="{ active: item.active }"
-                  @click="item.select"
+                  @click="handleChannelRowClick(item)"
                 >
                   <span class="channel-logo">
                     <img v-if="item.logo" :src="item.logo" :alt="item.name" @error="useDefaultLogo" />
@@ -253,7 +254,7 @@
                 type="button"
                 class="channel-row"
                 :class="{ active: item.active }"
-                @click="item.select"
+                @click="handleChannelRowClick(item)"
               >
                 <span class="channel-logo">
                   <img v-if="item.logo" :src="item.logo" :alt="item.name" @error="useDefaultLogo" />
@@ -379,6 +380,8 @@ const sourceMenuListMaxHeight = ref('260px')
 const iptvSourceRuntimeStatus = ref({})
 const activePlayerPanel = ref('channels')
 const DEFAULT_LOGO_URL = '/logos/default.png'
+const isFullPlayerDark = ref(document.documentElement.classList.contains('dark'))
+let themeObserver = null
 
 const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
   (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
@@ -445,6 +448,13 @@ async function toggleSourceMenu() {
 
 function closeSourceMenu() {
   sourceMenuOpen.value = false
+}
+
+function syncFullPlayerTheme() {
+  const shouldUseDark = document.documentElement.classList.contains('dark') ||
+    document.body.classList.contains('dark')
+  isFullPlayerDark.value = shouldUseDark
+  window.__wavebypassSyncThemeChrome?.(shouldUseDark)
 }
 
 const isIptvMode = computed(() => Boolean(playerStore.currentIptvChannel))
@@ -555,10 +565,11 @@ const displayChannelRows = computed(() => {
         live: playing,
         playing,
         active,
+        channel: ch,
         summary: active
           ? `当前：${currentProgram.value.title} · 剩余 ${currentProgram.value.remaining} 分钟`
           : `${ch.group_name || '直播频道'} · ${15 + (index % 5) * 5} 分钟`,
-        select: () => playerStore.playIptvChannel(ch),
+        select: () => playIptvChannelFromFullPlayer(ch),
       }
     })
   }
@@ -573,6 +584,7 @@ const displayChannelRows = computed(() => {
       live: playing,
       playing,
       active,
+      stationId: station.id,
       summary: active
         ? `当前：${station.subtitle || station.name} · 剩余 ${currentProgram.value.remaining} 分钟`
         : `${station.subtitle || '直播电台'} · ${15 + (index % 5) * 5} 分钟`,
@@ -580,6 +592,48 @@ const displayChannelRows = computed(() => {
     }
   })
 })
+
+function playIptvChannelFromFullPlayer(channel) {
+  if (!channel?.urls?.length) {
+    playerStore.setPlaybackError('频道没有可用播放源')
+    return
+  }
+
+  const videoEl = playerStore.iptvVideoEl || iptvVideoRef.value
+  if (videoEl) videoEl.play().catch(() => {})
+  _manualIptvStartPending += 1
+  playerStore.playIptvChannel(channel)
+  nextTick(() => {
+    _manualIptvStartPending = Math.max(0, _manualIptvStartPending - 1)
+    if (!iptvVideoRef.value || !playerStore.currentIptvChannel) return
+    resetRacedLosers()
+    const attemptId = ++_playAttemptId
+    playCurrentIptvUrl(attemptId).catch((e) => {
+      console.warn('[IPTV] 列表切台起播失败:', e?.message)
+    })
+  })
+}
+
+function handleChannelRowClick(item) {
+  if (import.meta.env.DEV) {
+    console.log('channel row clicked', item)
+    console.log(typeof item?.select)
+  }
+
+  if (typeof item?.select === 'function') {
+    item.select()
+    return
+  }
+
+  if (item?.channel) {
+    playIptvChannelFromFullPlayer(item.channel)
+    return
+  }
+
+  if (item?.stationId) {
+    playerStore.switchStation(item.stationId)
+  }
+}
 
 function sourceTargetUrl(entry) {
   if (!entry?.url) return ''
@@ -757,7 +811,9 @@ function isMpegTsUrl(url) {
 
 // source_type 优先，兜底回 URL 猜测
 function sourceType(entry) {
-  return entry?.source_type || (isHlsUrl(entry?.url || '') ? 'hls' : isMpegTsUrl(entry?.url || '') ? 'mpegts' : 'hls')
+  const url = entry?.url || ''
+  const inferred = isHlsUrl(url) ? 'hls' : isMpegTsUrl(url) ? 'mpegts' : 'hls'
+  return entry?.source_type && entry.source_type !== 'hls' ? entry.source_type : inferred
 }
 
 function canUseMpegTs() {
@@ -779,6 +835,7 @@ let _racedLosers = new Set()
 let _cleanupActiveRace = null
 let _cancelCurrentStartup = null
 let _suppressIptvUrlWatch = 0
+let _manualIptvStartPending = 0
 
 function isAttemptActive(attemptId) {
   return attemptId === _playAttemptId
@@ -2240,6 +2297,7 @@ watch(() => playerStore.currentIptvChannel, async (ch) => {
   if (ch) {
     sourceMenuOpen.value = false
     iptvSourceRuntimeStatus.value = {}
+    if (_manualIptvStartPending > 0) return
     await nextTick()
     if (iptvVideoRef.value) {
       resetRacedLosers()
@@ -2257,6 +2315,7 @@ watch(sourceMenuOpen, async (open) => {
 
 watch(isPlayerExpanded, (expanded) => {
   if (!expanded) closeSourceMenu()
+  nextTick(syncFullPlayerTheme)
 })
 
 watch(isPlaying, (playing) => {
@@ -2294,12 +2353,18 @@ watch(() => playerStore.currentIptvChannel, (ch) => {
 })
 
 onMounted(() => {
+  syncFullPlayerTheme()
+  themeObserver = new MutationObserver(syncFullPlayerTheme)
+  themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] })
+  themeObserver.observe(document.body, { attributes: true, attributeFilter: ['class'] })
   document.addEventListener('click', closeSourceMenu)
   window.addEventListener('resize', updateSourceMenuPosition)
   window.addEventListener('orientationchange', updateSourceMenuPosition)
 })
 
 onBeforeUnmount(() => {
+  themeObserver?.disconnect()
+  themeObserver = null
   document.removeEventListener('click', closeSourceMenu)
   window.removeEventListener('resize', updateSourceMenuPosition)
   window.removeEventListener('orientationchange', updateSourceMenuPosition)
@@ -2334,6 +2399,22 @@ onBeforeUnmount(() => {
 }
 
 .full-player {
+  --page-bg: #f8f8f7;
+  --surface-bg: #ffffff;
+  --surface-soft: rgba(255, 255, 255, 0.72);
+  --text-primary: #111827;
+  --text-secondary: rgba(17, 24, 39, 0.56);
+  --text-tertiary: rgba(17, 24, 39, 0.42);
+  --text-quaternary: rgba(17, 24, 39, 0.28);
+  --row-active-bg: rgba(15, 23, 42, 0.055);
+  --row-separator: rgba(10, 10, 10, 0.045);
+  --tag-bg: rgba(17, 24, 39, 0.08);
+  --tag-text: rgba(17, 24, 39, 0.46);
+  --logo-shadow: 0 6px 16px rgba(15, 23, 42, 0.08);
+  --control-surface: rgba(255, 255, 255, 0.72);
+  --control-shadow: 0 18px 42px rgba(0, 0, 0, 0.08), inset 0 0 0 1px rgba(255, 255, 255, 0.8);
+  --media-placeholder-bg: #0b0d12;
+  --progress-knob-bg: #fff;
   --accent: #35c87a;
   --gold: #c79a2b;
   --muted: #8d9299;
@@ -2385,9 +2466,34 @@ onBeforeUnmount(() => {
   --timeline-title-size: 18px;
   overflow: hidden;
   min-height: 100dvh;
+  background: var(--page-bg);
+  color: var(--text-primary);
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "PingFang SC", "Hiragino Sans", "Microsoft YaHei", sans-serif;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+}
+
+.full-player.theme-dark {
+  --page-bg: #111113;
+  --surface-bg: #18181b;
+  --surface-soft: rgba(39, 39, 42, 0.72);
+  --text-primary: rgba(250, 250, 250, 0.94);
+  --text-secondary: rgba(250, 250, 250, 0.6);
+  --text-tertiary: rgba(250, 250, 250, 0.42);
+  --text-quaternary: rgba(250, 250, 250, 0.28);
+  --row-active-bg: rgba(255, 255, 255, 0.055);
+  --row-separator: rgba(255, 255, 255, 0.07);
+  --tag-bg: rgba(255, 255, 255, 0.09);
+  --tag-text: rgba(250, 250, 250, 0.48);
+  --logo-shadow: 0 6px 16px rgba(0, 0, 0, 0.28);
+  --control-surface: rgba(39, 39, 42, 0.72);
+  --control-shadow: 0 18px 42px rgba(0, 0, 0, 0.22), inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+  --media-placeholder-bg: #050507;
+  --progress-knob-bg: #f8f8f7;
+  --gold: #d3aa43;
+  --muted: rgba(250, 250, 250, 0.46);
+  --line: rgba(255, 255, 255, 0.09);
+  --channel-subtitle-color: rgba(250, 250, 250, 0.44);
 }
 
 .full-player,
@@ -2405,6 +2511,7 @@ onBeforeUnmount(() => {
   height: var(--layout-height);
   margin: 0 auto;
   padding: var(--layout-padding);
+  background: var(--page-bg);
 }
 
 .player-main {
@@ -2422,7 +2529,7 @@ onBeforeUnmount(() => {
   height: var(--media-height);
   aspect-ratio: 16 / 8.6;
   border-radius: var(--media-radius);
-  background: #0b0d12;
+  background: var(--media-placeholder-bg);
   box-shadow: var(--media-shadow);
 }
 
@@ -2431,7 +2538,7 @@ onBeforeUnmount(() => {
   width: 100%;
   height: 100%;
   object-fit: contain;
-  background: #050505;
+  background: var(--media-placeholder-bg);
 }
 
 .radio-art-stage {
@@ -2451,8 +2558,8 @@ onBeforeUnmount(() => {
   aspect-ratio: 1;
   overflow: hidden;
   border-radius: 24px;
-  background: rgba(255, 255, 255, 0.72);
-  color: #111827;
+  background: var(--surface-soft);
+  color: var(--text-primary);
   font-size: 44px;
   font-weight: 700;
   box-shadow: 0 18px 40px rgba(15, 23, 42, 0.16);
@@ -2527,8 +2634,8 @@ onBeforeUnmount(() => {
   height: 36px;
   overflow: hidden;
   border-radius: 11px;
-  background: #e5e7eb;
-  color: #111;
+  background: var(--surface-bg);
+  color: var(--text-primary);
   font-weight: 600;
 }
 
@@ -2536,7 +2643,7 @@ onBeforeUnmount(() => {
   width: var(--eq-width);
   height: var(--eq-height);
   background: linear-gradient(90deg, currentColor 12%, transparent 12% 22%, currentColor 22% 34%, transparent 34% 45%, currentColor 45% 57%, transparent 57% 68%, currentColor 68% 80%, transparent 80% 90%, currentColor 90%);
-  color: #a7adb5;
+  color: var(--text-quaternary);
   mask: linear-gradient(to top, transparent 10%, #000 10%);
   opacity: var(--eq-opacity);
 }
@@ -2571,7 +2678,7 @@ onBeforeUnmount(() => {
 
 .now-panel > p {
   margin: 10px 0 0;
-  color: rgba(17, 24, 39, 0.42);
+  color: var(--text-tertiary);
   font-size: var(--subtitle-size);
   font-weight: 500;
   line-height: 1.2;
@@ -2601,7 +2708,7 @@ onBeforeUnmount(() => {
   height: 12px;
   border: 2px solid rgba(199, 154, 43, 0.55);
   border-radius: 999px;
-  background: #fff;
+  background: var(--progress-knob-bg);
   transform: translate(-50%, -50%);
   box-shadow: 0 0 0 1px rgba(199, 154, 43, 0.2);
 }
@@ -2612,7 +2719,7 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: space-between;
   margin-top: 14px;
-  color: #111827;
+  color: var(--text-primary);
   font-size: var(--meta-size);
   font-weight: 400;
 }
@@ -2620,7 +2727,7 @@ onBeforeUnmount(() => {
 .program-state {
   justify-content: center;
   gap: 7px;
-  color: rgba(17, 24, 39, 0.56);
+  color: var(--text-secondary);
   font-weight: 500;
 }
 
@@ -2628,7 +2735,7 @@ onBeforeUnmount(() => {
   width: 7px;
   height: 7px;
   border-radius: 999px;
-  background: rgba(107, 114, 128, 0.45);
+  background: var(--text-quaternary);
 }
 
 .state-dot.playing {
@@ -2640,7 +2747,7 @@ onBeforeUnmount(() => {
 }
 
 .state-dot.loading {
-  border: 1px solid rgba(17, 24, 39, 0.22);
+  border: 1px solid var(--text-quaternary);
   border-top-color: var(--gold);
   background: transparent;
   animation: spin 0.9s linear infinite;
@@ -2671,7 +2778,7 @@ onBeforeUnmount(() => {
   place-items: center;
   border: 0;
   background: transparent;
-  color: #090a0c;
+  color: var(--text-primary);
   cursor: pointer;
 }
 
@@ -2689,8 +2796,8 @@ onBeforeUnmount(() => {
   width: var(--control-main-size);
   height: var(--control-main-size);
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.72);
-  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.08), inset 0 0 0 1px rgba(255, 255, 255, 0.8);
+  background: var(--control-surface);
+  box-shadow: var(--control-shadow);
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
 }
@@ -2713,7 +2820,7 @@ onBeforeUnmount(() => {
   position: relative;
   width: var(--utility-size);
   height: var(--utility-size);
-  color: rgba(17, 24, 39, 0.42);
+  color: var(--tag-text);
 }
 
 .utility-btn svg {
@@ -2734,7 +2841,7 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 10px;
-  color: rgba(17, 24, 39, 0.42);
+  color: var(--text-tertiary);
 }
 
 .volume-control svg {
@@ -2744,7 +2851,7 @@ onBeforeUnmount(() => {
 
 .volume-control input {
   width: 70px;
-  accent-color: #111827;
+  accent-color: var(--text-primary);
 }
 
 .side-panel {
@@ -2769,7 +2876,7 @@ onBeforeUnmount(() => {
   min-height: var(--tab-min-height);
   border: 0;
   background: transparent;
-  color: rgba(17, 24, 39, 0.42);
+  color: var(--text-tertiary);
   font-size: var(--tab-size);
   font-weight: var(--tab-weight);
   letter-spacing: 0;
@@ -2778,7 +2885,7 @@ onBeforeUnmount(() => {
 }
 
 .panel-tabs button.active {
-  color: #111827;
+  color: var(--text-primary);
   font-weight: var(--tab-active-weight);
 }
 
@@ -2821,7 +2928,7 @@ onBeforeUnmount(() => {
 }
 
 .channel-row.active {
-  background: rgba(15, 23, 42, 0.055);
+  background: var(--row-active-bg);
 }
 
 .channel-logo {
@@ -2831,11 +2938,11 @@ onBeforeUnmount(() => {
   height: var(--channel-logo-size);
   overflow: hidden;
   border-radius: 8px;
-  background: #fff;
-  color: #111827;
+  background: var(--surface-bg);
+  color: var(--text-primary);
   font-size: 14px;
   font-weight: 600;
-  box-shadow: 0 6px 16px rgba(15, 23, 42, 0.08);
+  box-shadow: var(--logo-shadow);
 }
 
 .channel-copy {
@@ -2848,7 +2955,7 @@ onBeforeUnmount(() => {
   min-width: 0;
   align-items: center;
   gap: 8px;
-  color: #111827;
+  color: var(--text-primary);
   font-size: var(--channel-title-size);
   font-weight: var(--channel-title-weight);
   line-height: 1.25;
@@ -2875,8 +2982,8 @@ onBeforeUnmount(() => {
   min-height: 20px;
   padding: 2px 8px;
   border-radius: 6px;
-  background: rgba(17, 24, 39, 0.08);
-  color: #8a8f97;
+  background: var(--tag-bg);
+  color: var(--text-tertiary);
   font-size: 12px;
   font-weight: 500;
   white-space: nowrap;
@@ -2905,7 +3012,7 @@ onBeforeUnmount(() => {
   display: inline-flex;
   align-items: center;
   gap: 10px;
-  color: #111827;
+  color: var(--text-primary);
   font-size: 24px;
   font-weight: 800;
   letter-spacing: -0.02em;
@@ -2928,7 +3035,7 @@ onBeforeUnmount(() => {
   bottom: 24px;
   left: var(--timeline-line-left);
   width: 2px;
-  background: rgba(17, 24, 39, 0.11);
+  background: var(--line);
 }
 
 .timeline-row {
@@ -2937,11 +3044,11 @@ onBeforeUnmount(() => {
   grid-template-columns: var(--timeline-grid);
   align-items: center;
   min-height: var(--timeline-row-height);
-  color: #111827;
+  color: var(--text-primary);
 }
 
 .timeline-time {
-  color: rgba(17, 24, 39, 0.42);
+  color: var(--text-tertiary);
   font-size: var(--timeline-time-size);
   font-weight: 500;
   font-variant-numeric: tabular-nums;
@@ -2952,9 +3059,9 @@ onBeforeUnmount(() => {
   z-index: 1;
   width: 15px;
   height: 15px;
-  border: 2px solid #c6cbd1;
+  border: 2px solid var(--text-quaternary);
   border-radius: 999px;
-  background: #f7f7f6;
+  background: var(--page-bg);
   justify-self: center;
 }
 
@@ -2987,7 +3094,7 @@ onBeforeUnmount(() => {
   .full-player {
     --layout-width: 100%;
     --layout-height: auto;
-    --layout-padding: 0 0 calc(env(safe-area-inset-bottom) + 128px);
+    --layout-padding: 0 0 calc(env(safe-area-inset-bottom) + 96px);
     --media-width: 100vw;
     --media-height: clamp(220px, 56vw, 245px);
     --media-radius: 0;
@@ -3030,7 +3137,7 @@ onBeforeUnmount(() => {
     --timeline-time-size: 13px;
     --timeline-title-size: 15px;
     overflow-y: auto;
-    background: #f8f8f7;
+    background: var(--page-bg);
   }
 
   .player-layout {
@@ -3038,6 +3145,7 @@ onBeforeUnmount(() => {
     width: var(--layout-width);
     min-height: 100dvh;
     padding: var(--layout-padding);
+    background: var(--page-bg);
   }
 
   .media-card {
@@ -3111,7 +3219,7 @@ onBeforeUnmount(() => {
     margin-top: 6px;
     font-size: var(--subtitle-size);
     font-weight: 400;
-    color: rgba(17, 24, 39, 0.44);
+    color: var(--text-tertiary);
   }
 
   .program-progress {
@@ -3131,7 +3239,7 @@ onBeforeUnmount(() => {
 
   .program-state {
     margin-top: 8px;
-    color: rgba(10, 10, 10, 0.46);
+    color: var(--text-secondary);
     font-size: var(--meta-size);
     font-weight: 400;
   }
@@ -3234,7 +3342,7 @@ onBeforeUnmount(() => {
     min-height: var(--channel-min-height);
     margin-bottom: var(--channel-margin);
     padding: var(--channel-padding);
-    border-bottom: 1px solid rgba(10, 10, 10, 0.045);
+    border-bottom: 1px solid var(--row-separator);
     border-radius: 0;
   }
 
@@ -3251,7 +3359,7 @@ onBeforeUnmount(() => {
     height: var(--channel-logo-size);
     border-radius: 13px;
     font-weight: 500;
-    box-shadow: 0 3px 8px rgba(15, 23, 42, 0.035);
+    box-shadow: var(--logo-shadow);
   }
 
   .channel-title {
