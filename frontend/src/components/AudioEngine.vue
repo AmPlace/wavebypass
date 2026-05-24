@@ -4,11 +4,10 @@
 </template>
 
 <script setup>
-const API_BASE = import.meta.env.VITE_API_BASE_URL || ''
-
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { usePlayerStore } from '../stores/player'
+import { API_BASE } from '../apiBase'
 
 const playerStore = usePlayerStore()
 const { currentStation, isPlaying, volume } = storeToRefs(playerStore)

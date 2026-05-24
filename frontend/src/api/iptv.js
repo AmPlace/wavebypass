@@ -1,4 +1,4 @@
-const API_BASE = import.meta.env.VITE_API_BASE_URL || ''
+import { API_BASE } from '../apiBase'
 
 async function request(url, options = {}) {
   const ctrl = new AbortController()

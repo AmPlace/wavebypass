@@ -1,4 +1,5 @@
 import { defineStore } from 'pinia'
+import { API_BASE } from '../apiBase'
 
 export const usePlayerStore = defineStore('player', {
   state: () => ({
@@ -113,7 +114,6 @@ export const usePlayerStore = defineStore('player', {
       })
       // 构建回退队列：直连优先，代理在后
       const list = []
-      const API_BASE = import.meta.env?.VITE_API_BASE_URL || window.location.origin
       const sourceUrl = (u) => String(u?.url || '').trim()
       const parseYoutubeVideoId = (url) => {
         try {

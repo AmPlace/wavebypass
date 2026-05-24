@@ -1,3 +1,5 @@
+import { API_BASE } from '../apiBase'
+
 export const YUNTING_PROVINCES = [
   '340000', // 安徽
   '110000', // 北京
@@ -90,7 +92,7 @@ export async function fetchYuntingStations(provinceCode) {
   try {
     const ctrl = new AbortController()
     const timer = setTimeout(() => ctrl.abort(), 10_000)
-    const res = await fetch(`/api/yunting/stations/${provinceCode}`, { signal: ctrl.signal })
+    const res = await fetch(`${API_BASE}/api/yunting/stations/${provinceCode}`, { signal: ctrl.signal })
     clearTimeout(timer)
     if (res.ok) data = await res.json()
   } catch {}
@@ -106,7 +108,7 @@ export async function fetchAllYuntingStations() {
   try {
     const ctrl = new AbortController()
     const timer = setTimeout(() => ctrl.abort(), 15_000)
-    const res = await fetch('/api/yunting/all', { signal: ctrl.signal })
+    const res = await fetch(`${API_BASE}/api/yunting/all`, { signal: ctrl.signal })
     clearTimeout(timer)
     if (!res.ok) return []
     const data = await res.json()

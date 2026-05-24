@@ -1,3 +1,5 @@
+import { API_BASE } from '../apiBase'
+
 const NAME_TYPE_KEYWORDS = [
   { keywords: ['音樂', 'music', '金曲', '古典', 'hit'], type: 'music' },
   { keywords: ['新聞', 'news', '資訊', '交通'], type: 'news' },
@@ -17,7 +19,7 @@ export async function fetchMyradioStations() {
   try {
     const ctrl = new AbortController()
     const timer = setTimeout(() => ctrl.abort(), 15_000)
-    const res = await fetch('/api/myradio/all', { signal: ctrl.signal })
+    const res = await fetch(`${API_BASE}/api/myradio/all`, { signal: ctrl.signal })
     clearTimeout(timer)
     if (!res.ok) return []
 

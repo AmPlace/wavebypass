@@ -123,7 +123,7 @@
             删除
           </button>
           <a
-            :href="`/api/iptv/export.m3u?tested_only=false`"
+            :href="`${API_BASE}/api/iptv/export.m3u?tested_only=false`"
             target="_blank"
             class="rounded-lg px-2.5 py-1 text-xs text-neutral-400 transition-colors hover:bg-neutral-100 dark:hover:bg-neutral-700"
           >
@@ -145,8 +145,7 @@ import {
   fetchSubscriptions, addSubscription, deleteSubscription, refreshSubscription,
   testAllGlobal, fetchGlobalTestStatus, getExportUrl,
 } from '../api/iptv'
-
-const API_BASE = import.meta.env.VITE_API_BASE_URL || ''
+import { API_BASE } from '../apiBase'
 
 const subscriptions = ref([])
 const loading = ref(false)

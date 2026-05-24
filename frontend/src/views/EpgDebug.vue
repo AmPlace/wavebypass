@@ -87,6 +87,7 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
+import { API_BASE } from '../apiBase'
 
 const FILTER_ALL = 'all'
 
@@ -106,8 +107,6 @@ const filtered = computed(() => {
 
 onMounted(async () => {
   try {
-    const API_BASE = import.meta.env.VITE_API_BASE_URL || ''
-
     // 拉匹配状态
     const [statusRes, channelsRes] = await Promise.all([
       fetch(`${API_BASE}/api/iptv/epg/match-status`),

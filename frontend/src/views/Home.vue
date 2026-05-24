@@ -152,6 +152,7 @@ import { fetchAllYuntingStations } from '../api/yunting'
 import { fetchMyradioStations } from '../api/myradio'
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch, watchEffect } from 'vue'
 import { useScroll, useThrottleFn } from '@vueuse/core'
+import { API_BASE } from '../apiBase'
 
 const playerStore = usePlayerStore()
 const { currentStation, isPlaying, isLoading, stationList } = storeToRefs(playerStore)
@@ -383,8 +384,8 @@ onMounted(() => {
   ;(async () => {
     try {
       const [cfgRes, stRes] = await Promise.all([
-        fetch('/api/config'),
-        fetch('/api/stations'),
+        fetch(`${API_BASE}/api/config`),
+        fetch(`${API_BASE}/api/stations`),
       ])
       if (cfgRes.ok) geoConfig.value = await cfgRes.json()
       if (stRes.ok) {
@@ -413,7 +414,7 @@ onMounted(() => {
 
   epgTimer = setInterval(async () => {
     try {
-      const res = await fetch('/api/yunting/epg')
+      const res = await fetch(`${API_BASE}/api/yunting/epg`)
       if (res.ok) syncEpg(await res.json())
     } catch {}
   }, 180_000)

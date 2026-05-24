@@ -1,3 +1,5 @@
+import { API_BASE } from '../apiBase'
+
 const RB_DIRECT_BASE = 'https://all.api.radio-browser.info/json'
 
 export const RB_COUNTRIES = [
@@ -72,7 +74,7 @@ export async function fetchStationsByCountry(countryCode) {
   try {
     const ctrl = new AbortController()
     const timer = setTimeout(() => ctrl.abort(), 10_000)
-    const res = await fetch(`/api/radio-browser/stations/${countryCode}`, { signal: ctrl.signal })
+    const res = await fetch(`${API_BASE}/api/radio-browser/stations/${countryCode}`, { signal: ctrl.signal })
     clearTimeout(timer)
     if (res.ok) data = await res.json()
   } catch {}
