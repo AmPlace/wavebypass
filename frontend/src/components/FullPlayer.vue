@@ -2,7 +2,7 @@
   <Teleport to="body">
     <Transition name="ios-sheet">
       <div
-        v-if="isPlayerExpanded"
+        v-show="isPlayerExpanded"
         class="full-player fixed inset-0 z-50 overflow-y-auto"
         :class="{ 'theme-dark': isFullPlayerDark, 'safari-chrome-refresh': isSafariChromeRefreshing }"
       >

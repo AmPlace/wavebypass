@@ -187,7 +187,6 @@ function playChannel(ch) {
   // 仅调 play() 满足 iOS 手势，其余由 store.playIptvChannel 接管
   if (videoEl) videoEl.play().catch(() => {})
   playerStore.playIptvChannel(ch)
-  playerStore.expandPlayer()
 }
 
 function pillClass(active) {
