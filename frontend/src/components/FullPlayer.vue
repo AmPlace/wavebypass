@@ -3,7 +3,7 @@
       <div
         v-show="isPlayerExpanded"
         class="full-player fixed inset-0 z-50 overflow-y-auto"
-        :class="{ 'theme-dark': isFullPlayerDark }"
+        :class="{ 'theme-dark': isFullPlayerDark, 'safari-chrome-refresh': isSafariChromeRefreshing }"
       >
         <div class="player-layout">
           <main class="player-main">
@@ -379,6 +379,7 @@ const iptvSourceRuntimeStatus = ref({})
 const activePlayerPanel = ref('channels')
 const DEFAULT_LOGO_URL = '/logos/default.png'
 const isFullPlayerDark = ref(document.documentElement.classList.contains('dark'))
+const isSafariChromeRefreshing = ref(false)
 let themeObserver = null
 
 const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
@@ -452,7 +453,6 @@ function syncFullPlayerTheme() {
   const shouldUseDark = document.documentElement.classList.contains('dark') ||
     document.body.classList.contains('dark')
   isFullPlayerDark.value = shouldUseDark
-  window.__wavebypassSyncThemeChrome?.(shouldUseDark)
 }
 
 function setFullPlayerChromeOpen(open) {
@@ -474,6 +474,18 @@ function handleThemeChromeSync(event) {
   } else {
     syncFullPlayerTheme()
   }
+  refreshSafariChrome()
+}
+
+function refreshSafariChrome() {
+  if (!isPlayerExpanded.value) return
+  if (!isIOS) return
+  isSafariChromeRefreshing.value = true
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      isSafariChromeRefreshing.value = false
+    })
+  })
 }
 
 const isIptvMode = computed(() => Boolean(playerStore.currentIptvChannel))
@@ -2512,7 +2524,11 @@ onBeforeUnmount(() => {
 :global(html.full-player-open),
 :global(body.full-player-open),
 :global(#app.full-player-open) {
-  background: var(--wavebypass-page-bg, #f8f8f7) !important;
+  overflow: hidden !important;
+}
+
+.full-player.safari-chrome-refresh {
+  display: none !important;
 }
 
 .full-player.theme-dark {

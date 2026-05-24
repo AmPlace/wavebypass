@@ -154,50 +154,55 @@ watch(() => route.path, (path) => {
   playerStore.setActiveMode(path.startsWith('/iptv') ? 'iptv' : 'radio')
 }, { immediate: true })
 
-function upsertMeta(name) {
-  const metas = Array.from(document.querySelectorAll(`meta[name="${name}"]`))
-  let meta = metas[0]
-  metas.slice(1).forEach((node) => node.remove())
-  if (!meta) {
-    meta = document.createElement('meta')
-    meta.name = name
-    document.head.appendChild(meta)
-  }
-  meta.removeAttribute('media')
+function forceMetaContent(name, content) {
+  const old = document.querySelector(`meta[name="${name}"]`)
+  if (old) old.remove()
+  const meta = document.createElement('meta')
+  meta.name = name
+  meta.content = content
+  document.head.appendChild(meta)
   return meta
 }
 
-function forceMetaContent(name, content) {
-  const meta = upsertMeta(name)
-  meta.setAttribute('content', content)
-  meta.removeAttribute('media')
-
-  // iOS Safari 有时不会立刻重绘地址栏/状态栏，替换节点比单纯改 content 更稳定。
-  const clone = meta.cloneNode(true)
-  meta.replaceWith(clone)
-  return clone
-}
-
 // 动态修改 Safari / PWA 浏览器 chrome 颜色
-function updateThemeColor(isDarkMode = document.documentElement.classList.contains('dark')) {
+function updateThemeColor(isDarkMode = document.documentElement.classList.contains('dark'), source = '') {
   const themeColor = isDarkMode ? THEME_CHROME_COLORS.dark : THEME_CHROME_COLORS.light
   const statusBarStyle = isDarkMode ? THEME_STATUS_BAR.dark : THEME_STATUS_BAR.light
   const colorScheme = isDarkMode ? 'dark' : 'light'
-  
+
+  console.log('[theme-sync]', {
+    source,
+    inputIsDark: isDarkMode,
+    htmlDark: document.documentElement.classList.contains('dark'),
+    bodyDark: document.body.classList.contains('dark'),
+    prefersDark: window.matchMedia('(prefers-color-scheme: dark)').matches,
+    themeColor,
+    colorScheme,
+    metaBefore: [...document.querySelectorAll('meta[name="theme-color"]')].map(m => m.outerHTML),
+  })
+
   forceMetaContent('theme-color', themeColor)
   forceMetaContent('apple-mobile-web-app-status-bar-style', statusBarStyle)
   forceMetaContent('color-scheme', colorScheme)
 
-  document.documentElement.style.backgroundColor = themeColor
-  document.documentElement.style.colorScheme = colorScheme
-  document.documentElement.style.setProperty('--wavebypass-page-bg', themeColor)
+  console.log('[theme-sync-after]', {
+    themeMetas: [...document.querySelectorAll('meta[name="theme-color"]')].map(m => m.outerHTML),
+    colorSchemeMetas: [...document.querySelectorAll('meta[name="color-scheme"]')].map(m => m.outerHTML),
+    htmlBg: getComputedStyle(document.documentElement).backgroundColor,
+    bodyBg: getComputedStyle(document.body).backgroundColor,
+    appBg: getComputedStyle(document.getElementById('app')).backgroundColor,
+  })
+
+  document.documentElement.style.setProperty('background-color', themeColor, 'important')
+  document.documentElement.style.setProperty('color-scheme', colorScheme, 'important')
+  document.documentElement.style.setProperty('--wavebypass-page-bg', themeColor, 'important')
   if (document.body) {
-    document.body.style.backgroundColor = themeColor
-    document.body.style.colorScheme = colorScheme
+    document.body.style.setProperty('background-color', themeColor, 'important')
+    document.body.style.setProperty('color-scheme', colorScheme, 'important')
   }
   const appEl = document.getElementById('app')
-  appEl?.style.setProperty('background-color', themeColor)
-  appEl?.style.setProperty('color-scheme', colorScheme)
+  appEl?.style.setProperty('background-color', themeColor, 'important')
+  appEl?.style.setProperty('color-scheme', colorScheme, 'important')
 
   window.dispatchEvent(new CustomEvent('wavebypass-theme-chrome-sync', {
     detail: { isDarkMode, themeColor },
@@ -215,7 +220,7 @@ function applyTheme() {
   isDark.value = shouldUseDark
   document.documentElement.classList.toggle('dark', shouldUseDark)
   
-  updateThemeColor(shouldUseDark)
+  updateThemeColor(shouldUseDark, 'applyTheme:' + (savedTheme ? 'manual' : 'system'))
 }
 
 applyTheme()
