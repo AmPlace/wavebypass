@@ -153,6 +153,7 @@ import { fetchMyradioStations } from '../api/myradio'
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch, watchEffect } from 'vue'
 import { useScroll, useThrottleFn } from '@vueuse/core'
 import { API_BASE } from '../apiBase'
+import { publicAsset } from '../publicAsset'
 
 const playerStore = usePlayerStore()
 const { currentStation, isPlaying, isLoading, stationList } = storeToRefs(playerStore)
@@ -162,7 +163,7 @@ const ytLoading = ref(false)
 
 const mrStations = ref([])
 const mrLoading = ref(false)
-const DEFAULT_LOGO_URL = '/logos/default.png'
+const DEFAULT_LOGO_URL = publicAsset('/logos/default.png')
 
 function useDefaultLogo(event) {
   const img = event?.target

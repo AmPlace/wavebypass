@@ -8,6 +8,7 @@ import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { usePlayerStore } from '../stores/player'
 import { API_BASE } from '../apiBase'
+import { publicAsset } from '../publicAsset'
 
 const playerStore = usePlayerStore()
 const { currentStation, isPlaying, volume } = storeToRefs(playerStore)
@@ -30,7 +31,7 @@ function hasDirectUrl(stationId) {
 function updateSystemMediaSession(stationId) {
   if ('mediaSession' in navigator) {
     const meta = playerStore.stationMap[stationId] || {}
-    const finalLogo = meta.logoUrl || '/logos/default.png'
+    const finalLogo = publicAsset(meta.logoUrl || '/logos/default.png')
 
     try {
       navigator.mediaSession.metadata = new MediaMetadata({

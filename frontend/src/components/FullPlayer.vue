@@ -367,6 +367,7 @@ import { usePlayerStore } from '../stores/player'
 import { fetchAggregatedChannels } from '../api/iptv'
 import { useEpg } from '../composables/useEpg'
 import { API_BASE } from '../apiBase'
+import { publicAsset } from '../publicAsset'
 
 const playerStore = usePlayerStore()
 const { isPlayerExpanded, currentStation, isPlaying, isLoading, volume, stationMap, stationList } = storeToRefs(playerStore)
@@ -387,7 +388,7 @@ const sourceMenuStyle = ref({
 const sourceMenuListMaxHeight = ref('260px')
 const iptvSourceRuntimeStatus = ref({})
 const activePlayerPanel = ref('channels')
-const DEFAULT_LOGO_URL = '/logos/default.png'
+const DEFAULT_LOGO_URL = publicAsset('/logos/default.png')
 const isFullPlayerDark = ref(document.documentElement.classList.contains('dark'))
 const isSafariChromeRefreshing = ref(false)
 let themeObserver = null

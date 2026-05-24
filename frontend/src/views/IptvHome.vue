@@ -117,6 +117,7 @@ import { useScroll, useThrottleFn } from '@vueuse/core'
 import { usePlayerStore } from '../stores/player'
 import { fetchAggregatedChannels } from '../api/iptv'
 import { useEpg } from '../composables/useEpg'
+import { publicAsset } from '../publicAsset'
 
 const playerStore = usePlayerStore()
 const { currentStation } = storeToRefs(playerStore)
@@ -131,7 +132,7 @@ const allGroups = ref([])
 const selectedGroup = ref('')
 const loading = ref(false)
 const epgMap = ref({})
-const DEFAULT_LOGO_URL = '/logos/default.png'
+const DEFAULT_LOGO_URL = publicAsset('/logos/default.png')
 
 function useDefaultLogo(event) {
   const img = event?.target
