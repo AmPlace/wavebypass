@@ -145,38 +145,63 @@ const THEME_CHROME_COLORS = {
   light: '#f8f8f7',
   dark: '#111113',
 }
+const THEME_STATUS_BAR = {
+  light: 'default',
+  dark: 'default',
+}
 
 watch(() => route.path, (path) => {
   playerStore.setActiveMode(path.startsWith('/iptv') ? 'iptv' : 'radio')
 }, { immediate: true })
 
-// 动态修改Safari iOS状态栏颜色
-function updateThemeColor(isDarkMode) {
-  let metaThemeColor = document.querySelector('meta[name="theme-color"]')
-  let metaStatusBar = document.querySelector('meta[name="apple-mobile-web-app-status-bar-style"]')
-  const themeColor = isDarkMode ? THEME_CHROME_COLORS.dark : THEME_CHROME_COLORS.light
-  
-  if (!metaThemeColor) {
-    metaThemeColor = document.createElement('meta')
-    metaThemeColor.name = 'theme-color'
-    document.head.appendChild(metaThemeColor)
+function upsertMeta(name) {
+  const metas = Array.from(document.querySelectorAll(`meta[name="${name}"]`))
+  let meta = metas[0]
+  metas.slice(1).forEach((node) => node.remove())
+  if (!meta) {
+    meta = document.createElement('meta')
+    meta.name = name
+    document.head.appendChild(meta)
   }
+  meta.removeAttribute('media')
+  return meta
+}
 
-  if (!metaStatusBar) {
-    metaStatusBar = document.createElement('meta')
-    metaStatusBar.name = 'apple-mobile-web-app-status-bar-style'
-    document.head.appendChild(metaStatusBar)
-  }
+function forceMetaContent(name, content) {
+  const meta = upsertMeta(name)
+  meta.setAttribute('content', content)
+  meta.removeAttribute('media')
+
+  // iOS Safari 有时不会立刻重绘地址栏/状态栏，替换节点比单纯改 content 更稳定。
+  const clone = meta.cloneNode(true)
+  meta.replaceWith(clone)
+  return clone
+}
+
+// 动态修改 Safari / PWA 浏览器 chrome 颜色
+function updateThemeColor(isDarkMode = document.documentElement.classList.contains('dark')) {
+  const themeColor = isDarkMode ? THEME_CHROME_COLORS.dark : THEME_CHROME_COLORS.light
+  const statusBarStyle = isDarkMode ? THEME_STATUS_BAR.dark : THEME_STATUS_BAR.light
+  const colorScheme = isDarkMode ? 'dark' : 'light'
   
-  metaThemeColor.setAttribute('content', themeColor)
-  metaStatusBar.content = isDarkMode ? 'black-translucent' : 'default'
+  forceMetaContent('theme-color', themeColor)
+  forceMetaContent('apple-mobile-web-app-status-bar-style', statusBarStyle)
+  forceMetaContent('color-scheme', colorScheme)
 
   document.documentElement.style.backgroundColor = themeColor
-  document.documentElement.style.colorScheme = isDarkMode ? 'dark' : 'light'
+  document.documentElement.style.colorScheme = colorScheme
+  document.documentElement.style.setProperty('--wavebypass-page-bg', themeColor)
   if (document.body) {
     document.body.style.backgroundColor = themeColor
+    document.body.style.colorScheme = colorScheme
   }
-  document.getElementById('app')?.style.setProperty('background-color', themeColor)
+  const appEl = document.getElementById('app')
+  appEl?.style.setProperty('background-color', themeColor)
+  appEl?.style.setProperty('color-scheme', colorScheme)
+
+  window.dispatchEvent(new CustomEvent('wavebypass-theme-chrome-sync', {
+    detail: { isDarkMode, themeColor },
+  }))
 }
 
 window.__wavebypassSyncThemeChrome = updateThemeColor

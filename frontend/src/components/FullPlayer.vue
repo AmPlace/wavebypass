@@ -1,6 +1,5 @@
 <template>
   <Teleport to="body">
-    <Transition name="slide-up">
       <div
         v-show="isPlayerExpanded"
         class="full-player fixed inset-0 z-50 overflow-y-auto"
@@ -300,7 +299,6 @@
           </aside>
         </div>
       </div>
-    </Transition>
   </Teleport>
 
   <Teleport to="body">
@@ -455,6 +453,27 @@ function syncFullPlayerTheme() {
     document.body.classList.contains('dark')
   isFullPlayerDark.value = shouldUseDark
   window.__wavebypassSyncThemeChrome?.(shouldUseDark)
+}
+
+function setFullPlayerChromeOpen(open) {
+  const appEl = document.getElementById('app')
+  document.documentElement.classList.toggle('full-player-open', open)
+  document.body.classList.toggle('full-player-open', open)
+  appEl?.classList.toggle('full-player-open', open)
+
+  if (open) {
+    syncFullPlayerTheme()
+  } else {
+    window.__wavebypassSyncThemeChrome?.()
+  }
+}
+
+function handleThemeChromeSync(event) {
+  if (typeof event?.detail?.isDarkMode === 'boolean') {
+    isFullPlayerDark.value = event.detail.isDarkMode
+  } else {
+    syncFullPlayerTheme()
+  }
 }
 
 const isIptvMode = computed(() => Boolean(playerStore.currentIptvChannel))
@@ -2315,7 +2334,7 @@ watch(sourceMenuOpen, async (open) => {
 
 watch(isPlayerExpanded, (expanded) => {
   if (!expanded) closeSourceMenu()
-  nextTick(syncFullPlayerTheme)
+  nextTick(() => setFullPlayerChromeOpen(expanded))
 })
 
 watch(isPlaying, (playing) => {
@@ -2354,17 +2373,21 @@ watch(() => playerStore.currentIptvChannel, (ch) => {
 
 onMounted(() => {
   syncFullPlayerTheme()
+  setFullPlayerChromeOpen(isPlayerExpanded.value)
   themeObserver = new MutationObserver(syncFullPlayerTheme)
   themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] })
   themeObserver.observe(document.body, { attributes: true, attributeFilter: ['class'] })
+  window.addEventListener('wavebypass-theme-chrome-sync', handleThemeChromeSync)
   document.addEventListener('click', closeSourceMenu)
   window.addEventListener('resize', updateSourceMenuPosition)
   window.addEventListener('orientationchange', updateSourceMenuPosition)
 })
 
 onBeforeUnmount(() => {
+  setFullPlayerChromeOpen(false)
   themeObserver?.disconnect()
   themeObserver = null
+  window.removeEventListener('wavebypass-theme-chrome-sync', handleThemeChromeSync)
   document.removeEventListener('click', closeSourceMenu)
   window.removeEventListener('resize', updateSourceMenuPosition)
   window.removeEventListener('orientationchange', updateSourceMenuPosition)
@@ -2466,11 +2489,30 @@ onBeforeUnmount(() => {
   --timeline-title-size: 18px;
   overflow: hidden;
   min-height: 100dvh;
+  isolation: isolate;
   background: var(--page-bg);
   color: var(--text-primary);
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "PingFang SC", "Hiragino Sans", "Microsoft YaHei", sans-serif;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+}
+
+.full-player::after {
+  content: "";
+  position: fixed;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 0;
+  height: calc(env(safe-area-inset-bottom) + 120px);
+  background: var(--page-bg);
+  pointer-events: none;
+}
+
+:global(html.full-player-open),
+:global(body.full-player-open),
+:global(#app.full-player-open) {
+  background: var(--wavebypass-page-bg, #f8f8f7) !important;
 }
 
 .full-player.theme-dark {
@@ -2504,6 +2546,8 @@ onBeforeUnmount(() => {
 }
 
 .player-layout {
+  position: relative;
+  z-index: 1;
   display: grid;
   grid-template-columns: minmax(0, 1.72fr) minmax(340px, 0.9fr);
   gap: var(--layout-gap);
