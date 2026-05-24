@@ -1,0 +1,43 @@
+{
+  "name": "waveflow-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "out/main/index.js",
+  "scripts": {
+    "build:frontend": "cd frontend && npm install && npm run build -- --mode desktop",
+    "build:electron": "electron-vite build",
+    "electron:start": "electron .",
+    "electron:build:win": "npm run desktop:win",
+    "desktop:win": "powershell -ExecutionPolicy Bypass -File scripts/build-desktop-win.ps1"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0",
+    "electron-vite": "^3.0.0"
+  },
+  "build": {
+    "appId": "com.waveflow.desktop",
+    "productName": "WaveFlow",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "out/**/*",
+      "frontend/dist/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "backend_dist/waveflow-backend.exe",
+        "to": "backend/waveflow-backend.exe"
+      }
+    ],
+    "win": {
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}
