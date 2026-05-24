@@ -1,7 +1,8 @@
 <template>
   <Teleport to="body">
+    <Transition name="ios-sheet">
       <div
-        v-show="isPlayerExpanded"
+        v-if="isPlayerExpanded"
         class="full-player fixed inset-0 z-50 overflow-y-auto"
         :class="{ 'theme-dark': isFullPlayerDark, 'safari-chrome-refresh': isSafariChromeRefreshing }"
       >
@@ -299,6 +300,7 @@
           </aside>
         </div>
       </div>
+    </Transition>
   </Teleport>
 
   <Teleport to="body">
@@ -636,7 +638,9 @@ function playIptvChannelFromFullPlayer(channel) {
   playerStore.playIptvChannel(channel)
   nextTick(() => {
     _manualIptvStartPending = Math.max(0, _manualIptvStartPending - 1)
-    if (!iptvVideoRef.value || !playerStore.currentIptvChannel) return
+    if (!iptvVideoRef.value || !playerStore.currentIptvChannel) {
+      return
+    }
     resetRacedLosers()
     const attemptId = ++_playAttemptId
     playCurrentIptvUrl(attemptId).catch((e) => {
@@ -2412,15 +2416,23 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-.slide-up-enter-active,
-.slide-up-leave-active {
-  transition: transform 0.3s cubic-bezier(0.32, 0.72, 0, 1);
+.ios-sheet-enter-active {
+  transition: transform 520ms cubic-bezier(0.22, 1, 0.36, 1), opacity 260ms ease;
+  will-change: transform, opacity;
 }
-.slide-up-enter-from {
-  transform: translateY(100%);
+.ios-sheet-leave-active {
+  transition: transform 420ms cubic-bezier(0.32, 0.72, 0, 1), opacity 200ms ease;
+  will-change: transform, opacity;
 }
-.slide-up-leave-to {
-  transform: translateY(100%);
+.ios-sheet-enter-from,
+.ios-sheet-leave-to {
+  transform: translate3d(0, 18px, 0) scale(0.985);
+  opacity: 0;
+}
+.ios-sheet-enter-to,
+.ios-sheet-leave-from {
+  transform: translate3d(0, 0, 0) scale(1);
+  opacity: 1;
 }
 
 .fade-enter-active,
