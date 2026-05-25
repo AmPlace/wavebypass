@@ -1,5 +1,6 @@
 import { app, BrowserWindow } from 'electron'
 import { spawn } from 'node:child_process'
+import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import http from 'node:http'
@@ -8,10 +9,15 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 
 let backendProcess = null
+let backendDebugPidPath = null
 
 const BACKEND_HOST = '127.0.0.1'
 const BACKEND_PORT = 18765
 const API_BASE = `http://${BACKEND_HOST}:${BACKEND_PORT}`
+// 调试开关：设 WAVEFLOW_DESKTOP_DEBUG=1，或启动 app 时传 --waveflow-debug。
+// 打开后前端允许 F12 Console，后端会在可见终端窗口里启动。
+const DESKTOP_DEBUG =
+  process.env.WAVEFLOW_DESKTOP_DEBUG === '1' || process.argv.includes('--waveflow-debug')
 
 function getBackendExecutableName() {
   return process.platform === 'win32' ? 'waveflow-backend.exe' : 'waveflow-backend'
@@ -35,28 +41,95 @@ function getFrontendIndexPath() {
   return path.join(process.cwd(), 'frontend', 'dist', 'index.html')
 }
 
+function getBackendArgs() {
+  return [
+    '--host',
+    BACKEND_HOST,
+    '--port',
+    String(BACKEND_PORT),
+    '--data-dir',
+    app.getPath('userData'),
+  ]
+}
+
+function quoteShellArg(value) {
+  return `'${String(value).replaceAll("'", "'\\''")}'`
+}
+
+function startBackendInDebugTerminal(backendPath, backendArgs) {
+  if (process.platform === 'win32') {
+    const command = [backendPath, ...backendArgs]
+      .map((arg) => `"${String(arg).replaceAll('"', '\\"')}"`)
+      .join(' ')
+
+    return spawn('cmd.exe', ['/k', command], {
+      windowsHide: false,
+      stdio: 'ignore',
+    })
+  }
+
+  if (process.platform === 'darwin') {
+    backendDebugPidPath = path.join(app.getPath('userData'), 'backend-debug.pid')
+    const command = [
+      'rm',
+      '-f',
+      quoteShellArg(backendDebugPidPath),
+      '&&',
+      'echo',
+      '$$',
+      '>',
+      quoteShellArg(backendDebugPidPath),
+      '&&',
+      'exec',
+      [backendPath, ...backendArgs].map(quoteShellArg).join(' '),
+    ].join(' ')
+    const script = `tell application "Terminal" to do script ${JSON.stringify(command)}`
+
+    return spawn('osascript', ['-e', script], {
+      stdio: 'ignore',
+    })
+  }
+
+  return spawn(backendPath, backendArgs, {
+    stdio: 'inherit',
+  })
+}
+
 function startBackend() {
   const backendPath = getBackendPath()
+  const backendArgs = getBackendArgs()
 
-  backendProcess = spawn(
-    backendPath,
-    [
-      '--host',
-      BACKEND_HOST,
-      '--port',
-      String(BACKEND_PORT),
-      '--data-dir',
-      app.getPath('userData'),
-    ],
-    {
+  if (DESKTOP_DEBUG) {
+    backendProcess = startBackendInDebugTerminal(backendPath, backendArgs)
+  } else {
+    backendProcess = spawn(backendPath, backendArgs, {
       windowsHide: true,
       stdio: 'ignore',
-    },
-  )
+    })
+  }
 
   backendProcess.on('exit', (code) => {
     console.log('[WaveFlow 后端退出]', code)
   })
+}
+
+function stopBackend() {
+  if (DESKTOP_DEBUG && process.platform === 'darwin' && backendDebugPidPath) {
+    try {
+      const pid = Number(fs.readFileSync(backendDebugPidPath, 'utf8').trim())
+      if (pid) {
+        process.kill(pid)
+      }
+      fs.rmSync(backendDebugPidPath, { force: true })
+    } catch {
+      // 调试终端可能已被手动关闭；这里静默清理即可。
+    }
+  }
+
+  if (backendProcess) {
+    backendProcess.kill()
+    backendProcess = null
+  }
 }
 
 function waitForBackend(timeoutMs = 12000) {
@@ -107,8 +180,17 @@ async function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
+      devTools: DESKTOP_DEBUG,
     },
   })
+
+  if (DESKTOP_DEBUG) {
+    win.webContents.on('before-input-event', (event, input) => {
+      if (input.type === 'keyDown' && input.key === 'F12') {
+        win.webContents.toggleDevTools()
+      }
+    })
+  }
 
   win.once('ready-to-show', () => {
     win.show()
@@ -130,10 +212,7 @@ app.whenReady().then(async () => {
 })
 
 app.on('before-quit', () => {
-  if (backendProcess) {
-    backendProcess.kill()
-    backendProcess = null
-  }
+  stopBackend()
 })
 
 app.on('window-all-closed', () => {

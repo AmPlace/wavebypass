@@ -8,6 +8,7 @@
     "build:frontend": "cd frontend && npm install && npm run build -- --mode desktop",
     "build:electron": "electron-vite build",
     "electron:start": "electron .",
+    "electron:start:debug": "electron . --waveflow-debug",
     "electron:build:win": "npm run desktop:win",
     "electron:build:mac": "npm run desktop:mac",
     "desktop:win": "powershell -ExecutionPolicy Bypass -File scripts/build-desktop-win.ps1",
