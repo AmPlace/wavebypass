@@ -13,12 +13,18 @@ const BACKEND_HOST = '127.0.0.1'
 const BACKEND_PORT = 18765
 const API_BASE = `http://${BACKEND_HOST}:${BACKEND_PORT}`
 
+function getBackendExecutableName() {
+  return process.platform === 'win32' ? 'waveflow-backend.exe' : 'waveflow-backend'
+}
+
 function getBackendPath() {
+  const executableName = getBackendExecutableName()
+
   if (app.isPackaged) {
-    return path.join(process.resourcesPath, 'backend', 'waveflow-backend.exe')
+    return path.join(process.resourcesPath, 'backend', executableName)
   }
 
-  return path.join(process.cwd(), 'backend_dist', 'waveflow-backend.exe')
+  return path.join(process.cwd(), 'backend_dist', executableName)
 }
 
 function getFrontendIndexPath() {

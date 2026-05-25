@@ -9,7 +9,9 @@
     "build:electron": "electron-vite build",
     "electron:start": "electron .",
     "electron:build:win": "npm run desktop:win",
-    "desktop:win": "powershell -ExecutionPolicy Bypass -File scripts/build-desktop-win.ps1"
+    "electron:build:mac": "npm run desktop:mac",
+    "desktop:win": "powershell -ExecutionPolicy Bypass -File scripts/build-desktop-win.ps1",
+    "desktop:mac": "bash scripts/build-desktop-mac.sh"
   },
   "devDependencies": {
     "electron": "^33.0.0",
@@ -28,12 +30,19 @@
     ],
     "extraResources": [
       {
-        "from": "backend_dist/waveflow-backend.exe",
-        "to": "backend/waveflow-backend.exe"
+        "from": "backend_dist",
+        "to": "backend"
       }
     ],
     "win": {
       "target": "nsis"
+    },
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "identity": null
     },
     "nsis": {
       "oneClick": false,

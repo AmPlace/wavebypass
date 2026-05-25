@@ -26,10 +26,11 @@ if (!(Test-Path ".venv")) {
 cd ..
 
 Write-Host "== Copy backend exe =="
-if (!(Test-Path "backend_dist")) {
-  New-Item -ItemType Directory backend_dist | Out-Null
+if (Test-Path "backend_dist") {
+  Remove-Item backend_dist -Recurse -Force
 }
 
+New-Item -ItemType Directory backend_dist | Out-Null
 Copy-Item backend\dist\waveflow-backend.exe backend_dist\waveflow-backend.exe -Force
 
 Write-Host "== Install desktop deps =="
