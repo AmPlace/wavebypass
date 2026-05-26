@@ -1895,10 +1895,24 @@ _WIDE_WINDOW = 20
 _WIDE_TTL = 300    
 
 
+def _drop_wide_cache(cache_key: str) -> None:
+    _wide_cache.pop(cache_key, None)
+    _wide_cache.pop(cache_key + '_ts', None)
+
+
 async def _wide_refresher(cache_key: str, target_url: str, custom_ua: str = ''):
     """后台任务：每 2s 拉一次上游，更新分片队列"""
     _h = {'User-Agent': custom_ua} if custom_ua else {}
     while True:
+        cache = _wide_cache.get(cache_key)
+        last_access = _wide_cache.get(cache_key + '_ts', 0)
+        if not cache:
+            return
+        if time.time() - last_access > _WIDE_TTL:
+            _drop_wide_cache(cache_key)
+            logger.info("IPTV wide playlist 后台刷新停止: idle %.0fs url=%s", time.time() - last_access, target_url)
+            return
+
         try:
             resp = await http_client.get(target_url, follow_redirects=True, timeout=6, headers=_h)
             resp.raise_for_status()
@@ -1927,11 +1941,6 @@ async def _wide_refresher(cache_key: str, target_url: str, custom_ua: str = ''):
 
             cache = _wide_cache.get(cache_key)
             if not cache:
-                return
-            # 5 分钟无请求则自动停拉
-            if time.time() - _wide_cache.get(cache_key + '_ts', 0) > _WIDE_TTL:
-                del _wide_cache[cache_key]
-                del _wide_cache[cache_key + '_ts']
                 return
             cache['target_duration'] = target_duration
             seen = cache.get('seen', set())
@@ -2155,9 +2164,21 @@ async def iptv_proxy_stream(request: Request, target_url: str = '', custom_ua: s
         upstream: httpx.Response | None = initial_upstream
         no_data_retries = 0
         last_data_at = time.monotonic()
+
+        async def client_disconnected() -> bool:
+            return bool(request and await request.is_disconnected())
+
+        async def sleep_unless_disconnected(delay: float) -> bool:
+            deadline = time.monotonic() + delay
+            while time.monotonic() < deadline:
+                if await client_disconnected():
+                    return True
+                await asyncio.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
+            return await client_disconnected()
+
         try:
             while True:
-                if request and await request.is_disconnected():
+                if await client_disconnected():
                     break
 
                 opened_at = time.monotonic()
@@ -2166,7 +2187,7 @@ async def iptv_proxy_stream(request: Request, target_url: str = '', custom_ua: s
 
                 try:
                     async for chunk in upstream.aiter_bytes(64 * 1024):
-                        if request and await request.is_disconnected():
+                        if await client_disconnected():
                             close_reason = "client disconnected"
                             break
                         if chunk:
@@ -2183,7 +2204,7 @@ async def iptv_proxy_stream(request: Request, target_url: str = '', custom_ua: s
                         await upstream.aclose()
                         upstream = None
 
-                if request and await request.is_disconnected():
+                if await client_disconnected():
                     break
 
                 elapsed = time.monotonic() - opened_at
@@ -2219,9 +2240,12 @@ async def iptv_proxy_stream(request: Request, target_url: str = '', custom_ua: s
                     IPTV_STREAM_RECONNECT_DELAY_SECONDS * max(1, no_data_retries),
                     IPTV_STREAM_RECONNECT_MAX_DELAY_SECONDS,
                 )
-                await asyncio.sleep(delay)
+                if await sleep_unless_disconnected(delay):
+                    break
 
                 while True:
+                    if await client_disconnected():
+                        return
                     try:
                         upstream = await open_upstream()
                         break
@@ -2237,7 +2261,12 @@ async def iptv_proxy_stream(request: Request, target_url: str = '', custom_ua: s
                         )
                         if no_data_retries >= IPTV_STREAM_NO_DATA_RETRIES or no_data_age > IPTV_STREAM_NO_DATA_TIMEOUT_SECONDS:
                             return
-                        await asyncio.sleep(min(IPTV_STREAM_RECONNECT_DELAY_SECONDS * no_data_retries, IPTV_STREAM_RECONNECT_MAX_DELAY_SECONDS))
+                        retry_delay = min(
+                            IPTV_STREAM_RECONNECT_DELAY_SECONDS * no_data_retries,
+                            IPTV_STREAM_RECONNECT_MAX_DELAY_SECONDS,
+                        )
+                        if await sleep_unless_disconnected(retry_delay):
+                            return
         finally:
             await stream_client.aclose()
 
