@@ -1956,6 +1956,17 @@ async def _wide_refresher(cache_key: str, target_url: str, custom_ua: str = ''):
         await asyncio.sleep(2)
 
 
+@app.post("/api/iptv/proxy/wide/release")
+async def release_iptv_wide_playlist(target_url: str = ''):
+    if not target_url:
+        raise HTTPException(status_code=400, detail="缺少 target_url")
+
+    cache_key = quote(target_url, safe='')
+    released = cache_key in _wide_cache or cache_key + '_ts' in _wide_cache
+    _drop_wide_cache(cache_key)
+    return {"released": released}
+
+
 @app.get("/api/iptv/proxy/wide.m3u8")
 async def iptv_wide_playlist(target_url: str = '', proxy_ts: int = 0, custom_ua: str = '', compat: int = 0):
     if not target_url:
