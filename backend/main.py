@@ -2497,9 +2497,13 @@ def _is_supported_export_source(source: dict, healthy_only: bool = True) -> bool
         return False
     return _source_type(source) not in {'youtube', 'unsupported_youtube_url'}
 
+def _request_public_base_url(request: Request) -> str:
+    proto = request.headers.get("x-forwarded-proto") or request.url.scheme
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc
+    return f"{proto}://{host}".rstrip("/")
 
 def _absolute_api_url(request: Request, path: str) -> str:
-    return f"{str(request.base_url).rstrip('/')}{path}"
+    return f"{_request_public_base_url(request)}{path}"
 
 
 def _iptv_proxy_path_for_source(source: dict) -> str:
@@ -2611,7 +2615,7 @@ async def export_iptv_subscription(
     return Response(
         content=content,
         media_type="audio/x-mpegurl",
-        headers={"Content-Disposition": f'attachment; filename="wavebypass_{mode}.m3u"'},
+        headers={"Content-Disposition": f'attachment; filename="waveflow_{mode}.m3u"'},
     )
 
 
