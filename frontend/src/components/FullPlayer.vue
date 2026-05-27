@@ -412,10 +412,13 @@ const sourceMenuStyle = ref({
 const sourceMenuListMaxHeight = ref('260px')
 const iptvSourceRuntimeStatus = ref({})
 const activePlayerPanel = ref('channels')
+const epgNow = ref(Date.now())
 const DEFAULT_LOGO_URL = publicAsset('/logos/default.png')
 const isFullPlayerDark = ref(document.documentElement.classList.contains('dark'))
 const isSafariChromeRefreshing = ref(false)
 let themeObserver = null
+let epgTickTimer = null
+let epgRefreshAfterEndTimer = null
 
 const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
   (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
@@ -566,12 +569,17 @@ const currentProgram = computed(() => {
   if (epg) {
     const startD = new Date(epg.start)
     const stopD = new Date(epg.stop)
+    const now = epgNow.value
+    const total = stopD.getTime() - startD.getTime()
+    const elapsed = now - startD.getTime()
+    const remainingMs = stopD.getTime() - now
+    const progress = total > 0 ? Math.max(0, Math.min(100, Math.round((elapsed / total) * 100))) : 0
     return {
       title: epg.title,
       start: startD.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }),
       end: stopD.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }),
-      remaining: epg.remaining_minutes,
-      progress: Math.round(epg.progress * 100),
+      remaining: Math.max(0, Math.ceil(remainingMs / 60000)),
+      progress,
     }
   }
   return { title: currentStationName.value, start: '', end: '', remaining: 0, progress: 0 }
@@ -2988,17 +2996,53 @@ async function selectEpgDate(date) {
   playerStore.currentEpgProgram = _epgCurrent.value
 }
 
+async function refreshCurrentEpg(options = {}) {
+  const key = playerStore.currentIptvChannel?.canonical_key
+  if (!key) return
+  await _epgFetch(key, options)
+  playerStore.currentEpgProgram = _epgCurrent.value
+}
+
+function clearEpgRefreshAfterEndTimer() {
+  if (!epgRefreshAfterEndTimer) return
+  clearTimeout(epgRefreshAfterEndTimer)
+  epgRefreshAfterEndTimer = null
+}
+
+function scheduleEpgRefreshAfterProgramEnd(program = playerStore.currentEpgProgram) {
+  clearEpgRefreshAfterEndTimer()
+  if (!program?.stop) return
+  const delay = new Date(program.stop).getTime() - Date.now() + 1200
+  if (!Number.isFinite(delay)) return
+  epgRefreshAfterEndTimer = setTimeout(() => {
+    refreshCurrentEpg({ date: _epgSelectedDate.value }).catch((e) => {
+      console.warn('[EPG] refresh after program end failed:', e?.message || e)
+    })
+  }, Math.max(1000, Math.min(delay, 2 * 60 * 60 * 1000)))
+}
+
 watch(() => playerStore.currentIptvChannel, (ch) => {
   if (ch?.canonical_key) {
-    _epgFetch(ch.canonical_key).then(() => {
-      playerStore.currentEpgProgram = _epgCurrent.value
+    refreshCurrentEpg().then(() => {
+      scheduleEpgRefreshAfterProgramEnd()
     })
   } else {
     playerStore.currentEpgProgram = null
+    _epgSchedule.value = []
+    _epgAvailableDates.value = []
+    _epgSelectedDate.value = ''
+    clearEpgRefreshAfterEndTimer()
   }
 })
 
+watch(() => playerStore.currentEpgProgram?.stop, () => {
+  scheduleEpgRefreshAfterProgramEnd()
+})
+
 onMounted(() => {
+  epgTickTimer = setInterval(() => {
+    epgNow.value = Date.now()
+  }, 30_000)
   syncFullPlayerTheme()
   setFullPlayerChromeOpen(isPlayerExpanded.value)
   themeObserver = new MutationObserver(syncFullPlayerTheme)
@@ -3023,6 +3067,11 @@ onBeforeUnmount(() => {
   cancelCurrentStartup()
   cancelActiveProxyRace()
   destroyIptvEngines()
+  if (epgTickTimer) {
+    clearInterval(epgTickTimer)
+    epgTickTimer = null
+  }
+  clearEpgRefreshAfterEndTimer()
 })
 </script>
 
