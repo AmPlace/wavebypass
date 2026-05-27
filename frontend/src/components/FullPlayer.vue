@@ -240,7 +240,7 @@
                     <span class="timeline-dot"></span>
                     <span class="timeline-title">
                       {{ program.title }}
-                      <span v-if="program.current" class="tag live-tag">直播中</span>
+                      <!-- <span v-if="program.current" class="tag live-tag">直播中</span> -->
                     </span>
                   </div>
                 </div>
@@ -323,7 +323,7 @@
                   <span class="timeline-dot"></span>
                   <span class="timeline-title">
                     {{ program.title }}
-                    <span v-if="program.current" class="tag live-tag">直播中</span>
+                    <!-- <span v-if="program.current" class="tag live-tag">直播中</span> -->
                   </span>
                 </div>
               </div>
@@ -3639,7 +3639,7 @@ onBeforeUnmount(() => {
   font-size: var(--tab-size);
   font-weight: var(--tab-weight);
   letter-spacing: 0;
-  text-align: left;
+  text-align: center;
   cursor: pointer;
 }
 
@@ -3768,13 +3768,14 @@ onBeforeUnmount(() => {
 }
 
 .schedule-date {
-  display: inline-flex;
+  display: flex;
   align-items: center;
+  justify-content: center;
   gap: 10px;
   color: var(--text-primary);
   font-size: 24px;
   font-weight: 800;
-  letter-spacing: -0.02em;
+  letter-spacing: 0;
 }
 
 .schedule-date svg {
