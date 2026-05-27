@@ -122,7 +122,7 @@
         <div class="mb-5 relative flex items-center justify-center">
 
           <div class="text-center">
-            <h2 class="text-lg font-semibold text-neutral-900 dark:text-neutral-50">选择订阅导出模式</h2>
+            <h2 class="text-lg font-semibold text-neutral-900 dark:text-neutral-50">订阅导出</h2>
           </div>
 
           <button type="button"
