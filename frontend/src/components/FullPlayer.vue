@@ -17,7 +17,7 @@
           >
             <svg viewBox="0 0 24 24" fill="none"><path d="M19 12H5M12 5l-7 7 7 7" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
           </button>
-          <main class="player-main">
+          <main ref="playerMainRef" class="player-main" :style="mediaFrameStyle">
             <section class="media-card">
               <div class="mobile-live-pill" aria-hidden="true">
                 <div class="pill-logo">
@@ -63,6 +63,7 @@
                 @pause="onVideoEvent('pause')"
                 @waiting="onVideoEvent('waiting')"
                 @stalled="onVideoStalled"
+                @loadedmetadata="updateMediaAspectFromVideo"
                 @timeupdate="onVideoTimeUpdate"
               ></video>
               <div
@@ -411,6 +412,7 @@ const iptvVideoRef = ref(null)
 const iptvHlsRef = ref(null)
 const iptvMpegtsRef = ref(null)
 const youtubeHostRef = ref(null)
+const playerMainRef = ref(null)
 const activeIptvEngine = ref('video')
 const sourceButtonRef = ref(null)
 const sourceMenuOpen = ref(false)
@@ -425,6 +427,9 @@ const iptvSourceRuntimeStatus = ref({})
 const activePlayerPanel = ref('channels')
 const epgNow = ref(Date.now())
 const mobileOverlayVisible = ref(true)
+const mediaAspectRatio = ref('16 / 9')
+const mediaAspectValue = ref(16 / 9)
+const mediaFrameWidth = ref(null)
 const DEFAULT_LOGO_URL = publicAsset('/logos/default.png')
 const isFullPlayerDark = ref(document.documentElement.classList.contains('dark'))
 const isSafariChromeRefreshing = ref(false)
@@ -432,10 +437,19 @@ let themeObserver = null
 let epgTickTimer = null
 let epgRefreshAfterEndTimer = null
 let mobileOverlayTimer = null
+let mediaLayoutObserver = null
 
 const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
   (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
 const iptvMuted = ref(isIOS)  // iOS 静音绕过自动播放限制
+
+const mediaFrameStyle = computed(() => {
+  const style = {
+    '--media-aspect-ratio': mediaAspectRatio.value,
+  }
+  if (mediaFrameWidth.value) style['--media-frame-width'] = `${mediaFrameWidth.value}px`
+  return style
+})
 
 function useDefaultLogo(event) {
   const img = event?.target
@@ -465,6 +479,41 @@ function toggleFullscreen() {
     el.requestFullscreen().catch(() => {})
   }
 }  // 跟踪当前播放的 URL，防止重复设置
+
+function resetMediaAspect() {
+  mediaAspectRatio.value = '16 / 9'
+  mediaAspectValue.value = 16 / 9
+  updateMediaFrameSize()
+}
+
+function setMediaAspect(width, height) {
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return
+  const ratio = Math.min(Math.max(width / height, 0.56), 2.4)
+  mediaAspectValue.value = ratio
+  mediaAspectRatio.value = `${Math.round(width)} / ${Math.round(height)}`
+  updateMediaFrameSize()
+}
+
+function updateMediaAspectFromVideo() {
+  const video = iptvVideoRef.value
+  if (!video) return
+  setMediaAspect(video.videoWidth, video.videoHeight)
+}
+
+function updateMediaFrameSize() {
+  if (window.matchMedia('(max-width: 980px)').matches) {
+    mediaFrameWidth.value = null
+    return
+  }
+  const mainWidth = playerMainRef.value?.clientWidth
+  if (!mainWidth) {
+    mediaFrameWidth.value = null
+    return
+  }
+  const maxHeight = Math.max(280, window.innerHeight - 430)
+  const widthByHeight = maxHeight * mediaAspectValue.value
+  mediaFrameWidth.value = Math.round(Math.min(mainWidth, 1160, widthByHeight))
+}
 
 function updateSourceMenuPosition() {
   const button = sourceButtonRef.value
@@ -1056,6 +1105,7 @@ function destroyIptvEngines() {
 function resetIptvVideo() {
   if (!iptvVideoRef.value) return
   stopPlaybackWatchdogs()
+  resetMediaAspect()
   iptvVideoRef.value.pause()
   iptvVideoRef.value.removeAttribute('src')
   iptvVideoRef.value.load()
@@ -1189,6 +1239,7 @@ async function startYoutubeCandidate(entry, attemptId = 0, sourceIndex = -1) {
   if (!youtubeHostRef.value) throw new Error('YouTube 播放容器未就绪')
 
   activeIptvEngine.value = 'youtube'
+  resetMediaAspect()
   youtubeHostRef.value.innerHTML = ''
   console.log(`[START] YouTube:${videoId}`)
 
@@ -1773,6 +1824,7 @@ async function tryPlayIptv(url, usingProxy = false, customUa = '', attemptId = 0
       try {
         if (!iptvVideoRef.value) throw new Error('播放器未就绪')
         iptvVideoRef.value.volume = volume.value
+        updateMediaAspectFromVideo()
         await iptvVideoRef.value.play()
         if (settled) return
         if (!isAttemptActive(attemptId)) {
@@ -2957,8 +3009,12 @@ watch(sourceMenuOpen, async (open) => {
 
 watch(isPlayerExpanded, (expanded) => {
   if (!expanded) closeSourceMenu()
-  if (expanded) showMobileOverlayControls()
-  else clearMobileOverlayTimer()
+  if (expanded) {
+    showMobileOverlayControls()
+    nextTick(updateMediaFrameSize)
+  } else {
+    clearMobileOverlayTimer()
+  }
   nextTick(() => setFullPlayerChromeOpen(expanded))
 })
 
@@ -3074,6 +3130,11 @@ onMounted(() => {
   epgTickTimer = setInterval(() => {
     epgNow.value = Date.now()
   }, 30_000)
+  if (window.ResizeObserver && playerMainRef.value) {
+    mediaLayoutObserver = new ResizeObserver(updateMediaFrameSize)
+    mediaLayoutObserver.observe(playerMainRef.value)
+  }
+  updateMediaFrameSize()
   syncFullPlayerTheme()
   setFullPlayerChromeOpen(isPlayerExpanded.value)
   themeObserver = new MutationObserver(syncFullPlayerTheme)
@@ -3082,17 +3143,23 @@ onMounted(() => {
   window.addEventListener('wavebypass-theme-chrome-sync', handleThemeChromeSync)
   document.addEventListener('click', closeSourceMenu)
   window.addEventListener('resize', updateSourceMenuPosition)
+  window.addEventListener('resize', updateMediaFrameSize)
   window.addEventListener('orientationchange', updateSourceMenuPosition)
+  window.addEventListener('orientationchange', updateMediaFrameSize)
 })
 
 onBeforeUnmount(() => {
   setFullPlayerChromeOpen(false)
+  mediaLayoutObserver?.disconnect()
+  mediaLayoutObserver = null
   themeObserver?.disconnect()
   themeObserver = null
   window.removeEventListener('wavebypass-theme-chrome-sync', handleThemeChromeSync)
   document.removeEventListener('click', closeSourceMenu)
   window.removeEventListener('resize', updateSourceMenuPosition)
+  window.removeEventListener('resize', updateMediaFrameSize)
   window.removeEventListener('orientationchange', updateSourceMenuPosition)
+  window.removeEventListener('orientationchange', updateMediaFrameSize)
   _playAttemptId++
   stopPlaybackWatchdogs()
   cancelCurrentStartup()
@@ -3159,12 +3226,14 @@ onBeforeUnmount(() => {
   --gold: #c79a2b;
   --muted: #8d9299;
   --line: rgba(17, 24, 39, 0.08);
-  --layout-width: min(1580px, calc(100% - 88px));
+  --layout-width: min(1740px, calc(100% - 64px));
   --layout-height: 100dvh;
-  --layout-gap: clamp(36px, 3.4vw, 60px);
-  --layout-padding: clamp(28px, 4vh, 44px) 0 clamp(24px, 3.2vh, 36px);
-  --media-width: min(100%, 1040px, calc(58dvh * 1.8605));
+  --layout-gap: clamp(32px, 3vw, 54px);
+  --layout-padding: clamp(44px, 5.5vh, 64px) 0 clamp(24px, 3.2vh, 36px);
+  --player-main-offset: 16px;
+  --media-width: min(100%, 1160px);
   --media-height: auto;
+  --media-aspect-ratio: 16 / 9;
   --media-radius: 8px;
   --media-shadow: 0 18px 42px rgba(15, 23, 42, 0.18);
   --panel-inline: 22px;
@@ -3323,15 +3392,16 @@ onBeforeUnmount(() => {
   min-height: 0;
   min-width: 0;
   flex-direction: column;
+  padding-top: var(--player-main-offset);
 }
 
 .media-card {
   position: relative;
   box-sizing: border-box;
   overflow: hidden;
-  width: var(--media-width);
+  width: var(--media-frame-width, var(--media-width));
   height: var(--media-height);
-  aspect-ratio: 16 / 8.6;
+  aspect-ratio: var(--media-aspect-ratio);
   border-radius: var(--media-radius);
   background: var(--media-placeholder-bg);
   box-shadow: var(--media-shadow);
@@ -3490,6 +3560,7 @@ onBeforeUnmount(() => {
 }
 
 .now-panel {
+  width: var(--media-frame-width, var(--media-width));
   padding: 18px var(--panel-inline) 0;
   text-align: left;
 }
@@ -3683,7 +3754,7 @@ onBeforeUnmount(() => {
 .side-panel {
   min-width: 0;
   min-height: 0;
-  padding-top: 14px;
+  padding-top: 0;
 }
 
 .mobile-panel {
@@ -3970,6 +4041,7 @@ onBeforeUnmount(() => {
     --layout-width: 100%;
     --layout-height: auto;
     --layout-padding: 0 0 calc(env(safe-area-inset-bottom) + 96px);
+    --player-main-offset: 0;
     --media-width: 100vw;
     --media-height: clamp(220px, 56vw, 245px);
     --media-radius: 0;
