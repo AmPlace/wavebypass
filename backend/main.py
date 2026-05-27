@@ -9,10 +9,11 @@ import tempfile
 import threading
 import time
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from collections.abc import AsyncIterator
 from pathlib import Path
 from urllib.parse import quote, urljoin, urlparse
+from zoneinfo import ZoneInfo
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request, Response
@@ -2407,21 +2408,112 @@ async def refresh_epg():
     return {"ok": True}
 
 
+def _epg_zoneinfo(tz: str = ''):
+    try:
+        return ZoneInfo(tz or 'Asia/Shanghai')
+    except Exception:
+        return timezone(timedelta(hours=8), 'Asia/Shanghai')
+
+
+def _epg_parse_iso(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace('Z', '+00:00')).astimezone(timezone.utc)
+
+
+def _epg_date_from_query(value: str, tzinfo) -> str:
+    if value:
+        try:
+            return datetime.strptime(value, '%Y-%m-%d').date().isoformat()
+        except ValueError:
+            pass
+    return datetime.now(tzinfo).date().isoformat()
+
+
+def _epg_day_bounds(date_value: str, tzinfo) -> tuple[str, str]:
+    day = datetime.strptime(date_value, '%Y-%m-%d').date()
+    start_local = datetime(day.year, day.month, day.day, tzinfo=tzinfo)
+    end_local = start_local + timedelta(days=1) - timedelta(microseconds=1)
+    return start_local.astimezone(timezone.utc).isoformat(), end_local.astimezone(timezone.utc).isoformat()
+
+
+def _epg_available_dates(programs: list[dict], tzinfo, center_date: str) -> list[str]:
+    center = datetime.strptime(center_date, '%Y-%m-%d').date()
+    window_start = center - timedelta(days=7)
+    window_end = center + timedelta(days=7)
+    dates: set[str] = set()
+
+    for program in programs:
+        try:
+            start_local = _epg_parse_iso(program['start']).astimezone(tzinfo)
+            stop_local = _epg_parse_iso(program['stop']).astimezone(tzinfo) - timedelta(microseconds=1)
+        except Exception:
+            continue
+
+        current_day = start_local.date()
+        last_day = max(current_day, stop_local.date())
+        while current_day <= last_day:
+            if window_start <= current_day <= window_end:
+                dates.add(current_day.isoformat())
+            current_day += timedelta(days=1)
+
+    return sorted(dates)
+
+
+def _epg_nearest_date(requested_date: str, available_dates: list[str]) -> str:
+    if not available_dates or requested_date in available_dates:
+        return requested_date
+    requested = datetime.strptime(requested_date, '%Y-%m-%d').date()
+    return min(
+        available_dates,
+        key=lambda value: abs((datetime.strptime(value, '%Y-%m-%d').date() - requested).days),
+    )
+
+
 @app.get("/api/iptv/epg/programs/{canonical_key}")
 async def get_epg_programs(canonical_key: str, date: str = '', tz: str = ''):
     em = await db.get_channel_epg_map(canonical_key)
     if not em or not em.get('epg_channel_id'):
-        return {"canonical_key": canonical_key, "match_status": em['match_status'] if em else 'unmatched', "current": None, "next": None, "programs": []}
+        tzinfo = _epg_zoneinfo(tz)
+        return {
+            "canonical_key": canonical_key,
+            "match_status": em['match_status'] if em else 'unmatched',
+            "current": None,
+            "next": None,
+            "programs": [],
+            "date": _epg_date_from_query(date, tzinfo),
+            "requested_date": date,
+            "tz": str(tzinfo),
+            "available_dates": [],
+        }
 
     sid = em['epg_source_id']
     cid = em['epg_channel_id']
+    tzinfo = _epg_zoneinfo(tz)
+    requested_date = _epg_date_from_query(date, tzinfo)
     now = datetime.now(timezone.utc).isoformat()
-    end_of_day = (datetime.now(timezone.utc).replace(hour=23, minute=59, second=59)).isoformat()
 
-    programs = await db.get_epg_programs(sid, cid, start_after=now, start_before=end_of_day)
+    today_local = datetime.now(tzinfo).date()
+    window_start_local = datetime(today_local.year, today_local.month, today_local.day, tzinfo=tzinfo) - timedelta(days=7)
+    window_end_local = window_start_local + timedelta(days=15) - timedelta(microseconds=1)
+    window_programs = await db.get_epg_programs(
+        sid,
+        cid,
+        start_after=window_start_local.astimezone(timezone.utc).isoformat(),
+        start_before=window_end_local.astimezone(timezone.utc).isoformat(),
+    )
+    available_dates = _epg_available_dates(window_programs, tzinfo, today_local.isoformat())
+    selected_date = _epg_nearest_date(requested_date, available_dates)
+    day_start, day_end = _epg_day_bounds(selected_date, tzinfo)
+
+    programs = await db.get_epg_programs(sid, cid, start_after=day_start, start_before=day_end)
+    now_programs = await db.get_epg_programs(
+        sid,
+        cid,
+        start_after=(datetime.now(timezone.utc) - timedelta(hours=12)).isoformat(),
+        start_before=(datetime.now(timezone.utc) + timedelta(days=2)).isoformat(),
+    )
     current = None
     next_prog = None
-    for p in programs:
+    for p in now_programs:
         if p['start'] <= now < p['stop']:
             total = (datetime.fromisoformat(p['stop']) - datetime.fromisoformat(p['start'])).total_seconds()
             elapsed = (datetime.now(timezone.utc) - datetime.fromisoformat(p['start'])).total_seconds()
@@ -2431,7 +2523,7 @@ async def get_epg_programs(canonical_key: str, date: str = '', tz: str = ''):
                 'progress': max(0, min(1, elapsed / total)) if total > 0 else 0,
                 'remaining_minutes': max(0, int((datetime.fromisoformat(p['stop']) - datetime.now(timezone.utc)).total_seconds() / 60)),
             }
-        elif not current and p['start'] > now:
+        elif p['start'] > now:
             if not next_prog:
                 next_prog = {'title': p['title'], 'start': p['start'], 'stop': p['stop']}
 
@@ -2444,6 +2536,8 @@ async def get_epg_programs(canonical_key: str, date: str = '', tz: str = ''):
         "canonical_key": canonical_key, "epg_source_id": sid, "epg_channel_id": cid,
         "match_status": em.get('match_status', 'unmatched'),
         "current": current, "next": next_prog, "programs": schedule,
+        "date": selected_date, "requested_date": requested_date, "tz": str(tzinfo),
+        "available_dates": available_dates,
     }
 
 

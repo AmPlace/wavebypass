@@ -19,21 +19,32 @@ export function useEpg() {
   const current = ref(null)
   const next = ref(null)
   const schedule = ref([])
+  const selectedDate = ref('')
+  const availableDates = ref([])
   const loading = ref(false)
 
-  async function fetchPrograms(canonicalKey) {
+  async function fetchPrograms(canonicalKey, options = {}) {
     if (!canonicalKey) return
     loading.value = true
     try {
-      const data = await request(`/api/iptv/epg/programs/${encodeURIComponent(canonicalKey)}`)
+      const params = new URLSearchParams()
+      const tz = options.tz || Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai'
+      if (options.date) params.set('date', options.date)
+      if (tz) params.set('tz', tz)
+      const qs = params.toString()
+      const data = await request(`/api/iptv/epg/programs/${encodeURIComponent(canonicalKey)}${qs ? `?${qs}` : ''}`)
       current.value = data.current || null
       next.value = data.next || null
       schedule.value = data.programs || []
+      selectedDate.value = data.date || options.date || ''
+      availableDates.value = data.available_dates || []
     } catch (e) {
       console.warn('[EPG] fetch failed:', e?.message)
       current.value = null
       next.value = null
       schedule.value = []
+      selectedDate.value = options.date || ''
+      availableDates.value = []
     }
     loading.value = false
   }
@@ -55,5 +66,5 @@ export function useEpg() {
     }
   }
 
-  return { current, next, schedule, loading, fetchPrograms, batchCurrent }
+  return { current, next, schedule, selectedDate, availableDates, loading, fetchPrograms, batchCurrent }
 }

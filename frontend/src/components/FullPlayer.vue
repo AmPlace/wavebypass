@@ -218,12 +218,24 @@
               </div>
 
               <div v-else class="schedule-panel">
-                <div class="schedule-date">
-                  <span>今天 · 2月22日</span>
-                  <svg viewBox="0 0 24 24" fill="none"><path d="m7 10 5 5 5-5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                <div v-if="epgDateOptions.length" class="schedule-date-list">
+                  <button
+                    v-for="item in epgDateOptions"
+                    :key="item.value"
+                    type="button"
+                    class="schedule-date-chip"
+                    :class="{ active: item.active }"
+                    @click="selectEpgDate(item.value)"
+                  >
+                    <span>{{ item.label }}</span>
+                    <small>{{ item.weekday }}</small>
+                  </button>
+                </div>
+                <div v-else class="schedule-date">
+                  <span>今天</span>
                 </div>
                 <div class="timeline">
-                  <div v-for="program in displaySchedule" :key="program.time" class="timeline-row" :class="{ current: program.current, past: program.past }">
+                  <div v-for="program in displaySchedule" :key="`${program.time}-${program.title}`" class="timeline-row" :class="{ current: program.current, past: program.past }">
                     <span class="timeline-time">{{ program.time }}</span>
                     <span class="timeline-dot"></span>
                     <span class="timeline-title">
@@ -289,12 +301,24 @@
             </div>
 
             <div v-else class="schedule-panel desktop-panel-scroll">
-              <div class="schedule-date">
-                <span>今天 · 2月22日</span>
-                <svg viewBox="0 0 24 24" fill="none"><path d="m7 10 5 5 5-5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              <div v-if="epgDateOptions.length" class="schedule-date-list">
+                <button
+                  v-for="item in epgDateOptions"
+                  :key="item.value"
+                  type="button"
+                  class="schedule-date-chip"
+                  :class="{ active: item.active }"
+                  @click="selectEpgDate(item.value)"
+                >
+                  <span>{{ item.label }}</span>
+                  <small>{{ item.weekday }}</small>
+                </button>
+              </div>
+              <div v-else class="schedule-date">
+                <span>今天</span>
               </div>
               <div class="timeline">
-                <div v-for="program in displaySchedule" :key="program.time" class="timeline-row" :class="{ current: program.current, past: program.past }">
+                <div v-for="program in displaySchedule" :key="`${program.time}-${program.title}`" class="timeline-row" :class="{ current: program.current, past: program.past }">
                   <span class="timeline-time">{{ program.time }}</span>
                   <span class="timeline-dot"></span>
                   <span class="timeline-title">
@@ -555,6 +579,37 @@ const currentProgram = computed(() => {
 
 const currentProgramProgressPercent = computed(() => `${currentProgram.value.progress}%`)
 
+function localDateString(date = new Date()) {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+function epgDateLabel(value) {
+  const today = localDateString()
+  const date = new Date(`${value}T00:00:00`)
+  const diffDays = Math.round((date - new Date(`${today}T00:00:00`)) / 86400000)
+  if (diffDays === -1) return '昨天'
+  if (diffDays === 0) return '今天'
+  if (diffDays === 1) return '明天'
+  return `${date.getMonth() + 1}/${date.getDate()}`
+}
+
+function epgDateWeekday(value) {
+  return new Date(`${value}T00:00:00`).toLocaleDateString('zh-CN', { weekday: 'short' })
+}
+
+const epgDateOptions = computed(() => {
+  const dates = _epgAvailableDates.value || []
+  return dates.map((value) => ({
+    value,
+    label: epgDateLabel(value),
+    weekday: epgDateWeekday(value),
+    active: value === _epgSelectedDate.value,
+  }))
+})
+
 const fullPlayerStatusText = computed(() => {
   if (playerStore.playbackError) return playerStore.playbackError
   if (isLoading.value) return '正在连接'
@@ -578,10 +633,9 @@ const isPlaybackConfirmed = computed(() => (
 ))
 
 const displaySchedule = computed(() => {
-  const epg = playerStore.currentEpgProgram
-  if (epg) {
+  const schedule = _epgSchedule.value || []
+  if (schedule.length) {
     // EPG 有数据时用 EPG schedule
-    const schedule = _epgSchedule.value || []
     return schedule.map(p => {
       const startD = new Date(p.start)
       return {
@@ -2918,7 +2972,21 @@ watch(() => playerStore.iptvUrlIndex, () => {
 })
 
 // EPG 集成
-const { current: _epgCurrent, next: _epgNext, schedule: _epgSchedule, fetchPrograms: _epgFetch } = useEpg()
+const {
+  current: _epgCurrent,
+  next: _epgNext,
+  schedule: _epgSchedule,
+  selectedDate: _epgSelectedDate,
+  availableDates: _epgAvailableDates,
+  fetchPrograms: _epgFetch,
+} = useEpg()
+
+async function selectEpgDate(date) {
+  const key = playerStore.currentIptvChannel?.canonical_key
+  if (!key || !date || date === _epgSelectedDate.value) return
+  await _epgFetch(key, { date })
+  playerStore.currentEpgProgram = _epgCurrent.value
+}
 
 watch(() => playerStore.currentIptvChannel, (ch) => {
   if (ch?.canonical_key) {
@@ -3663,6 +3731,54 @@ onBeforeUnmount(() => {
 .schedule-date svg {
   width: 21px;
   height: 21px;
+}
+
+.schedule-date-list {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+  scrollbar-width: none;
+}
+
+.schedule-date-list::-webkit-scrollbar {
+  display: none;
+}
+
+.schedule-date-chip {
+  display: inline-flex;
+  min-width: 62px;
+  flex: 0 0 auto;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-soft);
+  color: var(--text-secondary);
+  padding: 8px 12px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0;
+  transition: background 0.16s ease, border-color 0.16s ease, color 0.16s ease;
+}
+
+.schedule-date-chip small {
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+.schedule-date-chip.active {
+  border-color: transparent;
+  background: var(--accent);
+  color: #fff;
+}
+
+.schedule-date-chip.active small {
+  color: rgba(255, 255, 255, 0.74);
 }
 
 .timeline {
