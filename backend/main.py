@@ -1898,11 +1898,45 @@ async def test_status(sub_id: int):
 _wide_cache: dict[str, dict] = {}
 _WIDE_WINDOW = 20  
 _WIDE_TTL = 120    
+_IPTV_SEGMENT_EXTENSIONS = (".ts", ".m4s", ".mp4", ".m4v", ".aac", ".mp3")
 
 
 def _drop_wide_cache(cache_key: str) -> None:
     _wide_cache.pop(cache_key, None)
     _wide_cache.pop(cache_key + '_ts', None)
+
+
+def _iptv_wide_playlist_proxy_path(target_url: str, proxy_ts: int = 0, custom_ua: str = '') -> str:
+    ua = f'&custom_ua={quote(custom_ua, safe="")}' if custom_ua else ''
+    return f'/api/iptv/proxy/wide.m3u8?proxy_ts={1 if proxy_ts else 0}{ua}&target_url={quote(target_url, safe="")}'
+
+
+def _iptv_chunk_proxy_path(target_url: str, custom_ua: str = '') -> str:
+    ua = f'&custom_ua={quote(custom_ua, safe="")}' if custom_ua else ''
+    return f'/api/iptv/proxy/chunk.ts?target_url={quote(target_url, safe="")}{ua}'
+
+
+def _rewrite_iptv_wide_m3u8_text(raw_m3u8_text: str, base_url: str, proxy_ts: int = 0, custom_ua: str = '') -> str:
+    rewritten_lines: list[str] = []
+
+    for line in raw_m3u8_text.splitlines():
+        stripped_line = line.strip()
+        if not stripped_line or stripped_line.startswith("#"):
+            rewritten_lines.append(line)
+            continue
+
+        absolute_media_url = urljoin(base_url, stripped_line)
+        parsed_url = urlparse(absolute_media_url)
+        uri_path = parsed_url.path.lower()
+
+        if uri_path.endswith(".m3u8"):
+            rewritten_lines.append(_iptv_wide_playlist_proxy_path(absolute_media_url, proxy_ts, custom_ua))
+        elif proxy_ts and parsed_url.scheme == "http" and uri_path.endswith(_IPTV_SEGMENT_EXTENSIONS):
+            rewritten_lines.append(_iptv_chunk_proxy_path(absolute_media_url, custom_ua))
+        else:
+            rewritten_lines.append(absolute_media_url)
+
+    return "\n".join(rewritten_lines)
 
 
 async def _wide_refresher(cache_key: str, target_url: str, custom_ua: str = ''):
@@ -1921,6 +1955,7 @@ async def _wide_refresher(cache_key: str, target_url: str, custom_ua: str = ''):
         try:
             resp = await http_client.get(target_url, follow_redirects=True, timeout=6, headers=_h)
             resp.raise_for_status()
+            playlist_base_url = str(resp.url)
             lines = resp.text.splitlines()
 
             # 解析 EXTINF + URL 对，同时追踪 MEDIA-SEQUENCE
@@ -1938,7 +1973,7 @@ async def _wide_refresher(cache_key: str, target_url: str, custom_ua: str = ''):
                     dur = line.split(':')[1].rstrip(',')
                     url = lines[i + 1].strip() if i + 1 < len(lines) else ''
                     if url and not url.startswith('#'):
-                        abs_url = urljoin(target_url, url)
+                        abs_url = urljoin(playlist_base_url, url)
                         segments.append({'dur': dur, 'url': abs_url, 'seq': media_seq})
                         media_seq += 1
                     i += 1
@@ -1984,8 +2019,7 @@ async def iptv_wide_playlist(target_url: str = '', proxy_ts: int = 0, custom_ua:
 
     def _rewrite_ts(seg_url: str) -> str:
         if proxy_ts and urlparse(seg_url).scheme == 'http':
-            ua = f'&custom_ua={quote(custom_ua, safe="")}' if custom_ua else ''
-            return f'/api/iptv/proxy/chunk.ts?target_url={quote(seg_url, safe="")}{ua}'
+            return _iptv_chunk_proxy_path(seg_url, custom_ua)
         return seg_url
 
     cache_key = quote(target_url, safe='')
@@ -2000,6 +2034,7 @@ async def iptv_wide_playlist(target_url: str = '', proxy_ts: int = 0, custom_ua:
             try:
                 resp = await http_client.get(target_url, follow_redirects=True, timeout=6, headers=_headers)
                 resp.raise_for_status()
+                playlist_base_url = str(resp.url)
                 lines = resp.text.splitlines()
                 media_seq = 0
                 i = 0
@@ -2013,7 +2048,7 @@ async def iptv_wide_playlist(target_url: str = '', proxy_ts: int = 0, custom_ua:
                         dur = line.split(':')[1].rstrip(',')
                         url = lines[i + 1].strip() if i + 1 < len(lines) else ''
                         if url and not url.startswith('#'):
-                            abs_url = urljoin(target_url, url)
+                            abs_url = urljoin(playlist_base_url, url)
                             if abs_url not in seen:
                                 queue.append({'dur': dur, 'url': abs_url, 'seq': media_seq})
                                 seen.add(abs_url)
@@ -2050,7 +2085,8 @@ async def iptv_wide_playlist(target_url: str = '', proxy_ts: int = 0, custom_ua:
         # 直接转发
         try:
             resp = await http_client.get(target_url, follow_redirects=True, timeout=6, headers=_headers)
-            return Response(content=resp.text, media_type="application/x-mpegURL")
+            rewritten = _rewrite_iptv_wide_m3u8_text(resp.text, str(resp.url), proxy_ts=proxy_ts, custom_ua=custom_ua)
+            return Response(content=rewritten, media_type="application/x-mpegURL")
         except httpx.HTTPError as exc:
             raise HTTPException(status_code=502, detail=f"拉取失败: {exc}") from exc
 
@@ -2061,7 +2097,8 @@ async def iptv_wide_playlist(target_url: str = '', proxy_ts: int = 0, custom_ua:
     if not queue:
         try:
             resp = await http_client.get(target_url, follow_redirects=True, timeout=6, headers=_headers)
-            return Response(content=resp.text, media_type="application/x-mpegURL")
+            rewritten = _rewrite_iptv_wide_m3u8_text(resp.text, str(resp.url), proxy_ts=proxy_ts, custom_ua=custom_ua)
+            return Response(content=rewritten, media_type="application/x-mpegURL")
         except httpx.HTTPError as exc:
             raise HTTPException(status_code=502, detail=f"拉取失败: {exc}") from exc
 
