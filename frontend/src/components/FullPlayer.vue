@@ -5,8 +5,18 @@
         v-show="isPlayerExpanded"
         class="full-player fixed inset-0 z-50 overflow-y-auto"
         :class="{ 'theme-dark': isFullPlayerDark, 'safari-chrome-refresh': isSafariChromeRefreshing }"
+        @pointermove="showMobileOverlayControls"
+        @pointerdown="showMobileOverlayControls"
       >
         <div class="player-layout">
+          <button
+            type="button"
+            class="desktop-collapse-btn"
+            aria-label="收起播放器"
+            @click="playerStore.collapsePlayer()"
+          >
+            <svg viewBox="0 0 24 24" fill="none"><path d="M19 12H5M12 5l-7 7 7 7" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
           <main class="player-main">
             <section class="media-card">
               <div class="mobile-live-pill" aria-hidden="true">
@@ -25,19 +35,20 @@
               <button
                 type="button"
                 class="overlay-btn overlay-back"
+                :class="{ hidden: !mobileOverlayVisible }"
                 aria-label="收起播放器"
-                @click="playerStore.collapsePlayer()"
+                @click.stop="playerStore.collapsePlayer()"
               >
                 <svg viewBox="0 0 24 24" fill="none"><path d="M19 12H5M12 5l-7 7 7 7" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
               </button>
 
-              <button
+              <!-- <button
                 type="button"
                 class="overlay-btn overlay-info"
                 aria-label="频道信息"
               >
                 <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="8.5" stroke="currentColor" stroke-width="2"/><path d="M12 10.8v5.2M12 7.8h.01" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
-              </button>
+              </button> -->
 
               <video
                 v-if="isIptvMode"
@@ -413,12 +424,14 @@ const sourceMenuListMaxHeight = ref('260px')
 const iptvSourceRuntimeStatus = ref({})
 const activePlayerPanel = ref('channels')
 const epgNow = ref(Date.now())
+const mobileOverlayVisible = ref(true)
 const DEFAULT_LOGO_URL = publicAsset('/logos/default.png')
 const isFullPlayerDark = ref(document.documentElement.classList.contains('dark'))
 const isSafariChromeRefreshing = ref(false)
 let themeObserver = null
 let epgTickTimer = null
 let epgRefreshAfterEndTimer = null
+let mobileOverlayTimer = null
 
 const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
   (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
@@ -489,6 +502,22 @@ async function toggleSourceMenu() {
 
 function closeSourceMenu() {
   sourceMenuOpen.value = false
+}
+
+function clearMobileOverlayTimer() {
+  if (!mobileOverlayTimer) return
+  clearTimeout(mobileOverlayTimer)
+  mobileOverlayTimer = null
+}
+
+function showMobileOverlayControls() {
+  if (window.matchMedia('(min-width: 981px)').matches) return
+  mobileOverlayVisible.value = true
+  clearMobileOverlayTimer()
+  mobileOverlayTimer = setTimeout(() => {
+    mobileOverlayVisible.value = false
+    mobileOverlayTimer = null
+  }, 5000)
 }
 
 function syncFullPlayerTheme() {
@@ -2928,6 +2957,8 @@ watch(sourceMenuOpen, async (open) => {
 
 watch(isPlayerExpanded, (expanded) => {
   if (!expanded) closeSourceMenu()
+  if (expanded) showMobileOverlayControls()
+  else clearMobileOverlayTimer()
   nextTick(() => setFullPlayerChromeOpen(expanded))
 })
 
@@ -3072,6 +3103,7 @@ onBeforeUnmount(() => {
     epgTickTimer = null
   }
   clearEpgRefreshAfterEndTimer()
+  clearMobileOverlayTimer()
 })
 </script>
 
@@ -3257,6 +3289,35 @@ onBeforeUnmount(() => {
   background: var(--page-bg);
 }
 
+.desktop-collapse-btn {
+  position: fixed;
+  top: max(18px, env(safe-area-inset-top));
+  left: max(18px, env(safe-area-inset-left));
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--control-surface);
+  color: var(--text-primary);
+  cursor: pointer;
+  box-shadow: var(--control-shadow);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  transition: opacity 0.18s ease, transform 0.16s ease, background 0.16s ease;
+}
+
+.desktop-collapse-btn:hover {
+  transform: translateY(-1px);
+}
+
+.desktop-collapse-btn svg {
+  width: 22px;
+  height: 22px;
+}
+
 .player-main {
   display: flex;
   min-height: 0;
@@ -3345,7 +3406,12 @@ onBeforeUnmount(() => {
   color: #fff;
   cursor: pointer;
   backdrop-filter: blur(12px);
-  transition: transform 0.16s ease, background 0.16s ease;
+  transition: opacity 0.18s ease, transform 0.16s ease, background 0.16s ease;
+}
+
+.overlay-btn.hidden {
+  opacity: 0;
+  pointer-events: none;
 }
 
 .overlay-btn:hover {
@@ -3361,6 +3427,7 @@ onBeforeUnmount(() => {
 .overlay-back {
   top: 24px;
   left: 24px;
+  display: none;
 }
 
 .overlay-info {
@@ -3956,6 +4023,10 @@ onBeforeUnmount(() => {
     background: var(--page-bg);
   }
 
+  .desktop-collapse-btn {
+    display: none;
+  }
+
   .media-card {
     width: var(--media-width);
     height: var(--media-height);
@@ -4004,6 +4075,7 @@ onBeforeUnmount(() => {
 
   .overlay-back {
     left: 24px;
+    display: grid;
   }
 
   .overlay-info {
