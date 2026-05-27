@@ -1,42 +1,37 @@
 <template>
-  <main class="mx-auto flex min-h-screen w-full max-w-4xl flex-col px-5 pt-[calc(env(safe-area-inset-top)+3.5rem)] pb-36 sm:px-8">
+  <main
+    class="mx-auto flex min-h-screen w-full max-w-4xl flex-col px-5 pt-[calc(env(safe-area-inset-top)+3.5rem)] pb-36 sm:px-8">
 
     <header class="mb-6 flex items-center justify-between">
       <div class="flex items-center gap-3">
-        <button
-          type="button"
+        <button type="button"
           class="flex size-8 items-center justify-center rounded-full text-neutral-500 transition-colors hover:bg-neutral-200/60 dark:hover:bg-neutral-700/60"
-          @click="$router.push('/iptv')"
-        >
-          <svg class="size-4" viewBox="0 0 24 24" fill="none"><path d="M19 12H5M12 5l-7 7 7 7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          @click="$router.push('/iptv')">
+          <svg class="size-4" viewBox="0 0 24 24" fill="none">
+            <path d="M19 12H5M12 5l-7 7 7 7" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+              stroke-linejoin="round" />
+          </svg>
         </button>
         <h1 class="text-sm font-semibold text-neutral-800 dark:text-neutral-200">订阅管理</h1>
       </div>
       <div class="flex items-center gap-2">
-        <button
-          type="button"
+        <button type="button"
           class="rounded-full border border-neutral-200 bg-white/70 px-3 py-1.5 text-xs font-medium text-neutral-600 backdrop-blur-xl transition-all hover:scale-[1.03] active:scale-95 dark:border-neutral-700 dark:bg-neutral-800/70 dark:text-neutral-300"
-          :disabled="testRunning"
-          @click="handleTestAll"
-        >
+          :disabled="testRunning" @click="handleTestAll">
           {{ testRunning ? `测速中 ${testProgress.tested}/${testProgress.total}` : '全部测速' }}
         </button>
-        <a
-          :href="exportUrl"
-          target="_blank"
+        <button type="button"
           class="rounded-full bg-neutral-950 px-3 py-1.5 text-xs font-medium text-white transition-all hover:scale-[1.03] active:scale-95 dark:bg-white dark:text-black"
-        >
+          @click="openExportDialog">
           导出 M3U8
-        </a>
+        </button>
       </div>
     </header>
 
     <!-- 测速进度条 -->
     <div v-if="testRunning" class="mb-4 h-1.5 overflow-hidden rounded-full bg-neutral-200 dark:bg-neutral-700">
-      <div
-        class="h-full rounded-full bg-emerald-500 transition-all duration-300"
-        :style="{ width: `${(testProgress.tested / testProgress.total * 100) || 0}%` }"
-      ></div>
+      <div class="h-full rounded-full bg-emerald-500 transition-all duration-300"
+        :style="{ width: `${(testProgress.tested / testProgress.total * 100) || 0}%` }"></div>
     </div>
 
     <div v-if="testRunning" class="mb-4 flex gap-4 text-xs text-neutral-400 dark:text-neutral-500">
@@ -48,31 +43,21 @@
     <!-- 添加订阅 -->
     <div class="mb-6 space-y-2">
       <div class="flex gap-2">
-        <input
-          v-model="addUrl"
-          type="url"
-          placeholder="输入 M3U/M3U8 订阅链接…"
+        <input v-model="addUrl" type="url" placeholder="输入 M3U/M3U8 订阅链接…"
           class="min-w-0 flex-1 rounded-xl border border-neutral-200 bg-white/70 px-4 py-2.5 text-sm text-neutral-800 outline-none backdrop-blur-xl transition-colors focus:border-neutral-400 dark:border-neutral-600 dark:bg-neutral-800/70 dark:text-neutral-200 dark:focus:border-neutral-500"
-          @keydown.enter="handleAdd"
-        />
-        <button
-          type="button"
+          @keydown.enter="handleAdd" />
+        <button type="button"
           class="shrink-0 rounded-xl bg-neutral-950 px-4 py-2.5 text-sm font-medium text-white transition-all hover:scale-[1.03] active:scale-95 disabled:opacity-50 dark:bg-white dark:text-black"
-          :disabled="!addUrl.trim() || addLoading"
-          @click="handleAdd"
-        >
+          :disabled="!addUrl.trim() || addLoading" @click="handleAdd">
           {{ addLoading ? '解析中…' : '添加' }}
         </button>
       </div>
       <div class="flex items-center gap-2">
-        <input
-          v-model="addUa"
-          type="text"
-          placeholder="自定义 User-Agent（可选）"
-          class="min-w-0 flex-1 rounded-xl border border-neutral-200 bg-white/70 px-4 py-2 text-xs text-neutral-600 outline-none backdrop-blur-xl transition-colors focus:border-neutral-400 dark:border-neutral-600 dark:bg-neutral-800/70 dark:text-neutral-300 dark:focus:border-neutral-500"
-        />
+        <input v-model="addUa" type="text" placeholder="自定义 User-Agent（可选）"
+          class="min-w-0 flex-1 rounded-xl border border-neutral-200 bg-white/70 px-4 py-2 text-xs text-neutral-600 outline-none backdrop-blur-xl transition-colors focus:border-neutral-400 dark:border-neutral-600 dark:bg-neutral-800/70 dark:text-neutral-300 dark:focus:border-neutral-500" />
         <label class="flex items-center gap-1.5 text-xs text-neutral-500 dark:text-neutral-400 cursor-pointer">
-          <input v-model="addForceProxy" type="checkbox" class="size-3.5 rounded accent-neutral-950 dark:accent-white" />
+          <input v-model="addForceProxy" type="checkbox"
+            class="size-3.5 rounded accent-neutral-950 dark:accent-white" />
           强制中转
         </label>
       </div>
@@ -82,11 +67,8 @@
 
     <!-- 订阅列表 -->
     <div class="space-y-3">
-      <div
-        v-for="sub in subscriptions"
-        :key="sub.id"
-        class="rounded-2xl border border-black/5 bg-white/80 p-4 shadow-sm backdrop-blur-xl dark:border-white/10 dark:bg-neutral-800/50"
-      >
+      <div v-for="sub in subscriptions" :key="sub.id"
+        class="rounded-2xl border border-black/5 bg-white/80 p-4 shadow-sm backdrop-blur-xl dark:border-white/10 dark:bg-neutral-800/50">
         <div class="mb-2 flex items-start justify-between">
           <div class="min-w-0 flex-1">
             <h3 class="truncate text-sm font-semibold text-neutral-800 dark:text-neutral-200">{{ sub.title }}</h3>
@@ -101,49 +83,206 @@
           </div>
         </div>
         <div class="flex items-center gap-2 border-t border-black/5 pt-3 dark:border-white/5">
-          <button
-            type="button"
+          <button type="button"
             class="rounded-lg bg-neutral-100 px-2.5 py-1 text-xs text-neutral-600 transition-colors hover:bg-neutral-200 dark:bg-neutral-700 dark:text-neutral-300 dark:hover:bg-neutral-600"
-            @click="handleRefresh(sub)"
-          >
+            @click="handleRefresh(sub)">
             刷新
           </button>
-          <button
-            type="button"
+          <button type="button"
             class="rounded-lg bg-neutral-100 px-2.5 py-1 text-xs text-neutral-600 transition-colors hover:bg-neutral-200 dark:bg-neutral-700 dark:text-neutral-300 dark:hover:bg-neutral-600"
-            @click="handleTestSub(sub)"
-          >
+            @click="handleTestSub(sub)">
             测速
           </button>
-          <button
-            type="button"
+          <button type="button"
             class="rounded-lg px-2.5 py-1 text-xs text-red-400 transition-colors hover:bg-red-50 dark:hover:bg-red-900/20"
-            @click="handleDelete(sub)"
-          >
+            @click="handleDelete(sub)">
             删除
           </button>
-          <a
-            :href="`${API_BASE}/api/iptv/export.m3u?tested_only=false`"
-            target="_blank"
+          <button type="button"
             class="rounded-lg px-2.5 py-1 text-xs text-neutral-400 transition-colors hover:bg-neutral-100 dark:hover:bg-neutral-700"
-          >
+            @click="openExportDialog">
             导出
-          </a>
+          </button>
         </div>
       </div>
 
-      <p v-if="subscriptions.length === 0 && !loading" class="py-10 text-center text-sm text-neutral-400 dark:text-neutral-500">
+      <p v-if="subscriptions.length === 0 && !loading"
+        class="py-10 text-center text-sm text-neutral-400 dark:text-neutral-500">
         暂无订阅源，在上方输入链接添加
       </p>
     </div>
   </main>
+
+  <Teleport to="body">
+    <div v-if="exportDialogOpen"
+      class="fixed inset-0 z-[80] flex items-center justify-center bg-neutral-950/35 px-4 py-8 backdrop-blur-md"
+      @click.self="closeExportDialog">
+      <section
+        class="max-h-full w-full max-w-xl overflow-y-auto rounded-3xl border border-white/60 bg-white/95 p-6 shadow-2xl shadow-neutral-950/20 dark:border-white/10 dark:bg-neutral-900/95">
+        <div class="mb-5 relative flex items-center justify-center">
+
+          <div class="text-center">
+            <h2 class="text-lg font-semibold text-neutral-900 dark:text-neutral-50">选择订阅导出模式</h2>
+          </div>
+
+          <button type="button"
+            class="absolute right-0 flex size-8 shrink-0 items-center justify-center rounded-full text-neutral-500 transition-colors hover:bg-neutral-100 dark:hover:bg-neutral-800"
+            aria-label="关闭" @click="closeExportDialog">
+            <svg class="size-4" viewBox="0 0 24 24" fill="none">
+              <path d="M6 6l12 12M18 6 6 18" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" />
+            </svg>
+          </button>
+
+        </div>
+
+        <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <button v-for="mode in exportModes" :key="mode.id" type="button"
+            class="group relative rounded-2xl border border-neutral-200 bg-white p-4 text-center transition-all hover:-translate-y-0.5 hover:border-neutral-400 hover:shadow-lg active:translate-y-0 dark:border-neutral-700 dark:bg-neutral-900 dark:hover:border-neutral-500"
+            @click="copySubscriptionUrl(mode.id)">
+            <span v-if="mode.badge"
+              class="absolute right-3 top-3 rounded-full border border-neutral-200 px-2 py-0.5 text-[0.65rem] font-medium text-neutral-500 dark:border-neutral-700 dark:text-neutral-400">
+              {{ mode.badge }}
+            </span>
+            <span
+              class="mx-auto mb-3 flex size-9 items-center justify-center rounded-full bg-neutral-100 text-neutral-900 dark:bg-neutral-800 dark:text-neutral-100">
+              <svg v-if="mode.id === 'hybrid'" class="size-5" viewBox="0 0 24 24" fill="none">
+                <path
+                  d="M10 13a5 5 0 0 0 7.1 0l2-2a5 5 0 0 0-7.1-7.1l-1.1 1.1M14 11a5 5 0 0 0-7.1 0l-2 2A5 5 0 0 0 12 20.1l1.1-1.1"
+                  stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+              </svg>
+              <svg v-else-if="mode.id === 'direct'" class="size-5" viewBox="0 0 24 24" fill="none">
+                <path d="m13 2-8 12h6l-1 8 8-12h-6l1-8Z" stroke="currentColor" stroke-width="2"
+                  stroke-linejoin="round" />
+              </svg>
+              <svg v-else-if="mode.id === 'proxy'" class="size-5" viewBox="0 0 24 24" fill="none">
+                <path
+                  d="M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18ZM3.6 9h16.8M3.6 15h16.8M12 3c2.2 2.4 3.3 5.4 3.3 9S14.2 18.6 12 21M12 3c-2.2 2.4-3.3 5.4-3.3 9s1.1 6.6 3.3 9"
+                  stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+              </svg>
+              <svg v-else class="size-5" viewBox="0 0 24 24" fill="none">
+                <path
+                  d="M12 3l1.7 5.3L19 10l-5.3 1.7L12 17l-1.7-5.3L5 10l5.3-1.7L12 3ZM19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8L19 15Z"
+                  stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" />
+              </svg>
+            </span>
+            <h3 class="text-sm font-semibold text-neutral-900 dark:text-neutral-100">{{ mode.title }}</h3>
+            <p class="mt-1 text-xs text-neutral-500 dark:text-neutral-400">{{ mode.subtitle }}</p>
+            <!-- <p class="mt-3 text-[0.7rem] text-neutral-400 dark:text-neutral-500">{{ mode.detail }}</p> -->
+            <p v-if="copiedMode === mode.id" class="mt-3 text-xs font-medium text-emerald-500">已复制</p>
+          </button>
+        </div>
+
+        <div
+          class="mt-5 rounded-2xl border border-neutral-200 bg-neutral-50/80 p-3 dark:border-neutral-800 dark:bg-neutral-950/40">
+          <button type="button"
+            class="flex w-full items-center justify-between text-left text-xs font-medium text-neutral-700 dark:text-neutral-300"
+            @click="advancedOpen = !advancedOpen">
+            高级选项
+            <svg class="size-4 transition-transform" :class="{ 'rotate-180': advancedOpen }" viewBox="0 0 24 24"
+              fill="none">
+              <path d="m6 9 6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                stroke-linejoin="round" />
+            </svg>
+          </button>
+          <div v-if="advancedOpen" class="mt-3 space-y-3">
+            <div class="grid grid-cols-1 gap-2 text-xs text-neutral-600 dark:text-neutral-300 sm:grid-cols-2">
+              <label class="flex items-center gap-2"><input v-model="exportOptions.healthyOnly" type="checkbox"
+                  class="size-3.5 rounded accent-neutral-950 dark:accent-white" />只导出可用源</label>
+              <label class="flex items-center gap-2"><input v-model="exportOptions.includeRtsp" type="checkbox"
+                  class="size-3.5 rounded accent-neutral-950 dark:accent-white" />纯直连包含 RTSP</label>
+              <label class="flex items-center gap-2"><input v-model="exportOptions.includeEpg" type="checkbox"
+                  class="size-3.5 rounded accent-neutral-950 dark:accent-white" />附带 EPG ID</label>
+              <label class="flex items-center gap-2"><input v-model="exportOptions.includeLogo" type="checkbox"
+                  class="size-3.5 rounded accent-neutral-950 dark:accent-white" />附带台标</label>
+            </div>
+            <input v-model="exportOptions.groups" type="text" placeholder="分组过滤，用逗号分隔，例如：央视,卫视"
+              class="w-full rounded-xl border border-neutral-200 bg-white px-3 py-2 text-xs text-neutral-700 outline-none focus:border-neutral-400 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-200" />
+          </div>
+        </div>
+        <div class="my-6 flex items-center justify-center">
+          <div class="h-px flex-grow bg-neutral-200 dark:bg-neutral-800"></div>
+          <span class="px-3 text-sm font-medium text-neutral-400 font-semibold">支持客户端</span>
+          <div class="h-px flex-grow bg-neutral-200 dark:bg-neutral-800"></div>
+        </div>
+
+        <div class="mb-4 flex flex-wrap items-center justify-center gap-3">
+          <div
+            class="flex items-center gap-1.5 rounded-lg border border-neutral-200 bg-white px-2.5 py-1.5 text-xs text-neutral-600 shadow-sm dark:border-neutral-800 dark:bg-neutral-900/50 dark:text-neutral-300">
+            <svg class="size-5 text-[#FD335B]" fill="currentColor" role="img" viewBox="0 0 160 160"
+              xmlns="http://www.w3.org/2000/svg">
+              <title>Icon</title>
+              <g transform="translate(0, 160) scale(0.1, -0.1)" stroke="none">
+                <path fill-rule="evenodd"
+                  d="M976 1280 c211 -17 275 -47 323 -149 25 -55 26 -61 26 -256 -1 -224 -12 -292 -67 -377 -64 -102 -230 -166 -475 -184 -104 -7 -257 8 -327 33 -140 51 -194 201 -183 507 6 169 18 231 60 293 39 57 126 108 219 128 77 16 252 19 424 5z M553 1205 c-79 -18 -114 -36 -147 -76 -67 -79 -78 -139 -66 -353 6 -97 15 -180 24 -199 16 -40 77 -89 129 -106 47 -16 363 -15 421 0 81 21 152 116 182 246 24 102 24 283 0 357 -22 66 -68 119 -112 130 -62 15 -367 16 -431 1z" />
+                <path
+                  d="M761 979 c109 -71 149 -106 149 -130 0 -16 -148 -164 -197 -196 -28 -19 -69 -10 -78 16 -10 34 -25 184 -25 263 0 68 3 79 22 92 12 9 25 16 29 16 4 0 49 -27 100 -61z" />
+                <path
+                  d="M1180 1065 c-13 -35 -13 -231 0 -256 14 -25 46 -24 60 1 6 12 9 71 8 147 l-3 128 -27 3 c-22 3 -30 -2 -38 -23z" />
+                <path d="M1185 720 c-35 -39 6 -95 43 -58 17 17 15 65 -4 72 -21 8 -18 9 -39 -14z" />
+              </g>
+            </svg>
+            <span class="font-bold text-black-600">APTV</span>
+          </div>
+          <div
+            class="flex items-center gap-1.5 rounded-lg border border-neutral-200 bg-white px-2.5 py-1.5 text-xs text-neutral-600 shadow-sm dark:border-neutral-800 dark:bg-neutral-900/50 dark:text-neutral-300">
+            <svg class="size-5 text-blue-500" fill="currentColor" role="img" viewBox="0 0 256 256"
+              xmlns="http://www.w3.org/2000/svg">
+              <title>TiviMate</title>
+              <g transform="translate(0, 256) scale(0.1, -0.1)" stroke="none">
+                <path
+                  d="M550 1765 l0 -155 -50 0 -50 0 0 -100 0 -100 49 0 49 0 4 -262 c3 -245 5 -266 25 -310 12 -26 33 -63 48 -82 57 -74 212 -125 342 -112 64 7 168 39 178 56 3 5 -11 51 -31 104 l-36 94 -34 -14 c-43 -18 -117 -18 -152 0 -53 27 -57 48 -57 295 l0 226 118 3 117 3 0 99 0 100 -120 0 -120 0 0 155 0 155 -140 0 -140 0 0 -155z" />
+                <path
+                  d="M1883 1478 c-23 -51 -76 -173 -118 -270 -43 -98 -80 -178 -84 -178 -3 0 -80 63 -171 141 -91 77 -197 167 -237 200 l-72 60 19 -43 c10 -24 91 -200 178 -393 l160 -350 140 -3 140 -3 20 58 c11 32 59 164 107 293 47 129 107 291 132 360 25 69 54 146 64 173 l19 47 -129 0 -128 0 -40 -92z" />
+              </g>
+            </svg>
+            <span class="font-bold text-black-500">TiviMate</span>
+          </div>
+          <div
+            class="flex items-center gap-1.5 rounded-lg border border-neutral-200 bg-white px-2.5 py-1.5 text-xs text-neutral-600 shadow-sm dark:border-neutral-800 dark:bg-neutral-900/50 dark:text-neutral-300">
+            <svg class="size-4 text-orange-500" fill="currentColor" role="img" viewBox="0 0 24 24"
+              xmlns="http://www.w3.org/2000/svg">
+              <title>VLC media player</title>
+              <path
+                d="M12.0319 0c-.8823 0-1.0545.136-1.0545.136-.1738.056-.3556.255-.4105.43L9.683 3.3808c.4729.1729 1.3222.4266 2.2337.4266 1.0987 0 2.017-.3494 2.3763-.5075L13.4352.566c-.055-.1755-.237-.3707-.4067-.4374 0 0-.1142-.1286-.9966-.1286zm3.5645 7.455c-.3601.34-1.3276.9373-3.6797.9373-2.2929 0-3.189-.5678-3.5213-.9113l-1.3887 4.4227c.2272.3614 1.2539 1.5594 4.8847 1.5594 3.7569 0 4.8539-1.3467 5.0649-1.6737zm-8.5897 4.4487l-1.0025 3.1922H4.3428c-.2486 0-.5097.1932-.5826.4315l-2.334 7.6317a.3962.3962 0 0 0-.0169.1537c-.0008.0053-.002.0099-.002.016 0 .0839.0233.226.0233.226.0322.2456.2612.4452.5098.4452h20.1192c.2487 0 .4768-.1994.5098-.4453 0 0 .0234-.142.0234-.226a.0245.0245 0 0 0-.0025-.01.3201.3201 0 0 0 .0024-.0313.4096.4096 0 0 0-.019-.1282l-2.3339-7.6318c-.0729-.2383-.334-.4314-.5826-.4314h-1.6636l.2005.6391c-.2407.4854-1.4886 2.38-6.3027 2.38-4.6003 0-5.8288-1.73-6.1107-2.3072z" />
+            </svg>
+            <span class="font-bold text-black-500">VLC</span>
+          </div>
+          <div
+            class="flex items-center gap-1.5 rounded-lg border border-neutral-200 bg-white px-2.5 py-1.5 text-xs text-neutral-600 shadow-sm dark:border-neutral-800 dark:bg-neutral-900/50 dark:text-neutral-300">
+            <svg class="size-4" viewBox="0 0 205 256" xmlns="http://www.w3.org/2000/svg">
+              <title>PotPlayer</title>
+              <path fill="#fff"
+                d="m27.76,245.86c-9.66,0-17.52-7.86-17.52-17.51V27.71c0-9.66,7.86-17.51,17.52-17.51,3.47,0,6.84,1.04,9.75,3l149.04,100.31c4.84,3.26,7.73,8.68,7.73,14.52s-2.89,11.26-7.73,14.52L37.51,242.86c-2.91,1.96-6.28,3-9.75,3h0Z" />
+              <path fill="#2ea4ff"
+                d="m27.76,19.7c1.5,0,3.04.43,4.44,1.38l149.04,100.31c4.71,3.17,4.71,10.1,0,13.27L32.2,234.98c-1.41.95-2.94,1.38-4.44,1.38-4.16,0-8.02-3.31-8.02-8.01V27.71c0-4.71,3.86-8.01,8.02-8.01m0-19C12.86.7.74,12.82.74,27.71v200.63c0,14.9,12.12,27.01,27.02,27.01,5.36,0,10.57-1.6,15.05-4.61l149.04-100.31c7.47-5.03,11.92-13.4,11.92-22.4,0-9-4.46-17.37-11.92-22.4L42.81,5.32c-4.49-3.02-9.69-4.61-15.05-4.61h0Z" />
+            </svg>
+            <span class="font-bold text-black-500">PotPlayer</span>
+          </div>
+          <div
+            class="flex items-center gap-1.5 rounded-lg border border-neutral-200 bg-white px-2.5 py-1.5 text-xs text-neutral-600 shadow-sm dark:border-neutral-800 dark:bg-neutral-900/50 dark:text-neutral-300">
+            <svg class="size-4 text-emerald-500" fill="currentColor" role="img" viewBox="0 0 24 24"
+              xmlns="http://www.w3.org/2000/svg">
+              <title>Emby</title>
+              <path
+                d="M11.041 0c-.007 0-1.456 1.43-3.219 3.176L4.615 6.352l.512.513.512.512-2.819 2.791L0 12.961l1.83 1.848c1.006 1.016 2.438 2.46 3.182 3.209l1.351 1.359.508-.496c.28-.273.515-.498.524-.498.008 0 1.266 1.264 2.794 2.808L12.97 24l.187-.182c.23-.225 5.007-4.95 5.717-5.656l.52-.516-.502-.513c-.276-.282-.5-.52-.496-.53.003-.009 1.264-1.26 2.802-2.783 1.538-1.522 2.8-2.776 2.803-2.785.005-.012-3.617-3.684-6.107-6.193L17.65 4.6l-.505.505c-.279.278-.517.501-.53.497-.013-.005-1.27-1.267-2.793-2.805A449.655 449.655 0 0011.041 0zM9.223 7.367c.091.038 7.951 4.608 7.957 4.627.003.013-1.781 1.056-3.965 2.32a999.898 999.898 0 01-3.996 2.307c-.019.006-.026-1.266-.026-4.629 0-3.7.007-4.634.03-4.625Z" />
+            </svg>
+            <span class="font-bold text-black-500">Emby</span>
+          </div>
+        </div>
+        <p class="mt-4 text-center text-xs text-neutral-400 dark:text-neutral-500">
+          不知道选什么？<a href="https://bgm.gs/" target="_blank" class="text-blue-500 hover:underline">点我</a>
+        </p>
+        <p v-if="copyError" class="mt-2 text-center text-xs text-red-500">{{ copyError }}</p>
+      </section>
+    </div>
+  </Teleport>
 </template>
 
 <script setup>
 import { ref, onMounted, onBeforeUnmount } from 'vue'
 import {
   fetchSubscriptions, addSubscription, deleteSubscription, refreshSubscription,
-  testAllGlobal, fetchGlobalTestStatus, getExportUrl,
+  testAllGlobal, fetchGlobalTestStatus,
 } from '../api/iptv'
 import { API_BASE } from '../apiBase'
 
@@ -156,7 +295,48 @@ const addError = ref('')
 const addLoading = ref(false)
 const testRunning = ref(false)
 const testProgress = ref({ total: 0, tested: 0, working: 0, failed: 0 })
-const exportUrl = ref('')
+const exportDialogOpen = ref(false)
+const advancedOpen = ref(false)
+const copiedMode = ref('')
+const copyError = ref('')
+const exportOptions = ref({
+  healthyOnly: true,
+  includeRtsp: false,
+  includeEpg: true,
+  includeLogo: true,
+  groups: '',
+})
+
+const exportModes = [
+  {
+    id: 'hybrid',
+    title: '混合',
+    subtitle: '直链优先 + 代理备选',
+    detail: '默认推荐，部分流量走服务器',
+    badge: '推荐',
+  },
+  {
+    id: 'smart',
+    title: 'Smart',
+    subtitle: '每频道一条智能链接',
+    detail: '后端选择当前可用源',
+    badge: 'Beta',
+  },
+  {
+    id: 'proxy',
+    title: '代理',
+    subtitle: '所有频道使用代理',
+    detail: '网络受限时更稳定',
+    badge: '',
+  },
+  {
+    id: 'direct',
+    title: '直链',
+    subtitle: '所有频道使用直链',
+    detail: '最省服务器流量',
+    badge: '',
+  },
+]
 
 let testTimer = null
 
@@ -240,7 +420,7 @@ async function pollTestStatus() {
       clearInterval(testTimer)
       testTimer = null
     }
-  } catch {}
+  } catch { }
 }
 
 function formatTime(iso) {
@@ -250,9 +430,66 @@ function formatTime(iso) {
   } catch { return iso }
 }
 
+function openExportDialog() {
+  copyError.value = ''
+  copiedMode.value = ''
+  exportDialogOpen.value = true
+}
+
+function closeExportDialog() {
+  exportDialogOpen.value = false
+}
+
+function buildSubscriptionUrl(mode) {
+  const params = new URLSearchParams()
+  params.set('mode', mode)
+  params.set('healthy_only', exportOptions.value.healthyOnly ? '1' : '0')
+  params.set('include_rtsp', exportOptions.value.includeRtsp ? '1' : '0')
+  params.set('include_epg', exportOptions.value.includeEpg ? '1' : '0')
+  params.set('include_logo', exportOptions.value.includeLogo ? '1' : '0')
+  const groups = exportOptions.value.groups.trim()
+  if (groups) params.set('groups', groups)
+  return `${API_BASE}/api/iptv/subscription.m3u?${params.toString()}`
+}
+
+function fallbackCopyText(text) {
+  const el = document.createElement('textarea')
+  el.value = text
+  el.setAttribute('readonly', '')
+  el.style.position = 'fixed'
+  el.style.opacity = '0'
+  document.body.appendChild(el)
+  el.select()
+  const ok = document.execCommand('copy')
+  el.remove()
+  if (!ok) throw new Error('复制失败')
+}
+
+async function copySubscriptionUrl(mode) {
+  const url = buildSubscriptionUrl(mode)
+  copyError.value = ''
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(url)
+    } else {
+      fallbackCopyText(url)
+    }
+    copiedMode.value = mode
+    window.setTimeout(() => {
+      if (copiedMode.value === mode) copiedMode.value = ''
+    }, 1800)
+  } catch (e) {
+    try {
+      fallbackCopyText(url)
+      copiedMode.value = mode
+    } catch {
+      copyError.value = e?.message || '复制失败，请手动复制链接'
+    }
+  }
+}
+
 onMounted(() => {
   loadSubscriptions()
-  exportUrl.value = `${API_BASE}/api/iptv/export.m3u?tested_only=true`
 })
 
 onBeforeUnmount(() => {

@@ -79,7 +79,3 @@ export async function fetchGlobalTestStatus() {
   const res = await request('/api/iptv/test-status')
   return res.json()
 }
-
-export async function getExportUrl(testedOnly = true) {
-  return `${API_BASE}/api/iptv/export.m3u?tested_only=${testedOnly}`
-}

@@ -17,7 +17,7 @@ from urllib.parse import quote, urljoin, urlparse
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from contextlib import asynccontextmanager
 from fetchers import STATION_FETCHER_MAP, yunting
 import database
@@ -1563,8 +1563,7 @@ async def list_channels(sub_id: int, group: str = '', search: str = ''):
 
 # ── 前端聚合频道列表（跨源去重，每个频道保留所有可用链接）──
 
-@app.get("/api/iptv/channels")
-async def aggregated_channels(group: str = '', search: str = ''):
+async def _get_aggregated_iptv_channels(group: str = '', search: str = '') -> tuple[list[dict], list[str]]:
     # 搜索在 SQL 层过滤（性能好），分组在聚合后过滤（归一化后才准）
     raw = await db.get_aggregated_channels(group='', search=search)
 
@@ -1662,6 +1661,12 @@ async def aggregated_channels(group: str = '', search: str = ''):
         result = [c for c in result if c['group_name'] == group]
 
     groups = sorted(set(c['group_name'] for c in merged.values()))
+    return result, groups
+
+
+@app.get("/api/iptv/channels")
+async def aggregated_channels(group: str = '', search: str = ''):
+    result, groups = await _get_aggregated_iptv_channels(group=group, search=search)
 
     return {"channels": result, "groups": groups, "total": len(result)}
 
@@ -2450,40 +2455,198 @@ async def epg_match_status():
     return [{"canonical_key": m['canonical_key'], "status": m['match_status'], "epg_channel_id": m.get('epg_channel_id', ''), "confidence": m.get('confidence', 0)} for m in maps]
 
 
-# ── 导出 M3U8 ──
+# ── 订阅导出 ──
 
-@app.get("/api/iptv/export.m3u")
-async def export_m3u(tested_only: bool = True):
-    subs = await db.get_subscriptions()
-    if not subs:
-        raise HTTPException(status_code=404, detail="无订阅源")
+IPTV_SUBSCRIPTION_MODES = {"hybrid", "direct", "proxy", "smart"}
+
+
+def _csv_set(value: str = '') -> set[str]:
+    return {item.strip() for item in (value or '').split(',') if item.strip()}
+
+
+def _truthy_query(value: bool | int | str) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() not in {"0", "false", "no", "off", ""}
+
+
+def _m3u_attr(value: str = '') -> str:
+    return str(value or '').replace('"', "'").replace('\n', ' ').strip()
+
+
+def _source_type(source: dict) -> str:
+    from m3u8_parser import detect_source_type
+
+    declared = source.get('source_type')
+    if declared and declared != 'hls':
+        return declared
+    return detect_source_type(source.get('url', ''))
+
+
+def _sorted_sources(sources: list[dict]) -> list[dict]:
+    return sorted(sources, key=lambda u: (
+        0 if u.get('is_working') == 1 else 1 if u.get('is_working') == -1 else 2,
+        u.get('latency_ms') or 9999,
+    ))
+
+
+def _is_supported_export_source(source: dict, healthy_only: bool = True) -> bool:
+    if not source.get('url'):
+        return False
+    if healthy_only and source.get('is_working') != 1:
+        return False
+    return _source_type(source) not in {'youtube', 'unsupported_youtube_url'}
+
+
+def _absolute_api_url(request: Request, path: str) -> str:
+    return f"{str(request.base_url).rstrip('/')}{path}"
+
+
+def _iptv_proxy_path_for_source(source: dict) -> str:
+    url = str(source.get('url') or '').strip()
+    custom_ua = str(source.get('custom_ua') or '').strip()
+    ua = f'&custom_ua={quote(custom_ua, safe="")}' if custom_ua else ''
+    source_type = _source_type(source)
+    if source_type == 'rtsp':
+        return f'/api/iptv/proxy/rtsp.m3u8?target_url={quote(url, safe="")}{ua}'
+    if source_type == 'mpegts':
+        return f'/api/iptv/proxy/stream?target_url={quote(url, safe="")}{ua}'
+    return f'/api/iptv/proxy/wide.m3u8?proxy_ts=1{ua}&target_url={quote(url, safe="")}'
+
+
+def _iptv_proxy_url_for_source(source: dict, request: Request) -> str:
+    return _absolute_api_url(request, _iptv_proxy_path_for_source(source))
+
+
+def _m3u_attrs_for_channel(channel: dict, include_epg: bool, include_logo: bool) -> str:
+    attrs = []
+    tvg_name = channel.get('tvg_name') or channel.get('name') or ''
+    if tvg_name:
+        attrs.append(f'tvg-name="{_m3u_attr(tvg_name)}"')
+    export_tvg = channel.get('epg_channel_id') or channel.get('tvg_id') or channel.get('canonical_key', '')
+    if include_epg and export_tvg:
+        attrs.append(f'tvg-id="{_m3u_attr(export_tvg)}"')
+    if include_logo and channel.get('logo_url'):
+        attrs.append(f'tvg-logo="{_m3u_attr(channel["logo_url"])}"')
+    if channel.get('group_name'):
+        attrs.append(f'group-title="{_m3u_attr(channel["group_name"])}"')
+    return ' '.join(attrs)
+
+
+def _subscription_urls_for_channel(channel: dict, mode: str, request: Request, healthy_only: bool, include_rtsp: bool) -> list[str]:
+    sources = _sorted_sources([
+        source for source in channel.get('urls', [])
+        if _is_supported_export_source(source, healthy_only=healthy_only)
+    ])
+
+    if mode == 'smart':
+        if sources:
+            return [_absolute_api_url(request, f'/api/iptv/smart/{quote(channel["canonical_key"], safe="")}.m3u8')]
+        return []
+
+    if mode == 'direct':
+        return [
+            source['url'] for source in sources
+            if include_rtsp or _source_type(source) != 'rtsp'
+        ]
+
+    if mode == 'proxy':
+        return [_iptv_proxy_url_for_source(source, request) for source in sources]
+
+    direct_sources = []
+    proxy_only_sources = []
+    for source in sources:
+        source_type = _source_type(source)
+        if source_type == 'rtsp' or source.get('force_proxy') or source.get('custom_ua'):
+            proxy_only_sources.append(source)
+        else:
+            direct_sources.append(source)
+
+    urls = [source['url'] for source in direct_sources]
+    urls.extend(_iptv_proxy_url_for_source(source, request) for source in direct_sources)
+    urls.extend(_iptv_proxy_url_for_source(source, request) for source in proxy_only_sources)
+    return urls
+
+
+@app.get("/api/iptv/subscription.m3u")
+async def export_iptv_subscription(
+    request: Request,
+    mode: str = 'hybrid',
+    healthy_only: bool = True,
+    include_rtsp: bool = False,
+    include_epg: bool = True,
+    include_logo: bool = True,
+    groups: str = '',
+):
+    mode = (mode or 'hybrid').strip().lower()
+    if mode not in IPTV_SUBSCRIPTION_MODES:
+        raise HTTPException(status_code=400, detail="无效导出模式")
+
+    channels, _groups = await _get_aggregated_iptv_channels()
+    selected_groups = _csv_set(groups)
+    if selected_groups:
+        channels = [ch for ch in channels if ch.get('group_name') in selected_groups]
+
+    healthy = _truthy_query(healthy_only)
+    rtsp = _truthy_query(include_rtsp)
+    epg = _truthy_query(include_epg)
+    logo = _truthy_query(include_logo)
 
     lines = ["#EXTM3U"]
-    for sub in subs:
-        channels = await db.get_channels(sub['id'])
-        if tested_only:
-            channels = [ch for ch in channels if ch['is_working'] == 1]
-        for ch in channels:
-            attrs = []
-            if ch['tvg_name']:
-                attrs.append(f'tvg-name="{ch["tvg_name"]}"')
-            export_tvg = ch.get('epg_channel_id') or ch.get('tvg_id') or ch.get('canonical_key', '')
-            if export_tvg:
-                attrs.append(f'tvg-id="{export_tvg}"')
-            if ch['logo_url']:
-                attrs.append(f'tvg-logo="{ch["logo_url"]}"')
-            if ch['group_name']:
-                attrs.append(f'group-title="{ch["group_name"]}"')
-            attr_str = ' '.join(attrs)
-            lines.append(f'#EXTINF:-1 {attr_str},{ch["name"]}')
-            lines.append(ch['url'])
+    exported = 0
+    for channel in channels:
+        urls = _subscription_urls_for_channel(channel, mode, request, healthy, rtsp)
+        if not urls:
+            continue
+        attrs = _m3u_attrs_for_channel(channel, include_epg=epg, include_logo=logo)
+        for url in urls:
+            lines.append(f'#EXTINF:-1 {attrs},{channel["name"]}')
+            lines.append(url)
+            exported += 1
+
+    if exported == 0:
+        raise HTTPException(status_code=404, detail="无可导出的频道")
 
     content = '\n'.join(lines)
     return Response(
         content=content,
         media_type="audio/x-mpegurl",
-        headers={"Content-Disposition": 'attachment; filename="wavebypass_iptv.m3u"'},
+        headers={"Content-Disposition": f'attachment; filename="wavebypass_{mode}.m3u"'},
     )
+
+
+@app.get("/api/iptv/smart/{canonical_key}.m3u8")
+async def iptv_smart_playlist(canonical_key: str, request: Request):
+    channels, _groups = await _get_aggregated_iptv_channels()
+    channel = next((ch for ch in channels if ch.get('canonical_key') == canonical_key), None)
+    if not channel:
+        raise HTTPException(status_code=404, detail="频道不存在")
+
+    sources = _sorted_sources([
+        source for source in channel.get('urls', [])
+        if _is_supported_export_source(source, healthy_only=True)
+    ])
+    for source in sources:
+        source_type = _source_type(source)
+        try:
+            if source_type == 'rtsp':
+                return await iptv_proxy_rtsp_playlist(
+                    target_url=source['url'],
+                    custom_ua=source.get('custom_ua', ''),
+                    compat=0,
+                )
+            if source_type == 'mpegts':
+                return RedirectResponse(_iptv_proxy_url_for_source(source, request), status_code=307)
+            return await iptv_wide_playlist(
+                target_url=source['url'],
+                proxy_ts=1,
+                custom_ua=source.get('custom_ua', ''),
+                compat=0,
+            )
+        except HTTPException:
+            continue
+
+    raise HTTPException(status_code=503, detail="没有可用播放源")
 
 
 # ── 工具函数 ──
