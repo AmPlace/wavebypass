@@ -489,12 +489,14 @@ function handleThemeChromeSync(event) {
   } else {
     syncFullPlayerTheme()
   }
+  if (event?.detail?.refreshChrome === false) return
   refreshSafariChrome()
 }
 
 function refreshSafariChrome() {
   if (!isPlayerExpanded.value) return
   if (!isIOS) return
+  if (document.visibilityState !== 'visible') return
   isSafariChromeRefreshing.value = true
   requestAnimationFrame(() => {
     requestAnimationFrame(() => {
@@ -731,7 +733,7 @@ function syncIptvMediaSession(playbackState = isPlaying.value ? 'playing' : 'pau
       if (activeIptvEngine.value === 'youtube') {
         try { _youtubePlayer?.playVideo?.() } catch {}
       }
-      playerStore.togglePlay(true)
+      resumeIptvFromMediaSession()
     })
     navigator.mediaSession.setActionHandler('pause', () => {
       if (activeIptvEngine.value === 'youtube') {
@@ -746,6 +748,45 @@ function syncIptvMediaSession(playbackState = isPlaying.value ? 'playing' : 'pau
     })
   } catch (e) {
     console.warn('[IPTV] MediaSession 更新失败:', e)
+  }
+}
+
+async function resumeIptvFromMediaSession() {
+  if (!isIptvMode.value) return
+  playerStore.togglePlay(true)
+
+  if (activeIptvEngine.value === 'youtube') {
+    try { _youtubePlayer?.playVideo?.() } catch {}
+    syncIptvMediaSession('playing')
+    return
+  }
+
+  const video = iptvVideoRef.value
+  if (video && !video.paused && !video.ended) {
+    syncIptvMediaSession('playing')
+    return
+  }
+
+  if (video && (iptvHlsRef.value || iptvMpegtsRef.value || video.currentSrc || video.src)) {
+    try {
+      video.volume = volume.value
+      await video.play()
+      playerStore.setLoading(false)
+      syncIptvMediaSession('playing')
+      return
+    } catch (e) {
+      console.warn('[IPTV] MediaSession resume play() failed:', e?.message || e)
+    }
+  }
+
+  const attemptId = ++_playAttemptId
+  try {
+    await playCurrentIptvUrl(attemptId, { allowStartupRace: false })
+    syncIptvMediaSession('playing')
+  } catch (e) {
+    if (e?.message !== 'cancelled') {
+      console.warn('[IPTV] MediaSession resume reload failed:', e?.message || e)
+    }
   }
 }
 

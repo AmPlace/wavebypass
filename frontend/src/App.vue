@@ -156,7 +156,10 @@ watch(() => route.path, (path) => {
 
 function forceMetaContent(name, content) {
   const old = document.querySelector(`meta[name="${name}"]`)
-  if (old) old.remove()
+  if (old) {
+    if (old.content !== content) old.content = content
+    return old
+  }
   const meta = document.createElement('meta')
   meta.name = name
   meta.content = content
@@ -165,10 +168,11 @@ function forceMetaContent(name, content) {
 }
 
 // 动态修改 Safari / PWA 浏览器 chrome 颜色
-function updateThemeColor(isDarkMode = document.documentElement.classList.contains('dark'), source = '') {
+function updateThemeColor(isDarkMode = document.documentElement.classList.contains('dark'), source = '', options = {}) {
   const themeColor = isDarkMode ? THEME_CHROME_COLORS.dark : THEME_CHROME_COLORS.light
   const statusBarStyle = isDarkMode ? THEME_STATUS_BAR.dark : THEME_STATUS_BAR.light
   const colorScheme = isDarkMode ? 'dark' : 'light'
+  const refreshChrome = options.refreshChrome !== false
 
   console.log('[theme-sync]', {
     source,
@@ -205,13 +209,13 @@ function updateThemeColor(isDarkMode = document.documentElement.classList.contai
   appEl?.style.setProperty('color-scheme', colorScheme, 'important')
 
   window.dispatchEvent(new CustomEvent('wavebypass-theme-chrome-sync', {
-    detail: { isDarkMode, themeColor },
+    detail: { isDarkMode, themeColor, refreshChrome, source },
   }))
 }
 
 window.__wavebypassSyncThemeChrome = updateThemeColor
 
-function applyTheme() {
+function applyTheme(source = 'applyTheme', options = {}) {
   const savedTheme = window.localStorage.getItem(THEME_STORAGE_KEY)
   const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches
 
@@ -220,7 +224,7 @@ function applyTheme() {
   isDark.value = shouldUseDark
   document.documentElement.classList.toggle('dark', shouldUseDark)
   
-  updateThemeColor(shouldUseDark, 'applyTheme:' + (savedTheme ? 'manual' : 'system'))
+  updateThemeColor(shouldUseDark, `${source}:${savedTheme ? 'manual' : 'system'}`, options)
 }
 
 applyTheme()
@@ -249,17 +253,17 @@ function onSearchBlur() {
 function toggleTheme() {
   const nextTheme = isDark.value ? 'light' : 'dark'
   window.localStorage.setItem(THEME_STORAGE_KEY, nextTheme)
-  applyTheme()
+  applyTheme('toggleTheme')
 }
 
 function handleSystemThemeChange(e) {
   window.localStorage.removeItem(THEME_STORAGE_KEY)
-  applyTheme()
+  applyTheme('systemThemeChange')
 }
 
 function handleVisibilityChange() {
   if (document.visibilityState === 'visible') {
-    applyTheme()
+    applyTheme('visibilitychange', { refreshChrome: false })
   }
 }
 
