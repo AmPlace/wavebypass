@@ -849,11 +849,47 @@ function releaseWideProxyUrl(url) {
   }
 }
 
+const HLS_ABR_PATCH_KEY = '__wavebypassAbrNullGuard'
+
+function patchHlsAbrNullGuard(hls) {
+  const abr = hls?.abrController
+  if (!abr || abr[HLS_ABR_PATCH_KEY]) return
+  const original = abr._abandonRulesCheck
+  if (typeof original !== 'function') return
+  abr._abandonRulesCheck = (...args) => {
+    if (!abr.hls) {
+      try {
+        abr.clearTimer?.()
+      } catch {}
+      return
+    }
+    return original.apply(abr, args)
+  }
+  abr[HLS_ABR_PATCH_KEY] = true
+}
+
+function clearHlsInternalTimers(hls) {
+  const controllers = [
+    hls?.abrController,
+    hls?.streamController,
+    hls?.levelController,
+    hls?.audioStreamController,
+    hls?.subtitleStreamController,
+  ]
+  for (const controller of controllers) {
+    try {
+      controller?.clearTimer?.()
+    } catch {}
+  }
+}
+
 function trackHlsSource(hls, url) {
+  patchHlsAbrNullGuard(hls)
   if (hls && url) hls.__wavebypassSourceUrl = url
 }
 
 function releaseTrackedHls(hls) {
+  clearHlsInternalTimers(hls)
   releaseWideProxyUrl(hls?.__wavebypassSourceUrl)
 }
 
