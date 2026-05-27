@@ -1804,10 +1804,13 @@ function startupRaceEntries(urls, startIndex) {
   const racers = []
   const hlsProbeSupported = canUseHls()
   const mpegtsProbeSupported = canUseMpegTs()
+  const isProxyLike = (entry) => entry?.type === 'proxy' || entry?.via_proxy
+  const currentIsProxyLike = isProxyLike(urls[startIndex])
   for (let i = startIndex; i < urls.length && racers.length < STARTUP_RACE_LIMIT; i++) {
     const entry = urls[i]
     if (!entry?.url) continue
-    if ((entry.type === 'proxy' || entry.via_proxy) && _racedLosers.has(entry.url)) continue
+    if (isProxyLike(entry) !== currentIsProxyLike) continue
+    if (isProxyLike(entry) && _racedLosers.has(entry.url)) continue
     const st = sourceType(entry)
     if (st === 'hls' && hlsProbeSupported) {
       racers.push({ entry, index: i, kind: 'hls' })
