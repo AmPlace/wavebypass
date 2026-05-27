@@ -1892,7 +1892,7 @@ async def test_status(sub_id: int):
 # 扩展窗口代理：定期拉上游 playlist
 _wide_cache: dict[str, dict] = {}
 _WIDE_WINDOW = 20  
-_WIDE_TTL = 300    
+_WIDE_TTL = 120    
 
 
 def _drop_wide_cache(cache_key: str) -> None:
