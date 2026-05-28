@@ -198,6 +198,7 @@ export const usePlayerStore = defineStore('player', {
         if (u.adapter_proxy_url) return u.adapter_proxy_url
         const url = sourceUrl(u)
         const ua = u.custom_ua ? `&custom_ua=${encodeURIComponent(u.custom_ua)}` : ''
+        const referer = u.referer ? `&referer=${encodeURIComponent(u.referer)}` : ''
         const st = sourceType(u)
         if (st === 'adapter') {
           return adapterPlayUrlFor(url)
@@ -207,9 +208,9 @@ export const usePlayerStore = defineStore('player', {
           return `${API_BASE}/api/iptv/proxy/rtsp.m3u8?target_url=${encodeURIComponent(url)}${ua}${compat}`
         }
         if (st === 'mpegts') {
-          return `${API_BASE}/api/iptv/proxy/stream?target_url=${encodeURIComponent(url)}${ua}`
+          return `${API_BASE}/api/iptv/proxy/stream?target_url=${encodeURIComponent(url)}${ua}${referer}`
         }
-        return `${API_BASE}/api/iptv/proxy/wide.m3u8?proxy_ts=1${ua}&target_url=${encodeURIComponent(url)}`
+        return `${API_BASE}/api/iptv/proxy/wide.m3u8?proxy_ts=1${ua}${referer}&target_url=${encodeURIComponent(url)}`
       }
       // 分两组：直连组 + 必须代理组
       const directUrls = []
@@ -238,7 +239,7 @@ export const usePlayerStore = defineStore('player', {
           adapterSources.push(u)
           continue
         }
-        if (st === 'rtsp' || u.force_proxy || u.custom_ua) {
+        if (st === 'rtsp' || u.force_proxy || u.custom_ua || u.referer) {
           proxyOnlyUrls.push({
             ...u,
             url: proxyUrlFor(u),

@@ -17,6 +17,11 @@ const routes = [
     component: () => import('../views/AdminView.vue'),
   },
   {
+    path: '/market',
+    name: 'market',
+    component: () => import('../views/MarketView.vue'),
+  },
+  {
     path: '/admin/epg',
     name: 'epg-debug',
     component: () => import('../views/EpgDebug.vue'),
