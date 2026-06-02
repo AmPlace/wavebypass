@@ -345,6 +345,40 @@ async def _load_manifest(index_item: dict, market_url: str, *, allow_private: bo
     return _normalize_package(index_item, market_url=market_url)
 
 
+def _cache_package(package: dict) -> None:
+    package_id = package.get("id")
+    if not package_id:
+        return
+    packages = _market_cache.get("packages") or []
+    for index, item in enumerate(packages):
+        if item.get("id") == package_id:
+            packages[index] = package
+            return
+
+
+async def _resolve_package_manifest(package: dict) -> dict:
+    if package.get("_manifest_loaded") or not package.get("manifest_url"):
+        return package
+
+    manifest_url = urljoin(str(package.get("market_url") or ""), str(package.get("manifest_url") or ""))
+    allow_private = bool(package.get("_allow_private_fetch") or ALLOW_PRIVATE_MARKET_URLS)
+    final_url, text, _headers = await safe_http_fetch(manifest_url, allow_private=allow_private)
+    try:
+        manifest = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise MarketError(f"manifest JSON 解析失败: {exc}", 400) from exc
+
+    merged = _merge_dict(package, manifest)
+    source = package.get("market_source") or {}
+    original_id = str(package.get("original_id") or manifest.get("id") or package.get("id") or "")
+    loaded = _normalize_package(merged, manifest_url=final_url, market_url=package.get("market_url", ""))
+    loaded = _attach_source(loaded, source, original_id)
+    loaded["_allow_private_fetch"] = allow_private
+    loaded["_manifest_loaded"] = True
+    _cache_package(loaded)
+    return loaded
+
+
 async def _load_source_packages(source: dict) -> tuple[dict, list[dict]]:
     url = str(source.get("url") or "").strip()
     if not url:
@@ -362,16 +396,9 @@ async def _load_source_packages(source: dict) -> tuple[dict, list[dict]]:
     packages = []
     for item in market.get("packages", []):
         raw_id = str(item.get("id") or "")
-        try:
-            loaded = await _load_manifest(item, final_url, allow_private=allow_private)
-            packages.append(_attach_source(loaded, source, raw_id or loaded.get("id")))
-        except Exception as exc:
-            broken = _normalize_package(item, market_url=final_url)
-            broken["supported_in_v1"] = False
-            broken["previewable"] = False
-            broken["importable"] = False
-            broken["unsupported_reason"] = f"manifest 加载失败: {exc}"
-            packages.append(_attach_source(broken, source, raw_id or broken.get("id")))
+        loaded = _normalize_package(item, market_url=final_url)
+        loaded["_manifest_loaded"] = not bool(loaded.get("manifest_url"))
+        packages.append(_attach_source(loaded, source, raw_id or loaded.get("id")))
     for package in packages:
         package["_allow_private_fetch"] = allow_private
     market["_source"] = _source_public({**source, "url": final_url})
@@ -612,6 +639,15 @@ async def get_package(package_id: str) -> dict:
     package = next((item for item in _market_cache.get("packages") or [] if item.get("id") == package_id), None)
     if not package:
         raise MarketError("Market 包不存在", 404)
+    try:
+        package = await _resolve_package_manifest(package)
+    except Exception as exc:
+        package = deepcopy(package)
+        package["supported_in_v1"] = False
+        package["previewable"] = False
+        package["importable"] = False
+        package["unsupported_reason"] = f"manifest 加载失败: {exc}"
+        _cache_package(package)
     result = deepcopy(package)
     install = installed.get(package_id)
     result["installed"] = bool(install)
