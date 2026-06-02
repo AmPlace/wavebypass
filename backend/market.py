@@ -19,6 +19,36 @@ from m3u8_parser import detect_source_type, parse_m3u, parse_youtube_video_id
 SCHEMA_VERSION = 1
 SUPPORTED_IMPORT_KINDS = {"playlist", "dynamic_playlist", "mixed"}
 SUPPORTED_CHANNEL_SOURCE_TYPES = {"inline_channels", "playlist"}
+INDEX_EXECUTION_FIELDS = {
+    "defaults",
+    "channel_sources",
+    "inline_channels",
+    "channels",
+    "channels_url",
+    "source_defaults",
+    "headers",
+}
+RECOMMENDED_INDEX_FIELDS = {
+    "id",
+    "name",
+    "description",
+    "kind",
+    "version",
+    "updated_at",
+    "manifest_url",
+    "region",
+    "operators",
+    "language",
+    "categories",
+    "tags",
+    "status",
+    "source_origin",
+    "source_policy",
+    "risk_level",
+    "importable",
+    "previewable",
+    "supported_in_v1",
+}
 RESERVED_KINDS = {
     "provider",
     "remote_resolver",
@@ -204,6 +234,31 @@ def _package_supported(package: dict) -> bool:
     return package.get("kind") in SUPPORTED_IMPORT_KINDS and bool(package.get("supported_in_v1", True))
 
 
+def _schema_warnings(package: dict, *, index: bool = False, manifest: bool = False) -> list[str]:
+    warnings: list[str] = []
+    if index:
+        leaked = sorted(field for field in INDEX_EXECUTION_FIELDS if field in package)
+        if leaked:
+            warnings.append(f"market.json 索引不应包含执行配置字段: {', '.join(leaked)}")
+        missing = sorted(field for field in RECOMMENDED_INDEX_FIELDS if field not in package)
+        if missing:
+            warnings.append(f"market.json 索引字段不完整: {', '.join(missing[:8])}{'…' if len(missing) > 8 else ''}")
+    if manifest and package.get("kind") in SUPPORTED_IMPORT_KINDS:
+        channel_sources = package.get("channel_sources")
+        if not isinstance(channel_sources, list) or not channel_sources:
+            warnings.append("manifest 缺少 channel_sources，无法预览或导入")
+    return warnings
+
+
+def _validate_package_minimal(raw: dict, *, context: str) -> None:
+    if not isinstance(raw, dict):
+        raise MarketError(f"{context} package 必须是 JSON object", 400)
+    if not str(raw.get("id") or "").strip():
+        raise MarketError(f"{context} package 缺少 id", 400)
+    if not str(raw.get("kind") or "").strip():
+        raise MarketError(f"{context} package 缺少 kind", 400)
+
+
 async def ensure_market_sources() -> list[dict]:
     official = await db.get_market_source_by_key(OFFICIAL_MARKET_SOURCE_KEY)
     if not official:
@@ -293,7 +348,7 @@ async def delete_source(source_id: int) -> dict:
     return {"ok": True}
 
 
-def _normalize_package(raw: dict, *, manifest_url: str = "", market_url: str = "") -> dict:
+def _normalize_package(raw: dict, *, manifest_url: str = "", market_url: str = "", schema_warnings: list[str] | None = None) -> dict:
     package = deepcopy(raw or {})
     package.setdefault("schema_version", SCHEMA_VERSION)
     if package.get("schema_version") != SCHEMA_VERSION:
@@ -320,6 +375,9 @@ def _normalize_package(raw: dict, *, manifest_url: str = "", market_url: str = "
     package.setdefault("contributors", [])
     package.setdefault("manifest_url", manifest_url)
     package.setdefault("market_url", market_url)
+    package.setdefault("schema_warnings", [])
+    if schema_warnings:
+        package["schema_warnings"] = list(dict.fromkeys([*package.get("schema_warnings", []), *schema_warnings]))
 
     supported = _package_supported(package)
     package["supported_in_v1"] = supported
@@ -368,10 +426,15 @@ async def _resolve_package_manifest(package: dict) -> dict:
     except json.JSONDecodeError as exc:
         raise MarketError(f"manifest JSON 解析失败: {exc}", 400) from exc
 
+    _validate_package_minimal(manifest, context="manifest")
+    manifest_warnings = _schema_warnings(manifest, manifest=True)
+    if any("缺少 channel_sources" in warning for warning in manifest_warnings):
+        raise MarketError("; ".join(manifest_warnings), 400)
+
     merged = _merge_dict(package, manifest)
     source = package.get("market_source") or {}
     original_id = str(package.get("original_id") or manifest.get("id") or package.get("id") or "")
-    loaded = _normalize_package(merged, manifest_url=final_url, market_url=package.get("market_url", ""))
+    loaded = _normalize_package(merged, manifest_url=final_url, market_url=package.get("market_url", ""), schema_warnings=manifest_warnings)
     loaded = _attach_source(loaded, source, original_id)
     loaded["_allow_private_fetch"] = allow_private
     loaded["_manifest_loaded"] = True
@@ -395,10 +458,26 @@ async def _load_source_packages(source: dict) -> tuple[dict, list[dict]]:
 
     packages = []
     for item in market.get("packages", []):
-        raw_id = str(item.get("id") or "")
-        loaded = _normalize_package(item, market_url=final_url)
-        loaded["_manifest_loaded"] = not bool(loaded.get("manifest_url"))
-        packages.append(_attach_source(loaded, source, raw_id or loaded.get("id")))
+        try:
+            _validate_package_minimal(item, context="market.json")
+            raw_id = str(item.get("id") or "")
+            index_warnings = _schema_warnings(item, index=True)
+            loaded = _normalize_package(item, market_url=final_url, schema_warnings=index_warnings)
+            loaded["_manifest_loaded"] = not bool(loaded.get("manifest_url"))
+            packages.append(_attach_source(loaded, source, raw_id or loaded.get("id")))
+        except Exception as exc:
+            fallback_id = str(item.get("id") or f"invalid-{len(packages) + 1}") if isinstance(item, dict) else f"invalid-{len(packages) + 1}"
+            broken = _normalize_package(
+                item if isinstance(item, dict) else {"id": fallback_id, "name": fallback_id, "kind": "unknown"},
+                market_url=final_url,
+                schema_warnings=[str(exc)],
+            )
+            broken["id"] = fallback_id
+            broken["supported_in_v1"] = False
+            broken["previewable"] = False
+            broken["importable"] = False
+            broken["unsupported_reason"] = f"索引校验失败: {exc}"
+            packages.append(_attach_source(broken, source, fallback_id))
     for package in packages:
         package["_allow_private_fetch"] = allow_private
     market["_source"] = _source_public({**source, "url": final_url})
@@ -628,7 +707,7 @@ def _package_card(package: dict) -> dict:
         "source_policy", "risk_level", "requires_proxy", "requires_resolver",
         "requires_cookie", "requires_referer", "requires_custom_ua", "channel_count",
         "source_count", "health", "compatibility", "contributors", "importable",
-        "previewable", "supported_in_v1", "unsupported_reason",
+        "previewable", "supported_in_v1", "unsupported_reason", "schema_warnings",
     ]
     return {key: deepcopy(package.get(key)) for key in keys if key in package}
 
@@ -816,8 +895,10 @@ async def build_preview(package_id: str) -> dict:
         "channels": entries[:200],
         "channel_count": len({entry["name"] for entry in entries}),
         "source_count": len(entries),
+        "direct_source_count": len([entry for entry in entries if not entry.get("force_proxy") and not entry.get("custom_ua") and not entry.get("referer")]),
+        "proxy_source_count": len([entry for entry in entries if entry.get("force_proxy") or entry.get("custom_ua") or entry.get("referer")]),
         "unsupported_source_count": unsupported_source_count,
-        "warnings": list(dict.fromkeys(warnings))[:50],
+        "warnings": list(dict.fromkeys([*(package.get("schema_warnings") or []), *warnings]))[:50],
         "created_at": now,
         "expires_at": now + PREVIEW_TTL_SECONDS,
         "cache_note": "V1 单进程内存缓存，服务重启后会清空",

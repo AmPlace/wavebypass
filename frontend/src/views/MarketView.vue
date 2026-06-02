@@ -117,6 +117,7 @@
           <button v-if="pkg.installed" type="button" class="market-action" :disabled="importLoading" @click="handleUninstall(pkg)">卸载</button>
         </div>
         <p v-if="!pkg.supported_in_v1" class="mt-3 text-xs text-neutral-400 dark:text-neutral-500">{{ pkg.unsupported_reason || '当前版本仅展示' }}</p>
+        <p v-else-if="pkg.schema_warnings?.length" class="mt-3 line-clamp-2 text-xs text-amber-600 dark:text-amber-300">{{ pkg.schema_warnings[0] }}</p>
       </article>
     </section>
 
@@ -205,13 +206,20 @@
           <div class="market-info">来源：{{ selectedPackage.source_origin || 'unknown' }}</div>
           <div class="market-info">策略：{{ selectedPackage.source_policy || 'unknown' }}</div>
         </div>
+        <div v-if="selectedPackage?.schema_warnings?.length" class="mb-5 rounded-2xl bg-amber-50 p-3 text-xs leading-5 text-amber-700 dark:bg-amber-950/30 dark:text-amber-300">
+          <p v-for="item in selectedPackage.schema_warnings.slice(0, 4)" :key="item">{{ item }}</p>
+        </div>
 
         <div v-if="previewLoading" class="rounded-2xl bg-neutral-100 p-5 text-sm text-neutral-500 dark:bg-neutral-800 dark:text-neutral-400">正在获取频道列表…</div>
 
         <div v-else-if="preview" class="space-y-4">
-          <div class="grid gap-2 text-sm sm:grid-cols-3">
+          <div class="grid gap-2 text-sm sm:grid-cols-4">
             <div class="market-stat"><b>{{ preview.channel_count }}</b><span>频道</span></div>
             <div class="market-stat"><b>{{ preview.source_count }}</b><span>可导入源</span></div>
+            <div class="market-stat"><b>{{ preview.direct_source_count ?? 0 }}</b><span>直连源</span></div>
+            <div class="market-stat"><b>{{ preview.proxy_source_count ?? 0 }}</b><span>代理源</span></div>
+          </div>
+          <div class="grid gap-2 text-sm sm:grid-cols-1">
             <div class="market-stat"><b>{{ preview.unsupported_source_count }}</b><span>跳过源</span></div>
           </div>
           <div v-if="preview.warnings?.length" class="rounded-2xl bg-amber-50 p-3 text-xs leading-5 text-amber-700 dark:bg-amber-950/30 dark:text-amber-300">
