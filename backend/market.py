@@ -708,6 +708,8 @@ def _package_card(package: dict) -> dict:
         "requires_cookie", "requires_referer", "requires_custom_ua", "channel_count",
         "source_count", "health", "compatibility", "contributors", "importable",
         "previewable", "supported_in_v1", "unsupported_reason", "schema_warnings",
+        "manifest_url", "market_url", "market_source", "installed", "installed_version",
+        "update_available",
     ]
     return {key: deepcopy(package.get(key)) for key in keys if key in package}
 

@@ -203,9 +203,40 @@
           <div class="market-info">状态：{{ statusLabel(selectedPackage.status) }}</div>
           <div class="market-info">地区：{{ regionLabel(selectedPackage.region) }}</div>
           <div class="market-info">运营商：{{ (selectedPackage.operators || []).map(operatorLabel).join('、') || '未知' }}</div>
+          <div class="market-info">版本：{{ selectedPackage.version || '未知' }}</div>
+          <div class="market-info">更新：{{ selectedPackage.updated_at || '未知' }}</div>
           <div class="market-info">来源：{{ selectedPackage.source_origin || 'unknown' }}</div>
           <div class="market-info">策略：{{ selectedPackage.source_policy || 'unknown' }}</div>
+          <div class="market-info">Market 源：{{ selectedPackage.market_source?.name || '未知' }}</div>
+          <div class="market-info">安装版本：{{ selectedPackage.installed_version || (selectedPackage.installed ? '未知' : '未安装') }}</div>
+          <div class="market-info sm:col-span-2">Manifest：{{ selectedPackage.manifest_url || '内联配置' }}</div>
         </div>
+
+        <div v-if="selectedPackage" class="mb-5 grid gap-2 text-xs text-neutral-500 dark:text-neutral-400 sm:grid-cols-3">
+          <div class="market-info">代理：{{ selectedPackage.requires_proxy ? '需要' : '不需要' }}</div>
+          <div class="market-info">解析器：{{ selectedPackage.requires_resolver ? '需要' : '不需要' }}</div>
+          <div class="market-info">Cookie：{{ selectedPackage.requires_cookie ? '需要' : '不需要' }}</div>
+          <div class="market-info">Referer：{{ selectedPackage.requires_referer ? '需要' : '不需要' }}</div>
+          <div class="market-info">自定义 UA：{{ selectedPackage.requires_custom_ua ? '需要' : '不需要' }}</div>
+          <div class="market-info">风险：{{ selectedPackage.risk_level || 'unknown' }}</div>
+        </div>
+
+        <div v-if="selectedPackage?.health || selectedPackage?.compatibility || selectedPackage?.contributors?.length" class="mb-5 grid gap-3 text-xs sm:grid-cols-3">
+          <div v-if="selectedPackage.health" class="market-detail-box">
+            <h3>健康</h3>
+            <p>可用率：{{ selectedPackage.health.rate ?? '未知' }}</p>
+            <p>检测：{{ selectedPackage.health.last_checked_at || '未知' }}</p>
+          </div>
+          <div v-if="selectedPackage.compatibility" class="market-detail-box">
+            <h3>兼容</h3>
+            <p v-for="(value, key) in selectedPackage.compatibility" :key="key">{{ key }}：{{ value }}</p>
+          </div>
+          <div v-if="selectedPackage.contributors?.length" class="market-detail-box">
+            <h3>贡献者</h3>
+            <p v-for="item in selectedPackage.contributors.slice(0, 4)" :key="item.name || item.url">{{ item.name || item.url }}</p>
+          </div>
+        </div>
+
         <div v-if="selectedPackage?.schema_warnings?.length" class="mb-5 rounded-2xl bg-amber-50 p-3 text-xs leading-5 text-amber-700 dark:bg-amber-950/30 dark:text-amber-300">
           <p v-for="item in selectedPackage.schema_warnings.slice(0, 4)" :key="item">{{ item }}</p>
         </div>
@@ -605,6 +636,29 @@ onMounted(async () => {
 .dark .market-chip,
 .dark .market-info {
   background: rgb(38 38 38);
+}
+
+.market-detail-box {
+  border-radius: 14px;
+  background: rgb(245 245 245);
+  padding: 10px 12px;
+  color: rgb(115 115 115);
+  line-height: 1.65;
+}
+
+.market-detail-box h3 {
+  margin-bottom: 4px;
+  font-weight: 700;
+  color: rgb(38 38 38);
+}
+
+.dark .market-detail-box {
+  background: rgb(38 38 38);
+  color: rgb(163 163 163);
+}
+
+.dark .market-detail-box h3 {
+  color: white;
 }
 
 .market-action {
