@@ -1690,7 +1690,16 @@ async def import_market_package(package_id: str, request: Request):
             package_id,
             preview_id=(body or {}).get("preview_id", ""),
             prefer_cached_preview=_truthy_query((body or {}).get("prefer_cached_preview", True)),
+            reinstall=_truthy_query((body or {}).get("reinstall", False)),
         )
+    except Exception as exc:
+        _market_http_error(exc)
+
+
+@app.delete("/api/market/packages/{package_id}/install")
+async def uninstall_market_package(package_id: str):
+    try:
+        return await _market.uninstall_package(package_id)
     except Exception as exc:
         _market_http_error(exc)
 

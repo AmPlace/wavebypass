@@ -108,9 +108,13 @@
         <div class="flex items-center gap-2">
           <button type="button" class="market-action" @click="openDetail(pkg)">详情</button>
           <button type="button" class="market-action" :disabled="!pkg.previewable" @click="handlePreview(pkg)">预览</button>
-          <button type="button" class="market-action primary" :disabled="!pkg.importable || pkg.installed" @click="handleImport(pkg)">
-            {{ pkg.installed ? '已安装' : '导入' }}
+          <button v-if="!pkg.installed" type="button" class="market-action primary" :disabled="!pkg.importable" @click="handleImport(pkg)">
+            导入
           </button>
+          <button v-else-if="pkg.update_available" type="button" class="market-action primary" :disabled="!pkg.importable || importLoading" @click="handleReinstall(pkg)">
+            更新
+          </button>
+          <button v-if="pkg.installed" type="button" class="market-action" :disabled="importLoading" @click="handleUninstall(pkg)">卸载</button>
         </div>
         <p v-if="!pkg.supported_in_v1" class="mt-3 text-xs text-neutral-400 dark:text-neutral-500">{{ pkg.unsupported_reason || '当前版本仅展示' }}</p>
       </article>
@@ -230,9 +234,13 @@
 
         <div class="mt-5 flex justify-end gap-2">
           <button type="button" class="market-action" :disabled="!selectedPackage?.previewable || previewLoading" @click="handlePreview(selectedPackage)">预览</button>
-          <button type="button" class="market-action primary" :disabled="!selectedPackage?.importable || selectedPackage?.installed || importLoading" @click="handleImport(selectedPackage)">
-            {{ importLoading ? '导入中' : selectedPackage?.installed ? '已安装' : '导入' }}
+          <button v-if="!selectedPackage?.installed" type="button" class="market-action primary" :disabled="!selectedPackage?.importable || importLoading" @click="handleImport(selectedPackage)">
+            {{ importLoading ? '导入中' : '导入' }}
           </button>
+          <button v-else-if="selectedPackage?.update_available" type="button" class="market-action primary" :disabled="!selectedPackage?.importable || importLoading" @click="handleReinstall(selectedPackage)">
+            {{ importLoading ? '更新中' : '更新' }}
+          </button>
+          <button v-if="selectedPackage?.installed" type="button" class="market-action" :disabled="importLoading" @click="handleUninstall(selectedPackage)">卸载</button>
         </div>
       </section>
     </div>
@@ -251,6 +259,7 @@ import {
   previewMarketPackage,
   refreshMarket,
   refreshMarketSource,
+  uninstallMarketPackage,
   updateMarketSource,
 } from '../api/market'
 
@@ -483,17 +492,55 @@ async function handleImport(pkg) {
   error.value = ''
   try {
     const result = await importMarketPackage(pkg.id, preview.value?.preview_id || '')
-    packages.value = packages.value.map(item => item.id === pkg.id
-      ? { ...item, installed: true, installed_subscription_id: result.subscription_id }
-      : item)
-    if (selectedPackage.value?.id === pkg.id) {
-      selectedPackage.value = { ...selectedPackage.value, installed: true, installed_subscription_id: result.subscription_id }
-    }
+    markPackageInstalled(pkg.id, result.subscription_id)
     preview.value = preview.value || { warnings: result.warnings || [], channel_count: result.channel_count, source_count: result.source_count, unsupported_source_count: 0, channels: [] }
   } catch (e) {
     error.value = e.message || String(e)
   } finally {
     importLoading.value = false
+  }
+}
+
+async function handleReinstall(pkg) {
+  if (!pkg?.id) return
+  importLoading.value = true
+  error.value = ''
+  try {
+    const result = await importMarketPackage(pkg.id, preview.value?.preview_id || '', { reinstall: true })
+    markPackageInstalled(pkg.id, result.subscription_id)
+    preview.value = preview.value || { warnings: result.warnings || [], channel_count: result.channel_count, source_count: result.source_count, unsupported_source_count: 0, channels: [] }
+  } catch (e) {
+    error.value = e.message || String(e)
+  } finally {
+    importLoading.value = false
+  }
+}
+
+async function handleUninstall(pkg) {
+  if (!pkg?.id) return
+  importLoading.value = true
+  error.value = ''
+  try {
+    await uninstallMarketPackage(pkg.id)
+    packages.value = packages.value.map(item => item.id === pkg.id
+      ? { ...item, installed: false, installed_subscription_id: null, installed_version: '' }
+      : item)
+    if (selectedPackage.value?.id === pkg.id) {
+      selectedPackage.value = { ...selectedPackage.value, installed: false, installed_subscription_id: null, installed_version: '' }
+    }
+  } catch (e) {
+    error.value = e.message || String(e)
+  } finally {
+    importLoading.value = false
+  }
+}
+
+function markPackageInstalled(packageId, subscriptionId) {
+  packages.value = packages.value.map(item => item.id === packageId
+    ? { ...item, installed: true, installed_subscription_id: subscriptionId, installed_version: item.version || '', update_available: false }
+    : item)
+  if (selectedPackage.value?.id === packageId) {
+    selectedPackage.value = { ...selectedPackage.value, installed: true, installed_subscription_id: subscriptionId, installed_version: selectedPackage.value.version || '', update_available: false }
   }
 }
 

@@ -99,12 +99,19 @@ export async function previewMarketPackage(id) {
   return res.json()
 }
 
-export async function importMarketPackage(id, previewId = '') {
+export async function importMarketPackage(id, previewId = '', { reinstall = false } = {}) {
   const res = await request(`/api/market/packages/${encodeURIComponent(id)}/import`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ preview_id: previewId, prefer_cached_preview: true }),
+    body: JSON.stringify({ preview_id: previewId, prefer_cached_preview: true, reinstall }),
     timeout: 45_000,
+  })
+  return res.json()
+}
+
+export async function uninstallMarketPackage(id) {
+  const res = await request(`/api/market/packages/${encodeURIComponent(id)}/install`, {
+    method: 'DELETE',
   })
   return res.json()
 }

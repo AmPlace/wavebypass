@@ -242,7 +242,7 @@ def _package_source_id(source: dict, package_id: str) -> str:
     source_key = str(source.get("source_key") or "").strip()
     if source_key == OFFICIAL_MARKET_SOURCE_KEY:
         return package_id
-    return f"{source_key}/{package_id}" if source_key else package_id
+    return f"{source_key}::{package_id}" if source_key else package_id
 
 
 def _attach_source(package: dict, source: dict, raw_id: str | None = None) -> dict:
@@ -522,6 +522,30 @@ async def _installed_map() -> dict[str, dict]:
     return result
 
 
+def _installed_metadata(install: dict | None) -> dict:
+    if not install:
+        return {}
+    try:
+        return json.loads(install.get("metadata_json") or "{}")
+    except json.JSONDecodeError:
+        return {}
+
+
+def _update_available(package: dict, install: dict | None) -> bool:
+    if not install:
+        return False
+    current_version = str(package.get("version") or "").strip()
+    installed_version = str(install.get("installed_version") or "").strip()
+    if current_version and installed_version:
+        return current_version != installed_version
+
+    current_updated_at = str(package.get("updated_at") or "").strip()
+    installed_updated_at = str(_installed_metadata(install).get("updated_at") or "").strip()
+    if current_updated_at and installed_updated_at:
+        return current_updated_at != installed_updated_at
+    return False
+
+
 async def list_packages(filters: dict[str, str | bool]) -> list[dict]:
     await ensure_market_loaded()
     installed = await _installed_map()
@@ -565,6 +589,7 @@ async def list_packages(filters: dict[str, str | bool]) -> list[dict]:
         item["installed"] = bool(install)
         item["installed_version"] = install.get("installed_version", "") if install else ""
         item["installed_subscription_id"] = install.get("installed_subscription_id") if install else None
+        item["update_available"] = _update_available(package, install)
         packages.append(item)
     return packages
 
@@ -592,7 +617,21 @@ async def get_package(package_id: str) -> dict:
     result["installed"] = bool(install)
     result["installed_version"] = install.get("installed_version", "") if install else ""
     result["installed_subscription_id"] = install.get("installed_subscription_id") if install else None
+    result["update_available"] = _update_available(package, install)
     return result
+
+
+async def uninstall_package(package_id: str) -> dict:
+    installed = await db.get_market_install(package_id)
+    if not installed:
+        return {"ok": True, "uninstalled": False}
+    sub_id = installed.get("installed_subscription_id")
+    if sub_id:
+        sub = await db.get_subscription(sub_id)
+        if sub:
+            await db.delete_subscription(sub_id)
+    await db.delete_market_install(package_id)
+    return {"ok": True, "uninstalled": True}
 
 
 def _source_type_for(source: dict) -> str:
@@ -763,7 +802,12 @@ def _drop_expired_previews() -> None:
             _preview_cache.pop(preview_id, None)
 
 
-async def import_package(package_id: str, preview_id: str = "", prefer_cached_preview: bool = True) -> dict:
+async def import_package(
+    package_id: str,
+    preview_id: str = "",
+    prefer_cached_preview: bool = True,
+    reinstall: bool = False,
+) -> dict:
     package = await get_package(package_id)
     if not package.get("importable"):
         raise MarketError(package.get("unsupported_reason") or "该包当前版本不可导入", 400)
@@ -772,7 +816,9 @@ async def import_package(package_id: str, preview_id: str = "", prefer_cached_pr
     if installed and installed.get("installed_subscription_id"):
         sub = await db.get_subscription(installed["installed_subscription_id"])
         if sub:
-            raise MarketError(f"Market 包已安装: {sub.get('title')}", 409)
+            if not reinstall:
+                raise MarketError(f"Market 包已安装: {sub.get('title')}", 409)
+            await db.delete_subscription(sub["id"])
         await db.delete_market_install(package_id)
 
     preview = None
@@ -811,6 +857,7 @@ async def import_package(package_id: str, preview_id: str = "", prefer_cached_pr
         "name": package.get("name"),
         "kind": package.get("kind"),
         "version": package.get("version", ""),
+        "updated_at": package.get("updated_at", ""),
         "manifest_url": package.get("manifest_url", ""),
         "channel_sources": package.get("channel_sources", []),
         "defaults": package.get("defaults", {}),
