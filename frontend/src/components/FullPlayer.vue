@@ -3379,8 +3379,8 @@ onBeforeUnmount(() => {
   color: var(--text-primary);
   cursor: pointer;
   box-shadow: var(--control-shadow);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
   transition: opacity 0.18s ease, transform 0.16s ease, background 0.16s ease;
 }
 
@@ -3481,7 +3481,7 @@ onBeforeUnmount(() => {
   background: rgba(15, 23, 42, 0.62);
   color: #fff;
   cursor: pointer;
-  backdrop-filter: blur(12px);
+  backdrop-filter: none;
   transition: opacity 0.18s ease, transform 0.16s ease, background 0.16s ease;
 }
 
@@ -3701,8 +3701,8 @@ onBeforeUnmount(() => {
   border-radius: 999px;
   background: var(--control-surface);
   box-shadow: var(--control-shadow);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
 
 .transport-main svg {

@@ -52,7 +52,7 @@
             :aria-label="`播放 ${ch.name}`"
             :style="{ height: `${cardSize}px` }"
             :disabled="isAllFailed(ch)"
-            class="group rounded-3xl border border-white/70 bg-gray-50/80 p-3 text-left shadow-sm shadow-black/[0.03] outline-none backdrop-blur-xl transition-[background-color,transform,box-shadow,border-color] duration-300 ease-out hover:scale-[1.02] hover:bg-white/90 active:scale-95 dark:border-white/10 dark:bg-neutral-800/50 dark:shadow-black/20 dark:hover:bg-neutral-800/75"
+            class="group rounded-3xl border border-white/70 bg-gray-50/80 p-3 text-left shadow-none outline-none backdrop-blur-none transition-colors duration-200 ease-out hover:bg-white/90 active:bg-white dark:border-white/10 dark:bg-neutral-800/50 dark:hover:bg-neutral-800/75"
             :class="{
               'ring-2 ring-black dark:ring-white': isCurrentChannel(ch),
               'cursor-not-allowed opacity-40 hover:scale-100 hover:bg-gray-50/80 dark:hover:bg-neutral-800/50': isAllFailed(ch),
