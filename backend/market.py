@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import ipaddress
 import json
 import os
@@ -762,7 +763,45 @@ def _source_headers(source: dict) -> dict[str, str]:
     return _clean_headers(source.get("headers") or {})
 
 
-def _normalize_source(channel: dict, source: dict, package: dict, source_defaults: dict) -> tuple[dict | None, str | None]:
+def _source_tracking_ids(channel: dict, source: dict, package: dict, channel_source: dict, source_index: int) -> dict[str, str]:
+    package_id = str(package.get("id") or "").strip()
+    channel_source_id = str(channel_source.get("id") or channel_source.get("name") or "").strip()
+    channel_id = str(
+        channel.get("id")
+        or channel.get("canonical_key")
+        or channel.get("tvg_id")
+        or (channel.get("epg") or {}).get("tvg_id")
+        or channel.get("name")
+        or ""
+    ).strip()
+    explicit_source_id = str(source.get("id") or source.get("source_id") or "").strip()
+    if explicit_source_id:
+        source_item_id = explicit_source_id
+    else:
+        seed = "|".join([
+            package_id,
+            channel_source_id,
+            channel_id,
+            str(source_index),
+            str(source.get("url") or ""),
+        ])
+        source_item_id = f"auto-{hashlib.sha1(seed.encode('utf-8')).hexdigest()[:16]}"
+    return {
+        "market_package_id": package_id,
+        "market_source_id": channel_source_id,
+        "market_channel_id": channel_id,
+        "market_source_item_id": source_item_id,
+    }
+
+
+def _normalize_source(
+    channel: dict,
+    source: dict,
+    package: dict,
+    channel_source: dict,
+    source_defaults: dict,
+    source_index: int,
+) -> tuple[dict | None, str | None]:
     if isinstance(source, str):
         source = {"url": source}
     merged = _merge_source_defaults(source_defaults, source)
@@ -798,6 +837,7 @@ def _normalize_source(channel: dict, source: dict, package: dict, source_default
             or custom_ua
             or referer
         ) else 0,
+        **_source_tracking_ids(channel, merged, package, channel_source, source_index),
     }, None
 
 
@@ -880,8 +920,15 @@ async def build_preview(package_id: str) -> dict:
             raw_sources = channel.get("sources")
             if not raw_sources and channel.get("url"):
                 raw_sources = [{"url": channel.get("url"), "source_type": channel.get("source_type")}]
-            for raw_source in raw_sources or []:
-                entry, warning = _normalize_source(channel, raw_source, package, channel_source_defaults)
+            for source_index, raw_source in enumerate(raw_sources or []):
+                entry, warning = _normalize_source(
+                    channel,
+                    raw_source,
+                    package,
+                    channel_source,
+                    channel_source_defaults,
+                    source_index,
+                )
                 if entry:
                     entries.append(entry)
                 else:

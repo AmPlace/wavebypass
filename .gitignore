@@ -26,6 +26,7 @@ edit.md
 geo-limit.md
 1.md
 *.md
+!docs/market-schema.md
 proud-wibbling-goblet.md
 tools/
 *.db

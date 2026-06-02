@@ -1755,6 +1755,10 @@ async def _get_aggregated_iptv_channels(group: str = '', search: str = '') -> tu
             'raw_tvg_id': ch.get('tvg_id', ''),
             'raw_tvg_name': ch.get('tvg_name', ''),
             'raw_group': ch.get('group_name', ''),
+            'market_package_id': ch.get('market_package_id', ''),
+            'market_source_id': ch.get('market_source_id', ''),
+            'market_channel_id': ch.get('market_channel_id', ''),
+            'market_source_item_id': ch.get('market_source_item_id', ''),
         })
 
     # 生成 tvg_id_candidates

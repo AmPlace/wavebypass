@@ -39,6 +39,10 @@ CREATE TABLE IF NOT EXISTS channels (
     source_type     TEXT DEFAULT 'hls',
     youtube_video_id TEXT DEFAULT '',
     referer         TEXT DEFAULT '',
+    market_package_id TEXT DEFAULT '',
+    market_source_id TEXT DEFAULT '',
+    market_channel_id TEXT DEFAULT '',
+    market_source_item_id TEXT DEFAULT '',
     FOREIGN KEY (subscription_id) REFERENCES subscriptions(id) ON DELETE CASCADE
 );
 
@@ -145,11 +149,17 @@ async def initialize():
             ('source_type', 'TEXT', "'hls'"),
             ('youtube_video_id', 'TEXT', "''"),
             ('referer', 'TEXT', "''"),
+            ('market_package_id', 'TEXT', "''"),
+            ('market_source_id', 'TEXT', "''"),
+            ('market_channel_id', 'TEXT', "''"),
+            ('market_source_item_id', 'TEXT', "''"),
         ]:
             try:
                 conn.execute(f"ALTER TABLE channels ADD COLUMN {col} {typ} DEFAULT {default}")
             except sqlite3.OperationalError:
                 pass  # 字段已存在
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_channels_market_pkg ON channels(market_package_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_channels_market_item ON channels(market_package_id, market_source_item_id)")
         for col, typ, default in [
             ('source_key', 'TEXT', "''"),
             ('allow_private', 'INTEGER', '0'),
@@ -267,8 +277,11 @@ async def add_channels_bulk(sub_id: int, channels: list[dict]):
         conn.execute("DELETE FROM channels WHERE subscription_id=?", (sub_id,))
         now = datetime.now(timezone.utc).isoformat()
         conn.executemany(
-            "INSERT INTO channels(subscription_id, name, url, logo_url, group_name, tvg_id, tvg_name, source_type, youtube_video_id, referer) "
-            "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO channels("
+            "subscription_id, name, url, logo_url, group_name, tvg_id, tvg_name, "
+            "source_type, youtube_video_id, referer, market_package_id, market_source_id, "
+            "market_channel_id, market_source_item_id"
+            ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 (
                     sub_id,
@@ -281,6 +294,10 @@ async def add_channels_bulk(sub_id: int, channels: list[dict]):
                     ch.get('source_type', 'hls'),
                     ch.get('youtube_video_id', ''),
                     ch.get('referer', ''),
+                    ch.get('market_package_id', ''),
+                    ch.get('market_source_id', ''),
+                    ch.get('market_channel_id', ''),
+                    ch.get('market_source_item_id', ''),
                 )
                 for ch in channels
             ],
