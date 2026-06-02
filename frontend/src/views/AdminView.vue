@@ -17,6 +17,11 @@
       <div class="flex items-center gap-2">
         <button type="button"
           class="rounded-full border border-neutral-200 bg-white/70 px-3 py-1.5 text-xs font-medium text-neutral-600 backdrop-blur-xl transition-all hover:scale-[1.03] active:scale-95 dark:border-neutral-700 dark:bg-neutral-800/70 dark:text-neutral-300"
+          @click="$router.push('/market')">
+          Market
+        </button>
+        <button type="button"
+          class="rounded-full border border-neutral-200 bg-white/70 px-3 py-1.5 text-xs font-medium text-neutral-600 backdrop-blur-xl transition-all hover:scale-[1.03] active:scale-95 dark:border-neutral-700 dark:bg-neutral-800/70 dark:text-neutral-300"
           :disabled="testRunning" @click="handleTestAll">
           {{ testRunning ? `测速中 ${testProgress.tested}/${testProgress.total}` : '全部测速' }}
         </button>

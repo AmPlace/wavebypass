@@ -20,9 +20,11 @@ _NAME_RE = re.compile(r',\s*(.+?)\s*$')
 _M3U_ENTRY_RE = re.compile(
     r'#EXTINF:-?[0-9]*\s*(.*?)\s*,\s*(.+?)\s*\n'
     r'(?:(?:[ \t]*\r?\n)*|(?:#EXTVLCOPT:[^\r\n]*(?:\r?\n|$))*)'
-    r'((?:https?|rtmp|rtsp)://\S+)',
+    r'((?:https?|rtmp|rtsp|migu|adapter)://\S+)',
     re.MULTILINE | re.DOTALL,
 )
+
+_STREAM_URL_PREFIXES = ('http://', 'https://', 'rtmp://', 'rtsp://', 'migu://', 'adapter://')
 
 # 简单的逐行解析用
 _EXTINF_RE = re.compile(r'#EXTINF:(.+?),(.+)')
@@ -145,6 +147,7 @@ def parse_m3u(text: str) -> list[dict]:
             'name': name,
             'url': url,
             'source_type': detect_source_type(url),
+            'adapter': adapter_provider(url),
             'youtube_video_id': parse_youtube_video_id(url),
             'logo_url': attrs.get('tvg-logo', ''),
             'group_name': attrs.get('group-title', '') or '其他',
@@ -188,11 +191,12 @@ def parse_m3u(text: str) -> list[dict]:
             i += 1
             continue
 
-        if pending_extinf and line.startswith(('http://', 'https://', 'rtmp://', 'rtsp://')):
+        if pending_extinf and line.startswith(_STREAM_URL_PREFIXES):
             ch = {
                 **pending_extinf,
                 'url': line,
                 'source_type': detect_source_type(line),
+                'adapter': adapter_provider(line),
                 'youtube_video_id': parse_youtube_video_id(line),
             }
             channels.append(ch)
@@ -216,15 +220,17 @@ def parse_m3u(text: str) -> list[dict]:
         if '#genre#' in line:
             current_group = line.split(',')[0].strip() or '其他'
             continue
-        if line.startswith(('http://', 'https://', 'rtmp://', 'rtsp://')):
+        if line.startswith(_STREAM_URL_PREFIXES):
             continue
         parts = line.split(',', 1)
-        if len(parts) == 2 and parts[1].strip().startswith(('http://', 'https://', 'rtmp://', 'rtsp://')):
+        if len(parts) == 2 and parts[1].strip().startswith(_STREAM_URL_PREFIXES):
+            url = parts[1].strip()
             channels.append({
                 'name': parts[0].strip(),
-                'url': parts[1].strip(),
-                'source_type': detect_source_type(parts[1].strip()),
-                'youtube_video_id': parse_youtube_video_id(parts[1].strip()),
+                'url': url,
+                'source_type': detect_source_type(url),
+                'adapter': adapter_provider(url),
+                'youtube_video_id': parse_youtube_video_id(url),
                 'logo_url': '',
                 'group_name': current_group,
                 'tvg_id': '',
@@ -276,8 +282,24 @@ def is_youtube_url(url: str) -> bool:
     )
 
 
+def adapter_provider(url: str) -> str:
+    value = (url or '').strip()
+    try:
+        parsed = urlparse(value)
+    except ValueError:
+        return ''
+    scheme = parsed.scheme.lower()
+    if scheme == 'migu':
+        return 'migu'
+    if scheme == 'adapter':
+        return (parsed.netloc or '').lower().split('@')[-1].split(':')[0]
+    return ''
+
+
 def detect_source_type(url: str) -> str:
     value = (url or '').strip().lower()
+    if adapter_provider(url):
+        return 'adapter'
     if parse_youtube_video_id(url):
         return 'youtube'
     if is_youtube_url(url):

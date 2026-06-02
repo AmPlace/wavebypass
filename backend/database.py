@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS channels (
     last_tested     TEXT DEFAULT '',
     source_type     TEXT DEFAULT 'hls',
     youtube_video_id TEXT DEFAULT '',
+    referer         TEXT DEFAULT '',
     FOREIGN KEY (subscription_id) REFERENCES subscriptions(id) ON DELETE CASCADE
 );
 
@@ -88,6 +89,17 @@ CREATE TABLE IF NOT EXISTS channel_epg_map (
     locked          INTEGER DEFAULT 0,
     updated_at      TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS market_packages_installed (
+    package_id                TEXT PRIMARY KEY,
+    market_url                TEXT DEFAULT '',
+    installed_subscription_id INTEGER,
+    installed_version         TEXT DEFAULT '',
+    installed_at              TEXT NOT NULL,
+    auto_update               INTEGER DEFAULT 0,
+    metadata_json             TEXT DEFAULT '',
+    FOREIGN KEY (installed_subscription_id) REFERENCES subscriptions(id) ON DELETE SET NULL
+);
 """
 
 
@@ -117,6 +129,7 @@ async def initialize():
         for col, typ, default in [
             ('source_type', 'TEXT', "'hls'"),
             ('youtube_video_id', 'TEXT', "''"),
+            ('referer', 'TEXT', "''"),
         ]:
             try:
                 conn.execute(f"ALTER TABLE channels ADD COLUMN {col} {typ} DEFAULT {default}")
@@ -226,8 +239,8 @@ async def add_channels_bulk(sub_id: int, channels: list[dict]):
         conn.execute("DELETE FROM channels WHERE subscription_id=?", (sub_id,))
         now = datetime.now(timezone.utc).isoformat()
         conn.executemany(
-            "INSERT INTO channels(subscription_id, name, url, logo_url, group_name, tvg_id, tvg_name, source_type, youtube_video_id) "
-            "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO channels(subscription_id, name, url, logo_url, group_name, tvg_id, tvg_name, source_type, youtube_video_id, referer) "
+            "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 (
                     sub_id,
@@ -239,6 +252,7 @@ async def add_channels_bulk(sub_id: int, channels: list[dict]):
                     ch.get('tvg_name', ''),
                     ch.get('source_type', 'hls'),
                     ch.get('youtube_video_id', ''),
+                    ch.get('referer', ''),
                 )
                 for ch in channels
             ],
@@ -306,6 +320,71 @@ async def get_aggregated_channels(group: str = '', search: str = '') -> list[dic
         conn.close()
         return [dict(r) for r in rows]
     return await asyncio.to_thread(_get)
+
+
+# ── Market install state ──
+
+async def get_market_install(package_id: str) -> dict | None:
+    def _get():
+        conn = _connect()
+        row = conn.execute(
+            "SELECT * FROM market_packages_installed WHERE package_id=?",
+            (package_id,),
+        ).fetchone()
+        conn.close()
+        return dict(row) if row else None
+    return await asyncio.to_thread(_get)
+
+
+async def list_market_installs() -> list[dict]:
+    def _list():
+        conn = _connect()
+        rows = conn.execute("SELECT * FROM market_packages_installed ORDER BY installed_at DESC").fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    return await asyncio.to_thread(_list)
+
+
+async def upsert_market_install(
+    package_id: str,
+    market_url: str,
+    installed_subscription_id: int,
+    installed_version: str = '',
+    metadata_json: str = '',
+    auto_update: int = 0,
+):
+    def _upsert():
+        conn = _connect()
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            """
+            INSERT INTO market_packages_installed(
+                package_id, market_url, installed_subscription_id, installed_version,
+                installed_at, auto_update, metadata_json
+            )
+            VALUES(?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(package_id) DO UPDATE SET
+                market_url=excluded.market_url,
+                installed_subscription_id=excluded.installed_subscription_id,
+                installed_version=excluded.installed_version,
+                installed_at=excluded.installed_at,
+                auto_update=excluded.auto_update,
+                metadata_json=excluded.metadata_json
+            """,
+            (package_id, market_url, installed_subscription_id, installed_version, now, auto_update, metadata_json),
+        )
+        conn.commit()
+        conn.close()
+    await asyncio.to_thread(_upsert)
+
+
+async def delete_market_install(package_id: str):
+    def _delete():
+        conn = _connect()
+        conn.execute("DELETE FROM market_packages_installed WHERE package_id=?", (package_id,))
+        conn.commit()
+        conn.close()
+    await asyncio.to_thread(_delete)
 
 
 async def get_all_channel_groups() -> list[str]:

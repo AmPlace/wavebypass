@@ -18,10 +18,11 @@ from zoneinfo import ZoneInfo
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from contextlib import asynccontextmanager
 from fetchers import STATION_FETCHER_MAP, yunting
 import database
+from adapters import AdapterResolveError, resolve_adapter_source
 
 
 TOKEN_REFRESH_INTERVAL_SECONDS = 18_000
@@ -1460,6 +1461,7 @@ async def _epg_refresh_loop() -> None:
 
 from m3u8_parser import parse_m3u, deduplicate_channels
 import database as db
+import market as _market
 
 @app.post("/api/iptv/subscriptions")
 async def add_subscription(request: Request):
@@ -1533,6 +1535,8 @@ async def refresh_subscription(sub_id: int):
     sub = await db.get_subscription(sub_id)
     if not sub:
         raise HTTPException(status_code=404, detail="订阅不存在")
+    if str(sub.get('url') or '').startswith('market://'):
+        raise HTTPException(status_code=400, detail="Market 包 V1 暂不支持从订阅页自动刷新，请从 Market 页面重新导入或更新。")
 
     headers = {'User-Agent': sub['custom_ua']} if sub.get('custom_ua') else {}
     try:
@@ -1562,13 +1566,100 @@ async def list_channels(sub_id: int, group: str = '', search: str = ''):
     return {"channels": channels, "groups": groups, "total": len(channels)}
 
 
+# =====================================================================
+# WaveFlow Market
+# =====================================================================
+
+def _market_http_error(exc: Exception):
+    if isinstance(exc, _market.MarketError):
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/api/market")
+async def get_market_summary():
+    try:
+        await _market.ensure_market_loaded()
+        return _market.market_summary()
+    except Exception as exc:
+        _market_http_error(exc)
+
+
+@app.post("/api/market/refresh")
+async def refresh_market(request: Request):
+    try:
+        body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+        return await _market.refresh_market(
+            (body or {}).get("market_url"),
+            allow_private=_truthy_query((body or {}).get("allow_private", False)),
+        )
+    except Exception as exc:
+        _market_http_error(exc)
+
+
+@app.get("/api/market/packages")
+async def list_market_packages(
+    search: str = '',
+    region: str = '',
+    operator: str = '',
+    kind: str = '',
+    status: str = '',
+    tag: str = '',
+    supported_only: bool = True,
+    importable_only: bool = False,
+):
+    try:
+        packages = await _market.list_packages({
+            "search": search,
+            "region": region,
+            "operator": operator,
+            "kind": kind,
+            "status": status,
+            "tag": tag,
+            "supported_only": supported_only,
+            "importable_only": importable_only,
+        })
+        return {"packages": packages, "total": len(packages)}
+    except Exception as exc:
+        _market_http_error(exc)
+
+
+@app.get("/api/market/packages/{package_id}")
+async def get_market_package(package_id: str):
+    try:
+        return await _market.get_package(package_id)
+    except Exception as exc:
+        _market_http_error(exc)
+
+
+@app.post("/api/market/packages/{package_id}/preview")
+async def preview_market_package(package_id: str):
+    try:
+        return await _market.build_preview(package_id)
+    except Exception as exc:
+        _market_http_error(exc)
+
+
+@app.post("/api/market/packages/{package_id}/import")
+async def import_market_package(package_id: str, request: Request):
+    try:
+        body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+        return await _market.import_package(
+            package_id,
+            preview_id=(body or {}).get("preview_id", ""),
+            prefer_cached_preview=_truthy_query((body or {}).get("prefer_cached_preview", True)),
+        )
+    except Exception as exc:
+        _market_http_error(exc)
+
+
 # ── 前端聚合频道列表（跨源去重，每个频道保留所有可用链接）──
 
 async def _get_aggregated_iptv_channels(group: str = '', search: str = '') -> tuple[list[dict], list[str]]:
     # 搜索在 SQL 层过滤（性能好），分组在聚合后过滤（归一化后才准）
     raw = await db.get_aggregated_channels(group='', search=search)
 
-    from m3u8_parser import clean_channel_display_name, detect_source_type, normalize_channel_name, parse_youtube_video_id, _channel_alias
+    from m3u8_parser import adapter_provider, clean_channel_display_name, detect_source_type, normalize_channel_name, parse_youtube_video_id, _channel_alias
     from template import channel_template, normalize_group_name
 
     merged: dict[str, dict] = {}
@@ -1604,8 +1695,10 @@ async def _get_aggregated_iptv_channels(group: str = '', search: str = '') -> tu
             'latency_ms': ch['latency_ms'],
             'sub_title': ch.get('sub_title', ''),
             'custom_ua': ch.get('custom_ua', ''),
+            'referer': ch.get('referer', ''),
             'force_proxy': ch.get('force_proxy', 0),
             'source_type': source_type,
+            'adapter': adapter_provider(ch['url']),
             'youtube_video_id': youtube_video_id,
             'raw_name': ch['name'],
             'raw_tvg_id': ch.get('tvg_id', ''),
@@ -1796,12 +1889,26 @@ async def global_test_status():
 async def _test_single_channel(ch: dict) -> dict:
     """测速单个频道：GET URL → 判断是否 M3U8 → HEAD 第一个 TS 分片"""
     url = ch['url']
+    custom_ua = ch.get('custom_ua', '')
+    headers = {'User-Agent': custom_ua} if custom_ua else {}
+    if ch.get('referer'):
+        headers['Referer'] = ch.get('referer')
+    start = time.time()
+    from m3u8_parser import detect_source_type
+
+    source_type = ch.get('source_type') if ch.get('source_type') and ch.get('source_type') != 'hls' else detect_source_type(url)
+    if source_type == 'adapter':
+        try:
+            resolved = await resolve_adapter_source(url, http_client)
+            url = str(resolved.get('url') or '')
+            resolved_headers = resolved.get('headers') if isinstance(resolved.get('headers'), dict) else {}
+            headers.update({str(k): str(v) for k, v in resolved_headers.items()})
+        except AdapterResolveError:
+            return {"working": False, "latency_ms": 0}
+
     # RTSP/RTMP 暂不支持 HTTP 测速，标记为未测试
     if url.startswith(('rtsp://', 'rtmp://')):
         return {"working": -1, "latency_ms": 0}
-    custom_ua = ch.get('custom_ua', '')
-    headers = {'User-Agent': custom_ua} if custom_ua else {}
-    start = time.time()
     try:
         resp = await http_client.get(url, follow_redirects=True, timeout=8, headers=headers)
         latency = (time.time() - start) * 1000
@@ -1907,17 +2014,24 @@ def _drop_wide_cache(cache_key: str) -> None:
     _wide_cache.pop(cache_key + '_ts', None)
 
 
-def _iptv_wide_playlist_proxy_path(target_url: str, proxy_ts: int = 0, custom_ua: str = '') -> str:
+def _iptv_wide_playlist_proxy_path(target_url: str, proxy_ts: int = 0, custom_ua: str = '', referer: str = '') -> str:
     ua = f'&custom_ua={quote(custom_ua, safe="")}' if custom_ua else ''
-    return f'/api/iptv/proxy/wide.m3u8?proxy_ts={1 if proxy_ts else 0}{ua}&target_url={quote(target_url, safe="")}'
+    ref = f'&referer={quote(referer, safe="")}' if referer else ''
+    return f'/api/iptv/proxy/wide.m3u8?proxy_ts={1 if proxy_ts else 0}{ua}{ref}&target_url={quote(target_url, safe="")}'
 
 
-def _iptv_chunk_proxy_path(target_url: str, custom_ua: str = '') -> str:
+def _iptv_adapter_play_path(target_url: str) -> str:
+    # TODO: V2 should prefer source_id-based adapter resolve/play paths over target_url.
+    return f'/api/iptv/adapter/play.m3u8?target_url={quote(target_url, safe="")}'
+
+
+def _iptv_chunk_proxy_path(target_url: str, custom_ua: str = '', referer: str = '') -> str:
     ua = f'&custom_ua={quote(custom_ua, safe="")}' if custom_ua else ''
-    return f'/api/iptv/proxy/chunk.ts?target_url={quote(target_url, safe="")}{ua}'
+    ref = f'&referer={quote(referer, safe="")}' if referer else ''
+    return f'/api/iptv/proxy/chunk.ts?target_url={quote(target_url, safe="")}{ua}{ref}'
 
 
-def _rewrite_iptv_wide_m3u8_text(raw_m3u8_text: str, base_url: str, proxy_ts: int = 0, custom_ua: str = '') -> str:
+def _rewrite_iptv_wide_m3u8_text(raw_m3u8_text: str, base_url: str, proxy_ts: int = 0, custom_ua: str = '', referer: str = '') -> str:
     rewritten_lines: list[str] = []
 
     for line in raw_m3u8_text.splitlines():
@@ -1931,18 +2045,65 @@ def _rewrite_iptv_wide_m3u8_text(raw_m3u8_text: str, base_url: str, proxy_ts: in
         uri_path = parsed_url.path.lower()
 
         if uri_path.endswith(".m3u8"):
-            rewritten_lines.append(_iptv_wide_playlist_proxy_path(absolute_media_url, proxy_ts, custom_ua))
+            rewritten_lines.append(_iptv_wide_playlist_proxy_path(absolute_media_url, proxy_ts, custom_ua, referer))
         elif proxy_ts and parsed_url.scheme == "http" and uri_path.endswith(_IPTV_SEGMENT_EXTENSIONS):
-            rewritten_lines.append(_iptv_chunk_proxy_path(absolute_media_url, custom_ua))
+            rewritten_lines.append(_iptv_chunk_proxy_path(absolute_media_url, custom_ua, referer))
         else:
             rewritten_lines.append(absolute_media_url)
 
     return "\n".join(rewritten_lines)
 
 
-async def _wide_refresher(cache_key: str, target_url: str, custom_ua: str = ''):
+def _adapter_error_response(exc: AdapterResolveError) -> JSONResponse:
+    return JSONResponse(status_code=exc.status_code, content=exc.to_payload())
+
+
+@app.get("/api/iptv/adapter/resolve")
+async def iptv_adapter_resolve(target_url: str = ''):
+    try:
+        resolved = await resolve_adapter_source(target_url, http_client)
+    except AdapterResolveError as exc:
+        return _adapter_error_response(exc)
+
+    payload = dict(resolved)
+    payload["proxy_url"] = _iptv_adapter_play_path(target_url)
+    return payload
+
+
+@app.get("/api/iptv/adapter/play.m3u8")
+async def iptv_adapter_play_m3u8(target_url: str = ''):
+    try:
+        resolved = await resolve_adapter_source(target_url, http_client)
+    except AdapterResolveError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.to_payload()) from exc
+
+    resolved_url = str(resolved.get('url') or '').strip()
+    if not resolved_url:
+        raise HTTPException(status_code=502, detail="adapter 未返回播放地址")
+
+    source_type = str(resolved.get('source_type') or 'hls').lower()
+    headers = resolved.get('headers') if isinstance(resolved.get('headers'), dict) else {}
+    custom_ua = str(headers.get('User-Agent') or headers.get('user-agent') or '')
+
+    if source_type == 'hls':
+        validate_target_url(resolved_url)
+        return await iptv_wide_playlist(target_url=resolved_url, proxy_ts=1, custom_ua=custom_ua)
+    if source_type == 'mpegts':
+        return RedirectResponse(
+            f'/api/iptv/proxy/stream?target_url={quote(resolved_url, safe="")}',
+            status_code=307,
+        )
+    if source_type == 'rtsp':
+        return await iptv_proxy_rtsp_playlist(target_url=resolved_url, custom_ua=custom_ua, compat=0)
+
+    raise HTTPException(status_code=502, detail=f"adapter 返回了暂不支持的流类型: {source_type}")
+
+
+async def _wide_refresher(cache_key: str, target_url: str, custom_ua: str = '', referer: str = ''):
     """后台任务：每 2s 拉一次上游，更新分片队列"""
     _h = {'User-Agent': custom_ua} if custom_ua else {}
+    if referer:
+        _h['Referer'] = referer
     while True:
         cache = _wide_cache.get(cache_key)
         last_access = _wide_cache.get(cache_key + '_ts', 0)
@@ -2009,7 +2170,7 @@ async def release_iptv_wide_playlist(target_url: str = ''):
 
 
 @app.get("/api/iptv/proxy/wide.m3u8")
-async def iptv_wide_playlist(target_url: str = '', proxy_ts: int = 0, custom_ua: str = '', compat: int = 0):
+async def iptv_wide_playlist(target_url: str = '', proxy_ts: int = 0, custom_ua: str = '', referer: str = '', compat: int = 0):
     if not target_url:
         raise HTTPException(status_code=400, detail="缺少 target_url")
 
@@ -2017,10 +2178,12 @@ async def iptv_wide_playlist(target_url: str = '', proxy_ts: int = 0, custom_ua:
         return await iptv_proxy_rtsp_playlist(target_url=target_url, custom_ua=custom_ua, compat=compat)
 
     _headers = {'User-Agent': custom_ua} if custom_ua else {}
+    if referer:
+        _headers['Referer'] = referer
 
     def _rewrite_ts(seg_url: str) -> str:
         if proxy_ts and urlparse(seg_url).scheme == 'http':
-            return _iptv_chunk_proxy_path(seg_url, custom_ua)
+            return _iptv_chunk_proxy_path(seg_url, custom_ua, referer)
         return seg_url
 
     cache_key = quote(target_url, safe='')
@@ -2068,7 +2231,7 @@ async def iptv_wide_playlist(target_url: str = '', proxy_ts: int = 0, custom_ua:
         }
         _wide_cache[cache_key] = cache
         _wide_cache[cache_key + '_ts'] = time.time()
-        asyncio.create_task(_wide_refresher(cache_key, target_url, custom_ua))
+        asyncio.create_task(_wide_refresher(cache_key, target_url, custom_ua, referer))
 
         # 返回扩展窗口 playlist
         if queue:
@@ -2086,7 +2249,7 @@ async def iptv_wide_playlist(target_url: str = '', proxy_ts: int = 0, custom_ua:
         # 直接转发
         try:
             resp = await http_client.get(target_url, follow_redirects=True, timeout=6, headers=_headers)
-            rewritten = _rewrite_iptv_wide_m3u8_text(resp.text, str(resp.url), proxy_ts=proxy_ts, custom_ua=custom_ua)
+            rewritten = _rewrite_iptv_wide_m3u8_text(resp.text, str(resp.url), proxy_ts=proxy_ts, custom_ua=custom_ua, referer=referer)
             return Response(content=rewritten, media_type="application/x-mpegURL")
         except httpx.HTTPError as exc:
             raise HTTPException(status_code=502, detail=f"拉取失败: {exc}") from exc
@@ -2098,7 +2261,7 @@ async def iptv_wide_playlist(target_url: str = '', proxy_ts: int = 0, custom_ua:
     if not queue:
         try:
             resp = await http_client.get(target_url, follow_redirects=True, timeout=6, headers=_headers)
-            rewritten = _rewrite_iptv_wide_m3u8_text(resp.text, str(resp.url), proxy_ts=proxy_ts, custom_ua=custom_ua)
+            rewritten = _rewrite_iptv_wide_m3u8_text(resp.text, str(resp.url), proxy_ts=proxy_ts, custom_ua=custom_ua, referer=referer)
             return Response(content=rewritten, media_type="application/x-mpegURL")
         except httpx.HTTPError as exc:
             raise HTTPException(status_code=502, detail=f"拉取失败: {exc}") from exc
@@ -2166,7 +2329,7 @@ async def iptv_proxy_rtsp_segment(session_id: str, filename: str):
 
 
 @app.get("/api/iptv/proxy/stream")
-async def iptv_proxy_stream(request: Request, target_url: str = '', custom_ua: str = ''):
+async def iptv_proxy_stream(request: Request, target_url: str = '', custom_ua: str = '', referer: str = ''):
     if not target_url:
         raise HTTPException(status_code=400, detail="缺少 target_url")
 
@@ -2176,7 +2339,7 @@ async def iptv_proxy_stream(request: Request, target_url: str = '', custom_ua: s
         'User-Agent': custom_ua or CDN_REQUEST_HEADERS['User-Agent'],
         'Accept': '*/*',
         'Connection': 'keep-alive',
-        'Referer': f'{parsed.scheme}://{parsed.netloc}/',
+        'Referer': referer or f'{parsed.scheme}://{parsed.netloc}/',
     }
 
     stream_timeout = httpx.Timeout(None, connect=10.0, read=IPTV_STREAM_READ_TIMEOUT_SECONDS)
@@ -2335,7 +2498,7 @@ async def iptv_proxy_stream(request: Request, target_url: str = '', custom_ua: s
 
 
 @app.get("/api/iptv/proxy/playlist.m3u8")
-async def iptv_proxy_playlist(target_url: str = '', compat: int = 0):
+async def iptv_proxy_playlist(target_url: str = '', referer: str = '', compat: int = 0):
     if not target_url:
         raise HTTPException(status_code=400, detail="缺少 target_url")
 
@@ -2343,7 +2506,8 @@ async def iptv_proxy_playlist(target_url: str = '', compat: int = 0):
         return await iptv_proxy_rtsp_playlist(target_url=target_url, compat=compat)
 
     try:
-        resp = await http_client.get(target_url, follow_redirects=True, timeout=8)
+        headers = {'Referer': referer} if referer else None
+        resp = await http_client.get(target_url, follow_redirects=True, timeout=8, headers=headers)
         resp.raise_for_status()
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"拉取 M3U8 失败: {exc}") from exc
@@ -2357,13 +2521,14 @@ async def iptv_proxy_playlist(target_url: str = '', compat: int = 0):
 
 
 @app.get("/api/iptv/proxy/chunk.ts")
-async def iptv_proxy_chunk(target_url: str = '', custom_ua: str = ''):
+async def iptv_proxy_chunk(target_url: str = '', custom_ua: str = '', referer: str = ''):
     if not target_url:
         raise HTTPException(status_code=400, detail="缺少 target_url")
 
     try:
         upstream = await http_client.get(target_url, follow_redirects=True, headers={
             'User-Agent': custom_ua or 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130.0.0.0 Safari/537.36',
+            **({'Referer': referer} if referer else {}),
         })
         upstream.raise_for_status()
     except httpx.HTTPError as exc:
@@ -2640,13 +2805,17 @@ def _absolute_api_url(request: Request, path: str) -> str:
 def _iptv_proxy_path_for_source(source: dict) -> str:
     url = str(source.get('url') or '').strip()
     custom_ua = str(source.get('custom_ua') or '').strip()
+    referer = str(source.get('referer') or '').strip()
     ua = f'&custom_ua={quote(custom_ua, safe="")}' if custom_ua else ''
+    ref = f'&referer={quote(referer, safe="")}' if referer else ''
     source_type = _source_type(source)
+    if source_type == 'adapter':
+        return _iptv_adapter_play_path(url)
     if source_type == 'rtsp':
         return f'/api/iptv/proxy/rtsp.m3u8?target_url={quote(url, safe="")}{ua}'
     if source_type == 'mpegts':
-        return f'/api/iptv/proxy/stream?target_url={quote(url, safe="")}{ua}'
-    return f'/api/iptv/proxy/wide.m3u8?proxy_ts=1{ua}&target_url={quote(url, safe="")}'
+        return f'/api/iptv/proxy/stream?target_url={quote(url, safe="")}{ua}{ref}'
+    return f'/api/iptv/proxy/wide.m3u8?proxy_ts=1{ua}{ref}&target_url={quote(url, safe="")}'
 
 
 def _iptv_proxy_url_for_source(source: dict, request: Request) -> str:
@@ -2682,7 +2851,11 @@ def _subscription_urls_for_channel(channel: dict, mode: str, request: Request, h
     if mode == 'direct':
         return [
             source['url'] for source in sources
-            if include_rtsp or _source_type(source) != 'rtsp'
+            if _source_type(source) != 'adapter'
+            and (include_rtsp or _source_type(source) != 'rtsp')
+            and not source.get('force_proxy')
+            and not source.get('custom_ua')
+            and not source.get('referer')
         ]
 
     if mode == 'proxy':
@@ -2692,7 +2865,7 @@ def _subscription_urls_for_channel(channel: dict, mode: str, request: Request, h
     proxy_only_sources = []
     for source in sources:
         source_type = _source_type(source)
-        if source_type == 'rtsp' or source.get('force_proxy') or source.get('custom_ua'):
+        if source_type in {'adapter', 'rtsp'} or source.get('force_proxy') or source.get('custom_ua') or source.get('referer'):
             proxy_only_sources.append(source)
         else:
             direct_sources.append(source)
@@ -2772,10 +2945,13 @@ async def iptv_smart_playlist(canonical_key: str, request: Request):
                 )
             if source_type == 'mpegts':
                 return RedirectResponse(_iptv_proxy_url_for_source(source, request), status_code=307)
+            if source_type == 'adapter':
+                return RedirectResponse(_iptv_proxy_url_for_source(source, request), status_code=307)
             return await iptv_wide_playlist(
                 target_url=source['url'],
                 proxy_ts=1,
                 custom_ua=source.get('custom_ua', ''),
+                referer=source.get('referer', ''),
                 compat=0,
             )
         except HTTPException:

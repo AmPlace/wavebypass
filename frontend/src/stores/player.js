@@ -16,6 +16,7 @@ export const usePlayerStore = defineStore('player', {
     currentIptvChannel: null,  // { name, group_name, logo_url, urls: [...] }
     iptvUrls: [],              // 当前频道的所有可用链接
     iptvUrlIndex: 0,           // 当前尝试的链接索引
+    iptvSelectionToken: 0,      // 防止异步解析旧频道覆盖新频道
     iptvVideoEl: null,         // FullPlayer 中的 video 元素引用（iOS 同步播放用）
     currentEpgProgram: null,   // EPG: { title, start, stop, progress, remaining_minutes }
   }),
@@ -107,7 +108,10 @@ export const usePlayerStore = defineStore('player', {
       this.activeMode = mode
     },
 
-    playIptvChannel(channel) {
+    async playIptvChannel(channel) {
+      const selectionToken = ++this.iptvSelectionToken
+      this.playbackError = ''
+      this.isLoading = true
       const sorted = [...channel.urls].sort((a, b) => {
         if (a.is_working !== b.is_working) return b.is_working - a.is_working
         return (a.latency_ms || 9999) - (b.latency_ms || 9999)
@@ -146,6 +150,7 @@ export const usePlayerStore = defineStore('player', {
         const value = String(url || '').trim().toLowerCase()
         if (parseYoutubeVideoId(url)) return 'youtube'
         if (isYoutubeUrl(url)) return 'unsupported_youtube_url'
+        if (value.startsWith('migu://') || value.startsWith('adapter://')) return 'adapter'
         if (value.startsWith('rtsp://')) return 'rtsp'
         if (/\/(?:rtp|udp)\//i.test(value) || /%2f(?:rtp|udp)%2f/i.test(value)) return 'mpegts'
         if (/\.(?:ts|m2ts|mts)(?:[?#]|$)/i.test(value)) return 'mpegts'
@@ -158,22 +163,59 @@ export const usePlayerStore = defineStore('player', {
       }
       const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
         (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
+      const adapterPlayUrlFor = (url) => `${API_BASE}/api/iptv/adapter/play.m3u8?target_url=${encodeURIComponent(url)}`
+      const absoluteApiUrl = (url) => {
+        if (!url) return ''
+        return /^https?:\/\//i.test(url) ? url : `${API_BASE}${url.startsWith('/') ? url : `/${url}`}`
+      }
+      const resolveAdapterSource = async (url) => {
+        const ctrl = new AbortController()
+        const timer = setTimeout(() => ctrl.abort(), 10_000)
+        try {
+          const res = await fetch(`${API_BASE}/api/iptv/adapter/resolve?target_url=${encodeURIComponent(url)}`, {
+            signal: ctrl.signal,
+          })
+          const data = await res.json().catch(() => ({}))
+          if (!res.ok || data.ok === false) {
+            throw new Error(data.message || data.detail?.message || data.detail || `HTTP ${res.status}`)
+          }
+          return data
+        } finally {
+          clearTimeout(timer)
+        }
+      }
+      const adapterName = (url) => {
+        const value = String(url || '').trim().toLowerCase()
+        if (value.startsWith('migu://')) return 'migu'
+        try {
+          const parsed = new URL(url)
+          return parsed.protocol === 'adapter:' ? parsed.hostname.toLowerCase() : ''
+        } catch {
+          return ''
+        }
+      }
       const proxyUrlFor = (u, options = {}) => {
+        if (u.adapter_proxy_url) return u.adapter_proxy_url
         const url = sourceUrl(u)
         const ua = u.custom_ua ? `&custom_ua=${encodeURIComponent(u.custom_ua)}` : ''
+        const referer = u.referer ? `&referer=${encodeURIComponent(u.referer)}` : ''
         const st = sourceType(u)
+        if (st === 'adapter') {
+          return adapterPlayUrlFor(url)
+        }
         if (st === 'rtsp') {
           const compat = options.compat ? '&compat=1' : ''
           return `${API_BASE}/api/iptv/proxy/rtsp.m3u8?target_url=${encodeURIComponent(url)}${ua}${compat}`
         }
         if (st === 'mpegts') {
-          return `${API_BASE}/api/iptv/proxy/stream?target_url=${encodeURIComponent(url)}${ua}`
+          return `${API_BASE}/api/iptv/proxy/stream?target_url=${encodeURIComponent(url)}${ua}${referer}`
         }
-        return `${API_BASE}/api/iptv/proxy/wide.m3u8?proxy_ts=1${ua}&target_url=${encodeURIComponent(url)}`
+        return `${API_BASE}/api/iptv/proxy/wide.m3u8?proxy_ts=1${ua}${referer}&target_url=${encodeURIComponent(url)}`
       }
       // 分两组：直连组 + 必须代理组
       const directUrls = []
       const proxyOnlyUrls = []
+      const adapterSources = []
       for (const u of sorted) {
         const url = sourceUrl(u)
         if (!url) continue
@@ -193,7 +235,11 @@ export const usePlayerStore = defineStore('player', {
           })
           continue
         }
-        if (st === 'rtsp' || u.force_proxy || u.custom_ua) {
+        if (st === 'adapter') {
+          adapterSources.push(u)
+          continue
+        }
+        if (st === 'rtsp' || u.force_proxy || u.custom_ua || u.referer) {
           proxyOnlyUrls.push({
             ...u,
             url: proxyUrlFor(u),
@@ -217,9 +263,54 @@ export const usePlayerStore = defineStore('player', {
           directUrls.push({ ...u, url, source_type: st })
         }
       }
+      for (const u of adapterSources) {
+        const url = sourceUrl(u)
+        const adapter = u.adapter || adapterName(url)
+        const fallbackProxyUrl = adapterPlayUrlFor(url)
+        try {
+          const resolved = await resolveAdapterSource(url)
+          const proxyUrl = absoluteApiUrl(resolved.proxy_url) || fallbackProxyUrl
+          const canDirectPlay = !resolved.requires_proxy && resolved.direct_playable !== false && resolved.url
+          if (canDirectPlay) {
+            directUrls.push({
+              ...u,
+              url: resolved.url,
+              original_url: url,
+              adapter,
+              adapter_source_url: url,
+              adapter_proxy_url: proxyUrl,
+              source_type: resolved.source_type || 'hls',
+              type: 'direct',
+            })
+          }
+          if (!canDirectPlay) {
+            proxyOnlyUrls.push({
+              ...u,
+              url: proxyUrl,
+              original_url: url,
+              adapter,
+              type: 'proxy',
+              via_proxy: true,
+              source_type: resolved.source_type || 'hls',
+            })
+          }
+        } catch (e) {
+          console.warn('[IPTV] adapter resolve failed:', e?.message || e)
+          proxyOnlyUrls.push({
+            ...u,
+            url: fallbackProxyUrl,
+            original_url: url,
+            adapter,
+            type: 'proxy',
+            via_proxy: true,
+            source_type: 'hls',
+          })
+        }
+      }
+      if (selectionToken !== this.iptvSelectionToken) return
       // 先所有直连，再所有直连的代理回退，最后是必须代理的
       for (const u of directUrls) {
-        list.push({ ...u, url: u.url, original_url: u.url, type: u.type || 'direct' })
+        list.push({ ...u, url: u.url, original_url: u.original_url || u.url, type: u.type || 'direct' })
       }
       for (const u of directUrls) {
         const url = sourceUrl(u)
@@ -228,7 +319,7 @@ export const usePlayerStore = defineStore('player', {
         list.push({
           ...u,
           url: proxyUrlFor(u),
-          original_url: url,
+          original_url: u.original_url || url,
           type: st === 'mpegts' ? 'direct' : 'proxy',
           via_proxy: true,
           source_type: st,

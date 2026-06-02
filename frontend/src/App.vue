@@ -3,7 +3,7 @@
     <div class="fixed inset-x-0 top-0 z-50 bg-[#f8f8f7] dark:bg-[#111113]">
       <div class="h-[env(safe-area-inset-top)]"></div>
       <div class="flex h-12 items-center justify-between px-4 sm:px-6">
-        <div class="w-10"></div>
+        <!-- <div class="w-10"></div> -->
         <div class="flex items-center rounded-full border border-black/5 bg-white/70 p-0.5 text-xs font-medium shadow-sm shadow-black/[0.04] backdrop-blur-xl dark:border-white/10 dark:bg-neutral-950/60">
           <button
             type="button"
@@ -27,6 +27,15 @@
           </button>
         </div>
         <div class="flex items-center gap-2">
+          <button
+            v-show="activeMode === 'iptv'"
+            type="button"
+            class="flex size-10 items-center justify-center rounded-full border border-black/5 bg-white/70 text-neutral-700 shadow-sm shadow-black/[0.04] backdrop-blur-xl transition-all duration-200 ease-out hover:scale-[1.03] hover:bg-white active:scale-95 dark:border-white/10 dark:bg-neutral-950/60 dark:text-neutral-200 dark:hover:bg-neutral-950"
+            aria-label="WaveFlow Market"
+            @click="router.push('/market')"
+          >
+            <svg class="size-5" viewBox="0 0 24 24" fill="none"><path d="M4 8.4 12 4l8 4.4-8 4.4L4 8.4Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M4 12.2 12 16.6l8-4.4M4 16l8 4.4L20 16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
           <button
             v-show="activeMode === 'iptv'"
             type="button"
@@ -151,7 +160,7 @@ const THEME_STATUS_BAR = {
 }
 
 watch(() => route.path, (path) => {
-  playerStore.setActiveMode(path.startsWith('/iptv') ? 'iptv' : 'radio')
+  playerStore.setActiveMode(path.startsWith('/iptv') || path.startsWith('/admin') || path.startsWith('/market') ? 'iptv' : 'radio')
 }, { immediate: true })
 
 function forceMetaContent(name, content) {
