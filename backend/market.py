@@ -26,7 +26,9 @@ RESERVED_KINDS = {
     "platform_pack",
     "radio_pack",
 }
-MARKET_URL = os.environ.get("WAVEFLOW_MARKET_URL", "").strip()
+DEFAULT_MARKET_URL = "https://market.waveflow.tv/market.json"
+OFFICIAL_MARKET_SOURCE_KEY = "official"
+MARKET_URL = os.environ.get("WAVEFLOW_MARKET_URL", DEFAULT_MARKET_URL).strip() or DEFAULT_MARKET_URL
 ALLOW_PRIVATE_MARKET_URLS = os.environ.get("WAVEFLOW_MARKET_ALLOW_PRIVATE", "").strip().lower() in {"1", "true", "yes", "on"}
 PREVIEW_TTL_SECONDS = 10 * 60
 MAX_FETCH_BYTES = 10 * 1024 * 1024
@@ -34,7 +36,9 @@ MAX_FETCH_BYTES = 10 * 1024 * 1024
 _market_cache: dict[str, Any] = {
     "market_url": MARKET_URL,
     "market": None,
+    "markets": [],
     "packages": [],
+    "sources": [],
     "fetched_at": 0,
     "stale": False,
     "last_error": "",
@@ -200,6 +204,95 @@ def _package_supported(package: dict) -> bool:
     return package.get("kind") in SUPPORTED_IMPORT_KINDS and bool(package.get("supported_in_v1", True))
 
 
+async def ensure_market_sources() -> list[dict]:
+    official = await db.get_market_source_by_key(OFFICIAL_MARKET_SOURCE_KEY)
+    if not official:
+        await db.upsert_market_source(
+            source_key=OFFICIAL_MARKET_SOURCE_KEY,
+            name="WaveFlow 官方 Market",
+            url=MARKET_URL,
+            enabled=1,
+            allow_private=1 if ALLOW_PRIVATE_MARKET_URLS else 0,
+            is_builtin=1,
+        )
+    return await db.list_market_sources()
+
+
+async def list_sources() -> list[dict]:
+    return await ensure_market_sources()
+
+
+def _source_public(source: dict | None) -> dict:
+    source = source or {}
+    return {
+        "id": source.get("id"),
+        "source_key": source.get("source_key", ""),
+        "name": source.get("name", ""),
+        "url": source.get("url", ""),
+        "enabled": bool(source.get("enabled", 1)),
+        "allow_private": bool(source.get("allow_private", 0)),
+        "is_builtin": bool(source.get("is_builtin", 0)),
+        "last_fetched_at": source.get("last_fetched_at", ""),
+        "last_status": source.get("last_status", ""),
+        "last_error": source.get("last_error", ""),
+    }
+
+
+def _package_source_id(source: dict, package_id: str) -> str:
+    source_key = str(source.get("source_key") or "").strip()
+    if source_key == OFFICIAL_MARKET_SOURCE_KEY:
+        return package_id
+    return f"{source_key}/{package_id}" if source_key else package_id
+
+
+def _attach_source(package: dict, source: dict, raw_id: str | None = None) -> dict:
+    result = deepcopy(package)
+    original_id = raw_id or str(result.get("id") or "")
+    result["original_id"] = original_id
+    result["id"] = _package_source_id(source, original_id)
+    result["market_source"] = _source_public(source)
+    return result
+
+
+async def create_source(name: str, url: str, enabled: bool = True, allow_private: bool = False) -> dict:
+    key = f"custom-{secrets.token_hex(4)}"
+    source_id = await db.create_market_source(
+        name=(name or "第三方 Market").strip(),
+        url=url.strip(),
+        source_key=key,
+        enabled=1 if enabled else 0,
+        allow_private=1 if allow_private else 0,
+    )
+    source = await db.get_market_source(source_id)
+    return _source_public(source)
+
+
+async def update_source(source_id: int, data: dict) -> dict:
+    source = await db.get_market_source(source_id)
+    if not source:
+        raise MarketError("Market 源不存在", 404)
+    updates = {}
+    for key in ("name", "url"):
+        if key in data:
+            updates[key] = str(data.get(key) or "").strip()
+    for key in ("enabled", "allow_private"):
+        if key in data:
+            updates[key] = 1 if data.get(key) else 0
+    if source.get("is_builtin") and updates.get("url") == "":
+        raise MarketError("内置 Market 源 URL 不能为空", 400)
+    await db.update_market_source(source_id, **updates)
+    updated = await db.get_market_source(source_id)
+    return _source_public(updated)
+
+
+async def delete_source(source_id: int) -> dict:
+    try:
+        await db.delete_market_source(source_id)
+    except ValueError as exc:
+        raise MarketError(str(exc), 400) from exc
+    return {"ok": True}
+
+
 def _normalize_package(raw: dict, *, manifest_url: str = "", market_url: str = "") -> dict:
     package = deepcopy(raw or {})
     package.setdefault("schema_version", SCHEMA_VERSION)
@@ -252,13 +345,76 @@ async def _load_manifest(index_item: dict, market_url: str, *, allow_private: bo
     return _normalize_package(index_item, market_url=market_url)
 
 
-async def refresh_market(market_url: str | None = None, *, allow_private: bool = False) -> dict:
-    url = (market_url or MARKET_URL or _market_cache.get("market_url") or "").strip()
+async def _load_source_packages(source: dict) -> tuple[dict, list[dict]]:
+    url = str(source.get("url") or "").strip()
     if not url:
+        raise MarketError("Market 源 URL 不能为空", 400)
+
+    allow_private = bool(source.get("allow_private") or ALLOW_PRIVATE_MARKET_URLS)
+    final_url, text, _headers = await safe_http_fetch(url, allow_private=allow_private)
+    try:
+        market = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise MarketError(f"market.json 解析失败: {exc}", 400) from exc
+    if market.get("schema_version", SCHEMA_VERSION) != SCHEMA_VERSION:
+        raise MarketError("不支持的 Market schema_version", 400)
+
+    packages = []
+    for item in market.get("packages", []):
+        raw_id = str(item.get("id") or "")
+        try:
+            loaded = await _load_manifest(item, final_url, allow_private=allow_private)
+            packages.append(_attach_source(loaded, source, raw_id or loaded.get("id")))
+        except Exception as exc:
+            broken = _normalize_package(item, market_url=final_url)
+            broken["supported_in_v1"] = False
+            broken["previewable"] = False
+            broken["importable"] = False
+            broken["unsupported_reason"] = f"manifest 加载失败: {exc}"
+            packages.append(_attach_source(broken, source, raw_id or broken.get("id")))
+    for package in packages:
+        package["_allow_private_fetch"] = allow_private
+    market["_source"] = _source_public({**source, "url": final_url})
+    return market, packages
+
+
+async def refresh_market(
+    market_url: str | None = None,
+    *,
+    allow_private: bool = False,
+    source_id: int | None = None,
+) -> dict:
+    sources = await ensure_market_sources()
+    if market_url:
+        source = next((item for item in sources if item.get("source_key") == "custom"), None)
+        if not source:
+            custom_id = await db.create_market_source(
+                name="自定义 Market",
+                url=market_url.strip(),
+                source_key="custom",
+                enabled=1,
+                allow_private=1 if allow_private else 0,
+            )
+            source = await db.get_market_source(custom_id)
+        else:
+            await db.update_market_source(source["id"], url=market_url.strip(), enabled=1, allow_private=1 if allow_private else 0)
+            source = await db.get_market_source(source["id"])
+        sources = [source] if source else []
+    elif source_id:
+        source = await db.get_market_source(source_id)
+        if not source:
+            raise MarketError("Market 源不存在", 404)
+        sources = [source]
+    else:
+        sources = [source for source in sources if source.get("enabled")]
+
+    if not sources:
         _market_cache.update({
             "market_url": "",
             "market": {"schema_version": SCHEMA_VERSION, "packages": []},
+            "markets": [],
             "packages": [],
+            "sources": await db.list_market_sources(),
             "fetched_at": time.time(),
             "stale": False,
             "last_error": "",
@@ -266,37 +422,44 @@ async def refresh_market(market_url: str | None = None, *, allow_private: bool =
         })
         return market_summary()
 
+    markets = []
+    packages = []
+    source_errors = []
     try:
-        final_url, text, _headers = await safe_http_fetch(url, allow_private=allow_private)
-        try:
-            market = json.loads(text)
-        except json.JSONDecodeError as exc:
-            raise MarketError(f"market.json 解析失败: {exc}", 400) from exc
-        if market.get("schema_version", SCHEMA_VERSION) != SCHEMA_VERSION:
-            raise MarketError("不支持的 Market schema_version", 400)
-
-        packages = []
-        for item in market.get("packages", []):
+        for source in sources:
             try:
-                packages.append(await _load_manifest(item, final_url, allow_private=allow_private))
+                market, source_packages = await _load_source_packages(source)
+                markets.append(market)
+                packages.extend(source_packages)
+                await db.update_market_source(
+                    source["id"],
+                    last_fetched_at=_now_iso(),
+                    last_status="ok",
+                    last_error="",
+                )
             except Exception as exc:
-                broken = _normalize_package(item, market_url=final_url)
-                broken["supported_in_v1"] = False
-                broken["previewable"] = False
-                broken["importable"] = False
-                broken["unsupported_reason"] = f"manifest 加载失败: {exc}"
-                packages.append(broken)
-        for package in packages:
-            package["_allow_private_fetch"] = bool(allow_private or ALLOW_PRIVATE_MARKET_URLS)
+                source_errors.append(f"{source.get('name') or source.get('url')}: {exc}")
+                await db.update_market_source(
+                    source["id"],
+                    last_fetched_at=_now_iso(),
+                    last_status="error",
+                    last_error=str(exc),
+                )
 
+        if not markets and source_errors:
+            raise MarketError("; ".join(source_errors), 502)
+
+        sources_latest = await db.list_market_sources()
         _market_cache.update({
-            "market_url": final_url,
-            "market": market,
+            "market_url": ", ".join([str(item.get("url") or "") for item in sources]),
+            "market": markets[0] if markets else {"schema_version": SCHEMA_VERSION, "packages": []},
+            "markets": markets,
             "packages": packages,
+            "sources": sources_latest,
             "fetched_at": time.time(),
             "stale": False,
-            "last_error": "",
-            "allow_private": bool(allow_private or ALLOW_PRIVATE_MARKET_URLS),
+            "last_error": "; ".join(source_errors),
+            "allow_private": any(bool(source.get("allow_private")) for source in sources_latest),
         })
     except Exception as exc:
         _market_cache["stale"] = bool(_market_cache.get("packages"))
@@ -308,12 +471,16 @@ async def refresh_market(market_url: str | None = None, *, allow_private: bool =
 
 def market_summary() -> dict:
     market = _market_cache.get("market") or {"schema_version": SCHEMA_VERSION, "packages": []}
+    sources = _market_cache.get("sources") or []
     return {
         "schema_version": market.get("schema_version", SCHEMA_VERSION),
         "market_version": market.get("market_version", ""),
         "updated_at": market.get("updated_at", ""),
         "market_url": _market_cache.get("market_url", ""),
         "package_count": len(_market_cache.get("packages") or []),
+        "source_count": len(sources),
+        "enabled_source_count": len([source for source in sources if source.get("enabled")]),
+        "sources": [_source_public(source) for source in sources],
         "fetched_at": _market_cache.get("fetched_at", 0),
         "stale": bool(_market_cache.get("stale")),
         "last_error": _market_cache.get("last_error", ""),
@@ -325,7 +492,20 @@ def market_summary() -> dict:
 async def ensure_market_loaded() -> None:
     if _market_cache.get("packages") or _market_cache.get("market") is not None:
         return
-    await refresh_market()
+    sources = await ensure_market_sources()
+    _market_cache["sources"] = sources
+    try:
+        await refresh_market()
+    except Exception as exc:
+        _market_cache.update({
+            "market": {"schema_version": SCHEMA_VERSION, "packages": []},
+            "markets": [],
+            "packages": [],
+            "sources": await db.list_market_sources(),
+            "fetched_at": time.time(),
+            "stale": False,
+            "last_error": str(exc),
+        })
 
 
 async def _installed_map() -> dict[str, dict]:

@@ -100,6 +100,21 @@ CREATE TABLE IF NOT EXISTS market_packages_installed (
     metadata_json             TEXT DEFAULT '',
     FOREIGN KEY (installed_subscription_id) REFERENCES subscriptions(id) ON DELETE SET NULL
 );
+
+CREATE TABLE IF NOT EXISTS market_sources (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_key      TEXT NOT NULL UNIQUE,
+    name            TEXT NOT NULL,
+    url             TEXT NOT NULL UNIQUE,
+    enabled         INTEGER DEFAULT 1,
+    allow_private   INTEGER DEFAULT 0,
+    is_builtin      INTEGER DEFAULT 0,
+    last_fetched_at TEXT DEFAULT '',
+    last_status     TEXT DEFAULT '',
+    last_error      TEXT DEFAULT '',
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL
+);
 """
 
 
@@ -135,6 +150,19 @@ async def initialize():
                 conn.execute(f"ALTER TABLE channels ADD COLUMN {col} {typ} DEFAULT {default}")
             except sqlite3.OperationalError:
                 pass  # 字段已存在
+        for col, typ, default in [
+            ('source_key', 'TEXT', "''"),
+            ('allow_private', 'INTEGER', '0'),
+            ('is_builtin', 'INTEGER', '0'),
+            ('last_fetched_at', 'TEXT', "''"),
+            ('last_status', 'TEXT', "''"),
+            ('last_error', 'TEXT', "''"),
+            ('updated_at', 'TEXT', "''"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE market_sources ADD COLUMN {col} {typ} DEFAULT {default}")
+            except sqlite3.OperationalError:
+                pass
         conn.close()
     await asyncio.to_thread(_init)
 
@@ -382,6 +410,121 @@ async def delete_market_install(package_id: str):
     def _delete():
         conn = _connect()
         conn.execute("DELETE FROM market_packages_installed WHERE package_id=?", (package_id,))
+        conn.commit()
+        conn.close()
+    await asyncio.to_thread(_delete)
+
+
+# ── Market sources ──
+
+async def list_market_sources() -> list[dict]:
+    def _list():
+        conn = _connect()
+        rows = conn.execute("SELECT * FROM market_sources ORDER BY is_builtin DESC, id ASC").fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    return await asyncio.to_thread(_list)
+
+
+async def get_market_source(source_id: int) -> dict | None:
+    def _get():
+        conn = _connect()
+        row = conn.execute("SELECT * FROM market_sources WHERE id=?", (source_id,)).fetchone()
+        conn.close()
+        return dict(row) if row else None
+    return await asyncio.to_thread(_get)
+
+
+async def get_market_source_by_key(source_key: str) -> dict | None:
+    def _get():
+        conn = _connect()
+        row = conn.execute("SELECT * FROM market_sources WHERE source_key=?", (source_key,)).fetchone()
+        conn.close()
+        return dict(row) if row else None
+    return await asyncio.to_thread(_get)
+
+
+async def upsert_market_source(
+    *,
+    source_key: str,
+    name: str,
+    url: str,
+    enabled: int = 1,
+    allow_private: int = 0,
+    is_builtin: int = 0,
+) -> int:
+    def _upsert():
+        conn = _connect()
+        now = datetime.now(timezone.utc).isoformat()
+        cur = conn.execute(
+            """
+            INSERT INTO market_sources(
+                source_key, name, url, enabled, allow_private, is_builtin,
+                created_at, updated_at
+            )
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(source_key) DO UPDATE SET
+                name=excluded.name,
+                url=excluded.url,
+                enabled=excluded.enabled,
+                allow_private=excluded.allow_private,
+                is_builtin=excluded.is_builtin,
+                updated_at=excluded.updated_at
+            """,
+            (source_key, name, url, enabled, allow_private, is_builtin, now, now),
+        )
+        conn.commit()
+        row = conn.execute("SELECT id FROM market_sources WHERE source_key=?", (source_key,)).fetchone()
+        conn.close()
+        return int(row["id"] if row else cur.lastrowid)
+    return await asyncio.to_thread(_upsert)
+
+
+async def create_market_source(name: str, url: str, source_key: str, enabled: int = 1, allow_private: int = 0) -> int:
+    def _create():
+        conn = _connect()
+        now = datetime.now(timezone.utc).isoformat()
+        cur = conn.execute(
+            """
+            INSERT INTO market_sources(
+                source_key, name, url, enabled, allow_private, is_builtin,
+                created_at, updated_at
+            )
+            VALUES(?, ?, ?, ?, ?, 0, ?, ?)
+            """,
+            (source_key, name, url, enabled, allow_private, now, now),
+        )
+        conn.commit()
+        source_id = cur.lastrowid
+        conn.close()
+        return source_id
+    return await asyncio.to_thread(_create)
+
+
+async def update_market_source(source_id: int, **kwargs):
+    allowed = {"name", "url", "enabled", "allow_private", "last_fetched_at", "last_status", "last_error"}
+    values = {key: value for key, value in kwargs.items() if key in allowed}
+    if not values:
+        return
+
+    def _update():
+        conn = _connect()
+        values["updated_at"] = datetime.now(timezone.utc).isoformat()
+        sets = ', '.join(f"{k}=?" for k in values)
+        conn.execute(f"UPDATE market_sources SET {sets} WHERE id=?", (*values.values(), source_id))
+        conn.commit()
+        conn.close()
+    await asyncio.to_thread(_update)
+
+
+async def delete_market_source(source_id: int):
+    def _delete():
+        conn = _connect()
+        row = conn.execute("SELECT is_builtin FROM market_sources WHERE id=?", (source_id,)).fetchone()
+        if row and row["is_builtin"]:
+            conn.close()
+            raise ValueError("内置 Market 源不能删除")
+        conn.execute("DELETE FROM market_sources WHERE id=?", (source_id,))
         conn.commit()
         conn.close()
     await asyncio.to_thread(_delete)

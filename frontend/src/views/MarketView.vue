@@ -10,28 +10,27 @@
           </button>
           <span class="text-sm font-medium text-neutral-400 dark:text-neutral-500">WaveFlow Market</span>
         </div>
-        <h1 class="text-2xl font-semibold tracking-tight text-neutral-900 dark:text-neutral-50">频道市场</h1>
+        <h1 class="text-3xl font-semibold tracking-tight text-neutral-900 dark:text-neutral-50">频道市场</h1>
         <!-- <p class="mt-2 max-w-2xl text-sm leading-6 text-neutral-500 dark:text-neutral-400">
           Market 只分发数据和配置，不自动执行第三方代码。动态订阅会由后端安全拉取并解析。
         </p> -->
       </div>
-      <div class="flex flex-col gap-2 sm:w-[360px]">
-        <div class="flex gap-2">
-          <input v-model="marketUrl" type="url" placeholder="Market URL（可选）"
-            class="min-w-0 flex-1 rounded-xl border border-neutral-200 bg-white/70 px-3 py-2 text-xs text-neutral-700 outline-none backdrop-blur-xl focus:border-neutral-400 dark:border-neutral-700 dark:bg-neutral-900/70 dark:text-neutral-200" />
+      <div class="flex flex-col items-start gap-2 sm:w-[360px] sm:items-end">
+        <div class="flex w-full justify-start gap-2 sm:justify-end">
+          <button type="button"
+            class="shrink-0 rounded-xl border border-neutral-200 bg-white/70 px-3 py-2 text-xs font-medium text-neutral-700 backdrop-blur-xl dark:border-neutral-700 dark:bg-neutral-900/70 dark:text-neutral-200"
+            @click="openSourceDialog">
+            Market 源管理
+          </button>
           <button type="button"
             class="shrink-0 rounded-xl bg-neutral-950 px-3 py-2 text-xs font-medium text-white disabled:opacity-50 dark:bg-white dark:text-black"
             :disabled="refreshing"
             @click="handleRefresh">
-            {{ refreshing ? '刷新中' : '刷新' }}
+            {{ refreshing ? '刷新中' : '刷新全部' }}
           </button>
         </div>
-        <label class="flex items-center gap-2 text-xs text-neutral-500 dark:text-neutral-400">
-          <input v-model="allowPrivateMarketUrls" type="checkbox" class="size-3.5 rounded accent-neutral-950 dark:accent-white" />
-          允许本机/内网 Market URL
-        </label>
-        <p class="truncate text-xs text-neutral-400 dark:text-neutral-500">
-          {{ summary.market_url || '未配置 Market URL，刷新时可填入 market.json 地址' }}
+        <p class="w-full text-left text-xs text-neutral-400 dark:text-neutral-500 sm:text-right">
+          {{ summary.enabled_source_count || 0 }} 个 Market 源启用 | 共 {{ summary.package_count || 0 }} 个包
         </p>
       </div>
     </header>
@@ -121,6 +120,65 @@
   </main>
 
   <Teleport to="body">
+    <div v-if="sourceDialogOpen"
+      class="fixed inset-0 z-[95] flex items-center justify-center bg-neutral-950/35 px-4 py-8 backdrop-blur-md"
+      @click.self="closeSourceDialog">
+      <section class="max-h-full w-full max-w-3xl overflow-y-auto rounded-3xl border border-white/60 bg-white/95 p-6 shadow-2xl shadow-neutral-950/20 dark:border-white/10 dark:bg-neutral-900/95">
+        <div class="mb-5 flex items-start justify-between gap-4">
+          <div>
+            <h2 class="text-lg font-semibold text-neutral-900 dark:text-neutral-50">Market源管理</h2>
+            <!-- <p class="mt-1 text-sm text-neutral-500 dark:text-neutral-400">默认启用官方源，也可以添加第三方 Market 同时加载。</p> -->
+          </div>
+          <button type="button" class="flex size-8 shrink-0 items-center justify-center rounded-full text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-800" @click="closeSourceDialog">
+            <svg class="size-4" viewBox="0 0 24 24" fill="none"><path d="M6 6l12 12M18 6 6 18" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" /></svg>
+          </button>
+        </div>
+
+        <div class="mb-5 space-y-3">
+          <div v-for="source in marketSources" :key="source.id" class="rounded-2xl border border-neutral-100 bg-neutral-50/80 p-3 dark:border-neutral-800 dark:bg-neutral-950/40">
+            <div class="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center">
+              <input v-model="source.name" class="market-input sm:w-44" placeholder="名称" />
+              <input v-model="source.url" class="market-input min-w-0 flex-1" placeholder="market.json URL" :disabled="source.is_builtin" />
+            </div>
+            <div class="flex flex-wrap items-center gap-3 text-xs text-neutral-500 dark:text-neutral-400">
+              <label class="flex items-center gap-1.5">
+                <input v-model="source.enabled" type="checkbox" class="size-3.5 rounded accent-neutral-950 dark:accent-white" />
+                启用
+              </label>
+              <label class="flex items-center gap-1.5">
+                <input v-model="source.allow_private" type="checkbox" class="size-3.5 rounded accent-neutral-950 dark:accent-white" />
+                允许本机/内网
+              </label>
+              <span :class="source.last_status === 'error' ? 'text-red-500' : source.last_status === 'ok' ? 'text-emerald-500' : ''">
+                {{ sourceStatusLabel(source) }}
+              </span>
+              <span v-if="source.last_error" class="min-w-0 flex-1 truncate text-red-500">{{ source.last_error }}</span>
+              <div class="ml-auto flex gap-2">
+                <button type="button" class="market-action" :disabled="refreshing" @click="handleRefreshSource(source)">刷新</button>
+                <button type="button" class="market-action" @click="handleUpdateSource(source)">保存</button>
+                <button type="button" class="market-action" :disabled="source.is_builtin" @click="handleDeleteSource(source)">删除</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="rounded-2xl border border-neutral-100 p-3 dark:border-neutral-800">
+          <h3 class="mb-3 text-sm font-semibold text-neutral-900 dark:text-neutral-50">添加第三方源</h3>
+          <div class="grid gap-2 sm:grid-cols-[160px_minmax(0,1fr)]">
+            <input v-model="sourceDraft.name" class="market-input" placeholder="名称" />
+            <input v-model="sourceDraft.url" class="market-input" placeholder="https://example.com/market.json" />
+          </div>
+          <div class="mt-3 flex flex-wrap items-center justify-between gap-3">
+            <label class="flex items-center gap-1.5 text-xs text-neutral-500 dark:text-neutral-400">
+              <input v-model="sourceDraft.allow_private" type="checkbox" class="size-3.5 rounded accent-neutral-950 dark:accent-white" />
+              允许本机/内网 URL
+            </label>
+            <button type="button" class="market-action primary" @click="handleCreateSource">添加源</button>
+          </div>
+        </div>
+      </section>
+    </div>
+
     <div v-if="dialogOpen"
       class="fixed inset-0 z-[90] flex items-center justify-center bg-neutral-950/35 px-4 py-8 backdrop-blur-md"
       @click.self="closeDialog">
@@ -184,11 +242,16 @@
 <script setup>
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import {
+  createMarketSource,
+  deleteMarketSource,
   fetchMarketPackages,
   fetchMarketSummary,
+  fetchMarketSources,
   importMarketPackage,
   previewMarketPackage,
   refreshMarket,
+  refreshMarketSource,
+  updateMarketSource,
 } from '../api/market'
 
 const summary = ref({})
@@ -198,11 +261,16 @@ const refreshing = ref(false)
 const previewLoading = ref(false)
 const importLoading = ref(false)
 const error = ref('')
-const marketUrl = ref('')
-const allowPrivateMarketUrls = ref(false)
 const dialogOpen = ref(false)
+const sourceDialogOpen = ref(false)
 const selectedPackage = ref(null)
 const preview = ref(null)
+const marketSources = ref([])
+const sourceDraft = reactive({
+  name: '',
+  url: '',
+  allow_private: false,
+})
 
 const filters = reactive({
   search: '',
@@ -266,10 +334,20 @@ function regionLabel(region) {
   return [region.country, region.province, region.city].filter(Boolean).join(' · ') || '未知地区'
 }
 
+function sourceStatusLabel(source) {
+  if (source.last_status === 'ok') return '已刷新'
+  if (source.last_status === 'error') return '刷新失败'
+  return source.is_builtin ? '官方默认' : '未刷新'
+}
+
 async function loadSummary() {
   summary.value = await fetchMarketSummary()
-  marketUrl.value = summary.value.market_url || ''
-  allowPrivateMarketUrls.value = Boolean(summary.value.allow_private)
+  marketSources.value = (summary.value.sources || []).map(source => ({ ...source }))
+}
+
+async function loadSources() {
+  const data = await fetchMarketSources()
+  marketSources.value = (data.sources || []).map(source => ({ ...source }))
 }
 
 async function loadPackages() {
@@ -289,8 +367,80 @@ async function handleRefresh() {
   refreshing.value = true
   error.value = ''
   try {
-    summary.value = await refreshMarket(marketUrl.value.trim(), { allowPrivate: allowPrivateMarketUrls.value })
-    marketUrl.value = summary.value.market_url || marketUrl.value
+    summary.value = await refreshMarket()
+    marketSources.value = (summary.value.sources || []).map(source => ({ ...source }))
+    await loadPackages()
+  } catch (e) {
+    error.value = e.message || String(e)
+  } finally {
+    refreshing.value = false
+  }
+}
+
+function openSourceDialog() {
+  sourceDialogOpen.value = true
+  loadSources().catch((e) => { error.value = e.message || String(e) })
+}
+
+function closeSourceDialog() {
+  sourceDialogOpen.value = false
+}
+
+async function handleCreateSource() {
+  if (!sourceDraft.url.trim()) {
+    error.value = 'Market 源 URL 不能为空'
+    return
+  }
+  error.value = ''
+  try {
+    await createMarketSource({
+      name: sourceDraft.name.trim() || '第三方 Market',
+      url: sourceDraft.url.trim(),
+      enabled: true,
+      allow_private: sourceDraft.allow_private,
+    })
+    sourceDraft.name = ''
+    sourceDraft.url = ''
+    sourceDraft.allow_private = false
+    await loadSources()
+  } catch (e) {
+    error.value = e.message || String(e)
+  }
+}
+
+async function handleUpdateSource(source) {
+  error.value = ''
+  try {
+    await updateMarketSource(source.id, {
+      name: source.name,
+      url: source.url,
+      enabled: source.enabled,
+      allow_private: source.allow_private,
+    })
+    await loadSources()
+  } catch (e) {
+    error.value = e.message || String(e)
+  }
+}
+
+async function handleDeleteSource(source) {
+  if (!source?.id || source.is_builtin) return
+  error.value = ''
+  try {
+    await deleteMarketSource(source.id)
+    await loadSources()
+  } catch (e) {
+    error.value = e.message || String(e)
+  }
+}
+
+async function handleRefreshSource(source) {
+  if (!source?.id) return
+  refreshing.value = true
+  error.value = ''
+  try {
+    summary.value = await refreshMarketSource(source.id)
+    marketSources.value = (summary.value.sources || []).map(item => ({ ...item }))
     await loadPackages()
   } catch (e) {
     error.value = e.message || String(e)
@@ -368,7 +518,23 @@ onMounted(async () => {
   outline: none;
 }
 
+.market-input {
+  border-radius: 12px;
+  border: 1px solid rgb(229 229 229);
+  background: rgb(255 255 255 / 0.78);
+  padding: 8px 10px;
+  font-size: 12px;
+  color: rgb(64 64 64);
+  outline: none;
+}
+
 .dark .market-select {
+  border-color: rgb(64 64 64);
+  background: rgb(23 23 23 / 0.72);
+  color: rgb(212 212 212);
+}
+
+.dark .market-input {
   border-color: rgb(64 64 64);
   background: rgb(23 23 23 / 0.72);
   color: rgb(212 212 212);

@@ -35,6 +35,46 @@ export async function refreshMarket(marketUrl = '', { allowPrivate = false } = {
   return res.json()
 }
 
+export async function refreshMarketSource(sourceId) {
+  const res = await request('/api/market/refresh', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ source_id: sourceId }),
+    timeout: 30_000,
+  })
+  return res.json()
+}
+
+export async function fetchMarketSources() {
+  const res = await request('/api/market/sources')
+  return res.json()
+}
+
+export async function createMarketSource(payload) {
+  const res = await request('/api/market/sources', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  return res.json()
+}
+
+export async function updateMarketSource(id, payload) {
+  const res = await request(`/api/market/sources/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  return res.json()
+}
+
+export async function deleteMarketSource(id) {
+  const res = await request(`/api/market/sources/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  })
+  return res.json()
+}
+
 export async function fetchMarketPackages(filters = {}) {
   const params = new URLSearchParams()
   for (const [key, value] of Object.entries(filters)) {

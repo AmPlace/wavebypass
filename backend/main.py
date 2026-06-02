@@ -1589,10 +1589,52 @@ async def get_market_summary():
 async def refresh_market(request: Request):
     try:
         body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+        source_id = (body or {}).get("source_id")
         return await _market.refresh_market(
             (body or {}).get("market_url"),
             allow_private=_truthy_query((body or {}).get("allow_private", False)),
+            source_id=int(source_id) if source_id else None,
         )
+    except Exception as exc:
+        _market_http_error(exc)
+
+
+@app.get("/api/market/sources")
+async def list_market_sources():
+    try:
+        return {"sources": await _market.list_sources()}
+    except Exception as exc:
+        _market_http_error(exc)
+
+
+@app.post("/api/market/sources")
+async def create_market_source(request: Request):
+    try:
+        body = await request.json()
+        source = await _market.create_source(
+            name=(body or {}).get("name", ""),
+            url=(body or {}).get("url", ""),
+            enabled=_truthy_query((body or {}).get("enabled", True)),
+            allow_private=_truthy_query((body or {}).get("allow_private", False)),
+        )
+        return source
+    except Exception as exc:
+        _market_http_error(exc)
+
+
+@app.put("/api/market/sources/{source_id}")
+async def update_market_source(source_id: int, request: Request):
+    try:
+        body = await request.json()
+        return await _market.update_source(source_id, body or {})
+    except Exception as exc:
+        _market_http_error(exc)
+
+
+@app.delete("/api/market/sources/{source_id}")
+async def delete_market_source(source_id: int):
+    try:
+        return await _market.delete_source(source_id)
     except Exception as exc:
         _market_http_error(exc)
 
