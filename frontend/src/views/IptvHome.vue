@@ -181,13 +181,13 @@ function isAllFailed(ch) {
   return ch.urls.every(u => u.is_working === 0)
 }
 
-function playChannel(ch) {
+async function playChannel(ch) {
   if (isAllFailed(ch)) return
   if (!ch.urls || !ch.urls.length) return
   const videoEl = playerStore.iptvVideoEl
   // 仅调 play() 满足 iOS 手势，其余由 store.playIptvChannel 接管
   if (videoEl) videoEl.play().catch(() => {})
-  playerStore.playIptvChannel(ch)
+  await playerStore.playIptvChannel(ch)
 }
 
 function pillClass(active) {

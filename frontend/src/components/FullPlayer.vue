@@ -781,7 +781,7 @@ const displayChannelRows = computed(() => {
   })
 })
 
-function playIptvChannelFromFullPlayer(channel) {
+async function playIptvChannelFromFullPlayer(channel) {
   if (!channel?.urls?.length) {
     playerStore.setPlaybackError('频道没有可用播放源')
     return
@@ -790,7 +790,13 @@ function playIptvChannelFromFullPlayer(channel) {
   const videoEl = playerStore.iptvVideoEl || iptvVideoRef.value
   if (videoEl) videoEl.play().catch(() => {})
   _manualIptvStartPending += 1
-  playerStore.playIptvChannel(channel)
+  try {
+    await playerStore.playIptvChannel(channel)
+  } catch (e) {
+    _manualIptvStartPending = Math.max(0, _manualIptvStartPending - 1)
+    playerStore.setPlaybackError(e?.message || '频道起播失败')
+    return
+  }
   nextTick(() => {
     _manualIptvStartPending = Math.max(0, _manualIptvStartPending - 1)
     if (!iptvVideoRef.value || !playerStore.currentIptvChannel) {
