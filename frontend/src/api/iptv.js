@@ -40,6 +40,14 @@ export async function refreshSubscription(id) {
   return res.json()
 }
 
+export async function refreshAllSubscriptions() {
+  const res = await request('/api/iptv/subscriptions/refresh-all', {
+    method: 'POST',
+    timeout: 120_000,
+  })
+  return res.json()
+}
+
 export async function fetchChannels(subId, { group = '', search = '' } = {}) {
   const params = new URLSearchParams()
   if (group) params.set('group', group)

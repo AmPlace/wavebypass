@@ -22,6 +22,12 @@
         </button>
         <button type="button"
           class="rounded-full border border-neutral-200 bg-white/70 px-3 py-1.5 text-xs font-medium text-neutral-600 backdrop-blur-xl transition-all hover:scale-[1.03] active:scale-95 dark:border-neutral-700 dark:bg-neutral-800/70 dark:text-neutral-300"
+          :disabled="refreshRunning"
+          @click="handleRefreshAll">
+          {{ refreshRunning ? '刷新中' : '全部刷新' }}
+        </button>
+        <button type="button"
+          class="rounded-full border border-neutral-200 bg-white/70 px-3 py-1.5 text-xs font-medium text-neutral-600 backdrop-blur-xl transition-all hover:scale-[1.03] active:scale-95 dark:border-neutral-700 dark:bg-neutral-800/70 dark:text-neutral-300"
           :disabled="testRunning" @click="handleTestAll">
           {{ testRunning ? `测速中 ${testProgress.tested}/${testProgress.total}` : '全部测速' }}
         </button>
@@ -286,7 +292,7 @@
 <script setup>
 import { ref, onMounted, onBeforeUnmount } from 'vue'
 import {
-  fetchSubscriptions, addSubscription, deleteSubscription, refreshSubscription,
+  fetchSubscriptions, addSubscription, deleteSubscription, refreshSubscription, refreshAllSubscriptions,
   testAllGlobal, fetchGlobalTestStatus,
 } from '../api/iptv'
 import { API_BASE } from '../apiBase'
@@ -298,6 +304,7 @@ const addUa = ref('')
 const addForceProxy = ref(false)
 const addError = ref('')
 const addLoading = ref(false)
+const refreshRunning = ref(false)
 const testRunning = ref(false)
 const testProgress = ref({ total: 0, tested: 0, working: 0, failed: 0 })
 const exportDialogOpen = ref(false)
@@ -388,6 +395,22 @@ async function handleRefresh(sub) {
     await loadSubscriptions()
   } catch (e) {
     alert(`刷新失败: ${e.message}`)
+  }
+}
+
+async function handleRefreshAll() {
+  if (refreshRunning.value) return
+  refreshRunning.value = true
+  try {
+    const result = await refreshAllSubscriptions()
+    await loadSubscriptions()
+    if (result.failed) {
+      alert(`已刷新 ${result.updated || 0} 个订阅，${result.failed} 个失败`)
+    }
+  } catch (e) {
+    alert(`全部刷新失败: ${e.message}`)
+  } finally {
+    refreshRunning.value = false
   }
 }
 

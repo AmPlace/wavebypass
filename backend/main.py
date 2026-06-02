@@ -1530,28 +1530,72 @@ async def delete_subscription(sub_id: int):
     return {"ok": True}
 
 
+async def _refresh_regular_subscription(sub: dict) -> dict:
+    headers = {'User-Agent': sub['custom_ua']} if sub.get('custom_ua') else {}
+    try:
+        resp = await http_client.get(sub['url'], follow_redirects=True, timeout=15, headers=headers)
+        resp.raise_for_status()
+    except httpx.HTTPError as exc:
+        await db.update_subscription(sub['id'], valid=0)
+        raise HTTPException(status_code=502, detail=f"刷新失败: {exc}") from exc
+
+    channels = parse_m3u(resp.text)
+    channels = deduplicate_channels(channels)
+    await db.add_channels_bulk(sub['id'], channels)
+    await db.update_subscription(sub['id'], valid=1, channel_count=len(channels))
+
+    return {"channel_count": len(channels)}
+
+
+async def _refresh_market_subscription(sub: dict) -> dict:
+    package_id = str(sub.get('url') or '').removeprefix('market://').strip()
+    if not package_id:
+        raise HTTPException(status_code=400, detail="Market 订阅缺少 package_id")
+    try:
+        result = await _market.update_installed_package(package_id)
+    except Exception as exc:
+        _market_http_error(exc)
+    return result
+
+
 @app.post("/api/iptv/subscriptions/{sub_id}/refresh")
 async def refresh_subscription(sub_id: int):
     sub = await db.get_subscription(sub_id)
     if not sub:
         raise HTTPException(status_code=404, detail="订阅不存在")
     if str(sub.get('url') or '').startswith('market://'):
-        raise HTTPException(status_code=400, detail="Market 包 V1 暂不支持从订阅页自动刷新，请从 Market 页面重新导入或更新。")
+        return await _refresh_market_subscription(sub)
+    return await _refresh_regular_subscription(sub)
 
-    headers = {'User-Agent': sub['custom_ua']} if sub.get('custom_ua') else {}
-    try:
-        resp = await http_client.get(sub['url'], follow_redirects=True, timeout=15, headers=headers)
-        resp.raise_for_status()
-    except httpx.HTTPError as exc:
-        await db.update_subscription(sub_id, valid=0)
-        raise HTTPException(status_code=502, detail=f"刷新失败: {exc}") from exc
 
-    channels = parse_m3u(resp.text)
-    channels = deduplicate_channels(channels)
-    await db.add_channels_bulk(sub_id, channels)
-    await db.update_subscription(sub_id, valid=1, channel_count=len(channels))
-
-    return {"channel_count": len(channels)}
+@app.post("/api/iptv/subscriptions/refresh-all")
+async def refresh_all_subscriptions():
+    subs = await db.get_subscriptions()
+    results = []
+    updated = 0
+    failed = 0
+    for sub in subs:
+        try:
+            if str(sub.get('url') or '').startswith('market://'):
+                result = await _refresh_market_subscription(sub)
+            else:
+                result = await _refresh_regular_subscription(sub)
+            updated += 1
+            results.append({
+                "subscription_id": sub.get("id"),
+                "title": sub.get("title"),
+                "status": "updated",
+                **(result or {}),
+            })
+        except HTTPException as exc:
+            failed += 1
+            results.append({
+                "subscription_id": sub.get("id"),
+                "title": sub.get("title"),
+                "status": "failed",
+                "error": exc.detail,
+            })
+    return {"ok": True, "updated": updated, "failed": failed, "results": results}
 
 
 # ── 频道 ──
@@ -1691,6 +1735,37 @@ async def import_market_package(package_id: str, request: Request):
             preview_id=(body or {}).get("preview_id", ""),
             prefer_cached_preview=_truthy_query((body or {}).get("prefer_cached_preview", True)),
             reinstall=_truthy_query((body or {}).get("reinstall", False)),
+        )
+    except Exception as exc:
+        _market_http_error(exc)
+
+
+@app.post("/api/market/packages/{package_id}/update")
+async def update_market_package(package_id: str):
+    try:
+        return await _market.update_installed_package(package_id)
+    except Exception as exc:
+        _market_http_error(exc)
+
+
+@app.patch("/api/market/packages/{package_id}/install")
+async def update_market_install(package_id: str, request: Request):
+    try:
+        body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+        return await _market.update_install_config(
+            package_id,
+            auto_update=_truthy_query((body or {}).get("auto_update", False)) if "auto_update" in (body or {}) else None,
+        )
+    except Exception as exc:
+        _market_http_error(exc)
+
+
+@app.post("/api/market/updates/run")
+async def run_market_updates(request: Request):
+    try:
+        body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+        return await _market.run_installed_updates(
+            auto_update_only=_truthy_query((body or {}).get("auto_update_only", False)),
         )
     except Exception as exc:
         _market_http_error(exc)

@@ -423,6 +423,21 @@ async def upsert_market_install(
     await asyncio.to_thread(_upsert)
 
 
+async def update_market_install(package_id: str, **kwargs):
+    allowed = {"auto_update"}
+    values = {key: value for key, value in kwargs.items() if key in allowed}
+    if not values:
+        return
+
+    def _update():
+        conn = _connect()
+        sets = ', '.join(f"{k}=?" for k in values)
+        conn.execute(f"UPDATE market_packages_installed SET {sets} WHERE package_id=?", (*values.values(), package_id))
+        conn.commit()
+        conn.close()
+    await asyncio.to_thread(_update)
+
+
 async def delete_market_install(package_id: str):
     def _delete():
         conn = _connect()

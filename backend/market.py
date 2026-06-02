@@ -696,6 +696,7 @@ async def list_packages(filters: dict[str, str | bool]) -> list[dict]:
         item["installed"] = bool(install)
         item["installed_version"] = install.get("installed_version", "") if install else ""
         item["installed_subscription_id"] = install.get("installed_subscription_id") if install else None
+        item["auto_update"] = bool(install.get("auto_update")) if install else False
         item["update_available"] = _update_available(package, install)
         packages.append(item)
     return packages
@@ -710,7 +711,7 @@ def _package_card(package: dict) -> dict:
         "source_count", "health", "compatibility", "contributors", "importable",
         "previewable", "supported_in_v1", "unsupported_reason", "schema_warnings",
         "manifest_url", "market_url", "market_source", "installed", "installed_version",
-        "update_available",
+        "auto_update", "update_available",
     ]
     return {key: deepcopy(package.get(key)) for key in keys if key in package}
 
@@ -735,6 +736,7 @@ async def get_package(package_id: str) -> dict:
     result["installed"] = bool(install)
     result["installed_version"] = install.get("installed_version", "") if install else ""
     result["installed_subscription_id"] = install.get("installed_subscription_id") if install else None
+    result["auto_update"] = bool(install.get("auto_update")) if install else False
     result["update_available"] = _update_available(package, install)
     return result
 
@@ -750,6 +752,88 @@ async def uninstall_package(package_id: str) -> dict:
             await db.delete_subscription(sub_id)
     await db.delete_market_install(package_id)
     return {"ok": True, "uninstalled": True}
+
+
+async def update_install_config(package_id: str, *, auto_update: bool | None = None) -> dict:
+    installed = await db.get_market_install(package_id)
+    if not installed:
+        raise MarketError("Market 包尚未安装", 404)
+    values: dict[str, int] = {}
+    if auto_update is not None:
+        values["auto_update"] = 1 if auto_update else 0
+    if values:
+        await db.update_market_install(package_id, **values)
+    updated = await db.get_market_install(package_id)
+    return {
+        "ok": True,
+        "package_id": package_id,
+        "auto_update": bool((updated or {}).get("auto_update")),
+    }
+
+
+async def update_installed_package(package_id: str) -> dict:
+    installed = await db.get_market_install(package_id)
+    if not installed:
+        raise MarketError("Market 包尚未安装", 404)
+    return await import_package(package_id, reinstall=True)
+
+
+async def run_installed_updates(auto_update_only: bool = False) -> dict:
+    await ensure_market_loaded()
+    rows = await db.list_market_installs()
+    results: list[dict[str, Any]] = []
+    updated = 0
+    skipped = 0
+    failed = 0
+
+    for install in rows:
+        package_id = str(install.get("package_id") or "").strip()
+        if not package_id:
+            continue
+        if auto_update_only and not install.get("auto_update"):
+            skipped += 1
+            results.append({
+                "package_id": package_id,
+                "status": "skipped",
+                "reason": "auto_update disabled",
+            })
+            continue
+        sub_id = install.get("installed_subscription_id")
+        sub = await db.get_subscription(sub_id) if sub_id else None
+        if not sub:
+            await db.delete_market_install(package_id)
+            skipped += 1
+            results.append({
+                "package_id": package_id,
+                "status": "skipped",
+                "reason": "installed subscription missing",
+            })
+            continue
+        try:
+            result = await update_installed_package(package_id)
+            updated += 1
+            results.append({
+                "package_id": package_id,
+                "status": "updated",
+                "subscription_id": result.get("subscription_id"),
+                "channel_count": result.get("channel_count", 0),
+                "source_count": result.get("source_count", 0),
+            })
+        except Exception as exc:
+            failed += 1
+            results.append({
+                "package_id": package_id,
+                "status": "failed",
+                "error": str(exc),
+            })
+
+    return {
+        "ok": True,
+        "updated": updated,
+        "skipped": skipped,
+        "failed": failed,
+        "results": results,
+    }
 
 
 def _source_type_for(source: dict) -> str:
@@ -979,13 +1063,11 @@ async def import_package(
         raise MarketError(package.get("unsupported_reason") or "该包当前版本不可导入", 400)
 
     installed = await db.get_market_install(package_id)
+    preserved_auto_update = int(installed.get("auto_update") or 0) if installed else 0
     if installed and installed.get("installed_subscription_id"):
         sub = await db.get_subscription(installed["installed_subscription_id"])
-        if sub:
-            if not reinstall:
-                raise MarketError(f"Market 包已安装: {sub.get('title')}", 409)
-            await db.delete_subscription(sub["id"])
-        await db.delete_market_install(package_id)
+        if sub and not reinstall:
+            raise MarketError(f"Market 包已安装: {sub.get('title')}", 409)
 
     preview = None
     _drop_expired_previews()
@@ -1000,6 +1082,13 @@ async def import_package(
     channels = preview.get("all_channels") or []
     if not channels:
         raise MarketError("没有可导入的频道源", 400)
+
+    if installed and reinstall:
+        sub_id = installed.get("installed_subscription_id")
+        sub = await db.get_subscription(sub_id) if sub_id else None
+        if sub:
+            await db.delete_subscription(sub["id"])
+        await db.delete_market_install(package_id)
 
     force_proxy = 1 if any(ch.get("force_proxy") for ch in channels) else 0
     custom_uas = sorted({str(ch.get("custom_ua") or "").strip() for ch in channels if ch.get("custom_ua")})
@@ -1036,6 +1125,7 @@ async def import_package(
         installed_subscription_id=sub_id,
         installed_version=package.get("version", ""),
         metadata_json=json.dumps(metadata, ensure_ascii=False),
+        auto_update=preserved_auto_update,
     )
     return {
         "ok": True,

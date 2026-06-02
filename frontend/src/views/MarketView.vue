@@ -28,6 +28,12 @@
             @click="handleRefresh">
             {{ refreshing ? '刷新中' : '刷新全部' }}
           </button>
+          <button type="button"
+            class="shrink-0 rounded-xl border border-neutral-200 bg-white/70 px-3 py-2 text-xs font-medium text-neutral-700 backdrop-blur-xl disabled:opacity-50 dark:border-neutral-700 dark:bg-neutral-900/70 dark:text-neutral-200"
+            :disabled="updating"
+            @click="handleUpdateAllInstalled">
+            {{ updating ? '更新中' : '更新全部已安装' }}
+          </button>
         </div>
         <p class="w-full text-left text-xs text-neutral-400 dark:text-neutral-500 sm:text-right">
           {{ summary.enabled_source_count || 0 }} 个 Market 源启用 | 共 {{ summary.package_count || 0 }} 个包
@@ -212,6 +218,22 @@
           <div class="market-info sm:col-span-2">Manifest：{{ selectedPackage.manifest_url || '内联配置' }}</div>
         </div>
 
+        <div v-if="selectedPackage?.installed" class="mb-5 rounded-2xl border border-neutral-100 bg-neutral-50/80 p-3 dark:border-neutral-800 dark:bg-neutral-950/40">
+          <label class="flex items-start justify-between gap-4 text-sm text-neutral-700 dark:text-neutral-200">
+            <span>
+              <span class="block font-semibold">自动更新</span>
+              <span class="mt-1 block text-xs leading-5 text-neutral-400 dark:text-neutral-500">用于后续后台自动更新；手动更新和全部更新不受此开关限制。</span>
+            </span>
+            <input
+              :checked="selectedPackage.auto_update"
+              type="checkbox"
+              class="mt-1 size-4 rounded accent-neutral-950 dark:accent-white"
+              :disabled="installConfigLoading"
+              @change="handleAutoUpdateChange(selectedPackage, $event)"
+            />
+          </label>
+        </div>
+
         <div v-if="selectedPackage" class="mb-5 grid gap-2 text-xs text-neutral-500 dark:text-neutral-400 sm:grid-cols-3">
           <div class="market-info">代理：{{ selectedPackage.requires_proxy ? '需要' : '不需要' }}</div>
           <div class="market-info">解析器：{{ selectedPackage.requires_resolver ? '需要' : '不需要' }}</div>
@@ -298,7 +320,10 @@ import {
   previewMarketPackage,
   refreshMarket,
   refreshMarketSource,
+  runMarketUpdates,
   uninstallMarketPackage,
+  updateMarketInstall,
+  updateMarketPackage,
   updateMarketSource,
 } from '../api/market'
 
@@ -306,8 +331,10 @@ const summary = ref({})
 const packages = ref([])
 const loading = ref(false)
 const refreshing = ref(false)
+const updating = ref(false)
 const previewLoading = ref(false)
 const importLoading = ref(false)
+const installConfigLoading = ref(false)
 const error = ref('')
 const dialogOpen = ref(false)
 const sourceDialogOpen = ref(false)
@@ -422,6 +449,24 @@ async function handleRefresh() {
     error.value = e.message || String(e)
   } finally {
     refreshing.value = false
+  }
+}
+
+async function handleUpdateAllInstalled() {
+  updating.value = true
+  error.value = ''
+  try {
+    const result = await runMarketUpdates()
+    await loadSummary()
+    await loadPackages()
+    syncSelectedPackageFromList()
+    if (result.failed) {
+      error.value = `已更新 ${result.updated || 0} 个包，${result.failed} 个失败`
+    }
+  } catch (e) {
+    error.value = e.message || String(e)
+  } finally {
+    updating.value = false
   }
 }
 
@@ -545,13 +590,29 @@ async function handleReinstall(pkg) {
   importLoading.value = true
   error.value = ''
   try {
-    const result = await importMarketPackage(pkg.id, preview.value?.preview_id || '', { reinstall: true })
+    const result = await updateMarketPackage(pkg.id)
     markPackageInstalled(pkg.id, result.subscription_id)
     preview.value = preview.value || { warnings: result.warnings || [], channel_count: result.channel_count, source_count: result.source_count, unsupported_source_count: 0, channels: [] }
   } catch (e) {
     error.value = e.message || String(e)
   } finally {
     importLoading.value = false
+  }
+}
+
+async function handleAutoUpdateChange(pkg, event) {
+  if (!pkg?.id) return
+  const enabled = Boolean(event?.target?.checked)
+  installConfigLoading.value = true
+  error.value = ''
+  try {
+    const result = await updateMarketInstall(pkg.id, { auto_update: enabled })
+    setPackageAutoUpdate(pkg.id, result.auto_update)
+  } catch (e) {
+    error.value = e.message || String(e)
+    if (event?.target) event.target.checked = !enabled
+  } finally {
+    installConfigLoading.value = false
   }
 }
 
@@ -562,10 +623,10 @@ async function handleUninstall(pkg) {
   try {
     await uninstallMarketPackage(pkg.id)
     packages.value = packages.value.map(item => item.id === pkg.id
-      ? { ...item, installed: false, installed_subscription_id: null, installed_version: '' }
+      ? { ...item, installed: false, installed_subscription_id: null, installed_version: '', auto_update: false }
       : item)
     if (selectedPackage.value?.id === pkg.id) {
-      selectedPackage.value = { ...selectedPackage.value, installed: false, installed_subscription_id: null, installed_version: '' }
+      selectedPackage.value = { ...selectedPackage.value, installed: false, installed_subscription_id: null, installed_version: '', auto_update: false }
     }
   } catch (e) {
     error.value = e.message || String(e)
@@ -581,6 +642,21 @@ function markPackageInstalled(packageId, subscriptionId) {
   if (selectedPackage.value?.id === packageId) {
     selectedPackage.value = { ...selectedPackage.value, installed: true, installed_subscription_id: subscriptionId, installed_version: selectedPackage.value.version || '', update_available: false }
   }
+}
+
+function setPackageAutoUpdate(packageId, autoUpdate) {
+  packages.value = packages.value.map(item => item.id === packageId
+    ? { ...item, auto_update: Boolean(autoUpdate) }
+    : item)
+  if (selectedPackage.value?.id === packageId) {
+    selectedPackage.value = { ...selectedPackage.value, auto_update: Boolean(autoUpdate) }
+  }
+}
+
+function syncSelectedPackageFromList() {
+  if (!selectedPackage.value?.id) return
+  const latest = packages.value.find(item => item.id === selectedPackage.value.id)
+  if (latest) selectedPackage.value = { ...selectedPackage.value, ...latest }
 }
 
 watch(filters, () => {

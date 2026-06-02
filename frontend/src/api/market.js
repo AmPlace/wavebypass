@@ -109,6 +109,33 @@ export async function importMarketPackage(id, previewId = '', { reinstall = fals
   return res.json()
 }
 
+export async function updateMarketPackage(id) {
+  const res = await request(`/api/market/packages/${encodeURIComponent(id)}/update`, {
+    method: 'POST',
+    timeout: 45_000,
+  })
+  return res.json()
+}
+
+export async function updateMarketInstall(id, payload) {
+  const res = await request(`/api/market/packages/${encodeURIComponent(id)}/install`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  return res.json()
+}
+
+export async function runMarketUpdates({ autoUpdateOnly = false } = {}) {
+  const res = await request('/api/market/updates/run', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ auto_update_only: autoUpdateOnly }),
+    timeout: 120_000,
+  })
+  return res.json()
+}
+
 export async function uninstallMarketPackage(id) {
   const res = await request(`/api/market/packages/${encodeURIComponent(id)}/install`, {
     method: 'DELETE',
