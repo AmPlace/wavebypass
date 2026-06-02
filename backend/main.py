@@ -18,10 +18,11 @@ from zoneinfo import ZoneInfo
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from contextlib import asynccontextmanager
 from fetchers import STATION_FETCHER_MAP, yunting
 import database
+from adapters import AdapterResolveError, resolve_adapter_source
 
 
 TOKEN_REFRESH_INTERVAL_SECONDS = 18_000
@@ -1568,7 +1569,7 @@ async def _get_aggregated_iptv_channels(group: str = '', search: str = '') -> tu
     # 搜索在 SQL 层过滤（性能好），分组在聚合后过滤（归一化后才准）
     raw = await db.get_aggregated_channels(group='', search=search)
 
-    from m3u8_parser import clean_channel_display_name, detect_source_type, normalize_channel_name, parse_youtube_video_id, _channel_alias
+    from m3u8_parser import adapter_provider, clean_channel_display_name, detect_source_type, normalize_channel_name, parse_youtube_video_id, _channel_alias
     from template import channel_template, normalize_group_name
 
     merged: dict[str, dict] = {}
@@ -1606,6 +1607,7 @@ async def _get_aggregated_iptv_channels(group: str = '', search: str = '') -> tu
             'custom_ua': ch.get('custom_ua', ''),
             'force_proxy': ch.get('force_proxy', 0),
             'source_type': source_type,
+            'adapter': adapter_provider(ch['url']),
             'youtube_video_id': youtube_video_id,
             'raw_name': ch['name'],
             'raw_tvg_id': ch.get('tvg_id', ''),
@@ -1796,12 +1798,24 @@ async def global_test_status():
 async def _test_single_channel(ch: dict) -> dict:
     """测速单个频道：GET URL → 判断是否 M3U8 → HEAD 第一个 TS 分片"""
     url = ch['url']
-    # RTSP/RTMP 暂不支持 HTTP 测速，标记为未测试
-    if url.startswith(('rtsp://', 'rtmp://')):
-        return {"working": -1, "latency_ms": 0}
     custom_ua = ch.get('custom_ua', '')
     headers = {'User-Agent': custom_ua} if custom_ua else {}
     start = time.time()
+    from m3u8_parser import detect_source_type
+
+    source_type = ch.get('source_type') if ch.get('source_type') and ch.get('source_type') != 'hls' else detect_source_type(url)
+    if source_type == 'adapter':
+        try:
+            resolved = await resolve_adapter_source(url, http_client)
+            url = str(resolved.get('url') or '')
+            resolved_headers = resolved.get('headers') if isinstance(resolved.get('headers'), dict) else {}
+            headers.update({str(k): str(v) for k, v in resolved_headers.items()})
+        except AdapterResolveError:
+            return {"working": False, "latency_ms": 0}
+
+    # RTSP/RTMP 暂不支持 HTTP 测速，标记为未测试
+    if url.startswith(('rtsp://', 'rtmp://')):
+        return {"working": -1, "latency_ms": 0}
     try:
         resp = await http_client.get(url, follow_redirects=True, timeout=8, headers=headers)
         latency = (time.time() - start) * 1000
@@ -1912,6 +1926,11 @@ def _iptv_wide_playlist_proxy_path(target_url: str, proxy_ts: int = 0, custom_ua
     return f'/api/iptv/proxy/wide.m3u8?proxy_ts={1 if proxy_ts else 0}{ua}&target_url={quote(target_url, safe="")}'
 
 
+def _iptv_adapter_play_path(target_url: str) -> str:
+    # TODO: V2 should prefer source_id-based adapter resolve/play paths over target_url.
+    return f'/api/iptv/adapter/play.m3u8?target_url={quote(target_url, safe="")}'
+
+
 def _iptv_chunk_proxy_path(target_url: str, custom_ua: str = '') -> str:
     ua = f'&custom_ua={quote(custom_ua, safe="")}' if custom_ua else ''
     return f'/api/iptv/proxy/chunk.ts?target_url={quote(target_url, safe="")}{ua}'
@@ -1938,6 +1957,51 @@ def _rewrite_iptv_wide_m3u8_text(raw_m3u8_text: str, base_url: str, proxy_ts: in
             rewritten_lines.append(absolute_media_url)
 
     return "\n".join(rewritten_lines)
+
+
+def _adapter_error_response(exc: AdapterResolveError) -> JSONResponse:
+    return JSONResponse(status_code=exc.status_code, content=exc.to_payload())
+
+
+@app.get("/api/iptv/adapter/resolve")
+async def iptv_adapter_resolve(target_url: str = ''):
+    try:
+        resolved = await resolve_adapter_source(target_url, http_client)
+    except AdapterResolveError as exc:
+        return _adapter_error_response(exc)
+
+    payload = dict(resolved)
+    payload["proxy_url"] = _iptv_adapter_play_path(target_url)
+    return payload
+
+
+@app.get("/api/iptv/adapter/play.m3u8")
+async def iptv_adapter_play_m3u8(target_url: str = ''):
+    try:
+        resolved = await resolve_adapter_source(target_url, http_client)
+    except AdapterResolveError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.to_payload()) from exc
+
+    resolved_url = str(resolved.get('url') or '').strip()
+    if not resolved_url:
+        raise HTTPException(status_code=502, detail="adapter 未返回播放地址")
+
+    source_type = str(resolved.get('source_type') or 'hls').lower()
+    headers = resolved.get('headers') if isinstance(resolved.get('headers'), dict) else {}
+    custom_ua = str(headers.get('User-Agent') or headers.get('user-agent') or '')
+
+    if source_type == 'hls':
+        validate_target_url(resolved_url)
+        return await iptv_wide_playlist(target_url=resolved_url, proxy_ts=1, custom_ua=custom_ua)
+    if source_type == 'mpegts':
+        return RedirectResponse(
+            f'/api/iptv/proxy/stream?target_url={quote(resolved_url, safe="")}',
+            status_code=307,
+        )
+    if source_type == 'rtsp':
+        return await iptv_proxy_rtsp_playlist(target_url=resolved_url, custom_ua=custom_ua, compat=0)
+
+    raise HTTPException(status_code=502, detail=f"adapter 返回了暂不支持的流类型: {source_type}")
 
 
 async def _wide_refresher(cache_key: str, target_url: str, custom_ua: str = ''):
@@ -2642,6 +2706,8 @@ def _iptv_proxy_path_for_source(source: dict) -> str:
     custom_ua = str(source.get('custom_ua') or '').strip()
     ua = f'&custom_ua={quote(custom_ua, safe="")}' if custom_ua else ''
     source_type = _source_type(source)
+    if source_type == 'adapter':
+        return _iptv_adapter_play_path(url)
     if source_type == 'rtsp':
         return f'/api/iptv/proxy/rtsp.m3u8?target_url={quote(url, safe="")}{ua}'
     if source_type == 'mpegts':
@@ -2682,7 +2748,7 @@ def _subscription_urls_for_channel(channel: dict, mode: str, request: Request, h
     if mode == 'direct':
         return [
             source['url'] for source in sources
-            if include_rtsp or _source_type(source) != 'rtsp'
+            if _source_type(source) != 'adapter' and (include_rtsp or _source_type(source) != 'rtsp')
         ]
 
     if mode == 'proxy':
@@ -2692,7 +2758,7 @@ def _subscription_urls_for_channel(channel: dict, mode: str, request: Request, h
     proxy_only_sources = []
     for source in sources:
         source_type = _source_type(source)
-        if source_type == 'rtsp' or source.get('force_proxy') or source.get('custom_ua'):
+        if source_type in {'adapter', 'rtsp'} or source.get('force_proxy') or source.get('custom_ua'):
             proxy_only_sources.append(source)
         else:
             direct_sources.append(source)
@@ -2771,6 +2837,8 @@ async def iptv_smart_playlist(canonical_key: str, request: Request):
                     compat=0,
                 )
             if source_type == 'mpegts':
+                return RedirectResponse(_iptv_proxy_url_for_source(source, request), status_code=307)
+            if source_type == 'adapter':
                 return RedirectResponse(_iptv_proxy_url_for_source(source, request), status_code=307)
             return await iptv_wide_playlist(
                 target_url=source['url'],
