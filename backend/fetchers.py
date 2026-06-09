@@ -232,14 +232,33 @@ def tingfm(post_id: int) -> StationFetcher:
 
 YUNTING_API_BASE = "https://ytmsout.radio.cn/web/appBroadcast/list"
 YUNTING_TIMEOUT = httpx.Timeout(15.0)
+_YUNTING_SIGN_KEY = "f0fc4c668392f9f9a447e48584c214ee"
+
+
+def _yunting_sign_headers(params: dict | None = None) -> dict:
+    import hashlib, time as _time
+    ts = str(int(_time.time() * 1000))
+    sorted_params = "&".join(f"{k}={v}" for k, v in sorted((params or {}).items()))
+    sign_text = (sorted_params + "&" if params else "") + "timestamp=" + ts + "&key=" + _YUNTING_SIGN_KEY
+    sign = hashlib.md5(sign_text.encode()).hexdigest().upper()
+    return {
+        "User-Agent": DEFAULT_UA,
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "Origin": "https://www.radio.cn",
+        "Referer": "https://www.radio.cn/",
+        "equipmentId": "0000",
+        "platformCode": "WEB",
+        "timestamp": ts,
+        "sign": sign,
+    }
 
 
 async def fetch_yunting(province_code: str, content_id: str) -> str:
     params = {"categoryId": 0, "provinceCode": province_code}
-    headers = {"User-Agent": DEFAULT_UA, "Accept": "application/json"}
 
     async with httpx.AsyncClient(timeout=YUNTING_TIMEOUT, follow_redirects=True) as client:
-        resp = await client.get(YUNTING_API_BASE, params=params, headers=headers)
+        resp = await client.get(YUNTING_API_BASE, params=params, headers=_yunting_sign_headers(params))
     resp.raise_for_status()
 
     for item in resp.json().get("data", []):

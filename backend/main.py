@@ -235,6 +235,30 @@ yunting_client = httpx.AsyncClient(
     limits=httpx.Limits(max_keepalive_connections=10, max_connections=10),
 )
 
+# 云听 API 鉴权
+_YUNTING_SIGN_KEY = "f0fc4c668392f9f9a447e48584c214ee"
+
+def _yunting_sign_headers(params: dict | None = None) -> dict:
+    """生成云听 API 鉴权 headers"""
+    ts = str(int(time.time() * 1000))
+    sorted_params = "&".join(f"{k}={v}" for k, v in sorted((params or {}).items()))
+    if params:
+        sign_text = sorted_params + "&timestamp=" + ts + "&key=" + _YUNTING_SIGN_KEY
+    else:
+        sign_text = "timestamp=" + ts + "&key=" + _YUNTING_SIGN_KEY
+    sign = hashlib.md5(sign_text.encode()).hexdigest().upper()
+    return {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "Origin": "https://www.radio.cn",
+        "Referer": "https://www.radio.cn/",
+        "equipmentId": "0000",
+        "platformCode": "WEB",
+        "timestamp": ts,
+        "sign": sign,
+    }
+
 
 YUNTING_REFRESH_INTERVAL = 1 * 3600
 
@@ -243,11 +267,12 @@ _yunting_sem = asyncio.Semaphore(5)
 
 async def _fetch_one_province(prov: str) -> list[dict] | None:
     try:
+        params = {"categoryId": 0, "provinceCode": prov}
         async with _yunting_sem:
             resp = await yunting_client.get(
                 YUNTING_API_BASE,
-                params={"categoryId": 0, "provinceCode": prov},
-                headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"},
+                params=params,
+                headers=_yunting_sign_headers(params),
             )
         resp.raise_for_status()
         stations = resp.json().get("data", [])
@@ -942,10 +967,9 @@ async def proxy_yunting_stations(province_code: str) -> Response:
         return Response(content=cached["data"], media_type="application/json")
 
     params = {"categoryId": 0, "provinceCode": province_code}
-    headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
     try:
         resp = await yunting_client.get(
-            YUNTING_API_BASE, params=params, headers=headers,
+            YUNTING_API_BASE, params=params, headers=_yunting_sign_headers(params),
         )
         resp.raise_for_status()
     except httpx.HTTPError as exc:
@@ -1057,10 +1081,11 @@ async def yunting_epg() -> Response:
     if need_api_refresh:
         for prov in need_api_refresh:
             try:
+                params = {"categoryId": 0, "provinceCode": prov}
                 resp = await yunting_client.get(
                     YUNTING_API_BASE,
-                    params={"categoryId": 0, "provinceCode": prov},
-                    headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"},
+                    params=params,
+                    headers=_yunting_sign_headers(params),
                 )
                 resp.raise_for_status()
                 stations_data = resp.json().get("data", [])
