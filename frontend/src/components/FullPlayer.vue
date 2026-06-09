@@ -171,8 +171,7 @@
                   aria-label="切换播放源"
                   @click.stop="toggleSourceMenu"
                 >
-                  <svg viewBox="0 0 24 24" fill="none"><path d="M6 7.5h12M6 12h12M6 16.5h8" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>
-                  <span class="source-dot" :class="currentIptvSourceStatusClass"></span>
+                  <svg viewBox="0 0 24 24" fill="none"><path d="M6 7.5h12M6 12h12M6 16.5h12" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>
                 </button>
               </div>
             </section>
@@ -1011,11 +1010,6 @@ const iptvSourceOptions = computed(() => {
 const currentIptvSourceLabel = computed(() => {
   const current = iptvSourceOptions.value[playerStore.iptvUrlIndex]
   return current ? `${current.index + 1}/${iptvSourceOptions.value.length}` : '未选择'
-})
-
-const currentIptvSourceStatusClass = computed(() => {
-  const current = iptvSourceOptions.value[playerStore.iptvUrlIndex]
-  return current ? current.statusClass : sourceStatusClass('idle')
 })
 
 async function loadIptvChannels() {
@@ -3881,24 +3875,19 @@ onBeforeUnmount(() => {
 
 .utility-btn {
   position: relative;
+  display: grid;
+  place-items: center;
   width: var(--utility-size);
   height: var(--utility-size);
+  padding: 0;
+  line-height: 0;
   color: var(--tag-text);
 }
 
 .utility-btn svg {
+  display: block;
   width: var(--utility-icon);
   height: var(--utility-icon);
-}
-
-.source-dot {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  width: 7px;
-  height: 7px;
-  border-radius: 999px;
-  transform: translate(1px, -1px);
 }
 
 .volume-control {
@@ -3909,6 +3898,7 @@ onBeforeUnmount(() => {
 }
 
 .volume-control svg {
+  display: block;
   width: 21px;
   height: 21px;
 }
@@ -4323,7 +4313,10 @@ onBeforeUnmount(() => {
   }
 
   .now-panel {
-    padding: 22px var(--panel-inline) 0;
+    width: 100%;
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 22px clamp(16px, 4vw, 28px) 0;
     text-align: center;
   }
 
@@ -4336,14 +4329,16 @@ onBeforeUnmount(() => {
   }
 
   .now-panel > p {
-    margin-top: 6px;
+    margin: 6px 0 0;
     font-size: var(--subtitle-size);
     font-weight: 400;
+    line-height: 1.2;
     color: var(--text-tertiary);
   }
 
   .program-progress {
-    margin-top: 16px;
+    margin-top: 0;
+    padding-top: 14px;
   }
 
   .progress-knob {
@@ -4358,7 +4353,8 @@ onBeforeUnmount(() => {
   }
 
   .program-state {
-    margin-top: 8px;
+    justify-content: center;
+    margin-top: 14px;
     color: var(--text-secondary);
     font-size: var(--meta-size);
     font-weight: 400;
@@ -4390,13 +4386,23 @@ onBeforeUnmount(() => {
   }
 
   .utility-row {
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: var(--utility-size);
+    align-items: center;
+    justify-content: center;
     gap: var(--utility-gap);
     margin-top: 10px;
+    min-height: var(--utility-size);
   }
 
   .utility-btn {
+    display: grid;
+    place-items: center;
     width: var(--utility-size);
     height: var(--utility-size);
+    padding: 0;
+    line-height: 0;
   }
 
   .utility-btn svg {
@@ -4409,6 +4415,7 @@ onBeforeUnmount(() => {
     place-items: center;
     width: var(--utility-size);
     height: var(--utility-size);
+    line-height: 0;
   }
 
   .volume-control svg {
