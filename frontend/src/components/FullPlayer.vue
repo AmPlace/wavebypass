@@ -610,19 +610,21 @@ function refreshSafariChrome() {
   })
 }
 
+const displayIptvChannel = computed(() => playerStore.pendingIptvChannel || playerStore.currentIptvChannel)
+
 const isIptvMode = computed(() => Boolean(playerStore.currentIptvChannel))
 
 const currentStationData = computed(() => stationMap.value[currentStation.value])
 
 const currentStationName = computed(() => {
-  if (playerStore.currentIptvChannel) return playerStore.currentIptvChannel.name
+  if (displayIptvChannel.value) return displayIptvChannel.value.name
   return currentStationData.value?.name || '未选择电台'
 })
 
 const statusText = computed(() => {
   if (playerStore.playbackError) return playerStore.playbackError
   if (isLoading.value) return '正在连接'
-  if (playerStore.currentIptvChannel) return playerStore.currentIptvChannel.group_name || 'IPTV'
+  if (displayIptvChannel.value) return displayIptvChannel.value.group_name || 'IPTV'
   const subtitle = currentStationData.value?.subtitle
   if (subtitle) return subtitle
   return 'Live'
@@ -633,12 +635,12 @@ const channelList = computed(() => stationList.value)
 const iptvChannelList = ref([])
 
 const currentArtworkUrl = computed(() => {
-  if (playerStore.currentIptvChannel) return playerStore.currentIptvChannel.logo_url || ''
+  if (displayIptvChannel.value) return displayIptvChannel.value.logo_url || ''
   return currentStationData.value?.logoUrl || ''
 })
 
 const currentChannelSubtitle = computed(() => {
-  if (playerStore.currentIptvChannel) return playerStore.currentIptvChannel.group_name || '直播频道'
+  if (displayIptvChannel.value) return displayIptvChannel.value.group_name || '直播频道'
   return statusText.value
 })
 
@@ -742,7 +744,7 @@ const displayChannelRows = computed(() => {
   if (isIptvMode.value) {
     const channels = iptvChannelList.value.length
       ? iptvChannelList.value
-      : (playerStore.currentIptvChannel ? [playerStore.currentIptvChannel] : [])
+      : (displayIptvChannel.value ? [displayIptvChannel.value] : [])
     return channels.map((ch, index) => {
       const active = isCurrentIptv(ch)
       const playing = active && isPlaybackConfirmed.value

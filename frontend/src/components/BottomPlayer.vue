@@ -148,11 +148,13 @@ function checkOverflow() {
   }
 }
 
-watch([currentStation, playbackError, isLoading, () => playerStore.currentIptvChannel], () => nextTick(checkOverflow))
+const displayIptvChannel = computed(() => playerStore.pendingIptvChannel || playerStore.currentIptvChannel)
+
+watch([currentStation, playbackError, isLoading, () => displayIptvChannel.value], () => nextTick(checkOverflow))
 
 const currentStationName = computed(() => {
-  if (playerStore.currentIptvChannel) {
-    return playerStore.currentIptvChannel.name
+  if (displayIptvChannel.value) {
+    return displayIptvChannel.value.name
   }
   return playerStore.stationMap[currentStation.value]?.name || currentStation.value || '未选择电台'
 })
@@ -166,9 +168,9 @@ const statusText = computed(() => {
     return '正在连接'
   }
 
-  if (playerStore.currentIptvChannel) {
+  if (displayIptvChannel.value) {
     const prog = playerStore.currentEpgProgram
-    return prog?.title || playerStore.currentIptvChannel.group_name || 'IPTV'
+    return prog?.title || displayIptvChannel.value.group_name || 'IPTV'
   }
 
   return 'Live'

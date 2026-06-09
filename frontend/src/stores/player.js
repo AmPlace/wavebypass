@@ -114,6 +114,7 @@ export const usePlayerStore = defineStore('player', {
       this.pendingIptvChannel = channel
       this.playbackError = ''
       this.isLoading = true
+      try {
       const sorted = [...channel.urls].sort((a, b) => {
         if (a.is_working !== b.is_working) return b.is_working - a.is_working
         return (a.latency_ms || 9999) - (b.latency_ms || 9999)
@@ -338,6 +339,12 @@ export const usePlayerStore = defineStore('player', {
       this.isLoading = Boolean(list.length)
       this.isPlaying = false
       // isPlaying 由实际播放事件设置，不提前设
+      } catch (e) {
+        if (selectionToken === this.iptvSelectionToken) {
+          this.pendingIptvChannel = null
+        }
+        throw e
+      }
     },
 
     iptvFallbackNext() {
