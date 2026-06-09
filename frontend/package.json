@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "@vueuse/core": "^14.3.0",
-    "mpegts.js": "1.7.3",
+    "mpegts.js": "1.8.0",
     "pinia": "^3.0.0",
     "vue": "^3.5.0",
     "vue-router": "^5.0.7"
