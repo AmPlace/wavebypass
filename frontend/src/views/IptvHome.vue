@@ -24,10 +24,25 @@
         </button>
       </div>
 
-      <p class="text-xs text-gray-400 dark:text-gray-500">
-        共 {{ filteredChannels.length }} 个频道
-        <span v-if="loading" class="ml-2">加载中…</span>
-      </p>
+      <div class="flex items-center justify-between">
+        <p class="text-xs text-gray-400 dark:text-gray-500">
+          共 {{ filteredChannels.length }} 个频道
+          <span v-if="loading" class="ml-2">加载中…</span>
+        </p>
+        <button
+          type="button"
+          class="inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-xs transition-colors"
+          :class="channelSortMode !== 'original'
+            ? 'border-green-500 bg-green-50 text-green-600 dark:border-green-400 dark:bg-green-900/30 dark:text-green-400'
+            : 'border-gray-300 bg-white text-gray-500 hover:bg-gray-100 dark:border-neutral-600 dark:bg-neutral-800 dark:text-gray-400 dark:hover:bg-neutral-700'"
+          @click="nextSortMode"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="12" height="12">
+            <line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="16" y2="12"/><line x1="4" y1="18" x2="12" y2="18"/>
+          </svg>
+          {{ currentSortLabel }}
+        </button>
+      </div>
     </header>
 
     <section
@@ -132,7 +147,22 @@ const allGroups = ref([])
 const selectedGroup = ref('')
 const loading = ref(false)
 const epgMap = ref({})
+const channelSortMode = ref('original')
 const DEFAULT_LOGO_URL = publicAsset('/logos/default.png')
+
+const SORT_MODES = [
+  { key: 'original', label: '默认' },
+  { key: 'natural', label: 'A-Z' },
+  { key: 'group', label: '分组' },
+]
+function naturalSort(a, b) {
+  return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' })
+}
+function nextSortMode() {
+  const idx = SORT_MODES.findIndex(m => m.key === channelSortMode.value)
+  channelSortMode.value = SORT_MODES[(idx + 1) % SORT_MODES.length].key
+}
+const currentSortLabel = computed(() => SORT_MODES.find(m => m.key === channelSortMode.value)?.label || '默认')
 
 function useDefaultLogo(event) {
   const img = event?.target
@@ -160,7 +190,15 @@ async function loadChannels() {
   loading.value = false
 }
 
-const filteredChannels = computed(() => allChannels.value)
+const filteredChannels = computed(() => {
+  const list = allChannels.value.slice()
+  if (channelSortMode.value === 'natural') {
+    list.sort((a, b) => naturalSort(a.name || '', b.name || ''))
+  } else if (channelSortMode.value === 'group') {
+    list.sort((a, b) => naturalSort(a.group_name || '', b.group_name || '') || naturalSort(a.name || '', b.name || ''))
+  }
+  return list
+})
 
 // 初始加载
 onMounted(loadChannels)

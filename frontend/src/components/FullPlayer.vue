@@ -4031,7 +4031,7 @@ onBeforeUnmount(() => {
   gap: 4px;
   padding: 4px 10px;
   border: 1px solid var(--row-separator);
-  border-radius: 6px;
+  border-radius: 999px;
   background: transparent;
   color: var(--text-tertiary);
   font-size: 12px;

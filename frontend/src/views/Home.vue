@@ -77,10 +77,25 @@
         </button>
       </div>
 
-      <p class="text-xs text-gray-400 dark:text-gray-500">
-        共 {{ filteredStations.length }} 个电台
-        <span v-if="ytLoading || mrLoading" class="ml-2">正在加载…</span>
-      </p>
+      <div class="flex items-center justify-between">
+        <p class="text-xs text-gray-400 dark:text-gray-500">
+          共 {{ filteredStations.length }} 个电台
+          <span v-if="ytLoading || mrLoading" class="ml-2">正在加载…</span>
+        </p>
+        <button
+          type="button"
+          class="inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-xs transition-colors"
+          :class="stationSortMode !== 'original'
+            ? 'border-green-500 bg-green-50 text-green-600 dark:border-green-400 dark:bg-green-900/30 dark:text-green-400'
+            : 'border-gray-300 bg-white text-gray-500 hover:bg-gray-100 dark:border-neutral-600 dark:bg-neutral-800 dark:text-gray-400 dark:hover:bg-neutral-700'"
+          @click="nextSortMode"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="12" height="12">
+            <line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="16" y2="12"/><line x1="4" y1="18" x2="12" y2="18"/>
+          </svg>
+          {{ currentSortLabel }}
+        </button>
+      </div>
     </header>
 
     <section
@@ -245,6 +260,20 @@ const typeLabels = { music: '音乐', news: '新闻', talk: '谈话', sports: '�
 const selectedRegion = ref('')
 const selectedType = ref('')
 const searchQuery = inject('searchQuery')
+const stationSortMode = ref('original')
+
+const SORT_MODES = [
+  { key: 'original', label: '默认' },
+  { key: 'natural', label: 'A-Z' },
+]
+function naturalSort(a, b) {
+  return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' })
+}
+function nextSortMode() {
+  const idx = SORT_MODES.findIndex(m => m.key === stationSortMode.value)
+  stationSortMode.value = SORT_MODES[(idx + 1) % SORT_MODES.length].key
+}
+const currentSortLabel = computed(() => SORT_MODES.find(m => m.key === stationSortMode.value)?.label || '默认')
 
 const regionScrollRef = ref(null)
 const canScrollLeft = ref(false)
@@ -303,6 +332,9 @@ watchEffect(() => {
     if (query && !(s.name || '').toLowerCase().includes(query)) return false
     return true
   })
+  if (stationSortMode.value === 'natural') {
+    result.sort((a, b) => naturalSort(a.name || '', b.name || ''))
+  }
   filteredStations.value = result
 })
 
