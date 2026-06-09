@@ -4067,7 +4067,7 @@ onBeforeUnmount(() => {
 .channel-sort-bar {
   display: flex;
   justify-content: flex-end;
-  padding: 0 8px 8px;
+  padding: 4px 8px 8px;
 }
 
 .sort-btn {
@@ -4599,7 +4599,7 @@ onBeforeUnmount(() => {
   }
 
   .channel-sort-bar {
-    padding: 0 16px 6px;
+    padding: 4px 16px 6px;
   }
 
   .channel-row {
