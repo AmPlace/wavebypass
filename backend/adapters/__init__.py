@@ -106,13 +106,16 @@ def parse_adapter_url(target_url: str) -> AdapterRequest:
     elif scheme == "huya":
         adapter = "huya"
         resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
+    elif scheme == "redbook":
+        adapter = "redbook"
+        resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
     elif scheme == "adapter":
         adapter = (parsed.netloc or "").lower().split("@")[-1].split(":")[0]
         resource_id = parsed.path.lstrip("/").strip()
     else:
         raise AdapterResolveError(
             "invalid_adapter_url",
-            "只允许 migu://、douyin://、huya:// 或 adapter:// 开头的 adapter 地址",
+            "只允许 migu://、douyin://、huya://、redbook:// 或 adapter:// 开头的 adapter 地址",
         )
 
     if not adapter or adapter not in _ADAPTER_REGISTRY:
@@ -164,11 +167,13 @@ async def resolve_adapter_source(target_url: str, client: httpx.AsyncClient) -> 
 from .migu import resolve_migu
 from .douyin import resolve_douyin
 from .huya import resolve_huya
+from .redbook import resolve_redbook
 
 
 _ADAPTER_REGISTRY = {
     "migu": resolve_migu,
     "douyin": resolve_douyin,
     "huya": resolve_huya,
+    "redbook": resolve_redbook,
 }
 
