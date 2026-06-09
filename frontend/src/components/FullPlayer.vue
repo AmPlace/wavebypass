@@ -177,7 +177,7 @@
             </section>
 
             <section class="mobile-panel">
-              <div class="panel-tabs">
+              <div class="panel-tabs" ref="mobileTabsRef">
                 <button
                   type="button"
                   :class="{ active: activePlayerPanel === 'channels' }"
@@ -192,9 +192,109 @@
                 >
                   节目单
                 </button>
+                <span class="tab-indicator" :style="mobileTabIndicatorStyle"></span>
               </div>
 
-              <div v-if="activePlayerPanel === 'channels'" class="channel-panel">
+              <Transition name="panel-slide" mode="out-in">
+                <div v-if="activePlayerPanel === 'channels'" key="channels" class="channel-panel">
+                  <div class="channel-sort-bar">
+                    <button
+                      type="button"
+                      class="sort-btn"
+                      :class="{ active: channelSortMode !== 'original' }"
+                      @click="nextSortMode"
+                    >
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="14" height="14">
+                        <line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="16" y2="12"/><line x1="4" y1="18" x2="12" y2="18"/>
+                      </svg>
+                      {{ currentSortLabel }}
+                    </button>
+                  </div>
+                  <button
+                    v-for="item in displayChannelRows"
+                    :key="item.key"
+                    type="button"
+                    class="channel-row"
+                    :class="{ active: item.active }"
+                    @click="handleChannelRowClick(item)"
+                  >
+                    <span class="channel-logo">
+                      <img v-if="item.logo" :src="item.logo" :alt="item.name" @error="useDefaultLogo" />
+                      <span v-else>{{ item.name.slice(0, 2) }}</span>
+                    </span>
+                    <span class="channel-copy">
+                      <span class="channel-title">
+                        {{ item.name }}
+                        <span v-if="item.live" class="live-dot"></span>
+                      </span>
+                      <span class="channel-subtitle">{{ item.summary }}</span>
+                    </span>
+                    <svg
+                      v-if="item.playing"
+                      class="eq-icon active"
+                      viewBox="0 0 24 24"
+                      aria-hidden="true"
+                    >
+                      <rect x="4" y="8" width="2.5" height="8" rx="1.25" />
+                      <rect x="8.5" y="5" width="2.5" height="14" rx="1.25" />
+                      <rect x="13" y="3" width="2.5" height="18" rx="1.25" />
+                      <rect x="17.5" y="6" width="2.5" height="12" rx="1.25" />
+                    </svg>
+                  </button>
+                </div>
+
+                <div v-else key="schedule" class="schedule-panel">
+                  <div v-if="epgDateOptions.length" class="schedule-date-list">
+                    <button
+                      v-for="item in epgDateOptions"
+                      :key="item.value"
+                      type="button"
+                      class="schedule-date-chip"
+                      :class="{ active: item.active }"
+                      @click="selectEpgDate(item.value)"
+                    >
+                      <span>{{ item.label }}</span>
+                      <small>{{ item.weekday }}</small>
+                    </button>
+                  </div>
+                  <div v-else class="schedule-date">
+                    <span>今天</span>
+                  </div>
+                  <div class="timeline">
+                    <div v-for="program in displaySchedule" :key="`${program.time}-${program.title}`" class="timeline-row" :class="{ current: program.current, past: program.past }">
+                      <span class="timeline-time">{{ program.time }}</span>
+                      <span class="timeline-dot"></span>
+                      <span class="timeline-title">
+                        {{ program.title }}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </Transition>
+            </section>
+          </main>
+
+          <aside class="side-panel">
+            <div class="panel-tabs" ref="desktopTabsRef">
+              <button
+                type="button"
+                :class="{ active: activePlayerPanel === 'channels' }"
+                @click="activePlayerPanel = 'channels'"
+              >
+                频道列表
+              </button>
+              <button
+                type="button"
+                :class="{ active: activePlayerPanel === 'schedule' }"
+                @click="activePlayerPanel = 'schedule'"
+              >
+                节目单
+              </button>
+              <span class="tab-indicator" :style="desktopTabIndicatorStyle"></span>
+            </div>
+
+            <Transition name="panel-slide" mode="out-in">
+              <div v-if="activePlayerPanel === 'channels'" key="channels" class="channel-panel desktop-panel-scroll">
                 <div class="channel-sort-bar">
                   <button
                     type="button"
@@ -241,7 +341,7 @@
                 </button>
               </div>
 
-              <div v-else class="schedule-panel">
+              <div v-else key="schedule" class="schedule-panel desktop-panel-scroll">
                 <div v-if="epgDateOptions.length" class="schedule-date-list">
                   <button
                     v-for="item in epgDateOptions"
@@ -264,107 +364,11 @@
                     <span class="timeline-dot"></span>
                     <span class="timeline-title">
                       {{ program.title }}
-                      <!-- <span v-if="program.current" class="tag live-tag">直播中</span> -->
                     </span>
                   </div>
                 </div>
               </div>
-            </section>
-          </main>
-
-          <aside class="side-panel">
-            <div class="panel-tabs">
-              <button
-                type="button"
-                :class="{ active: activePlayerPanel === 'channels' }"
-                @click="activePlayerPanel = 'channels'"
-              >
-                频道列表
-              </button>
-              <button
-                type="button"
-                :class="{ active: activePlayerPanel === 'schedule' }"
-                @click="activePlayerPanel = 'schedule'"
-              >
-                节目单
-              </button>
-            </div>
-
-            <div v-if="activePlayerPanel === 'channels'" class="channel-panel desktop-panel-scroll">
-              <div class="channel-sort-bar">
-                <button
-                  type="button"
-                  class="sort-btn"
-                  :class="{ active: channelSortMode !== 'original' }"
-                  @click="nextSortMode"
-                >
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="14" height="14">
-                    <line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="16" y2="12"/><line x1="4" y1="18" x2="12" y2="18"/>
-                  </svg>
-                  {{ currentSortLabel }}
-                </button>
-              </div>
-              <button
-                v-for="item in displayChannelRows"
-                :key="item.key"
-                type="button"
-                class="channel-row"
-                :class="{ active: item.active }"
-                @click="handleChannelRowClick(item)"
-              >
-                <span class="channel-logo">
-                  <img v-if="item.logo" :src="item.logo" :alt="item.name" @error="useDefaultLogo" />
-                  <span v-else>{{ item.name.slice(0, 2) }}</span>
-                </span>
-                <span class="channel-copy">
-                  <span class="channel-title">
-                    {{ item.name }}
-                    <span v-if="item.live" class="live-dot"></span>
-                  </span>
-                  <span class="channel-subtitle">{{ item.summary }}</span>
-                </span>
-                <svg
-                  v-if="item.playing"
-                  class="eq-icon active"
-                  viewBox="0 0 24 24"
-                  aria-hidden="true"
-                >
-                  <rect x="4" y="8" width="2.5" height="8" rx="1.25" />
-                  <rect x="8.5" y="5" width="2.5" height="14" rx="1.25" />
-                  <rect x="13" y="3" width="2.5" height="18" rx="1.25" />
-                  <rect x="17.5" y="6" width="2.5" height="12" rx="1.25" />
-                </svg>
-              </button>
-            </div>
-
-            <div v-else class="schedule-panel desktop-panel-scroll">
-              <div v-if="epgDateOptions.length" class="schedule-date-list">
-                <button
-                  v-for="item in epgDateOptions"
-                  :key="item.value"
-                  type="button"
-                  class="schedule-date-chip"
-                  :class="{ active: item.active }"
-                  @click="selectEpgDate(item.value)"
-                >
-                  <span>{{ item.label }}</span>
-                  <small>{{ item.weekday }}</small>
-                </button>
-              </div>
-              <div v-else class="schedule-date">
-                <span>今天</span>
-              </div>
-              <div class="timeline">
-                <div v-for="program in displaySchedule" :key="`${program.time}-${program.title}`" class="timeline-row" :class="{ current: program.current, past: program.past }">
-                  <span class="timeline-time">{{ program.time }}</span>
-                  <span class="timeline-dot"></span>
-                  <span class="timeline-title">
-                    {{ program.title }}
-                    <!-- <span v-if="program.current" class="tag live-tag">直播中</span> -->
-                  </span>
-                </div>
-              </div>
-            </div>
+            </Transition>
           </aside>
         </div>
       </div>
@@ -451,6 +455,25 @@ const sourceMenuListMaxHeight = ref('260px')
 const iptvSourceRuntimeStatus = ref({})
 const activePlayerPanel = ref('channels')
 const channelSortMode = ref('original')  // 'original' | 'natural' | 'group' | 'live'
+const mobileTabsRef = ref(null)
+const desktopTabsRef = ref(null)
+
+function tabIndicatorStyle(tabsRef) {
+  if (!tabsRef) return { opacity: 0 }
+  const buttons = tabsRef.querySelectorAll('button')
+  const idx = activePlayerPanel.value === 'channels' ? 0 : 1
+  const btn = buttons[idx]
+  if (!btn) return { opacity: 0 }
+  return {
+    transform: `translateX(${btn.offsetLeft}px)`,
+    width: `${btn.offsetWidth}px`,
+    opacity: 1,
+  }
+}
+
+const mobileTabIndicatorStyle = computed(() => tabIndicatorStyle(mobileTabsRef.value))
+const desktopTabIndicatorStyle = computed(() => tabIndicatorStyle(desktopTabsRef.value))
+
 const SORT_MODES = [
   { key: 'original', label: '默认' },
   { key: 'natural', label: 'A-Z' },
@@ -3413,6 +3436,28 @@ onBeforeUnmount(() => {
   opacity: 0;
 }
 
+.panel-slide-enter-active {
+  transition: opacity 280ms cubic-bezier(0.22, 1, 0.36, 1), transform 280ms cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: opacity, transform;
+}
+.panel-slide-leave-active {
+  transition: opacity 180ms cubic-bezier(0.32, 0.72, 0, 1), transform 180ms cubic-bezier(0.32, 0.72, 0, 1);
+  will-change: opacity, transform;
+}
+.panel-slide-enter-from {
+  opacity: 0;
+  transform: translateY(8px);
+}
+.panel-slide-leave-to {
+  opacity: 0;
+  transform: translateY(-4px);
+}
+.panel-slide-enter-to,
+.panel-slide-leave-from {
+  opacity: 1;
+  transform: translateY(0);
+}
+
 .full-player {
   --page-bg: #f8f8f7;
   --surface-bg: #ffffff;
@@ -3973,6 +4018,7 @@ onBeforeUnmount(() => {
 }
 
 .panel-tabs {
+  position: relative;
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: var(--tab-gap);
@@ -3997,16 +4043,15 @@ onBeforeUnmount(() => {
   font-weight: var(--tab-active-weight);
 }
 
-.panel-tabs button.active::after {
-  content: "";
+.tab-indicator {
   position: absolute;
-  left: 50%;
-  bottom: -1px;
-  width: var(--tab-line-width);
+  bottom: 0;
+  left: 0;
   height: 3px;
   border-radius: 999px;
-  background: currentColor;
-  transform: translateX(-50%);
+  background: var(--text-primary);
+  transition: transform 320ms cubic-bezier(0.22, 1, 0.36, 1), width 320ms cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform, width;
 }
 
 .desktop-panel-scroll {
@@ -4545,11 +4590,8 @@ onBeforeUnmount(() => {
     font-weight: var(--tab-active-weight);
   }
 
-  .panel-tabs button.active::after {
-    left: 50%;
+  .tab-indicator {
     bottom: -10px;
-    width: var(--tab-line-width);
-    transform: translateX(-50%);
   }
 
   .channel-panel {
