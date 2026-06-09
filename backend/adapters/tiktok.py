@@ -11,7 +11,7 @@ _TIKTOK_TTL_SECONDS = 12 * 24 * 60 * 60
 
 
 async def resolve_tiktok(request: AdapterRequest, client: httpx.AsyncClient) -> dict[str, Any]:
-    room_id = request.resource_id.strip("/")
+    room_id = request.resource_id.strip("/").lstrip("@")
     if not room_id:
         raise AdapterResolveError("invalid_tiktok_room_id", "TikTok 房间号不能为空")
 
