@@ -84,6 +84,22 @@ STATIC_STATIONS = [
     {"id": "qz_fm904", "name": "泉州交通广播", "logoText": "FM904", "logoUrl": "/logos/qz904.png", "subtitle": "FM 90.4", "tags": ["CN", "福建", "news"]},
     {"id": "qz_fm1059", "name": "泉州刺桐之声", "logoText": "FM1059", "logoUrl": "/logos/qz1059.png", "subtitle": "FM 105.9", "tags": ["CN", "福建", "talk"]},
     {"id": "qz_fm923", "name": "泉州经济生活", "logoText": "FM923", "logoUrl": "/logos/qz923.png", "subtitle": "FM 92.3", "tags": ["CN", "福建", "news"]},
+    # ── 香港电台 (tingfm.com) ──
+    {"id": "tf_909", "name": "香港电台第一台", "logoText": "RTHK1", "logoUrl": "https://cdn.tingfm.com/tingfm/2013/04/file5e8d6ff30254e.png?x-oss-process=image/resize,m_fill,w_200,h_200", "subtitle": "RTHK Radio 1", "tags": ["HK", "news"]},
+    {"id": "tf_910", "name": "香港电台第二台", "logoText": "RTHK2", "logoUrl": "", "subtitle": "RTHK Radio 2", "tags": ["HK", "music"]},
+    {"id": "tf_911", "name": "香港电台第三台", "logoText": "RTHK3", "logoUrl": "", "subtitle": "RTHK Radio 3", "tags": ["HK", "news"]},
+    {"id": "tf_1071", "name": "香港电台第四台", "logoText": "RTHK4", "logoUrl": "https://cdn.tingfm.com/tingfm/2020/02/file5e467a134a163.jpg", "subtitle": "RTHK Radio 4", "tags": ["HK", "music"]},
+    {"id": "tf_913", "name": "香港电台第五台", "logoText": "RTHK5", "logoUrl": "", "subtitle": "RTHK Radio 5", "tags": ["HK", "news"]},
+    {"id": "tf_669", "name": "香港之声", "logoText": "之声", "logoUrl": "https://cdn.tingfm.com/tingfm/img/l/9/67829.v5.png?x-oss-process=image/resize,m_fill,w_200,h_200", "subtitle": "RTHK Radio 6", "tags": ["HK", "news"]},
+    {"id": "tf_9855", "name": "香港电台普通话台", "logoText": "普通话", "logoUrl": "", "subtitle": "RTHK Putonghua", "tags": ["HK", "news"]},
+    {"id": "tf_743", "name": "新城财经台", "logoText": "新城", "logoUrl": "https://cdn.tingfm.com/tingfm/2023/02/oss-63fcd98d4df88.png?x-oss-process=image/resize,m_fill,w_200,h_200", "subtitle": "FM 102.4-106.3", "tags": ["HK", "news"]},
+    {"id": "tf_744", "name": "新城知讯台", "logoText": "知讯", "logoUrl": "", "subtitle": "FM 99.7-102.1", "tags": ["HK", "news"]},
+    {"id": "tf_748", "name": "新城 Metro Plus", "logoText": "Metro", "logoUrl": "", "subtitle": "Metro Plus", "tags": ["HK", "music"]},
+    {"id": "tf_745", "name": "华语 HITS 香港", "logoText": "HITS", "logoUrl": "https://cdn.tingfm.com/tingfm/2023/02/oss-63e7081b5ade4.jpg?x-oss-process=image/resize,m_fill,w_200,h_200", "subtitle": "Chinese HITS", "tags": ["HK", "music"]},
+    {"id": "tf_747", "name": "香港数码台", "logoText": "DRK", "logoUrl": "https://cdn.tingfm.com/tingfm/2023/02/oss-63e70606b73a7.png?x-oss-process=image/resize,m_fill,w_200,h_200", "subtitle": "Digital Radio HK", "tags": ["HK", "news"]},
+    {"id": "tf_750", "name": "香港D100 PBS", "logoText": "D100", "logoUrl": "https://cdn.tingfm.com/tingfm/2020/10/file5f766022d365b.jpg", "subtitle": "D100", "tags": ["HK", "talk"]},
+    {"id": "tf_21365", "name": "凤凰卫视资讯台", "logoText": "凤凰", "logoUrl": "", "subtitle": "Phoenix InfoNews", "tags": ["HK", "news"]},
+    {"id": "tf_21300", "name": "凤凰卫视中文台", "logoText": "凤凰", "logoUrl": "", "subtitle": "Phoenix Chinese", "tags": ["HK", "news"]},
 ]
 
 _TW_STATION_IDS = {s["id"] for s in STATIC_STATIONS if "TW" in s.get("tags", [])}
@@ -569,6 +585,32 @@ async def _ensure_rtsp_hls_session(target_url: str, custom_ua: str = "", compat:
 
 
 @asynccontextmanager
+_TINGFM_STREAMS = {
+    "tf_909": "https://rthkradio1-live.akamaized.net/hls/live/2035313/radio1/master.m3u8",
+    "tf_910": "https://rthkradio2-live.akamaized.net/hls/live/2040078/radio2/master.m3u8",
+    "tf_911": "https://rthkradio3-live.akamaized.net/hls/live/2040079/radio3/master.m3u8",
+    "tf_1071": "https://rthkradio4-live.akamaized.net/hls/live/2040080/radio4/master.m3u8",
+    "tf_913": "https://rthkradio5-live.akamaized.net/hls/live/2040081/radio5/master.m3u8",
+    "tf_669": "https://rthkradiocnrhk-live.akamaized.net/hls/live/2046111/radiocnrhk/master.m3u8",
+    "tf_9855": "https://rthkradiopth-live.akamaized.net/hls/live/2040082/radiopth/master.m3u8",
+    "tf_743": "https://1716664847.rsc.cdn77.org/1716664847/index.m3u8",
+    "tf_744": "https://1603884249.rsc.cdn77.org/1603884249/index.m3u8",
+    "tf_748": "https://1946218710.rsc.cdn77.org/1946218710/index.m3u8",
+    "tf_745": "https://streaming.live365.com/a57743",
+    "tf_747": "http://ice.digitalradiohk.net:8000/drhk",
+    "tf_750": "https://uk.d100.net:8001/Channel1-128MP3",
+    "tf_21365": "https://playtv-live.ifeng.com/live/06OLEEWQKN4_audio.m3u8",
+    "tf_21300": "https://playtv-live.ifeng.com/live/06OLEGEGM4G_audio.m3u8",
+}
+
+
+def _load_tingfm_streams():
+    """加载 tingfm HK 电台流地址到 CURRENT_STREAMS"""
+    for station_id, url in _TINGFM_STREAMS.items():
+        CURRENT_STREAMS[station_id] = url
+    logger.info("tingfm HK 电台加载完成: %d 个", len(_TINGFM_STREAMS))
+
+
 async def lifespan(app: FastAPI):
     await database.initialize()
     _clear_stale_rtsp_hls_dirs()
@@ -578,6 +620,8 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(_epg_refresh_loop())
     asyncio.create_task(_prefetch_rb())
     asyncio.create_task(_rtsp_hls_cleanup_task())
+    # 加载 tingfm HK 电台流地址
+    _load_tingfm_streams()
     yield
     await _stop_all_rtsp_sessions()
     await http_client.aclose()
