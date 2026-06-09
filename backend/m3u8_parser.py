@@ -24,7 +24,7 @@ _M3U_ENTRY_RE = re.compile(
     re.MULTILINE | re.DOTALL,
 )
 
-_STREAM_URL_PREFIXES = ('http://', 'https://', 'rtmp://', 'rtsp://', 'migu://', 'douyin://', 'douyu://', 'huya://', 'redbook://', 'tiktok://', 'kuaishou://', 'bilibili://', 'yy://', 'bigo://', 'blued://', 'soop://', 'netease://', 'adapter://')
+_STREAM_URL_PREFIXES = ('http://', 'https://', 'rtmp://', 'rtsp://', 'migu://', 'douyin://', 'douyu://', 'huya://', 'redbook://', 'tiktok://', 'kuaishou://', 'bilibili://', 'yy://', 'bigo://', 'blued://', 'soop://', 'netease://', 'pandatv://', 'maoer://', 'look://', 'flextv://', 'popkontv://', 'twitcasting://', 'baidu://', 'weibo://', 'kugou://', 'twitch://', 'huajiao://', 'showroom://', 'inke://', 'acfun://', 'haixiu://', 'liveme://', 'zhihu://', 'chzzk://', '17live://', 'langlive://', 'changliao://', 'jd://', 'faceit://', 'lianjie://', 'sixroom://', 'lehai://', 'huamao://', 'shopee://', 'laixiu://', 'picarto://', 'adapter://')
 
 # 简单的逐行解析用
 _EXTINF_RE = re.compile(r'#EXTINF:(.+?),(.+)')
@@ -315,6 +315,66 @@ def adapter_provider(url: str) -> str:
         return 'soop'
     if scheme == 'netease':
         return 'netease'
+    if scheme == 'pandatv':
+        return 'pandatv'
+    if scheme == 'maoer':
+        return 'maoer'
+    if scheme == 'look':
+        return 'look'
+    if scheme == 'flextv':
+        return 'flextv'
+    if scheme == 'popkontv':
+        return 'popkontv'
+    if scheme == 'twitcasting':
+        return 'twitcasting'
+    if scheme == 'baidu':
+        return 'baidu'
+    if scheme == 'weibo':
+        return 'weibo'
+    if scheme == 'kugou':
+        return 'kugou'
+    if scheme == 'twitch':
+        return 'twitch'
+    if scheme == 'huajiao':
+        return 'huajiao'
+    if scheme == 'showroom':
+        return 'showroom'
+    if scheme == 'inke':
+        return 'inke'
+    if scheme == 'acfun':
+        return 'acfun'
+    if scheme == 'haixiu':
+        return 'haixiu'
+    if scheme == 'liveme':
+        return 'liveme'
+    if scheme == 'zhihu':
+        return 'zhihu'
+    if scheme == 'chzzk':
+        return 'chzzk'
+    if scheme == '17live':
+        return '17live'
+    if scheme == 'langlive':
+        return 'langlive'
+    if scheme == 'changliao':
+        return 'changliao'
+    if scheme == 'jd':
+        return 'jd'
+    if scheme == 'faceit':
+        return 'faceit'
+    if scheme == 'lianjie':
+        return 'lianjie'
+    if scheme == 'sixroom':
+        return 'sixroom'
+    if scheme == 'lehai':
+        return 'lehai'
+    if scheme == 'huamao':
+        return 'huamao'
+    if scheme == 'shopee':
+        return 'shopee'
+    if scheme == 'laixiu':
+        return 'laixiu'
+    if scheme == 'picarto':
+        return 'picarto'
     if scheme == 'adapter':
         return (parsed.netloc or '').lower().split('@')[-1].split(':')[0]
     return ''

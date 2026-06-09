@@ -136,13 +136,103 @@ def parse_adapter_url(target_url: str) -> AdapterRequest:
     elif scheme == "netease":
         adapter = "netease"
         resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
+    elif scheme == "pandatv":
+        adapter = "pandatv"
+        resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
+    elif scheme == "maoer":
+        adapter = "maoer"
+        resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
+    elif scheme == "look":
+        adapter = "look"
+        resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
+    elif scheme == "flextv":
+        adapter = "flextv"
+        resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
+    elif scheme == "popkontv":
+        adapter = "popkontv"
+        resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
+    elif scheme == "twitcasting":
+        adapter = "twitcasting"
+        resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
+    elif scheme == "baidu":
+        adapter = "baidu"
+        resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
+    elif scheme == "weibo":
+        adapter = "weibo"
+        resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
+    elif scheme == "kugou":
+        adapter = "kugou"
+        resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
+    elif scheme == "twitch":
+        adapter = "twitch"
+        resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
+    elif scheme == "huajiao":
+        adapter = "huajiao"
+        resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
+    elif scheme == "showroom":
+        adapter = "showroom"
+        resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
+    elif scheme == "inke":
+        adapter = "inke"
+        resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
+    elif scheme == "acfun":
+        adapter = "acfun"
+        resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
+    elif scheme == "haixiu":
+        adapter = "haixiu"
+        resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
+    elif scheme == "liveme":
+        adapter = "liveme"
+        resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
+    elif scheme == "zhihu":
+        adapter = "zhihu"
+        resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
+    elif scheme == "chzzk":
+        adapter = "chzzk"
+        resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
+    elif scheme == "17live":
+        adapter = "17live"
+        resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
+    elif scheme == "langlive":
+        adapter = "langlive"
+        resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
+    elif scheme == "changliao":
+        adapter = "changliao"
+        resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
+    elif scheme == "jd":
+        adapter = "jd"
+        resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
+    elif scheme == "faceit":
+        adapter = "faceit"
+        resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
+    elif scheme == "lianjie":
+        adapter = "lianjie"
+        resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
+    elif scheme == "sixroom":
+        adapter = "sixroom"
+        resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
+    elif scheme == "lehai":
+        adapter = "lehai"
+        resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
+    elif scheme == "huamao":
+        adapter = "huamao"
+        resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
+    elif scheme == "shopee":
+        adapter = "shopee"
+        resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
+    elif scheme == "laixiu":
+        adapter = "laixiu"
+        resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
+    elif scheme == "picarto":
+        adapter = "picarto"
+        resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
     elif scheme == "adapter":
         adapter = (parsed.netloc or "").lower().split("@")[-1].split(":")[0]
         resource_id = parsed.path.lstrip("/").strip()
     else:
         raise AdapterResolveError(
             "invalid_adapter_url",
-            "只允许 migu://、douyin://、douyu://、huya://、redbook://、tiktok://、kuaishou://、bilibili://、yy://、bigo://、blued://、soop://、netease:// 或 adapter:// 开头的 adapter 地址",
+            "暂不支持该 adapter 地址",
         )
 
     if not adapter or adapter not in _ADAPTER_REGISTRY:
@@ -204,6 +294,35 @@ from .bigo import resolve_bigo
 from .blued import resolve_blued
 from .soop import resolve_soop
 from .netease import resolve_netease
+from .pandatv import resolve_pandatv
+from .maoer import resolve_maoer
+from .look import resolve_look
+from .flextv import resolve_flextv
+from .popkontv import resolve_popkontv
+from .twitcasting import resolve_twitcasting
+from .baidu import resolve_baidu
+from .weibo import resolve_weibo
+from .kugou import resolve_kugou
+from .twitch import resolve_twitch
+from .huajiao import resolve_huajiao
+from .showroom import resolve_showroom
+from .inke import resolve_inke
+from .acfun import resolve_acfun
+from .haixiu import resolve_haixiu
+from .liveme import resolve_liveme
+from .zhihu import resolve_zhihu
+from .chzzk import resolve_chzzk
+from .langlive import resolve_langlive
+from .changliao import resolve_changliao
+from .jd import resolve_jd
+from .faceit import resolve_faceit
+from .lianjie import resolve_lianjie
+from .sixroom import resolve_sixroom
+from .lehai import resolve_lehai
+from .huamao import resolve_huamao
+from .shopee import resolve_shopee
+from .laixiu import resolve_laixiu
+from .picarto import resolve_picarto
 
 
 _ADAPTER_REGISTRY = {
@@ -220,4 +339,33 @@ _ADAPTER_REGISTRY = {
     "blued": resolve_blued,
     "soop": resolve_soop,
     "netease": resolve_netease,
+    "pandatv": resolve_pandatv,
+    "maoer": resolve_maoer,
+    "look": resolve_look,
+    "flextv": resolve_flextv,
+    "popkontv": resolve_popkontv,
+    "twitcasting": resolve_twitcasting,
+    "baidu": resolve_baidu,
+    "weibo": resolve_weibo,
+    "kugou": resolve_kugou,
+    "twitch": resolve_twitch,
+    "huajiao": resolve_huajiao,
+    "showroom": resolve_showroom,
+    "inke": resolve_inke,
+    "acfun": resolve_acfun,
+    "haixiu": resolve_haixiu,
+    "liveme": resolve_liveme,
+    "zhihu": resolve_zhihu,
+    "chzzk": resolve_chzzk,
+    "langlive": resolve_langlive,
+    "changliao": resolve_changliao,
+    "jd": resolve_jd,
+    "faceit": resolve_faceit,
+    "lianjie": resolve_lianjie,
+    "sixroom": resolve_sixroom,
+    "lehai": resolve_lehai,
+    "huamao": resolve_huamao,
+    "shopee": resolve_shopee,
+    "laixiu": resolve_laixiu,
+    "picarto": resolve_picarto,
 }
