@@ -4,7 +4,7 @@ from typing import Any
 import httpx
 from streamget import DouyuLiveStream
 
-from . import ADAPTER_SUCCESS_TTL_SECONDS, AdapterRequest, AdapterResolveError
+from . import AdapterRequest, AdapterResolveError
 
 
 async def resolve_douyu(request: AdapterRequest, client: httpx.AsyncClient) -> dict[str, Any]:
@@ -55,7 +55,9 @@ async def resolve_douyu(request: AdapterRequest, client: httpx.AsyncClient) -> d
         "direct_playable": True,
         "requires_proxy": False,
         "headers": {},
-        "ttl": ADAPTER_SUCCESS_TTL_SECONDS,
+        "ttl": 0,
+        "cacheable": False,
+        "volatile_url": True,
         "expires_at": None,
         "warnings": [],
         "anchor_name": result.get("anchor_name", ""),
