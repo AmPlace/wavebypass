@@ -277,14 +277,16 @@ export const usePlayerStore = defineStore('player', {
           const resolved = await resolveAdapterSource(url)
           const proxyUrl = absoluteApiUrl(resolved.proxy_url) || fallbackProxyUrl
           const canDirectPlay = !resolved.requires_proxy && resolved.direct_playable !== false && resolved.url
+          const keepAdapterEntry = canDirectPlay && resolved.volatile_url === true
           if (canDirectPlay) {
             directUrls.push({
               ...u,
-              url: resolved.url,
+              url: keepAdapterEntry ? proxyUrl : resolved.url,
               original_url: url,
               adapter,
               adapter_source_url: url,
               adapter_proxy_url: proxyUrl,
+              adapter_volatile_url: keepAdapterEntry,
               source_type: resolved.source_type || 'hls',
               type: 'direct',
             })
@@ -321,7 +323,7 @@ export const usePlayerStore = defineStore('player', {
       for (const u of directUrls) {
         const url = sourceUrl(u)
         const st = sourceType(u)
-        if (st === 'youtube') continue
+        if (st === 'youtube' || u.adapter_volatile_url) continue
         list.push({
           ...u,
           url: proxyUrlFor(u),

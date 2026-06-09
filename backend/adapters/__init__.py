@@ -67,7 +67,16 @@ def _cache_get(cache_key: str) -> dict[str, Any] | None:
 
 
 def _cache_success(cache_key: str, result: dict[str, Any]) -> None:
-    ttl = int(result.get("ttl") or ADAPTER_SUCCESS_TTL_SECONDS)
+    if result.get("cacheable") is False:
+        _adapter_cache.pop(cache_key, None)
+        return
+
+    ttl_value = result.get("ttl")
+    ttl = ADAPTER_SUCCESS_TTL_SECONDS if ttl_value is None else int(ttl_value)
+    if ttl <= 0:
+        _adapter_cache.pop(cache_key, None)
+        return
+
     _adapter_cache[cache_key] = {
         "expires_at": time.time() + max(1, ttl),
         "result": dict(result),
