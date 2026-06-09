@@ -1,10 +1,48 @@
 import json
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 from streamget import DouyuLiveStream
 
 from . import AdapterRequest, AdapterResolveError
+
+# CDN selection priority:
+# 1. Prefer douyucdn2.cn (stable)
+# 2. Avoid edgesrv.com:8443 (TLS issues)
+# 3. Fallback to other non-edgesrv
+# 4. Last resort: edgesrv
+_PREFERRED_CDN = "douyucdn2.cn"
+_BLOCKED_CDN_HOSTS = {"edgesrv.com"}
+
+
+def _cdn_score(url: str) -> int:
+    """Lower score = higher priority. -1 = blocked."""
+    try:
+        host = urlparse(url).hostname or ""
+    except Exception:
+        return 100
+    if any(blocked in host for blocked in _BLOCKED_CDN_HOSTS):
+        if ":8443" in url:
+            return -1  # blocked: TLS handshake failure
+        return 50  # edgesrv without 8443: low priority
+    if _PREFERRED_CDN in host:
+        return 0  # best
+    return 10  # other CDN: acceptable
+
+
+def _select_best_cdn(all_urls: list[str]) -> str | None:
+    """Select the best CDN URL from a list, preferring stable CDNs."""
+    if not all_urls:
+        return None
+    scored = [(u, _cdn_score(u)) for u in all_urls]
+    # Filter out blocked (-1), sort by score ascending
+    candidates = [(u, s) for u, s in scored if s >= 0]
+    if not candidates:
+        # All blocked — last resort: use the first one anyway
+        return all_urls[0]
+    candidates.sort(key=lambda x: x[1])
+    return candidates[0][0]
 
 
 async def resolve_douyu(request: AdapterRequest, client: httpx.AsyncClient) -> dict[str, Any]:
@@ -36,8 +74,15 @@ async def resolve_douyu(request: AdapterRequest, client: httpx.AsyncClient) -> d
             retryable=False,
         )
 
-    play_url = result.get("flv_url") or result.get("m3u8_url")
-    if not play_url:
+    # Collect all available CDN URLs
+    all_urls = []
+    primary_url = result.get("flv_url") or result.get("m3u8_url") or ""
+    if primary_url:
+        all_urls.append(primary_url)
+    backup_urls = (result.get("extra") or {}).get("backup_url_list") or []
+    all_urls.extend(backup_urls)
+
+    if not all_urls:
         raise AdapterResolveError(
             "douyu_no_play_url",
             "斗鱼没有返回可播放地址",
@@ -45,6 +90,8 @@ async def resolve_douyu(request: AdapterRequest, client: httpx.AsyncClient) -> d
             retryable=True,
         )
 
+    # Select best CDN (avoid edgesrv:8443 TLS issues)
+    play_url = _select_best_cdn(all_urls)
     source_type = "http_flv" if result.get("flv_url") else "hls"
 
     return {

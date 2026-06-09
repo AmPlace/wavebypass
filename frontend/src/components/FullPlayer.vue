@@ -1604,6 +1604,32 @@ function attachRuntimeHlsErrorHandlers(hls, sourceUrl, usingProxy, attemptId, so
     hls.destroy()
     clearCurrentHlsIf(hls)
 
+    // Volatile adapter: try re-resolving for a fresh URL before falling back
+    if (!usingProxy) {
+      const currentEntry = playerStore.iptvUrls[playerStore.iptvUrlIndex]
+      if (currentEntry?.adapter_volatile_url && currentEntry?.adapter_source_url) {
+        const retryCount = currentEntry._volatileRetryCount || 0
+        if (retryCount < 2) {
+          try {
+            console.warn('[IPTV] volatile runtime 中断，重新 resolve... (retry ' + (retryCount + 1) + '/2)')
+            setRuntimeStatus('trying')
+            playerStore.setPlaybackError('直连中断，正在获取新地址...')
+            playerStore.setLoading(true)
+            const resolved = await playerStore.reResolveAdapterUrl(currentEntry.adapter_source_url)
+            if (!isAttemptActive(attemptId)) return
+            if (resolved && resolved.url) {
+              currentEntry.url = resolved.url
+              currentEntry._volatileRetryCount = retryCount + 1
+              const nextAttemptId = ++_playAttemptId
+              return await playCurrentIptvUrl(nextAttemptId, { allowStartupRace: false })
+            }
+          } catch (reErr) {
+            console.warn('[IPTV] volatile re-resolve 失败:', reErr?.message)
+          }
+        }
+      }
+    }
+
     const nextAttemptId = ++_playAttemptId
     if (await fallbackToNextIptvUrl(nextAttemptId)) {
       return await playCurrentIptvUrl(nextAttemptId)
@@ -1666,6 +1692,32 @@ function attachRuntimeMpegtsErrorHandlers(player, sourceUrl, usingProxy, attempt
       const message = e?.message || ''
       if (!message.includes('removeAllListeners')) {
         console.warn('[IPTV] mpegts runtime cleanup failed:', e)
+      }
+    }
+
+    // Volatile adapter: try re-resolving for a fresh URL before falling back
+    if (!usingProxy) {
+      const currentEntry = playerStore.iptvUrls[playerStore.iptvUrlIndex]
+      if (currentEntry?.adapter_volatile_url && currentEntry?.adapter_source_url) {
+        const retryCount = currentEntry._volatileRetryCount || 0
+        if (retryCount < 2) {
+          try {
+            console.warn('[IPTV] volatile MPEG-TS 中断，重新 resolve... (retry ' + (retryCount + 1) + '/2)')
+            setRuntimeStatus('trying')
+            playerStore.setPlaybackError('直连中断，正在获取新地址...')
+            playerStore.setLoading(true)
+            const resolved = await playerStore.reResolveAdapterUrl(currentEntry.adapter_source_url)
+            if (!isAttemptActive(attemptId)) return
+            if (resolved && resolved.url) {
+              currentEntry.url = resolved.url
+              currentEntry._volatileRetryCount = retryCount + 1
+              const nextAttemptId = ++_playAttemptId
+              return await playCurrentIptvUrl(nextAttemptId, { allowStartupRace: false })
+            }
+          } catch (reErr) {
+            console.warn('[IPTV] volatile re-resolve 失败:', reErr?.message)
+          }
+        }
       }
     }
 
@@ -2097,6 +2149,28 @@ async function playCurrentIptvUrl(attemptId = 0, options = {}) {
         if (!isAttemptActive(attemptId)) return
         const nextAttemptId = ++_playAttemptId
         return await playCurrentIptvUrl(nextAttemptId, { allowStartupRace: false })
+      }
+    }
+    // Volatile adapter: re-resolve for a fresh URL before giving up
+    if (entry.adapter_volatile_url && entry.adapter_source_url) {
+      const retryCount = entry._volatileRetryCount || 0
+      if (retryCount < 2) {
+        try {
+          console.warn('[IPTV] volatile adapter URL 失败，重新 resolve... (retry ' + (retryCount + 1) + '/2)')
+          setSourceRuntimeStatus(idx, 'trying')
+          playerStore.setPlaybackError('直连失败，正在获取新地址...')
+          playerStore.setLoading(true)
+          const resolved = await playerStore.reResolveAdapterUrl(entry.adapter_source_url)
+          if (!isAttemptActive(attemptId)) return
+          if (resolved && resolved.url) {
+            entry.url = resolved.url
+            entry._volatileRetryCount = retryCount + 1
+            const nextAttemptId = ++_playAttemptId
+            return await playCurrentIptvUrl(nextAttemptId, { allowStartupRace: false })
+          }
+        } catch (reErr) {
+          console.warn('[IPTV] volatile adapter re-resolve 失败:', reErr?.message)
+        }
       }
     }
     if (await fallbackToNextIptvUrl(attemptId)) {

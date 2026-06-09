@@ -281,7 +281,7 @@ export const usePlayerStore = defineStore('player', {
           if (canDirectPlay) {
             directUrls.push({
               ...u,
-              url: keepAdapterEntry ? proxyUrl : resolved.url,
+              url: resolved.url,
               original_url: url,
               adapter,
               adapter_source_url: url,
@@ -323,7 +323,7 @@ export const usePlayerStore = defineStore('player', {
       for (const u of directUrls) {
         const url = sourceUrl(u)
         const st = sourceType(u)
-        if (st === 'youtube' || u.adapter_volatile_url) continue
+        if (st === 'youtube') continue
         list.push({
           ...u,
           url: proxyUrlFor(u),
@@ -361,6 +361,24 @@ export const usePlayerStore = defineStore('player', {
       this.isPlaying = false
       this.isLoading = false
       return false
+    },
+
+    async reResolveAdapterUrl(adapterSourceUrl) {
+      const API_BASE = window.location.origin
+      const ctrl = new AbortController()
+      const timer = setTimeout(() => ctrl.abort(), 10_000)
+      try {
+        const res = await fetch(`${API_BASE}/api/iptv/adapter/resolve?target_url=${encodeURIComponent(adapterSourceUrl)}`, {
+          signal: ctrl.signal,
+        })
+        const data = await res.json().catch(() => ({}))
+        if (!res.ok || data.ok === false) {
+          throw new Error(data.message || data.detail?.message || data.detail || `HTTP ${res.status}`)
+        }
+        return data
+      } finally {
+        clearTimeout(timer)
+      }
     },
   },
 })
