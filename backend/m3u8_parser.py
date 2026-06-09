@@ -321,6 +321,8 @@ def detect_source_type(url: str) -> str:
         or '.mts?' in value
     ):
         return 'mpegts'
+    if value.endswith('.flv') or '.flv?' in value:
+        return 'http_flv'
     return 'hls'
 
 

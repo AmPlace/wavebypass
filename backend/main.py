@@ -2211,16 +2211,20 @@ async def iptv_adapter_play_m3u8(target_url: str = ''):
     if not resolved_url:
         raise HTTPException(status_code=502, detail="adapter 未返回播放地址")
 
-    source_type = str(resolved.get('source_type') or 'hls').lower()
+    source_type = str(resolved.get('source_type') or 'hls').strip().lower()
     headers = resolved.get('headers') if isinstance(resolved.get('headers'), dict) else {}
     custom_ua = str(headers.get('User-Agent') or headers.get('user-agent') or '')
+    referer = str(headers.get('Referer') or headers.get('referer') or '')
 
     if source_type == 'hls':
         validate_target_url(resolved_url)
         return await iptv_wide_playlist(target_url=resolved_url, proxy_ts=1, custom_ua=custom_ua)
-    if source_type == 'mpegts':
+    if source_type in {'mpegts', 'http_flv'}:
+        stream_type = '&stream_type=http_flv' if source_type == 'http_flv' else ''
+        ua = f'&custom_ua={quote(custom_ua, safe="")}' if custom_ua else ''
+        ref = f'&referer={quote(referer, safe="")}' if referer else ''
         return RedirectResponse(
-            f'/api/iptv/proxy/stream?target_url={quote(resolved_url, safe="")}',
+            f'/api/iptv/proxy/stream?target_url={quote(resolved_url, safe="")}{ua}{ref}{stream_type}',
             status_code=307,
         )
     if source_type == 'rtsp':
@@ -2459,7 +2463,7 @@ async def iptv_proxy_rtsp_segment(session_id: str, filename: str):
 
 
 @app.get("/api/iptv/proxy/stream")
-async def iptv_proxy_stream(request: Request, target_url: str = '', custom_ua: str = '', referer: str = ''):
+async def iptv_proxy_stream(request: Request, target_url: str = '', custom_ua: str = '', referer: str = '', stream_type: str = ''):
     if not target_url:
         raise HTTPException(status_code=400, detail="缺少 target_url")
 
@@ -2495,7 +2499,7 @@ async def iptv_proxy_stream(request: Request, target_url: str = '', custom_ua: s
             length = int(content_length)
             if 0 < length < IPTV_STREAM_SHORT_CONNECTION_BYTES:
                 logger.warning(
-                    "IPTV MPEG-TS 上游 Content-Length 较小: %s bytes url=%s",
+                    "IPTV stream 上游 Content-Length 较小: %s bytes url=%s",
                     length,
                     target_url,
                 )
@@ -2557,7 +2561,7 @@ async def iptv_proxy_stream(request: Request, target_url: str = '', custom_ua: s
                 elapsed = time.monotonic() - opened_at
                 if bytes_this_connection < IPTV_STREAM_SHORT_CONNECTION_BYTES and elapsed < IPTV_STREAM_SHORT_CONNECTION_SECONDS:
                     logger.warning(
-                        "IPTV MPEG-TS 上游短连接结束: reason=%s bytes=%s elapsed=%.2fs url=%s",
+                        "IPTV stream 上游短连接结束: reason=%s bytes=%s elapsed=%.2fs url=%s",
                         close_reason,
                         bytes_this_connection,
                         elapsed,
@@ -2565,7 +2569,7 @@ async def iptv_proxy_stream(request: Request, target_url: str = '', custom_ua: s
                     )
                 else:
                     logger.info(
-                        "IPTV MPEG-TS 上游连接结束，准备重连: reason=%s bytes=%s elapsed=%.2fs",
+                        "IPTV stream 上游连接结束，准备重连: reason=%s bytes=%s elapsed=%.2fs",
                         close_reason,
                         bytes_this_connection,
                         elapsed,
@@ -2576,7 +2580,7 @@ async def iptv_proxy_stream(request: Request, target_url: str = '', custom_ua: s
                     no_data_age = time.monotonic() - last_data_at
                     if no_data_retries >= IPTV_STREAM_NO_DATA_RETRIES or no_data_age > IPTV_STREAM_NO_DATA_TIMEOUT_SECONDS:
                         logger.warning(
-                            "IPTV MPEG-TS 上游连续无数据，结束代理流: retries=%s no_data_age=%.2fs url=%s",
+                            "IPTV stream 上游连续无数据，结束代理流: retries=%s no_data_age=%.2fs url=%s",
                             no_data_retries,
                             no_data_age,
                             target_url,
@@ -2600,7 +2604,7 @@ async def iptv_proxy_stream(request: Request, target_url: str = '', custom_ua: s
                         no_data_retries += 1
                         no_data_age = time.monotonic() - last_data_at
                         logger.warning(
-                            "IPTV MPEG-TS 上游重连失败: retries=%s no_data_age=%.2fs error=%s url=%s",
+                            "IPTV stream 上游重连失败: retries=%s no_data_age=%.2fs error=%s url=%s",
                             no_data_retries,
                             no_data_age,
                             exc,
@@ -2617,9 +2621,12 @@ async def iptv_proxy_stream(request: Request, target_url: str = '', custom_ua: s
         finally:
             await stream_client.aclose()
 
+    stream_kind = (stream_type or '').strip().lower()
+    media_type = "video/x-flv" if stream_kind == "http_flv" else "video/MP2T"
+
     return StreamingResponse(
         stream_bytes(),
-        media_type="video/MP2T",
+        media_type=media_type,
         headers={
             "Cache-Control": "no-cache, no-store, must-revalidate",
             "Access-Control-Allow-Origin": "*",
@@ -2903,7 +2910,7 @@ def _m3u_attr(value: str = '') -> str:
 def _source_type(source: dict) -> str:
     from m3u8_parser import detect_source_type
 
-    declared = source.get('source_type')
+    declared = str(source.get('source_type') or '').strip().lower()
     if declared and declared != 'hls':
         return declared
     return detect_source_type(source.get('url', ''))
@@ -2943,8 +2950,9 @@ def _iptv_proxy_path_for_source(source: dict) -> str:
         return _iptv_adapter_play_path(url)
     if source_type == 'rtsp':
         return f'/api/iptv/proxy/rtsp.m3u8?target_url={quote(url, safe="")}{ua}'
-    if source_type == 'mpegts':
-        return f'/api/iptv/proxy/stream?target_url={quote(url, safe="")}{ua}{ref}'
+    if source_type in {'mpegts', 'http_flv'}:
+        stream_type = '&stream_type=http_flv' if source_type == 'http_flv' else ''
+        return f'/api/iptv/proxy/stream?target_url={quote(url, safe="")}{ua}{ref}{stream_type}'
     return f'/api/iptv/proxy/wide.m3u8?proxy_ts=1{ua}{ref}&target_url={quote(url, safe="")}'
 
 
@@ -3073,7 +3081,7 @@ async def iptv_smart_playlist(canonical_key: str, request: Request):
                     custom_ua=source.get('custom_ua', ''),
                     compat=0,
                 )
-            if source_type == 'mpegts':
+            if source_type in {'mpegts', 'http_flv'}:
                 return RedirectResponse(_iptv_proxy_url_for_source(source, request), status_code=307)
             if source_type == 'adapter':
                 return RedirectResponse(_iptv_proxy_url_for_source(source, request), status_code=307)

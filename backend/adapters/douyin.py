@@ -46,7 +46,7 @@ async def resolve_douyin(request: AdapterRequest, client: httpx.AsyncClient) -> 
             retryable=True,
         )
 
-    source_type = "hls" if result.get("m3u8_url") else "mpegts"
+    source_type = "hls" if result.get("m3u8_url") else "http_flv"
 
     return {
         "ok": True,

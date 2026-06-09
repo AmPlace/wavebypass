@@ -150,15 +150,16 @@ export const usePlayerStore = defineStore('player', {
         const value = String(url || '').trim().toLowerCase()
         if (parseYoutubeVideoId(url)) return 'youtube'
         if (isYoutubeUrl(url)) return 'unsupported_youtube_url'
-        if (value.startsWith('migu://') || value.startsWith('adapter://')) return 'adapter'
+        if (value.startsWith('migu://') || value.startsWith('douyin://') || value.startsWith('huya://') || value.startsWith('redbook://') || value.startsWith('adapter://')) return 'adapter'
         if (value.startsWith('rtsp://')) return 'rtsp'
         if (/\/(?:rtp|udp)\//i.test(value) || /%2f(?:rtp|udp)%2f/i.test(value)) return 'mpegts'
         if (/\.(?:ts|m2ts|mts)(?:[?#]|$)/i.test(value)) return 'mpegts'
+        if (/\.flv(?:[?#]|$)/i.test(value) || /[?&]stream_type=http_flv(?:&|$)/i.test(value)) return 'http_flv'
         return 'hls'
       }
       const sourceType = (u) => {
         const inferred = inferSourceType(sourceUrl(u))
-        const declared = u?.source_type
+        const declared = String(u?.source_type || '').trim().toLowerCase()
         return declared && declared !== 'hls' ? declared : inferred
       }
       const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
@@ -207,8 +208,9 @@ export const usePlayerStore = defineStore('player', {
           const compat = options.compat ? '&compat=1' : ''
           return `${API_BASE}/api/iptv/proxy/rtsp.m3u8?target_url=${encodeURIComponent(url)}${ua}${compat}`
         }
-        if (st === 'mpegts') {
-          return `${API_BASE}/api/iptv/proxy/stream?target_url=${encodeURIComponent(url)}${ua}${referer}`
+        if (st === 'mpegts' || st === 'http_flv') {
+          const streamType = st === 'http_flv' ? '&stream_type=http_flv' : ''
+          return `${API_BASE}/api/iptv/proxy/stream?target_url=${encodeURIComponent(url)}${ua}${referer}${streamType}`
         }
         return `${API_BASE}/api/iptv/proxy/wide.m3u8?proxy_ts=1${ua}${referer}&target_url=${encodeURIComponent(url)}`
       }
@@ -244,7 +246,7 @@ export const usePlayerStore = defineStore('player', {
             ...u,
             url: proxyUrlFor(u),
             original_url: url,
-            type: st === 'mpegts' ? 'direct' : 'proxy',
+            type: st === 'mpegts' || st === 'http_flv' ? 'direct' : 'proxy',
             via_proxy: true,
             source_type: st,
           })
@@ -320,7 +322,7 @@ export const usePlayerStore = defineStore('player', {
           ...u,
           url: proxyUrlFor(u),
           original_url: u.original_url || url,
-          type: st === 'mpegts' ? 'direct' : 'proxy',
+          type: st === 'mpegts' || st === 'http_flv' ? 'direct' : 'proxy',
           via_proxy: true,
           source_type: st,
         })

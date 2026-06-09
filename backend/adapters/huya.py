@@ -49,7 +49,7 @@ async def resolve_huya(request: AdapterRequest, client: httpx.AsyncClient) -> di
     return {
         "ok": True,
         "adapter": "huya",
-        "source_type": "hls",
+        "source_type": "hls" if result.get("m3u8_url") else "http_flv",
         "url": play_url,
         "direct_playable": True,
         "requires_proxy": False,
@@ -58,4 +58,3 @@ async def resolve_huya(request: AdapterRequest, client: httpx.AsyncClient) -> di
         "expires_at": None,
         "warnings": [],
     }
-
