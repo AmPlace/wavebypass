@@ -776,6 +776,10 @@ function channelRowSummary(ch, active) {
   return ch.group_name || '直播频道'
 }
 
+function naturalSort(a, b) {
+  return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' })
+}
+
 const displayChannelRows = computed(() => {
   if (isIptvMode.value) {
     const allChannels = iptvChannelList.value.length
@@ -785,7 +789,9 @@ const displayChannelRows = computed(() => {
     const groupedChannels = currentGroup
       ? allChannels.filter((ch) => normalizeGroupName(ch.group_name) === currentGroup)
       : allChannels
-    const channels = groupedChannels.length ? groupedChannels : allChannels
+    const channels = (groupedChannels.length ? groupedChannels : allChannels)
+      .slice()
+      .sort((a, b) => naturalSort(a.name || '', b.name || ''))
     return channels.map((ch, index) => {
       const active = isCurrentIptv(ch)
       const playing = active && isPlaybackConfirmed.value
@@ -3486,11 +3492,11 @@ onBeforeUnmount(() => {
   --muted: rgba(250, 250, 250, 0.46);
   --line: rgba(255, 255, 255, 0.09);
   --channel-subtitle-color: rgba(250, 250, 250, 0.44);
-  --progress-track: rgba(255, 255, 255, 0.14);
-  --progress-fill: rgba(255, 255, 255, 0.82);
+  --progress-track: rgba(255, 255, 255, 0.18);
+  --progress-fill: rgba(255, 255, 255, 0.92);
   --progress-knob-bg: #111113;
-  --progress-knob-border: rgba(255, 255, 255, 0.48);
-  --progress-knob-ring: rgba(255, 255, 255, 0.14);
+  --progress-knob-border: rgba(255, 255, 255, 0.52);
+  --progress-knob-ring: rgba(255, 255, 255, 0.18);
 }
 
 .full-player,
@@ -3729,7 +3735,7 @@ onBeforeUnmount(() => {
   overflow-wrap: anywhere;
   font-size: var(--title-size);
   line-height: 1.18;
-  font-weight: var(--title-weight);
+  font-weight: 700;
   letter-spacing: 0;
 }
 
@@ -4316,14 +4322,14 @@ onBeforeUnmount(() => {
     width: 100%;
     max-width: 720px;
     margin: 0 auto;
-    padding: 22px clamp(16px, 4vw, 28px) 0;
+    padding: 16px clamp(16px, 4vw, 28px) 0;
     text-align: center;
   }
 
   .now-panel h1 {
     font-size: var(--title-size);
     line-height: 1.16;
-    font-weight: var(--title-weight);
+    font-weight: 700;
     letter-spacing: -0.03em;
     font-synthesis: none;
   }
@@ -4337,13 +4343,19 @@ onBeforeUnmount(() => {
   }
 
   .program-progress {
-    margin-top: 0;
-    padding-top: 14px;
+    margin-top: 12px;
+    padding-top: 0;
   }
 
   .progress-knob {
     width: 11px;
     height: 11px;
+  }
+
+  .progress-track {
+    width: 100%;
+    max-width: 480px;
+    margin: 0 auto;
   }
 
   .progress-times {
@@ -4354,7 +4366,7 @@ onBeforeUnmount(() => {
 
   .program-state {
     justify-content: center;
-    margin-top: 14px;
+    margin-top: 10px;
     color: var(--text-secondary);
     font-size: var(--meta-size);
     font-weight: 400;
