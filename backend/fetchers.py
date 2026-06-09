@@ -298,33 +298,32 @@ async def resolve_myradio_url(client, url: str) -> str:
         station = url.split(":")[1]
         get_mypop_url = await client.post(
             "http://pop.olis.com.tw:8080/pop_api/index.php/Basic/GetHLS",
-        data={"station": station},
+            data={"station": station},
         )
         return get_mypop_url.json()["data"]["hlsurl"][station]
     if url.startswith("myBest"):
         station = url.split(":")[1]
         get_mybest_url = await client.post(
             "http://best.olis.com.tw:8080/best_api/index.php/Basic/GetHLS",
-        data={"station": station},
+            data={"station": station},
         )
-        before_mybest_url = get_mybest_url.json()["data"]["hlsurl"]
-        if before_mybest_url.startswith("http://"):
-            real_mybest_url = before_mybest_url.replace("http://", "https://", 1)
-            return real_mybest_url
+        hls_url = get_mybest_url.json()["data"]["hlsurl"]
+        if isinstance(hls_url, str):
+            return hls_url.replace("http://", "https://", 1) if hls_url.startswith("http://") else hls_url
+        return hls_url
     if url.startswith("myAline"):
         station = url.split(":")[1]
-        if station == "1":
-            get_aline_url = await client.get(
-                "https://ipget.apple-line.com/alinePlayer.php"
-            )
-        else: 
-            get_aline_url = await client.get(
-                "https://ipget.apple-line.com/youngPlayer.php"
-            )
-        return get_aline_url.text.strip()
-    if url.startswith("http://"):
-        url = url.replace("http://", "https://", 1)
-        return url
+        try:
+            if station == "1":
+                get_aline_url = await client.get("https://ipget.apple-line.com/alinePlayer.php", verify=False)
+            else:
+                get_aline_url = await client.get("https://ipget.apple-line.com/youngPlayer.php", verify=False)
+            return get_aline_url.text.strip()
+        except Exception:
+            logger.warning("A-Line Radio API 请求失败，使用备用 URL")
+            if station == "1":
+                return "http://aline.hichannel.com.tw:8080/3"
+            return "http://aline.hichannel.com.tw:8080/young"
 
 
 _MYRADIO_STATIC_PATH = os.path.join(os.path.dirname(__file__), "myradio_static.json")
