@@ -327,56 +327,100 @@ async def resolve_myradio_url(client, url: str) -> str:
         return url
 
 
+_MYRADIO_STATIC_PATH = os.path.join(os.path.dirname(__file__), "myradio_static.json")
+
+
+def _load_myradio_static() -> list[dict]:
+    """从本地 JSON 加载静态 URL 电台"""
+    try:
+        with open(_MYRADIO_STATIC_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data.get("static", [])
+    except Exception:
+        logger.warning("myradio 静态列表加载失败")
+        return []
+
+
 async def fetch_myradio_all() -> list[dict]:
     global _myradio_build_id
-    headers = {"User-Agent": DEFAULT_UA}
 
-    async with httpx.AsyncClient(timeout=MYRADIO_TIMEOUT, follow_redirects=True) as client:
-        # 从 sitemap 获取所有电台 ID（主页重构后只显示部分电台）
-        sitemap_resp = await client.get(f"{MYRADIO_BASE}/sitemap.xml", headers=headers)
+    # 1. 加载静态 URL 电台（不需要 API 调用）
+    static_stations = []
+    for item in _load_myradio_static():
+        url = item.get("url", "")
+        if url.startswith(("http://", "https://")):
+            static_stations.append({
+                "id": item["id"],
+                "name": item["name"],
+                "url": url,
+                "logo": item.get("logo", f"https://images.myradio.com.tw/images/{item['id']}.jpg"),
+                "freq": item.get("freq", ""),
+                "tag": item.get("tag", ""),
+                "codec": 0,
+            })
+
+    # 2. 获取动态 URL 电台（需要 API 调用）
+    dynamic_ids = []
+    try:
+        sitemap_resp = httpx.get(f"{MYRADIO_BASE}/sitemap.xml", headers={"User-Agent": DEFAULT_UA}, timeout=MYRADIO_TIMEOUT)
         sitemap_resp.raise_for_status()
-        ids = list(set(re.findall(r'<loc>https?://myradio\.com\.tw/radios/(A\d{4})</loc>', sitemap_resp.text)))
+        all_ids = set(re.findall(r'<loc>https?://myradio\.com\.tw/radios/(A\d{4})</loc>', sitemap_resp.text))
+        static_ids = {s["id"] for s in static_stations}
+        dynamic_ids = list(all_ids - static_ids)
+    except Exception:
+        logger.warning("myradio sitemap 获取失败，尝试从静态列表的动态部分获取")
+        try:
+            with open(_MYRADIO_STATIC_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            dynamic_ids = [item["id"] for item in data.get("dynamic", [])]
+        except Exception:
+            pass
 
-        if not ids:
-            # fallback: 从主页获取
-            resp = await client.get(f"{MYRADIO_BASE}/zh-TW", headers={**headers, "x-nextjs-data": "1"})
-            resp.raise_for_status()
-            ids = list(set(re.findall(r'href="[^"]*?/(A\d{4})"', resp.text)))
+    logger.info("myradio 静态: %d 个, 动态: %d 个", len(static_stations), len(dynamic_ids))
 
-        if not _myradio_build_id:
+    # 3. 获取 buildId
+    if dynamic_ids and not _myradio_build_id:
+        try:
+            resp = httpx.get(f"{MYRADIO_BASE}/zh-TW", headers={"User-Agent": DEFAULT_UA, "x-nextjs-data": "1"}, timeout=MYRADIO_TIMEOUT)
             m_build = re.search(r'"buildId"\s*:\s*"([^"]+)"', resp.text)
             if m_build:
                 _myradio_build_id = m_build.group(1)
             else:
-                _myradio_build_id = "zyHz39BkSpQMj2O8YxLfe"
+                _myradio_build_id = "NbGrNnycPXoV9eY5v4Kt-"
                 logger.warning("myradio buildId 提取失败，使用硬编码兜底")
+        except Exception:
+            _myradio_build_id = "NbGrNnycPXoV9eY5v4Kt-"
 
-        logger.info("myradio 发现 %d 个电台 ID，buildId=%s", len(ids), _myradio_build_id)
+    # 4. 获取动态电台数据
+    dynamic_stations = []
+    if dynamic_ids and _myradio_build_id:
+        async with httpx.AsyncClient(timeout=MYRADIO_TIMEOUT, follow_redirects=True) as client:
+            async def _fetch_one(sid: str) -> dict | None:
+                async with _mr_sem:
+                    try:
+                        url = f"{MYRADIO_BASE}/_next/data/{_myradio_build_id}/zh-TW/radios/{sid}.json?id={sid}"
+                        r = await client.get(url, headers={"User-Agent": DEFAULT_UA, "x-nextjs-data": "1"}, timeout=10)
+                        r.raise_for_status()
+                        radio = r.json()["pageProps"]["radio"]
+                        real_url = await resolve_myradio_url(client, radio["url"])
+                        logger.info("myradio %s url=%s", sid, real_url)
+                        return {
+                            "id": radio["id"],
+                            "name": radio["name"],
+                            "url": real_url,
+                            "logo": f"https://images.myradio.com.tw/images/{radio['id']}.jpg",
+                            "freq": radio.get("des", ""),
+                            "tag": radio.get("tag", ""),
+                            "codec": radio.get("codec", 0),
+                        }
+                    except Exception as exc:
+                        logger.error("myradio %s 详情获取失败: %s", sid, exc)
+                return None
 
-        async def _fetch_one(sid: str) -> dict | None:
-            async with _mr_sem:
-                try:
-                    url = f"{MYRADIO_BASE}/_next/data/{_myradio_build_id}/zh-TW/radios/{sid}.json?id={sid}"
-                    r = await client.get(url, headers=headers)
-                    r.raise_for_status()
-                    radio = r.json()["pageProps"]["radio"]
-                    real_url = await resolve_myradio_url(client, radio["url"])
-                    logger.info("myradio %s url=%s type=%s", sid, real_url, type(real_url))
-                    return {
-                        "id": radio["id"],
-                        "name": radio["name"],
-                        "url": real_url,
-                        "logo": f"https://images.myradio.com.tw/images/{radio['id']}.jpg",
-                        "freq": radio.get("des", ""),
-                        "tag": radio.get("tag", ""),
-                        "codec": radio.get("codec", 0),
-                    }
-                except Exception as exc:
-                    logger.error("myradio %s 详情获取失败: %s", sid, exc)
-            return None
+            results = await asyncio.gather(*[_fetch_one(sid) for sid in dynamic_ids])
+            dynamic_stations = [r for r in results if r]
 
-        results = await asyncio.gather(*[_fetch_one(sid) for sid in ids])
-    return [r for r in results if r]
+    return static_stations + dynamic_stations
 
 
 STATION_FETCHER_MAP: dict[str, StationFetcher] = {
