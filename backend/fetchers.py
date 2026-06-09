@@ -329,12 +329,19 @@ async def resolve_myradio_url(client, url: str) -> str:
 
 async def fetch_myradio_all() -> list[dict]:
     global _myradio_build_id
-    headers = {"User-Agent": DEFAULT_UA, "x-nextjs-data": "1"}
+    headers = {"User-Agent": DEFAULT_UA}
 
     async with httpx.AsyncClient(timeout=MYRADIO_TIMEOUT, follow_redirects=True) as client:
-        resp = await client.get(f"{MYRADIO_BASE}/zh-TW", headers=headers)
-        resp.raise_for_status()
-        ids = list(set(re.findall(r'href="[^"]*?/(A\d{4})"', resp.text)))
+        # 从 sitemap 获取所有电台 ID（主页重构后只显示部分电台）
+        sitemap_resp = await client.get(f"{MYRADIO_BASE}/sitemap.xml", headers=headers)
+        sitemap_resp.raise_for_status()
+        ids = list(set(re.findall(r'<loc>https?://myradio\.com\.tw/radios/(A\d{4})</loc>', sitemap_resp.text)))
+
+        if not ids:
+            # fallback: 从主页获取
+            resp = await client.get(f"{MYRADIO_BASE}/zh-TW", headers={**headers, "x-nextjs-data": "1"})
+            resp.raise_for_status()
+            ids = list(set(re.findall(r'href="[^"]*?/(A\d{4})"', resp.text)))
 
         if not _myradio_build_id:
             m_build = re.search(r'"buildId"\s*:\s*"([^"]+)"', resp.text)
@@ -349,7 +356,7 @@ async def fetch_myradio_all() -> list[dict]:
         async def _fetch_one(sid: str) -> dict | None:
             async with _mr_sem:
                 try:
-                    url = f"{MYRADIO_BASE}/_next/data/{_myradio_build_id}/zh-TW/{sid}.json?id={sid}"
+                    url = f"{MYRADIO_BASE}/_next/data/{_myradio_build_id}/zh-TW/radios/{sid}.json?id={sid}"
                     r = await client.get(url, headers=headers)
                     r.raise_for_status()
                     radio = r.json()["pageProps"]["radio"]
