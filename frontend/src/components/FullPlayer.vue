@@ -8,7 +8,7 @@
         @pointermove="showMobileOverlayControls"
         @pointerdown="showMobileOverlayControls"
       >
-        <div class="player-layout">
+        <div class="player-layout" :style="playerLayoutStyle">
           <button
             type="button"
             class="desktop-collapse-btn"
@@ -17,7 +17,7 @@
           >
             <svg viewBox="0 0 24 24" fill="none"><path d="M19 12H5M12 5l-7 7 7 7" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
           </button>
-          <main ref="playerMainRef" class="player-main" :style="mediaFrameStyle">
+          <main ref="playerMainRef" class="player-main">
             <section class="media-card">
               <div class="mobile-live-pill" aria-hidden="true">
                 <div class="pill-logo">
@@ -90,12 +90,12 @@
               <h1>{{ currentStationName }}</h1>
               <p>{{ currentChannelSubtitle }}</p>
 
-              <div class="program-progress">
+              <div class="program-progress" :class="{ empty: !hasCurrentEpgProgram }">
                 <div class="progress-track">
-                  <div class="progress-fill" :style="{ width: currentProgramProgressPercent }"></div>
-                  <span class="progress-knob" :style="{ left: currentProgramProgressPercent }"></span>
+                  <div v-if="hasCurrentEpgProgram" class="progress-fill" :style="{ width: currentProgramProgressPercent }"></div>
+                  <span v-if="hasCurrentEpgProgram" class="progress-knob" :style="{ left: currentProgramProgressPercent }"></span>
                 </div>
-                <div class="progress-times">
+                <div v-if="hasCurrentEpgProgram" class="progress-times">
                   <span>{{ currentProgram.start }}</span>
                   <span>{{ currentProgram.end }}</span>
                 </div>
@@ -430,6 +430,9 @@ const mobileOverlayVisible = ref(true)
 const mediaAspectRatio = ref('16 / 9')
 const mediaAspectValue = ref(16 / 9)
 const mediaFrameWidth = ref(null)
+const mediaFrameHeight = ref(null)
+const sidePanelWidth = ref(null)
+const playerLayoutWidth = ref(null)
 const DEFAULT_LOGO_URL = publicAsset('/logos/default.png')
 const isFullPlayerDark = ref(document.documentElement.classList.contains('dark'))
 const isSafariChromeRefreshing = ref(false)
@@ -443,11 +446,14 @@ const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
   (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
 const iptvMuted = ref(isIOS)  // iOS 静音绕过自动播放限制
 
-const mediaFrameStyle = computed(() => {
+const playerLayoutStyle = computed(() => {
   const style = {
     '--media-aspect-ratio': mediaAspectRatio.value,
   }
-  if (mediaFrameWidth.value) style['--media-frame-width'] = `${mediaFrameWidth.value}px`
+  if (mediaFrameWidth.value) style['--media-frame-width'] = `${mediaFrameWidth.value.toFixed(3)}px`
+  if (mediaFrameHeight.value) style['--media-frame-height'] = `${mediaFrameHeight.value.toFixed(3)}px`
+  if (sidePanelWidth.value) style['--side-panel-width'] = `${sidePanelWidth.value.toFixed(3)}px`
+  if (playerLayoutWidth.value) style['--layout-width'] = `${playerLayoutWidth.value.toFixed(3)}px`
   return style
 })
 
@@ -488,9 +494,8 @@ function resetMediaAspect() {
 
 function setMediaAspect(width, height) {
   if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return
-  const ratio = Math.min(Math.max(width / height, 0.56), 2.4)
-  mediaAspectValue.value = ratio
-  mediaAspectRatio.value = `${Math.round(width)} / ${Math.round(height)}`
+  mediaAspectValue.value = 16 / 9
+  mediaAspectRatio.value = '16 / 9'
   updateMediaFrameSize()
 }
 
@@ -503,16 +508,26 @@ function updateMediaAspectFromVideo() {
 function updateMediaFrameSize() {
   if (window.matchMedia('(max-width: 980px)').matches) {
     mediaFrameWidth.value = null
+    mediaFrameHeight.value = null
+    sidePanelWidth.value = null
+    playerLayoutWidth.value = null
     return
   }
-  const mainWidth = playerMainRef.value?.clientWidth
-  if (!mainWidth) {
-    mediaFrameWidth.value = null
-    return
-  }
-  const maxHeight = Math.max(280, window.innerHeight - 430)
+
+  const viewportWidth = window.innerWidth
+  const viewportHeight = window.innerHeight
+  const horizontalInset = Math.min(96, Math.max(48, viewportWidth * 0.05))
+  const layoutGap = Math.min(40, Math.max(24, viewportWidth * 0.02))
+  const panelWidth = Math.min(500, Math.max(360, viewportWidth * 0.24))
+  const reservedBelow = Math.min(320, Math.max(250, window.innerHeight * 0.28))
+  const maxHeight = Math.max(320, viewportHeight - reservedBelow)
+  const maxWidth = Math.max(360, viewportWidth - horizontalInset - layoutGap - panelWidth)
   const widthByHeight = maxHeight * mediaAspectValue.value
-  mediaFrameWidth.value = Math.round(Math.min(mainWidth, 1160, widthByHeight))
+  const width = Math.min(maxWidth, widthByHeight)
+  mediaFrameWidth.value = width
+  mediaFrameHeight.value = width / mediaAspectValue.value
+  sidePanelWidth.value = panelWidth
+  playerLayoutWidth.value = width + layoutGap + panelWidth
 }
 
 function updateSourceMenuPosition() {
@@ -665,6 +680,8 @@ const currentProgram = computed(() => {
   return { title: currentStationName.value, start: '', end: '', remaining: 0, progress: 0 }
 })
 
+const hasCurrentEpgProgram = computed(() => Boolean(playerStore.currentEpgProgram))
+
 const currentProgramProgressPercent = computed(() => `${currentProgram.value.progress}%`)
 
 function localDateString(date = new Date()) {
@@ -706,7 +723,11 @@ const fullPlayerStatusText = computed(() => {
 })
 
 const showProgramRemaining = computed(() => (
-  !playerStore.playbackError && !isLoading.value && isPlaying.value
+  hasCurrentEpgProgram.value
+  && !playerStore.playbackError
+  && !isLoading.value
+  && isPlaying.value
+  && currentProgram.value.remaining > 0
 ))
 
 const playbackStateClass = computed(() => {
@@ -740,11 +761,32 @@ const displaySchedule = computed(() => {
   ]
 })
 
+function normalizeGroupName(value) {
+  return String(value || '').trim().toLowerCase()
+}
+
+function channelRowSummary(ch, active) {
+  if (active) {
+    if (hasCurrentEpgProgram.value) {
+      const remaining = currentProgram.value.remaining
+      const suffix = remaining > 0 ? ` · 剩余 ${remaining} 分钟` : ''
+      return `当前：${currentProgram.value.title}${suffix}`
+    }
+    return '直播中'
+  }
+  return ch.group_name || '直播频道'
+}
+
 const displayChannelRows = computed(() => {
   if (isIptvMode.value) {
-    const channels = iptvChannelList.value.length
+    const allChannels = iptvChannelList.value.length
       ? iptvChannelList.value
       : (displayIptvChannel.value ? [displayIptvChannel.value] : [])
+    const currentGroup = normalizeGroupName(displayIptvChannel.value?.group_name)
+    const groupedChannels = currentGroup
+      ? allChannels.filter((ch) => normalizeGroupName(ch.group_name) === currentGroup)
+      : allChannels
+    const channels = groupedChannels.length ? groupedChannels : allChannels
     return channels.map((ch, index) => {
       const active = isCurrentIptv(ch)
       const playing = active && isPlaybackConfirmed.value
@@ -756,9 +798,7 @@ const displayChannelRows = computed(() => {
         playing,
         active,
         channel: ch,
-        summary: active
-          ? `当前：${currentProgram.value.title} · 剩余 ${currentProgram.value.remaining} 分钟`
-          : `${ch.group_name || '直播频道'} · ${15 + (index % 5) * 5} 分钟`,
+        summary: channelRowSummary(ch, active),
         select: () => playIptvChannelFromFullPlayer(ch),
       }
     })
@@ -776,8 +816,8 @@ const displayChannelRows = computed(() => {
       active,
       stationId: station.id,
       summary: active
-        ? `当前：${station.subtitle || station.name} · 剩余 ${currentProgram.value.remaining} 分钟`
-        : `${station.subtitle || '直播电台'} · ${15 + (index % 5) * 5} 分钟`,
+        ? `当前：${station.subtitle || station.name}`
+        : `${station.subtitle || '直播电台'}`,
       select: () => playerStore.switchStation(station.id),
     }
   })
@@ -1005,7 +1045,20 @@ onMounted(() => {
   if (isIptvMode.value) loadIptvChannels()
 })
 
+function playAdjacentVisibleChannel(offset) {
+  const rows = displayChannelRows.value.filter((item) => typeof item?.select === 'function')
+  if (rows.length <= 1) return
+  const activeIndex = rows.findIndex((item) => item.active)
+  const currentIndex = activeIndex >= 0 ? activeIndex : 0
+  const nextIndex = (currentIndex + offset + rows.length) % rows.length
+  rows[nextIndex]?.select?.()
+}
+
 function playPrev() {
+  if (isIptvMode.value) {
+    playAdjacentVisibleChannel(-1)
+    return
+  }
   const list = stationList.value
   if (!list.length) return
   const idx = list.findIndex((s) => s.id === currentStation.value)
@@ -1014,6 +1067,10 @@ function playPrev() {
 }
 
 function playNext() {
+  if (isIptvMode.value) {
+    playAdjacentVisibleChannel(1)
+    return
+  }
   const list = stationList.value
   if (!list.length) return
   const idx = list.findIndex((s) => s.id === currentStation.value)
@@ -3330,12 +3387,12 @@ onBeforeUnmount(() => {
   --gold: #c79a2b;
   --muted: #8d9299;
   --line: rgba(17, 24, 39, 0.08);
-  --layout-width: min(1740px, calc(100% - 64px));
+  --layout-width: calc(100% - clamp(48px, 5vw, 96px));
   --layout-height: 100dvh;
-  --layout-gap: clamp(32px, 3vw, 54px);
+  --layout-gap: clamp(24px, 2vw, 40px);
   --layout-padding: clamp(44px, 5.5vh, 64px) 0 clamp(24px, 3.2vh, 36px);
   --player-main-offset: 16px;
-  --media-width: min(100%, 1160px);
+  --media-width: 100%;
   --media-height: auto;
   --media-aspect-ratio: 16 / 9;
   --media-radius: 8px;
@@ -3453,9 +3510,10 @@ onBeforeUnmount(() => {
   position: relative;
   z-index: 1;
   display: grid;
-  grid-template-columns: minmax(0, 1.72fr) minmax(340px, 0.9fr);
+  grid-template-columns: var(--media-frame-width, minmax(0, 1fr)) var(--side-panel-width, minmax(360px, 500px));
   gap: var(--layout-gap);
   width: var(--layout-width);
+  max-width: calc(100% - clamp(48px, 5vw, 96px));
   height: var(--layout-height);
   margin: 0 auto;
   padding: var(--layout-padding);
@@ -3493,6 +3551,7 @@ onBeforeUnmount(() => {
 
 .player-main {
   display: flex;
+  align-items: stretch;
   min-height: 0;
   min-width: 0;
   flex-direction: column;
@@ -3504,7 +3563,7 @@ onBeforeUnmount(() => {
   box-sizing: border-box;
   overflow: hidden;
   width: var(--media-frame-width, var(--media-width));
-  height: var(--media-height);
+  height: var(--media-frame-height, var(--media-height));
   aspect-ratio: var(--media-aspect-ratio);
   border-radius: var(--media-radius);
   background: var(--media-placeholder-bg);
@@ -3512,6 +3571,8 @@ onBeforeUnmount(() => {
 }
 
 .media-video {
+  position: absolute;
+  inset: 0;
   display: block;
   width: 100%;
   height: 100%;
@@ -3666,15 +3727,16 @@ onBeforeUnmount(() => {
 .now-panel {
   width: var(--media-frame-width, var(--media-width));
   padding: 18px var(--panel-inline) 0;
-  text-align: left;
+  text-align: center;
 }
 
 .now-panel h1 {
   margin: 0;
+  overflow-wrap: anywhere;
   font-size: var(--title-size);
   line-height: 1.18;
   font-weight: var(--title-weight);
-  letter-spacing: -0.03em;
+  letter-spacing: 0;
 }
 
 .now-panel > p {
@@ -3831,11 +3893,12 @@ onBeforeUnmount(() => {
 
 .source-dot {
   position: absolute;
-  top: 6px;
-  right: 5px;
+  left: 50%;
+  top: 50%;
   width: 7px;
   height: 7px;
   border-radius: 999px;
+  transform: translate(1px, -1px);
 }
 
 .volume-control {
@@ -3893,12 +3956,13 @@ onBeforeUnmount(() => {
 .panel-tabs button.active::after {
   content: "";
   position: absolute;
-  left: 0;
+  left: 50%;
   bottom: -1px;
   width: var(--tab-line-width);
   height: 3px;
   border-radius: 999px;
-  background: var(--black);
+  background: currentColor;
+  transform: translateX(-50%);
 }
 
 .desktop-panel-scroll {
@@ -3947,8 +4011,12 @@ onBeforeUnmount(() => {
 }
 
 .channel-copy {
-  display: block;
+  display: flex;
+  min-height: var(--channel-logo-size);
   min-width: 0;
+  flex-direction: column;
+  justify-content: center;
+  gap: 6px;
 }
 
 .channel-title {
@@ -3968,7 +4036,6 @@ onBeforeUnmount(() => {
 
 .channel-subtitle {
   display: block;
-  margin-top: 6px;
   overflow: hidden;
   color: var(--channel-subtitle-color);
   font-size: var(--channel-subtitle-size);
@@ -4147,7 +4214,7 @@ onBeforeUnmount(() => {
     --layout-padding: 0 0 calc(env(safe-area-inset-bottom) + 96px);
     --player-main-offset: 0;
     --media-width: 100vw;
-    --media-height: clamp(220px, 56vw, 245px);
+    --media-height: auto;
     --media-radius: 0;
     --media-shadow: none;
     --panel-inline: 32px;
@@ -4207,16 +4274,13 @@ onBeforeUnmount(() => {
     width: var(--media-width);
     height: var(--media-height);
     margin-left: calc(50% - 50vw);
-    aspect-ratio: auto;
+    aspect-ratio: var(--media-aspect-ratio);
     border-radius: var(--media-radius);
     box-shadow: var(--media-shadow);
   }
 
   .media-video {
-    position: absolute;
-    inset: 0;
-    object-fit: cover;
-    object-position: center 45%;
+    object-position: center center;
   }
 
   .radio-art-stage {
@@ -4428,7 +4492,6 @@ onBeforeUnmount(() => {
   }
 
   .channel-subtitle {
-    margin-top: 5px;
     font-size: var(--channel-subtitle-size);
     font-weight: 400;
     color: var(--channel-subtitle-color);
@@ -4501,7 +4564,7 @@ onBeforeUnmount(() => {
 @media (max-width: 520px) {
   .full-player {
     --panel-inline: 30px;
-    --media-height: clamp(220px, 56vw, 245px);
+    --media-height: auto;
     --title-size: 21px;
     --title-weight: 500;
     --subtitle-size: 13px;
