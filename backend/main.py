@@ -584,7 +584,6 @@ async def _ensure_rtsp_hls_session(target_url: str, custom_ua: str = "", compat:
     raise HTTPException(status_code=504, detail=f"RTSP 转 HLS 起播超时{': ' + stderr[-500:] if stderr else ''}")
 
 
-@asynccontextmanager
 _TINGFM_STREAMS = {
     "tf_909": "https://rthkradio1-live.akamaized.net/hls/live/2035313/radio1/master.m3u8",
     "tf_910": "https://rthkradio2-live.akamaized.net/hls/live/2040078/radio2/master.m3u8",
@@ -611,6 +610,7 @@ def _load_tingfm_streams():
     logger.info("tingfm HK 电台加载完成: %d 个", len(_TINGFM_STREAMS))
 
 
+@asynccontextmanager
 async def lifespan(app: FastAPI):
     await database.initialize()
     _clear_stale_rtsp_hls_dirs()
