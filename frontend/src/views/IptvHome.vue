@@ -169,7 +169,7 @@ onMounted(loadChannels)
 watch(searchQuery, () => { loadChannels() })
 
 function isCurrentChannel(ch) {
-  const current = playerStore.currentIptvChannel
+  const current = playerStore.pendingIptvChannel || playerStore.currentIptvChannel
   return current && current.name === ch.name
 }
 

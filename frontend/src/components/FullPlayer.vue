@@ -986,7 +986,7 @@ async function loadIptvChannels() {
 }
 
 function isCurrentIptv(ch) {
-  const current = playerStore.currentIptvChannel
+  const current = playerStore.pendingIptvChannel || playerStore.currentIptvChannel
   return current && current.name === ch.name
 }
 

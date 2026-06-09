@@ -14,6 +14,7 @@ export const usePlayerStore = defineStore('player', {
     activeMode: 'radio',  // 'radio' | 'iptv'
     // IPTV 播放状态
     currentIptvChannel: null,  // { name, group_name, logo_url, urls: [...] }
+    pendingIptvChannel: null,  // 正在异步构建播放队列的频道，用于立即反馈选中态
     iptvUrls: [],              // 当前频道的所有可用链接
     iptvUrlIndex: 0,           // 当前尝试的链接索引
     iptvSelectionToken: 0,      // 防止异步解析旧频道覆盖新频道
@@ -110,6 +111,7 @@ export const usePlayerStore = defineStore('player', {
 
     async playIptvChannel(channel) {
       const selectionToken = ++this.iptvSelectionToken
+      this.pendingIptvChannel = channel
       this.playbackError = ''
       this.isLoading = true
       const sorted = [...channel.urls].sort((a, b) => {
@@ -329,6 +331,7 @@ export const usePlayerStore = defineStore('player', {
       }
       list.push(...proxyOnlyUrls)
       this.currentIptvChannel = channel
+      this.pendingIptvChannel = null
       this.iptvUrls = list
       this.iptvUrlIndex = 0
       this.playbackError = list.length ? '' : '没有可播放的源'
