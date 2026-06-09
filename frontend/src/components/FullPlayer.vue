@@ -195,6 +195,19 @@
               </div>
 
               <div v-if="activePlayerPanel === 'channels'" class="channel-panel">
+                <div class="channel-sort-bar">
+                  <button
+                    type="button"
+                    class="sort-btn"
+                    :class="{ active: channelSortMode !== 'original' }"
+                    @click="nextSortMode"
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="14" height="14">
+                      <line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="16" y2="12"/><line x1="4" y1="18" x2="12" y2="18"/>
+                    </svg>
+                    {{ currentSortLabel }}
+                  </button>
+                </div>
                 <button
                   v-for="item in displayChannelRows"
                   :key="item.key"
@@ -278,6 +291,19 @@
             </div>
 
             <div v-if="activePlayerPanel === 'channels'" class="channel-panel desktop-panel-scroll">
+              <div class="channel-sort-bar">
+                <button
+                  type="button"
+                  class="sort-btn"
+                  :class="{ active: channelSortMode !== 'original' }"
+                  @click="nextSortMode"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="14" height="14">
+                    <line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="16" y2="12"/><line x1="4" y1="18" x2="12" y2="18"/>
+                  </svg>
+                  {{ currentSortLabel }}
+                </button>
+              </div>
               <button
                 v-for="item in displayChannelRows"
                 :key="item.key"
@@ -424,6 +450,18 @@ const sourceMenuStyle = ref({
 const sourceMenuListMaxHeight = ref('260px')
 const iptvSourceRuntimeStatus = ref({})
 const activePlayerPanel = ref('channels')
+const channelSortMode = ref('original')  // 'original' | 'natural' | 'group' | 'live'
+const SORT_MODES = [
+  { key: 'original', label: '默认' },
+  { key: 'natural', label: 'A-Z' },
+  { key: 'group', label: '分组' },
+  { key: 'live', label: '直播中' },
+]
+function nextSortMode() {
+  const idx = SORT_MODES.findIndex(m => m.key === channelSortMode.value)
+  channelSortMode.value = SORT_MODES[(idx + 1) % SORT_MODES.length].key
+}
+const currentSortLabel = computed(() => SORT_MODES.find(m => m.key === channelSortMode.value)?.label || '默认')
 const epgNow = ref(Date.now())
 const mobileOverlayVisible = ref(true)
 const mediaAspectRatio = ref('16 / 9')
@@ -791,7 +829,17 @@ const displayChannelRows = computed(() => {
       : allChannels
     const channels = (groupedChannels.length ? groupedChannels : allChannels)
       .slice()
-      .sort((a, b) => naturalSort(a.name || '', b.name || ''))
+    if (channelSortMode.value === 'natural') {
+      channels.sort((a, b) => naturalSort(a.name || '', b.name || ''))
+    } else if (channelSortMode.value === 'group') {
+      channels.sort((a, b) => naturalSort(a.group_name || '', b.group_name || '') || naturalSort(a.name || '', b.name || ''))
+    } else if (channelSortMode.value === 'live') {
+      channels.sort((a, b) => {
+        const aLive = isCurrentIptv(a) ? 1 : 0
+        const bLive = isCurrentIptv(b) ? 1 : 0
+        return bLive - aLive || naturalSort(a.name || '', b.name || '')
+      })
+    }
     return channels.map((ch, index) => {
       const active = isCurrentIptv(ch)
       const playing = active && isPlaybackConfirmed.value
@@ -3971,6 +4019,38 @@ onBeforeUnmount(() => {
   padding-top: 24px;
 }
 
+.channel-sort-bar {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0 8px 8px;
+}
+
+.sort-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border: 1px solid var(--row-separator);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.sort-btn:hover {
+  border-color: var(--text-quaternary);
+  color: var(--text-secondary);
+}
+
+.sort-btn.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: rgba(53, 200, 122, 0.08);
+}
+
 .channel-row {
   display: grid;
   grid-template-columns: var(--channel-grid);
@@ -4474,6 +4554,10 @@ onBeforeUnmount(() => {
 
   .channel-panel {
     padding-top: 14px;
+  }
+
+  .channel-sort-bar {
+    padding: 0 16px 6px;
   }
 
   .channel-row {
