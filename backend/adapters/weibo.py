@@ -12,7 +12,15 @@ async def resolve_weibo(request: AdapterRequest, client: httpx.AsyncClient) -> d
     if not room_id:
         raise AdapterResolveError("invalid_weibo_room_id", "微博 房间号不能为空")
 
-    url = f"https://weibo.com/{room_id}"
+    # 支持两种格式：
+    # weibo://UID → 查找该用户的直播
+    # weibo://1022:ROOM_ID → 直接用 show URL
+    if room_id.startswith("1022:"):
+        url = f"https://weibo.com/show/{room_id}"
+    elif room_id.isdigit():
+        url = f"https://weibo.com/u/{room_id}"
+    else:
+        url = f"https://weibo.com/show/{room_id}"
 
     try:
         live = WeiboLiveStream(cookies="")
