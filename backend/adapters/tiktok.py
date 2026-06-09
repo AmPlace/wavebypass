@@ -4,7 +4,10 @@ from typing import Any
 import httpx
 from streamget import TikTokLiveStream
 
-from . import ADAPTER_SUCCESS_TTL_SECONDS, AdapterRequest, AdapterResolveError
+from . import AdapterRequest, AdapterResolveError
+
+# TikTok 流地址有效期约 14 天，留 2 天余量
+_TIKTOK_TTL_SECONDS = 12 * 24 * 60 * 60
 
 
 async def resolve_tiktok(request: AdapterRequest, client: httpx.AsyncClient) -> dict[str, Any]:
@@ -15,8 +18,9 @@ async def resolve_tiktok(request: AdapterRequest, client: httpx.AsyncClient) -> 
     tiktok_url = f"https://www.tiktok.com/@{room_id}/live"
 
     try:
-        live = TikTokLiveStream()
-        data = await live.fetch_web_stream_data(tiktok_url)
+        live = TikTokLiveStream(cookies="")
+        # 优先使用 app API 方式，可能绕过 WAF
+        data = await live.fetch_app_stream_data(tiktok_url)
         stream_obj = await live.fetch_stream_url(data, "OD")
         json_str = stream_obj.to_json()
         result = json.loads(json_str)
@@ -55,7 +59,7 @@ async def resolve_tiktok(request: AdapterRequest, client: httpx.AsyncClient) -> 
         "direct_playable": True,
         "requires_proxy": False,
         "headers": {},
-        "ttl": ADAPTER_SUCCESS_TTL_SECONDS,
+        "ttl": _TIKTOK_TTL_SECONDS,
         "expires_at": None,
         "warnings": [],
         "anchor_name": result.get("anchor_name", ""),
