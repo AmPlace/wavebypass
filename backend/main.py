@@ -2147,7 +2147,7 @@ def _drop_wide_cache(cache_key: str) -> None:
 def _iptv_wide_playlist_proxy_path(target_url: str, proxy_ts: int = 0, custom_ua: str = '', referer: str = '') -> str:
     ua = f'&custom_ua={quote(custom_ua, safe="")}' if custom_ua else ''
     ref = f'&referer={quote(referer, safe="")}' if referer else ''
-    return f'/api/iptv/proxy/wide.m3u8?proxy_ts={1 if proxy_ts else 0}{ua}{ref}&target_url={quote(target_url, safe="")}'
+    return f'/api/iptv/proxy/wide.m3u8?proxy_ts={int(proxy_ts or 0)}{ua}{ref}&target_url={quote(target_url, safe="")}'
 
 
 def _iptv_adapter_play_path(target_url: str) -> str:
@@ -2159,6 +2159,11 @@ def _iptv_chunk_proxy_path(target_url: str, custom_ua: str = '', referer: str = 
     ua = f'&custom_ua={quote(custom_ua, safe="")}' if custom_ua else ''
     ref = f'&referer={quote(referer, safe="")}' if referer else ''
     return f'/api/iptv/proxy/chunk.ts?target_url={quote(target_url, safe="")}{ua}{ref}'
+
+
+def _should_proxy_iptv_chunk(seg_url: str, proxy_ts: int = 0) -> bool:
+    scheme = urlparse(seg_url).scheme.lower()
+    return bool(proxy_ts) and scheme in {"http", "https"}
 
 
 def _rewrite_iptv_wide_m3u8_text(raw_m3u8_text: str, base_url: str, proxy_ts: int = 0, custom_ua: str = '', referer: str = '') -> str:
@@ -2176,7 +2181,7 @@ def _rewrite_iptv_wide_m3u8_text(raw_m3u8_text: str, base_url: str, proxy_ts: in
 
         if uri_path.endswith(".m3u8"):
             rewritten_lines.append(_iptv_wide_playlist_proxy_path(absolute_media_url, proxy_ts, custom_ua, referer))
-        elif proxy_ts and parsed_url.scheme == "http" and uri_path.endswith(_IPTV_SEGMENT_EXTENSIONS):
+        elif uri_path.endswith(_IPTV_SEGMENT_EXTENSIONS) and _should_proxy_iptv_chunk(absolute_media_url, proxy_ts):
             rewritten_lines.append(_iptv_chunk_proxy_path(absolute_media_url, custom_ua, referer))
         else:
             rewritten_lines.append(absolute_media_url)
@@ -2218,7 +2223,7 @@ async def iptv_adapter_play_m3u8(target_url: str = ''):
 
     if source_type == 'hls':
         validate_target_url(resolved_url)
-        return await iptv_wide_playlist(target_url=resolved_url, proxy_ts=1, custom_ua=custom_ua)
+        return await iptv_wide_playlist(target_url=resolved_url, proxy_ts=1, custom_ua=custom_ua, referer=referer)
     if source_type in {'mpegts', 'http_flv'}:
         stream_type = '&stream_type=http_flv' if source_type == 'http_flv' else ''
         ua = f'&custom_ua={quote(custom_ua, safe="")}' if custom_ua else ''
@@ -2316,7 +2321,7 @@ async def iptv_wide_playlist(target_url: str = '', proxy_ts: int = 0, custom_ua:
         _headers['Referer'] = referer
 
     def _rewrite_ts(seg_url: str) -> str:
-        if proxy_ts and urlparse(seg_url).scheme == 'http':
+        if _should_proxy_iptv_chunk(seg_url, proxy_ts):
             return _iptv_chunk_proxy_path(seg_url, custom_ua, referer)
         return seg_url
 
