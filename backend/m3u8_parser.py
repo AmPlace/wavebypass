@@ -24,7 +24,7 @@ _M3U_ENTRY_RE = re.compile(
     re.MULTILINE | re.DOTALL,
 )
 
-_STREAM_URL_PREFIXES = ('http://', 'https://', 'rtmp://', 'rtsp://', 'migu://', 'douyin://', 'huya://', 'redbook://', 'adapter://')
+_STREAM_URL_PREFIXES = ('http://', 'https://', 'rtmp://', 'rtsp://', 'migu://', 'douyin://', 'douyu://', 'huya://', 'redbook://', 'adapter://')
 
 # 简单的逐行解析用
 _EXTINF_RE = re.compile(r'#EXTINF:(.+?),(.+)')
@@ -293,6 +293,8 @@ def adapter_provider(url: str) -> str:
         return 'migu'
     if scheme == 'douyin':
         return 'douyin'
+    if scheme == 'douyu':
+        return 'douyu'
     if scheme == 'huya':
         return 'huya'
     if scheme == 'redbook':

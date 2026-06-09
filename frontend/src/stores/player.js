@@ -150,7 +150,7 @@ export const usePlayerStore = defineStore('player', {
         const value = String(url || '').trim().toLowerCase()
         if (parseYoutubeVideoId(url)) return 'youtube'
         if (isYoutubeUrl(url)) return 'unsupported_youtube_url'
-        if (value.startsWith('migu://') || value.startsWith('douyin://') || value.startsWith('huya://') || value.startsWith('redbook://') || value.startsWith('adapter://')) return 'adapter'
+        if (value.startsWith('migu://') || value.startsWith('douyin://') || value.startsWith('douyu://') || value.startsWith('huya://') || value.startsWith('redbook://') || value.startsWith('adapter://')) return 'adapter'
         if (value.startsWith('rtsp://')) return 'rtsp'
         if (/\/(?:rtp|udp)\//i.test(value) || /%2f(?:rtp|udp)%2f/i.test(value)) return 'mpegts'
         if (/\.(?:ts|m2ts|mts)(?:[?#]|$)/i.test(value)) return 'mpegts'
