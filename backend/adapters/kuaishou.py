@@ -15,7 +15,7 @@ async def resolve_kuaishou(request: AdapterRequest, client: httpx.AsyncClient) -
     kuaishou_url = f"https://live.kuaishou.com/u/{room_id}"
 
     try:
-        live = KwaiLiveStream()
+        live = KwaiLiveStream(cookies="")
         data = await live.fetch_web_stream_data(kuaishou_url)
         stream_obj = await live.fetch_stream_url(data, "OD")
         json_str = stream_obj.to_json()
