@@ -2136,7 +2136,9 @@ async def test_status(sub_id: int):
 _wide_cache: dict[str, dict] = {}
 _WIDE_WINDOW = 20  
 _WIDE_TTL = 120    
-_IPTV_SEGMENT_EXTENSIONS = (".ts", ".m4s", ".mp4", ".m4v", ".aac", ".mp3")
+_IPTV_SEGMENT_EXTENSIONS = (".ts", ".m4s", ".mp4", ".m4v", ".aac", ".mp3", ".key")
+_HLS_URI_TAGS = ("EXT-X-KEY", "EXT-X-MAP", "EXT-X-PART", "EXT-X-PRELOAD-HINT", "EXT-X-MEDIA", "EXT-X-I-FRAME-STREAM-INF")
+_HLS_URI_RE = re.compile(r'(URI=")([^"]+)(")', re.IGNORECASE)
 
 
 def _drop_wide_cache(cache_key: str) -> None:
@@ -2166,15 +2168,52 @@ def _should_proxy_iptv_chunk(seg_url: str, proxy_ts: int = 0) -> bool:
     return bool(proxy_ts) and scheme in {"http", "https"}
 
 
+def _rewrite_hls_tag_uri(line: str, base_url: str, proxy_ts: int = 0, custom_ua: str = '', referer: str = '') -> str:
+    """Rewrite URI attributes in HLS tag lines (EXT-X-KEY, EXT-X-MAP, EXT-X-PART, etc.)."""
+    upper = line.upper()
+    has_uri_tag = False
+    for tag in _HLS_URI_TAGS:
+        if f"#{tag}:" in upper:
+            has_uri_tag = True
+            break
+    if not has_uri_tag:
+        return line
+
+    def _replace_uri(m):
+        uri = m.group(2)
+        # Skip special schemes: data:, skd:, urn:, etc.
+        scheme = urlparse(uri).scheme.lower()
+        if scheme and scheme not in ("http", "https"):
+            return m.group(0)
+
+        absolute_url = urljoin(base_url, uri)
+        parsed = urlparse(absolute_url)
+        uri_path = parsed.path.lower()
+
+        if uri_path.endswith(".m3u8"):
+            return f'{m.group(1)}{_iptv_wide_playlist_proxy_path(absolute_url, proxy_ts, custom_ua, referer)}{m.group(3)}'
+        if uri_path.endswith(_IPTV_SEGMENT_EXTENSIONS) and _should_proxy_iptv_chunk(absolute_url, proxy_ts):
+            return f'{m.group(1)}{_iptv_chunk_proxy_path(absolute_url, custom_ua, referer)}{m.group(3)}'
+        return m.group(0)
+
+    return _HLS_URI_RE.sub(_replace_uri, line)
+
+
 def _rewrite_iptv_wide_m3u8_text(raw_m3u8_text: str, base_url: str, proxy_ts: int = 0, custom_ua: str = '', referer: str = '') -> str:
     rewritten_lines: list[str] = []
 
     for line in raw_m3u8_text.splitlines():
         stripped_line = line.strip()
-        if not stripped_line or stripped_line.startswith("#"):
+        if not stripped_line:
             rewritten_lines.append(line)
             continue
 
+        # Tag lines: rewrite URI attributes inside tags
+        if stripped_line.startswith("#"):
+            rewritten_lines.append(_rewrite_hls_tag_uri(line, base_url, proxy_ts, custom_ua, referer))
+            continue
+
+        # Standalone URL lines (segment or variant playlist)
         absolute_media_url = urljoin(base_url, stripped_line)
         parsed_url = urlparse(absolute_media_url)
         uri_path = parsed_url.path.lower()
@@ -2238,6 +2277,24 @@ async def iptv_adapter_play_m3u8(target_url: str = ''):
     raise HTTPException(status_code=502, detail=f"adapter 返回了暂不支持的流类型: {source_type}")
 
 
+_HLS_META_TAGS = ("EXT-X-MAP", "EXT-X-KEY", "EXT-X-VERSION", "EXT-X-PLAYLIST-TYPE")
+
+
+def _extract_hls_meta_lines(m3u8_text: str, base_url: str, proxy_ts: int = 0, custom_ua: str = '', referer: str = '') -> list[str]:
+    """Extract metadata lines (MAP, KEY, VERSION, etc.) from m3u8 text, rewritten for proxy."""
+    meta = []
+    for line in m3u8_text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith('#'):
+            continue
+        upper = stripped.upper()
+        for tag in _HLS_META_TAGS:
+            if upper.startswith(f'#{tag}:'):
+                meta.append(_rewrite_hls_tag_uri(line, base_url, proxy_ts, custom_ua, referer))
+                break
+    return meta
+
+
 async def _wide_refresher(cache_key: str, target_url: str, custom_ua: str = '', referer: str = ''):
     """后台任务：每 2s 拉一次上游，更新分片队列"""
     _h = {'User-Agent': custom_ua} if custom_ua else {}
@@ -2280,10 +2337,15 @@ async def _wide_refresher(cache_key: str, target_url: str, custom_ua: str = '', 
                     i += 1
                 i += 1
 
+            # Extract and rewrite metadata lines (MAP, KEY, etc.)
+            meta_lines = _extract_hls_meta_lines(resp.text, playlist_base_url, proxy_ts=1, custom_ua=custom_ua, referer=referer)
+
             cache = _wide_cache.get(cache_key)
             if not cache:
                 return
             cache['target_duration'] = target_duration
+            if meta_lines:
+                cache['meta'] = meta_lines
             seen = cache.get('seen', set())
             for seg in segments:
                 if seg['url'] not in seen:
@@ -2363,10 +2425,14 @@ async def iptv_wide_playlist(target_url: str = '', proxy_ts: int = 0, custom_ua:
             if attempt < 3:
                 await asyncio.sleep(0.3)
 
+        # Extract metadata lines from the last successful fetch
+        meta_lines = _extract_hls_meta_lines(resp.text, playlist_base_url, proxy_ts=proxy_ts, custom_ua=custom_ua, referer=referer) if 'resp' in dir() else []
+
         cache = {
             'queue': queue,
             'seen': seen,
             'target_duration': target_dur,
+            'meta': meta_lines,
         }
         _wide_cache[cache_key] = cache
         _wide_cache[cache_key + '_ts'] = time.time()
@@ -2379,6 +2445,9 @@ async def iptv_wide_playlist(target_url: str = '', proxy_ts: int = 0, custom_ua:
                 f'#EXT-X-TARGETDURATION:{target_dur}',
                 f'#EXT-X-MEDIA-SEQUENCE:{queue[0]["seq"]}',
             ]
+            for m in cache.get('meta', []):
+                if not m.upper().startswith('#EXT-X-VERSION:'):
+                    lines.append(m)
             for seg in queue:
                 lines.append(f'#EXTINF:{seg["dur"]},')
                 lines.append(_rewrite_ts(seg['url']))
@@ -2412,6 +2481,9 @@ async def iptv_wide_playlist(target_url: str = '', proxy_ts: int = 0, custom_ua:
         f'#EXT-X-TARGETDURATION:{target_dur}',
         f'#EXT-X-MEDIA-SEQUENCE:{queue[0]["seq"]}',
     ]
+    for m in cache.get('meta', []):
+        if not m.upper().startswith('#EXT-X-VERSION:'):
+            lines.append(m)
     for seg in queue:
         lines.append(f'#EXTINF:{seg["dur"]},')
         lines.append(_rewrite_ts(seg['url']))
@@ -2676,7 +2748,21 @@ async def iptv_proxy_chunk(target_url: str = '', custom_ua: str = '', referer: s
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"拉取分片失败: {exc}") from exc
 
-    return Response(content=upstream.content, media_type="video/MP2T")
+    # Forward upstream Content-Type, fallback by extension
+    content_type = upstream.headers.get('content-type', '')
+    if not content_type or content_type == 'application/octet-stream':
+        ext = urlparse(target_url).path.rsplit('.', 1)[-1].lower() if '.' in urlparse(target_url).path else ''
+        content_type = {
+            'ts': 'video/MP2T',
+            'm4s': 'video/mp4',
+            'mp4': 'video/mp4',
+            'fmp4': 'video/mp4',
+            'm4v': 'video/mp4',
+            'aac': 'audio/aac',
+            'mp3': 'audio/mpeg',
+        }.get(ext, 'application/octet-stream')
+
+    return Response(content=upstream.content, media_type=content_type)
 
 
 # ── EPG ──
