@@ -100,6 +100,26 @@ STATIC_STATIONS = [
     {"id": "tf_750", "name": "香港D100 PBS", "logoText": "D100", "logoUrl": "https://cdn.tingfm.com/tingfm/2020/10/file5f766022d365b.jpg", "subtitle": "D100", "tags": ["HK", "talk"]},
     {"id": "tf_21365", "name": "凤凰卫视资讯台", "logoText": "凤凰", "logoUrl": "", "subtitle": "Phoenix InfoNews", "tags": ["HK", "news"]},
     {"id": "tf_21300", "name": "凤凰卫视中文台", "logoText": "凤凰", "logoUrl": "", "subtitle": "Phoenix Chinese", "tags": ["HK", "news"]},
+    # ── 新加坡电台 (tingfm.com) ──
+    {"id": "tfsg_14467", "name": "963好FM", "logoText": "963", "logoUrl": "https://cdn.tingfm.com/tingfm/img/l/5/10489.v5.png?x-oss-process=image/resize,m_fill,w_200,h_200", "subtitle": "96.3 FM", "tags": ["SG", "music"]},
+    {"id": "tfsg_14773", "name": "88.3Jia FM", "logoText": "88.3", "logoUrl": "https://cdn.tingfm.com/tingfm/img/l/1/10376.v5.png?x-oss-process=image/resize,m_fill,w_200,h_200", "subtitle": "88.3 FM", "tags": ["SG", "music"]},
+    {"id": "tfsg_14775", "name": "Money FM 89.3", "logoText": "Money", "logoUrl": "https://cdn.tingfm.com/tingfm/img/l/5/10341.v5.png?x-oss-process=image/resize,m_fill,w_200,h_200", "subtitle": "89.3 FM", "tags": ["SG", "news"]},
+    {"id": "tfsg_14786", "name": "Ria 89.7 FM", "logoText": "Ria", "logoUrl": "", "subtitle": "89.7 FM", "tags": ["SG", "music"]},
+    {"id": "tfsg_14787", "name": "Gold 905", "logoText": "Gold", "logoUrl": "", "subtitle": "90.5 FM", "tags": ["SG", "music"]},
+    {"id": "tfsg_14788", "name": "ONE FM 91.3", "logoText": "ONE", "logoUrl": "https://cdn.tingfm.com/tingfm/img/l/5/10342.v5.png?x-oss-process=image/resize,m_fill,w_200,h_200", "subtitle": "91.3 FM", "tags": ["SG", "music"]},
+    {"id": "tfsg_14790", "name": "Symphony 924", "logoText": "Sym", "logoUrl": "https://cdn.tingfm.com/tingfm/img/l/1/10377.v5.png?x-oss-process=image/resize,m_fill,w_200,h_200", "subtitle": "92.4 FM", "tags": ["SG", "music"]},
+    {"id": "tfsg_14791", "name": "CNA938", "logoText": "CNA", "logoUrl": "", "subtitle": "93.8 FM", "tags": ["SG", "news"]},
+    {"id": "tfsg_14792", "name": "Warna 942", "logoText": "Warna", "logoUrl": "", "subtitle": "94.2 FM", "tags": ["SG", "news"]},
+    {"id": "tfsg_14793", "name": "Class 95", "logoText": "95", "logoUrl": "", "subtitle": "95 FM", "tags": ["SG", "music"]},
+    {"id": "tfsg_14794", "name": "Capital 958", "logoText": "958", "logoUrl": "https://cdn.tingfm.com/tingfm/img/l/1/10378.v5.png?x-oss-process=image/resize,m_fill,w_200,h_200", "subtitle": "95.8 FM", "tags": ["SG", "news"]},
+    {"id": "tfsg_14795", "name": "Oli 968", "logoText": "Oli", "logoUrl": "", "subtitle": "96.8 FM", "tags": ["SG", "music"]},
+    {"id": "tfsg_14796", "name": "Love 972", "logoText": "972", "logoUrl": "https://cdn.tingfm.com/tingfm/img/l/1/10379.v5.png?x-oss-process=image/resize,m_fill,w_200,h_200", "subtitle": "97.2 FM", "tags": ["SG", "music"]},
+    {"id": "tfsg_14797", "name": "987 Hit Music", "logoText": "987", "logoUrl": "", "subtitle": "98.7 FM", "tags": ["SG", "music"]},
+    {"id": "tfsg_24099", "name": "UFM 100.3", "logoText": "UFM", "logoUrl": "https://cdn.tingfm.com/tingfm/img/l/5/10343.v5.png?x-oss-process=image/resize,m_fill,w_200,h_200", "subtitle": "100.3 FM", "tags": ["SG", "music"]},
+    {"id": "tfsg_14271", "name": "YES 933", "logoText": "YES", "logoUrl": "https://cdn.tingfm.com/tingfm/img/l/5/10344.v5.png?x-oss-process=image/resize,m_fill,w_200,h_200", "subtitle": "93.3 FM", "tags": ["SG", "music"]},
+    {"id": "tfsg_63656", "name": "Kiss 92", "logoText": "Kiss", "logoUrl": "https://cdn.tingfm.com/tingfm/img/l/8/15248.v7.png?x-oss-process=image/resize,m_fill,w_200,h_200", "subtitle": "92 FM", "tags": ["SG", "music"]},
+    {"id": "tfsg_63610", "name": "Class 95 FM", "logoText": "95", "logoUrl": "", "subtitle": "95 FM", "tags": ["SG", "music"]},
+    {"id": "tfsg_22537", "name": "Oli 96.8 FM", "logoText": "Oli", "logoUrl": "", "subtitle": "96.8 FM", "tags": ["SG", "music"]},
 ]
 
 _TW_STATION_IDS = {s["id"] for s in STATIC_STATIONS if "TW" in s.get("tags", [])}
@@ -600,6 +620,26 @@ _TINGFM_STREAMS = {
     "tf_750": "https://uk.d100.net:8001/Channel1-128MP3",
     "tf_21365": "https://playtv-live.ifeng.com/live/06OLEEWQKN4_audio.m3u8",
     "tf_21300": "https://playtv-live.ifeng.com/live/06OLEGEGM4G_audio.m3u8",
+    # ── 新加坡 ──
+    "tfsg_14467": "https://playerservices.streamtheworld.com/api/livestream-redirect/963HITAAC_SC",
+    "tfsg_14773": "https://playerservices.streamtheworld.com/api/livestream-redirect/883JIAAAC_SC",
+    "tfsg_14775": "https://playerservices.streamtheworld.com/api/livestream-redirect/MONEY893AAC_SC",
+    "tfsg_14786": "https://playerservices.streamtheworld.com/api/livestream-redirect/RIA897AAC_SC",
+    "tfsg_14787": "https://playerservices.streamtheworld.com/api/livestream-redirect/GOLD905AAC_SC",
+    "tfsg_14788": "https://playerservices.streamtheworld.com/api/livestream-redirect/ONE913AAC_SC",
+    "tfsg_14790": "https://playerservices.streamtheworld.com/api/livestream-redirect/SYMPHONY924AAC_SC",
+    "tfsg_14791": "https://playerservices.streamtheworld.com/api/livestream-redirect/938NOWAAC_SC",
+    "tfsg_14792": "https://playerservices.streamtheworld.com/api/livestream-redirect/WARNA942AAC_SC",
+    "tfsg_14793": "https://playerservices.streamtheworld.com/api/livestream-redirect/CLASS95AAC_SC",
+    "tfsg_14794": "https://playerservices.streamtheworld.com/api/livestream-redirect/CAPITAL958AAC_SC",
+    "tfsg_14795": "https://playerservices.streamtheworld.com/api/livestream-redirect/OLI968AAC_SC",
+    "tfsg_14796": "https://playerservices.streamtheworld.com/api/livestream-redirect/LOVE972AAC_SC",
+    "tfsg_14797": "https://playerservices.streamtheworld.com/api/livestream-redirect/987FMAAC_SC",
+    "tfsg_24099": "https://playerservices.streamtheworld.com/api/livestream-redirect/UFM1003AAC_SC",
+    "tfsg_14271": "https://playerservices.streamtheworld.com/api/livestream-redirect/YES933AAC_SC",
+    "tfsg_63656": "https://playerservices.streamtheworld.com/api/livestream-redirect/KISS_92AAC_SC",
+    "tfsg_63610": "https://playerservices.streamtheworld.com/api/livestream-redirect/CLASS95AAC_SC",
+    "tfsg_22537": "https://playerservices.streamtheworld.com/api/livestream-redirect/OLI968AAC_SC",
 }
 
 
