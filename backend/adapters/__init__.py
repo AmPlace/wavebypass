@@ -121,13 +121,16 @@ def parse_adapter_url(target_url: str) -> AdapterRequest:
     elif scheme == "bilibili":
         adapter = "bilibili"
         resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
+    elif scheme == "yy":
+        adapter = "yy"
+        resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
     elif scheme == "adapter":
         adapter = (parsed.netloc or "").lower().split("@")[-1].split(":")[0]
         resource_id = parsed.path.lstrip("/").strip()
     else:
         raise AdapterResolveError(
             "invalid_adapter_url",
-            "只允许 migu://、douyin://、douyu://、huya://、redbook://、tiktok://、kuaishou://、bilibili:// 或 adapter:// 开头的 adapter 地址",
+            "只允许 migu://、douyin://、douyu://、huya://、redbook://、tiktok://、kuaishou://、bilibili://、yy:// 或 adapter:// 开头的 adapter 地址",
         )
 
     if not adapter or adapter not in _ADAPTER_REGISTRY:
@@ -184,6 +187,7 @@ from .redbook import resolve_redbook
 from .tiktok import resolve_tiktok
 from .kuaishou import resolve_kuaishou
 from .bilibili import resolve_bilibili
+from .yy import resolve_yy
 
 
 _ADAPTER_REGISTRY = {
@@ -195,4 +199,5 @@ _ADAPTER_REGISTRY = {
     "tiktok": resolve_tiktok,
     "kuaishou": resolve_kuaishou,
     "bilibili": resolve_bilibili,
+    "yy": resolve_yy,
 }
