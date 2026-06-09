@@ -24,7 +24,7 @@ _M3U_ENTRY_RE = re.compile(
     re.MULTILINE | re.DOTALL,
 )
 
-_STREAM_URL_PREFIXES = ('http://', 'https://', 'rtmp://', 'rtsp://', 'migu://', 'douyin://', 'douyu://', 'huya://', 'redbook://', 'tiktok://', 'kuaishou://', 'bilibili://', 'yy://', 'adapter://')
+_STREAM_URL_PREFIXES = ('http://', 'https://', 'rtmp://', 'rtsp://', 'migu://', 'douyin://', 'douyu://', 'huya://', 'redbook://', 'tiktok://', 'kuaishou://', 'bilibili://', 'yy://', 'bigo://', 'blued://', 'soop://', 'netease://', 'adapter://')
 
 # 简单的逐行解析用
 _EXTINF_RE = re.compile(r'#EXTINF:(.+?),(.+)')
@@ -307,6 +307,14 @@ def adapter_provider(url: str) -> str:
         return 'bilibili'
     if scheme == 'yy':
         return 'yy'
+    if scheme == 'bigo':
+        return 'bigo'
+    if scheme == 'blued':
+        return 'blued'
+    if scheme == 'soop':
+        return 'soop'
+    if scheme == 'netease':
+        return 'netease'
     if scheme == 'adapter':
         return (parsed.netloc or '').lower().split('@')[-1].split(':')[0]
     return ''
