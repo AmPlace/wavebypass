@@ -13,21 +13,10 @@ _channel_alias = Alias(_ALIAS_PATH)
 # 匹配 key="value" 或 key='value' 形式的属性
 _ATTR_RE = re.compile(r'''(\w[\w-]*)=(?:"([^"]*)"|'([^']*)')''')
 
-# 匹配 #EXTINF 行中的显示名（最后一个逗号之后的部分）
-_NAME_RE = re.compile(r',\s*(.+?)\s*$')
-
-# 完整的 M3U 行解析：#EXTINF + 属性 + 名字，紧接着 URL 行
-_M3U_ENTRY_RE = re.compile(
-    r'#EXTINF:-?[0-9]*\s*(.*?)\s*,\s*(.+?)\s*\n'
-    r'(?:(?:[ \t]*\r?\n)*|(?:#EXTVLCOPT:[^\r\n]*(?:\r?\n|$))*)'
-    r'((?:https?|rtmp|rtsp|migu|hnntv|gzstv|sxbc|xjtv|adapter)://\S+)',
-    re.MULTILINE | re.DOTALL,
-)
-
-_STREAM_URL_PREFIXES = ('http://', 'https://', 'rtmp://', 'rtsp://', 'migu://', 'hnntv://', 'gzstv://', 'sxbc://', 'xjtv://', 'douyin://', 'douyu://', 'huya://', 'redbook://', 'tiktok://', 'kuaishou://', 'bilibili://', 'yy://', 'bigo://', 'blued://', 'soop://', 'netease://', 'pandatv://', 'maoer://', 'look://', 'flextv://', 'popkontv://', 'twitcasting://', 'baidu://', 'weibo://', 'kugou://', 'twitch://', 'huajiao://', 'showroom://', 'inke://', 'acfun://', 'haixiu://', 'liveme://', 'zhihu://', 'chzzk://', '17live://', 'langlive://', 'changliao://', 'jd://', 'faceit://', 'lianjie://', 'sixroom://', 'lehai://', 'huamao://', 'shopee://', 'laixiu://', 'picarto://', 'ytsl://', 'youtube://', 'adapter://')
+_STREAM_URL_PREFIXES = ('http://', 'https://', 'rtmp://', 'rtsp://', 'migu://', 'hnntv://', 'gzstv://', 'sxbc://', 'xjtv://', 'douyin://', 'douyu://', 'huya://', 'hbtv://', 'redbook://', 'tiktok://', 'kuaishou://', 'bilibili://', 'yy://', 'bigo://', 'blued://', 'soop://', 'netease://', 'pandatv://', 'maoer://', 'look://', 'flextv://', 'popkontv://', 'twitcasting://', 'baidu://', 'weibo://', 'kugou://', 'twitch://', 'huajiao://', 'showroom://', 'inke://', 'acfun://', 'haixiu://', 'liveme://', 'zhihu://', 'chzzk://', '17live://', 'langlive://', 'changliao://', 'jd://', 'faceit://', 'lianjie://', 'sixroom://', 'lehai://', 'huamao://', 'shopee://', 'laixiu://', 'picarto://', 'ytsl://', 'youtube://', 'adapter://')
 
 # 简单的逐行解析用
-_EXTINF_RE = re.compile(r'#EXTINF:(.+?),(.+)')
+_EXTINF_RE = re.compile(r'#EXTINF:([^,]*),(.*)')
 _EXTGRP_RE = re.compile(r'#EXTGRP:\s*(.+)')
 _YOUTUBE_VIDEO_ID_RE = re.compile(r'^[a-zA-Z0-9_-]{11}$')
 
@@ -122,7 +111,11 @@ def normalize_channel_name(name: str) -> str:
 
 def _parse_attrs(attr_str: str) -> dict:
     """从 #EXTINF 的属性字符串中提取 key-value。"""
-    return {m.group(1): (m.group(2) or m.group(3)) for m in _ATTR_RE.finditer(attr_str)}
+    return {m.group(1).lower(): (m.group(2) or m.group(3)) for m in _ATTR_RE.finditer(attr_str)}
+
+
+def _is_stream_url(line: str) -> bool:
+    return line.strip().startswith(_STREAM_URL_PREFIXES)
 
 
 def parse_m3u(text: str) -> list[dict]:
@@ -139,26 +132,7 @@ def parse_m3u(text: str) -> list[dict]:
     """
     channels: list[dict] = []
 
-    # 优先用正则整体匹配（处理 EXTINF 和 URL 在相邻行的情况）
-    for m in _M3U_ENTRY_RE.finditer(text):
-        attr_str, name, url = m.group(1), m.group(2).strip(), m.group(3).strip()
-        attrs = _parse_attrs(attr_str)
-        channels.append({
-            'name': name,
-            'url': url,
-            'source_type': detect_source_type(url),
-            'adapter': adapter_provider(url),
-            'youtube_video_id': parse_youtube_video_id(url),
-            'logo_url': attrs.get('tvg-logo', ''),
-            'group_name': attrs.get('group-title', '') or '其他',
-            'tvg_id': attrs.get('tvg-id', ''),
-            'tvg_name': attrs.get('tvg-name', ''),
-        })
-
-    if channels:
-        return channels
-
-    # 回退：逐行解析（兼容格式不规范的文件）
+    # 逐行解析 EXTINF + URL 对，兼容任意属性顺序和中间的空行/扩展注释。
     lines = text.splitlines()
     i = 0
     current_group = ''
@@ -174,6 +148,8 @@ def parse_m3u(text: str) -> list[dict]:
         grp_m = _EXTGRP_RE.match(line)
         if grp_m:
             current_group = grp_m.group(1).strip()
+            if pending_extinf and pending_extinf.get('group_name') == '其他':
+                pending_extinf['group_name'] = current_group or '其他'
             i += 1
             continue
 
@@ -191,7 +167,7 @@ def parse_m3u(text: str) -> list[dict]:
             i += 1
             continue
 
-        if pending_extinf and line.startswith(_STREAM_URL_PREFIXES):
+        if pending_extinf and _is_stream_url(line):
             ch = {
                 **pending_extinf,
                 'url': line,
@@ -201,6 +177,10 @@ def parse_m3u(text: str) -> list[dict]:
             }
             channels.append(ch)
             pending_extinf = None
+            i += 1
+            continue
+
+        if line.startswith('#'):
             i += 1
             continue
 
@@ -220,10 +200,10 @@ def parse_m3u(text: str) -> list[dict]:
         if '#genre#' in line:
             current_group = line.split(',')[0].strip() or '其他'
             continue
-        if line.startswith(_STREAM_URL_PREFIXES):
+        if _is_stream_url(line):
             continue
         parts = line.split(',', 1)
-        if len(parts) == 2 and parts[1].strip().startswith(_STREAM_URL_PREFIXES):
+        if len(parts) == 2 and _is_stream_url(parts[1]):
             url = parts[1].strip()
             channels.append({
                 'name': parts[0].strip(),
@@ -305,6 +285,8 @@ def adapter_provider(url: str) -> str:
         return 'douyu'
     if scheme == 'huya':
         return 'huya'
+    if scheme == 'hbtv':
+        return 'hbtv'
     if scheme == 'redbook':
         return 'redbook'
     if scheme == 'tiktok':
