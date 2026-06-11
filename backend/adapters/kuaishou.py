@@ -40,7 +40,7 @@ async def resolve_kuaishou(request: AdapterRequest, client: httpx.AsyncClient) -
             )
 
         raw = match.group(1)
-        play_list_str = re.findall('(\{"liveStream".*?),"gameInfo', raw)[0] + "}"
+        play_list_str = re.findall(r'(\{"liveStream".*?),"gameInfo', raw)[0] + "}"
         play_list = json.loads(play_list_str)
         live_stream = play_list.get("liveStream", {})
         author = play_list.get("author", {})
