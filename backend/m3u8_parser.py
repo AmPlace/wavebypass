@@ -13,7 +13,7 @@ _channel_alias = Alias(_ALIAS_PATH)
 # 匹配 key="value" 或 key='value' 形式的属性
 _ATTR_RE = re.compile(r'''(\w[\w-]*)=(?:"([^"]*)"|'([^']*)')''')
 
-_STREAM_URL_PREFIXES = ('http://', 'https://', 'rtmp://', 'rtsp://', 'migu://', 'hnntv://', 'gzstv://', 'sxbc://', 'xjtv://', 'douyin://', 'douyu://', 'huya://', 'hbtv://', 'redbook://', 'tiktok://', 'kuaishou://', 'bilibili://', 'yy://', 'bigo://', 'blued://', 'soop://', 'netease://', 'pandatv://', 'maoer://', 'look://', 'flextv://', 'popkontv://', 'twitcasting://', 'baidu://', 'weibo://', 'kugou://', 'twitch://', 'huajiao://', 'showroom://', 'inke://', 'acfun://', 'haixiu://', 'liveme://', 'zhihu://', 'chzzk://', '17live://', 'langlive://', 'changliao://', 'jd://', 'faceit://', 'lianjie://', 'sixroom://', 'lehai://', 'huamao://', 'shopee://', 'laixiu://', 'picarto://', 'ytsl://', 'youtube://', 'adapter://')
+_STREAM_URL_PREFIXES = ('http://', 'https://', 'rtmp://', 'rtsp://', 'migu://', 'hnntv://', 'nmtv://', 'gzstv://', 'sxbc://', 'xjtv://', 'jstv://', 'douyin://', 'douyu://', 'huya://', 'hbtv://', 'redbook://', 'tiktok://', 'kuaishou://', 'bilibili://', 'yy://', 'bigo://', 'blued://', 'soop://', 'netease://', 'pandatv://', 'maoer://', 'look://', 'flextv://', 'popkontv://', 'twitcasting://', 'baidu://', 'weibo://', 'kugou://', 'twitch://', 'huajiao://', 'showroom://', 'inke://', 'acfun://', 'haixiu://', 'liveme://', 'zhihu://', 'chzzk://', 'live17://', 'langlive://', 'changliao://', 'jd://', 'faceit://', 'lianjie://', 'sixroom://', 'lehai://', 'huamao://', 'shopee://', 'laixiu://', 'picarto://', 'ytsl://', 'youtube://', 'adapter://')
 
 # 简单的逐行解析用
 _EXTINF_RE = re.compile(r'#EXTINF:([^,]*),(.*)')
@@ -273,12 +273,16 @@ def adapter_provider(url: str) -> str:
         return 'migu'
     if scheme == 'hnntv':
         return 'hnntv'
+    if scheme == 'nmtv':
+        return 'nmtv'
     if scheme == 'gzstv':
         return 'gzstv'
     if scheme == 'sxbc':
         return 'sxbc'
     if scheme == 'xjtv':
         return 'xjtv'
+    if scheme == 'jstv':
+        return 'jstv'
     if scheme == 'douyin':
         return 'douyin'
     if scheme == 'douyu':
@@ -341,8 +345,8 @@ def adapter_provider(url: str) -> str:
         return 'zhihu'
     if scheme == 'chzzk':
         return 'chzzk'
-    if scheme == '17live':
-        return '17live'
+    if scheme == 'live17':
+        return 'live17'
     if scheme == 'langlive':
         return 'langlive'
     if scheme == 'changliao':

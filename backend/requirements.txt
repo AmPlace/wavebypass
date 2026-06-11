@@ -5,3 +5,4 @@ streamget
 streamlink
 curl_cffi
 cryptography
+xxtea

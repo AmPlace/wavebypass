@@ -112,6 +112,9 @@ def parse_adapter_url(target_url: str) -> AdapterRequest:
     elif scheme == "hnntv":
         adapter = "hnntv"
         resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
+    elif scheme == "nmtv":
+        adapter = "nmtv"
+        resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
     elif scheme == "gzstv":
         adapter = "gzstv"
         resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
@@ -120,6 +123,9 @@ def parse_adapter_url(target_url: str) -> AdapterRequest:
         resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
     elif scheme == "xjtv":
         adapter = "xjtv"
+        resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
+    elif scheme == "jstv":
+        adapter = "jstv"
         resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
     elif scheme == "douyin":
         adapter = "douyin"
@@ -310,9 +316,11 @@ async def resolve_adapter_source(target_url: str, client: httpx.AsyncClient) -> 
 
 from .migu import resolve_migu
 from .hbtv import resolve_hbtv
+from .jstv import resolve_jstv
 import importlib as _importlib
 resolve_17live = _importlib.import_module(".17live", __package__).resolve_17live
 from .hnntv import resolve_hnntv
+from .nmtv import resolve_nmtv
 from .gzstv import resolve_gzstv
 from .sxbc import resolve_sxbc
 from .xjtv import resolve_xjtv
@@ -363,6 +371,8 @@ from .ytsl import resolve_ytsl
 _ADAPTER_REGISTRY = {
     "migu": resolve_migu,
     "hbtv": resolve_hbtv,
+    "nmtv": resolve_nmtv,
+    "jstv": resolve_jstv,
     "hnntv": resolve_hnntv,
     "gzstv": resolve_gzstv,
     "sxbc": resolve_sxbc,
