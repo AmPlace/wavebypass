@@ -2504,6 +2504,7 @@ async def iptv_wide_playlist(target_url: str = '', proxy_ts: int = 0, custom_ua:
         seen = set()
         target_dur = 6
 
+        playlist_base_url = target_url
         for attempt in range(4):
             try:
                 resp = await http_client.get(target_url, follow_redirects=True, timeout=6, headers=_headers)
