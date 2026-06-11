@@ -214,8 +214,8 @@ def parse_adapter_url(target_url: str) -> AdapterRequest:
     elif scheme == "chzzk":
         adapter = "chzzk"
         resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
-    elif scheme == "17live":
-        adapter = "17live"
+    elif scheme == "live17":
+        adapter = "live17"
         resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
     elif scheme == "langlive":
         adapter = "langlive"
@@ -310,6 +310,8 @@ async def resolve_adapter_source(target_url: str, client: httpx.AsyncClient) -> 
 
 from .migu import resolve_migu
 from .hbtv import resolve_hbtv
+import importlib as _importlib
+resolve_17live = _importlib.import_module(".17live", __package__).resolve_17live
 from .hnntv import resolve_hnntv
 from .gzstv import resolve_gzstv
 from .sxbc import resolve_sxbc
@@ -395,6 +397,7 @@ _ADAPTER_REGISTRY = {
     "liveme": resolve_liveme,
     "zhihu": resolve_zhihu,
     "chzzk": resolve_chzzk,
+    "live17": resolve_17live,
     "langlive": resolve_langlive,
     "changliao": resolve_changliao,
     "jd": resolve_jd,

@@ -49,7 +49,7 @@ async def resolve_17live(request: AdapterRequest, client: httpx.AsyncClient) -> 
 
     return {
         "ok": True,
-        "adapter": "17live",
+        "adapter": "live17",
         "source_type": source_type,
         "url": play_url,
         "direct_playable": True,
