@@ -20,11 +20,11 @@ _NAME_RE = re.compile(r',\s*(.+?)\s*$')
 _M3U_ENTRY_RE = re.compile(
     r'#EXTINF:-?[0-9]*\s*(.*?)\s*,\s*(.+?)\s*\n'
     r'(?:(?:[ \t]*\r?\n)*|(?:#EXTVLCOPT:[^\r\n]*(?:\r?\n|$))*)'
-    r'((?:https?|rtmp|rtsp|migu|adapter)://\S+)',
+    r'((?:https?|rtmp|rtsp|migu|hnntv|gzstv|sxbc|xjtv|adapter)://\S+)',
     re.MULTILINE | re.DOTALL,
 )
 
-_STREAM_URL_PREFIXES = ('http://', 'https://', 'rtmp://', 'rtsp://', 'migu://', 'douyin://', 'douyu://', 'huya://', 'redbook://', 'tiktok://', 'kuaishou://', 'bilibili://', 'yy://', 'bigo://', 'blued://', 'soop://', 'netease://', 'pandatv://', 'maoer://', 'look://', 'flextv://', 'popkontv://', 'twitcasting://', 'baidu://', 'weibo://', 'kugou://', 'twitch://', 'huajiao://', 'showroom://', 'inke://', 'acfun://', 'haixiu://', 'liveme://', 'zhihu://', 'chzzk://', '17live://', 'langlive://', 'changliao://', 'jd://', 'faceit://', 'lianjie://', 'sixroom://', 'lehai://', 'huamao://', 'shopee://', 'laixiu://', 'picarto://', 'ytsl://', 'youtube://', 'adapter://')
+_STREAM_URL_PREFIXES = ('http://', 'https://', 'rtmp://', 'rtsp://', 'migu://', 'hnntv://', 'gzstv://', 'sxbc://', 'xjtv://', 'douyin://', 'douyu://', 'huya://', 'redbook://', 'tiktok://', 'kuaishou://', 'bilibili://', 'yy://', 'bigo://', 'blued://', 'soop://', 'netease://', 'pandatv://', 'maoer://', 'look://', 'flextv://', 'popkontv://', 'twitcasting://', 'baidu://', 'weibo://', 'kugou://', 'twitch://', 'huajiao://', 'showroom://', 'inke://', 'acfun://', 'haixiu://', 'liveme://', 'zhihu://', 'chzzk://', '17live://', 'langlive://', 'changliao://', 'jd://', 'faceit://', 'lianjie://', 'sixroom://', 'lehai://', 'huamao://', 'shopee://', 'laixiu://', 'picarto://', 'ytsl://', 'youtube://', 'adapter://')
 
 # 简单的逐行解析用
 _EXTINF_RE = re.compile(r'#EXTINF:(.+?),(.+)')
@@ -291,6 +291,14 @@ def adapter_provider(url: str) -> str:
     scheme = parsed.scheme.lower()
     if scheme == 'migu':
         return 'migu'
+    if scheme == 'hnntv':
+        return 'hnntv'
+    if scheme == 'gzstv':
+        return 'gzstv'
+    if scheme == 'sxbc':
+        return 'sxbc'
+    if scheme == 'xjtv':
+        return 'xjtv'
     if scheme == 'douyin':
         return 'douyin'
     if scheme == 'douyu':

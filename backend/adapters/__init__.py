@@ -109,6 +109,18 @@ def parse_adapter_url(target_url: str) -> AdapterRequest:
     if scheme == "migu":
         adapter = "migu"
         resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
+    elif scheme == "hnntv":
+        adapter = "hnntv"
+        resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
+    elif scheme == "gzstv":
+        adapter = "gzstv"
+        resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
+    elif scheme == "sxbc":
+        adapter = "sxbc"
+        resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
+    elif scheme == "xjtv":
+        adapter = "xjtv"
+        resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
     elif scheme == "douyin":
         adapter = "douyin"
         resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
@@ -117,6 +129,9 @@ def parse_adapter_url(target_url: str) -> AdapterRequest:
         resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
     elif scheme == "huya":
         adapter = "huya"
+        resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
+    elif scheme == "hbtv":
+        adapter = "hbtv"
         resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
     elif scheme == "redbook":
         adapter = "redbook"
@@ -294,6 +309,11 @@ async def resolve_adapter_source(target_url: str, client: httpx.AsyncClient) -> 
 
 
 from .migu import resolve_migu
+from .hbtv import resolve_hbtv
+from .hnntv import resolve_hnntv
+from .gzstv import resolve_gzstv
+from .sxbc import resolve_sxbc
+from .xjtv import resolve_xjtv
 from .douyin import resolve_douyin
 from .douyu import resolve_douyu
 from .huya import resolve_huya
@@ -340,6 +360,11 @@ from .ytsl import resolve_ytsl
 
 _ADAPTER_REGISTRY = {
     "migu": resolve_migu,
+    "hbtv": resolve_hbtv,
+    "hnntv": resolve_hnntv,
+    "gzstv": resolve_gzstv,
+    "sxbc": resolve_sxbc,
+    "xjtv": resolve_xjtv,
     "douyin": resolve_douyin,
     "douyu": resolve_douyu,
     "huya": resolve_huya,
