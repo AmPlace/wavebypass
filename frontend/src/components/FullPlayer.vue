@@ -459,17 +459,19 @@ const activePlayerPanel = ref('channels')
 const channelSortMode = ref('original')  // 'original' | 'natural' | 'group' | 'live'
 const mobileTabsRef = ref(null)
 const desktopTabsRef = ref(null)
+const tabIndicatorRevision = ref(0)
 const DEFAULT_MEDIA_ASPECT_VALUE = 16 / 9
 const DEFAULT_MEDIA_ASPECT_RATIO = '16 / 9'
 const ULTRAWIDE_MEDIA_ASPECT = 2
 const MAX_ADAPTIVE_LANDSCAPE_ASPECT = 2.4
 
 function tabIndicatorStyle(tabsRef) {
+  tabIndicatorRevision.value
   if (!tabsRef) return { opacity: 0 }
   const buttons = tabsRef.querySelectorAll('button')
   const idx = activePlayerPanel.value === 'channels' ? 0 : 1
   const btn = buttons[idx]
-  if (!btn) return { opacity: 0 }
+  if (!btn || btn.offsetWidth <= 0) return { opacity: 0 }
   return {
     transform: `translateX(${btn.offsetLeft}px)`,
     width: `${btn.offsetWidth}px`,
@@ -479,6 +481,17 @@ function tabIndicatorStyle(tabsRef) {
 
 const mobileTabIndicatorStyle = computed(() => tabIndicatorStyle(mobileTabsRef.value))
 const desktopTabIndicatorStyle = computed(() => tabIndicatorStyle(desktopTabsRef.value))
+let tabIndicatorRaf = 0
+
+function scheduleTabIndicatorUpdate() {
+  if (tabIndicatorRaf) return
+  tabIndicatorRaf = window.requestAnimationFrame(() => {
+    tabIndicatorRaf = window.requestAnimationFrame(() => {
+      tabIndicatorRaf = 0
+      tabIndicatorRevision.value += 1
+    })
+  })
+}
 
 const SORT_MODES = [
   { key: 'original', label: '默认' },
@@ -602,6 +615,7 @@ function updateMediaFrameSize() {
     mediaFrameWidth.value = null
     sidePanelWidth.value = null
     playerLayoutWidth.value = null
+    scheduleTabIndicatorUpdate()
     return
   }
 
@@ -638,6 +652,7 @@ function updateMediaFrameSize() {
   mediaFrameWidth.value = width
   sidePanelWidth.value = panelWidth
   playerLayoutWidth.value = width + layoutGap + panelWidth
+  scheduleTabIndicatorUpdate()
 }
 
 function updateSourceMenuPosition() {
@@ -3289,11 +3304,18 @@ watch(sourceMenuOpen, async (open) => {
   updateSourceMenuPosition()
 })
 
+watch(activePlayerPanel, () => {
+  nextTick(scheduleTabIndicatorUpdate)
+})
+
 watch(isPlayerExpanded, (expanded) => {
   if (!expanded) closeSourceMenu()
   if (expanded) {
     showMobileOverlayControls()
-    nextTick(scheduleMediaFrameSizeUpdate)
+    nextTick(() => {
+      scheduleMediaFrameSizeUpdate()
+      scheduleTabIndicatorUpdate()
+    })
   } else {
     clearMobileOverlayTimer()
   }
@@ -3437,6 +3459,10 @@ onBeforeUnmount(() => {
   if (mediaLayoutRaf) {
     window.cancelAnimationFrame(mediaLayoutRaf)
     mediaLayoutRaf = 0
+  }
+  if (tabIndicatorRaf) {
+    window.cancelAnimationFrame(tabIndicatorRaf)
+    tabIndicatorRaf = 0
   }
   mediaLayoutObserver?.disconnect()
   mediaLayoutObserver = null
