@@ -1360,6 +1360,7 @@ function pauseIptvPlaybackPreservingFrame() {
   cancelCurrentStartup()
   cancelActiveProxyRace()
   clearStallRecoveryTimer()
+  stopPlaybackProgressWatch()
   stopVideoFrameWatch()
 
   const video = iptvVideoRef.value
@@ -1412,6 +1413,7 @@ async function resumeSoftPausedIptv(reason = 'resume') {
       _softPausedAt = 0
       _softPauseReleased = false
       markVideoProgress(video)
+      startPlaybackProgressWatch(video)
       startVideoFrameWatch(video)
       playerStore.togglePlay(true)
       setSourceRuntimeStatus(sourceIndex, 'playing')
@@ -3224,6 +3226,9 @@ let _videoFrameCallbackId = null
 let _videoFrameWatchTimer = null
 let _videoFrameWatchVideo = null
 let _videoFrameWatchSeq = 0
+let _playbackProgressWatchTimer = null
+let _playbackProgressWatchVideo = null
+let _playbackProgressWatchSeq = 0
 let _lastAvSyncRecoveryTime = 0
 let _lastReconnectTime = 0
 let _lastBufferNudgeTime = 0
@@ -3243,10 +3248,19 @@ function stopVideoFrameWatch() {
   }
 }
 
+function stopPlaybackProgressWatch() {
+  _playbackProgressWatchSeq++
+  _playbackProgressWatchVideo = null
+  if (_playbackProgressWatchTimer) {
+    clearInterval(_playbackProgressWatchTimer)
+    _playbackProgressWatchTimer = null
+  }
+}
 
 function stopPlaybackWatchdogs() {
   clearStallRecoveryTimer()
   stopVideoFrameWatch()
+  stopPlaybackProgressWatch()
   _lastVideoProgressAt = 0
   _lastVideoCurrentTime = 0
   _lastVideoFrameAt = 0
@@ -3430,6 +3444,53 @@ function onVideoTimeUpdate() {
   markVideoProgress(iptvVideoRef.value)
 }
 
+function startPlaybackProgressWatch(v = iptvVideoRef.value) {
+  if (!isIptvMode.value || !v) return
+  if (_playbackProgressWatchVideo === v && _playbackProgressWatchTimer) return
+
+  stopPlaybackProgressWatch()
+  _playbackProgressWatchVideo = v
+  const seq = ++_playbackProgressWatchSeq
+  markVideoProgress(v)
+
+  _playbackProgressWatchTimer = setInterval(() => {
+    if (seq !== _playbackProgressWatchSeq || _playbackProgressWatchVideo !== v) return
+    if (!isIptvMode.value || !isPlaying.value || v.paused || v.ended) return
+
+    const now = Date.now()
+    const progressAge = now - _lastVideoProgressAt
+    const currentTime = v.currentTime || 0
+    const bufferAhead = getForwardBuffer(v)
+    const liveLatency = getLiveLatency(v)
+
+    if (progressAge > RECOVERY_LOADING_DELAY_MS) {
+      playerStore.setLoading(true)
+    }
+
+    if (bufferAhead > 0 && bufferAhead < 0.6 && liveLatency > 9 && now - _lastBufferNudgeTime > 8000) {
+      _lastBufferNudgeTime = now
+      if (seekToStableLivePoint(v, 8)) {
+        console.warn('[IPTV] 前方缓冲过低，提前跳过可能卡顿点', {
+          bufferAhead,
+          liveLatency,
+          currentTime,
+        })
+        return
+      }
+    }
+
+    if (progressAge > RECOVERY_SOFT_RECOVER_MS) {
+      doRecovery(v, 'playback-progress-watchdog')
+    }
+
+    if (progressAge > RECOVERY_HARD_RELOAD_MS) {
+      recoverIptvPlayback('播放进度长时间停滞').catch((e) => {
+        console.warn('[IPTV] progress watchdog recovery failed:', e?.message || e)
+      })
+    }
+  }, RECOVERY_PROGRESS_WATCH_INTERVAL_MS)
+}
+
 function startVideoFrameWatch(v = iptvVideoRef.value) {
   if (!isIOS || !isIptvMode.value || !v?.requestVideoFrameCallback) return
   if (_videoFrameWatchVideo === v && _videoFrameWatchTimer) return
@@ -3505,6 +3566,7 @@ function onVideoEvent(evt) {
     _softPausedAt = 0
     _softPauseReleased = false
     markVideoProgress(iptvVideoRef.value)
+    startPlaybackProgressWatch(iptvVideoRef.value)
     startVideoFrameWatch(iptvVideoRef.value)
     clearStallRecoveryTimer()
     playerStore.setLoading(false)
@@ -3513,6 +3575,7 @@ function onVideoEvent(evt) {
   }
   if (evt === 'pause') {
     clearStallRecoveryTimer()
+    stopPlaybackProgressWatch()
     stopVideoFrameWatch()
     syncIptvMediaSession('paused')
   }
