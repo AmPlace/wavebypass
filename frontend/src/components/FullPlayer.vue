@@ -8,7 +8,7 @@
         @pointermove="showMobileOverlayControls"
         @pointerdown="showMobileOverlayControls"
       >
-        <div class="player-layout" :style="playerLayoutStyle">
+        <div ref="playerLayoutRef" class="player-layout" :style="playerLayoutStyle">
           <button
             type="button"
             class="desktop-collapse-btn"
@@ -86,7 +86,7 @@
               </div>
             </section>
 
-            <section class="now-panel">
+            <section ref="nowPanelRef" class="now-panel">
               <h1>{{ currentStationName }}</h1>
               <p>{{ currentChannelSubtitle }}</p>
 
@@ -441,7 +441,9 @@ const iptvVideoRef = ref(null)
 const iptvHlsRef = ref(null)
 const iptvMpegtsRef = ref(null)
 const youtubeHostRef = ref(null)
+const playerLayoutRef = ref(null)
 const playerMainRef = ref(null)
+const nowPanelRef = ref(null)
 const activeIptvEngine = ref('video')
 const sourceButtonRef = ref(null)
 const sourceMenuOpen = ref(false)
@@ -457,6 +459,10 @@ const activePlayerPanel = ref('channels')
 const channelSortMode = ref('original')  // 'original' | 'natural' | 'group' | 'live'
 const mobileTabsRef = ref(null)
 const desktopTabsRef = ref(null)
+const DEFAULT_MEDIA_ASPECT_VALUE = 16 / 9
+const DEFAULT_MEDIA_ASPECT_RATIO = '16 / 9'
+const ULTRAWIDE_MEDIA_ASPECT = 2
+const MAX_ADAPTIVE_LANDSCAPE_ASPECT = 2.4
 
 function tabIndicatorStyle(tabsRef) {
   if (!tabsRef) return { opacity: 0 }
@@ -487,10 +493,9 @@ function nextSortMode() {
 const currentSortLabel = computed(() => SORT_MODES.find(m => m.key === channelSortMode.value)?.label || '默认')
 const epgNow = ref(Date.now())
 const mobileOverlayVisible = ref(true)
-const mediaAspectRatio = ref('16 / 9')
-const mediaAspectValue = ref(16 / 9)
+const mediaAspectRatio = ref(DEFAULT_MEDIA_ASPECT_RATIO)
+const mediaAspectValue = ref(DEFAULT_MEDIA_ASPECT_VALUE)
 const mediaFrameWidth = ref(null)
-const mediaFrameHeight = ref(null)
 const sidePanelWidth = ref(null)
 const playerLayoutWidth = ref(null)
 const DEFAULT_LOGO_URL = publicAsset('/logos/default.png')
@@ -501,6 +506,7 @@ let epgTickTimer = null
 let epgRefreshAfterEndTimer = null
 let mobileOverlayTimer = null
 let mediaLayoutObserver = null
+let mediaLayoutRaf = 0
 
 const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
   (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
@@ -511,7 +517,6 @@ const playerLayoutStyle = computed(() => {
     '--media-aspect-ratio': mediaAspectRatio.value,
   }
   if (mediaFrameWidth.value) style['--media-frame-width'] = `${mediaFrameWidth.value.toFixed(3)}px`
-  if (mediaFrameHeight.value) style['--media-frame-height'] = `${mediaFrameHeight.value.toFixed(3)}px`
   if (sidePanelWidth.value) style['--side-panel-width'] = `${sidePanelWidth.value.toFixed(3)}px`
   if (playerLayoutWidth.value) style['--layout-width'] = `${playerLayoutWidth.value.toFixed(3)}px`
   return style
@@ -547,16 +552,30 @@ function toggleFullscreen() {
 }  // 跟踪当前播放的 URL，防止重复设置
 
 function resetMediaAspect() {
-  mediaAspectRatio.value = '16 / 9'
-  mediaAspectValue.value = 16 / 9
-  updateMediaFrameSize()
+  mediaAspectRatio.value = DEFAULT_MEDIA_ASPECT_RATIO
+  mediaAspectValue.value = DEFAULT_MEDIA_ASPECT_VALUE
+  scheduleMediaFrameSizeUpdate()
+}
+
+function adaptiveMediaAspect(width, height) {
+  const aspect = width / height
+  if (!Number.isFinite(aspect) || aspect <= 0) return DEFAULT_MEDIA_ASPECT_VALUE
+  if (aspect < ULTRAWIDE_MEDIA_ASPECT) return DEFAULT_MEDIA_ASPECT_VALUE
+  return Math.min(MAX_ADAPTIVE_LANDSCAPE_ASPECT, aspect)
+}
+
+function formatAspectRatio(aspect) {
+  return `${aspect.toFixed(6)} / 1`
 }
 
 function setMediaAspect(width, height) {
   if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return
-  mediaAspectValue.value = 16 / 9
-  mediaAspectRatio.value = '16 / 9'
-  updateMediaFrameSize()
+  const aspect = adaptiveMediaAspect(width, height)
+  mediaAspectValue.value = aspect
+  mediaAspectRatio.value = aspect === DEFAULT_MEDIA_ASPECT_VALUE
+    ? DEFAULT_MEDIA_ASPECT_RATIO
+    : formatAspectRatio(aspect)
+  scheduleMediaFrameSizeUpdate()
 }
 
 function updateMediaAspectFromVideo() {
@@ -565,10 +584,22 @@ function updateMediaAspectFromVideo() {
   setMediaAspect(video.videoWidth, video.videoHeight)
 }
 
+function cssNumber(style, prop, fallback = 0) {
+  const value = Number.parseFloat(style.getPropertyValue(prop))
+  return Number.isFinite(value) ? value : fallback
+}
+
+function scheduleMediaFrameSizeUpdate() {
+  if (mediaLayoutRaf) return
+  mediaLayoutRaf = window.requestAnimationFrame(() => {
+    mediaLayoutRaf = 0
+    updateMediaFrameSize()
+  })
+}
+
 function updateMediaFrameSize() {
   if (window.matchMedia('(max-width: 980px)').matches) {
     mediaFrameWidth.value = null
-    mediaFrameHeight.value = null
     sidePanelWidth.value = null
     playerLayoutWidth.value = null
     return
@@ -576,16 +607,35 @@ function updateMediaFrameSize() {
 
   const viewportWidth = window.innerWidth
   const viewportHeight = window.innerHeight
-  const horizontalInset = Math.min(96, Math.max(48, viewportWidth * 0.05))
-  const layoutGap = Math.min(40, Math.max(24, viewportWidth * 0.02))
-  const panelWidth = Math.min(500, Math.max(360, viewportWidth * 0.24))
-  const reservedBelow = Math.min(320, Math.max(250, window.innerHeight * 0.28))
-  const maxHeight = Math.max(320, viewportHeight - reservedBelow)
-  const maxWidth = Math.max(360, viewportWidth - horizontalInset - layoutGap - panelWidth)
+  const layoutEl = playerLayoutRef.value
+  const layoutStyle = layoutEl ? window.getComputedStyle(layoutEl) : null
+  const mainStyle = playerMainRef.value ? window.getComputedStyle(playerMainRef.value) : null
+  const horizontalInset = Math.min(64, Math.max(24, viewportWidth * 0.035))
+  const layoutGap = layoutStyle
+    ? cssNumber(layoutStyle, 'column-gap', Math.min(28, Math.max(16, viewportWidth * 0.015)))
+    : Math.min(28, Math.max(16, viewportWidth * 0.015))
+  const layoutPaddingTop = layoutStyle ? cssNumber(layoutStyle, 'padding-top') : Math.min(42, Math.max(22, viewportHeight * 0.035))
+  const layoutPaddingBottom = layoutStyle ? cssNumber(layoutStyle, 'padding-bottom') : Math.min(22, Math.max(12, viewportHeight * 0.018))
+  const playerMainOffset = mainStyle ? cssNumber(mainStyle, 'padding-top') : 6
+  const nowPanelHeight = nowPanelRef.value
+    ? Math.ceil(nowPanelRef.value.getBoundingClientRect().height)
+    : 150
+  const preferredPanelWidth = Math.min(440, Math.max(280, viewportWidth * 0.2))
+  const minPanelWidth = viewportWidth >= 1180 ? 240 : 220
+  const maxHeight = Math.max(
+    240,
+    viewportHeight - layoutPaddingTop - layoutPaddingBottom - playerMainOffset - nowPanelHeight,
+  )
+  const maxLayoutWidth = Math.max(720, viewportWidth - horizontalInset)
   const widthByHeight = maxHeight * mediaAspectValue.value
+  const videoFirstWidth = Math.min(widthByHeight, maxLayoutWidth - layoutGap - minPanelWidth)
+  const panelWidth = Math.max(
+    minPanelWidth,
+    Math.min(preferredPanelWidth, maxLayoutWidth - layoutGap - videoFirstWidth),
+  )
+  const maxWidth = Math.max(360, maxLayoutWidth - layoutGap - panelWidth)
   const width = Math.min(maxWidth, widthByHeight)
   mediaFrameWidth.value = width
-  mediaFrameHeight.value = width / mediaAspectValue.value
   sidePanelWidth.value = panelWidth
   playerLayoutWidth.value = width + layoutGap + panelWidth
 }
@@ -3243,7 +3293,7 @@ watch(isPlayerExpanded, (expanded) => {
   if (!expanded) closeSourceMenu()
   if (expanded) {
     showMobileOverlayControls()
-    nextTick(updateMediaFrameSize)
+    nextTick(scheduleMediaFrameSizeUpdate)
   } else {
     clearMobileOverlayTimer()
   }
@@ -3362,9 +3412,11 @@ onMounted(() => {
   epgTickTimer = setInterval(() => {
     epgNow.value = Date.now()
   }, 30_000)
-  if (window.ResizeObserver && playerMainRef.value) {
-    mediaLayoutObserver = new ResizeObserver(updateMediaFrameSize)
-    mediaLayoutObserver.observe(playerMainRef.value)
+  if (window.ResizeObserver) {
+    mediaLayoutObserver = new ResizeObserver(scheduleMediaFrameSizeUpdate)
+    if (playerLayoutRef.value) mediaLayoutObserver.observe(playerLayoutRef.value)
+    if (playerMainRef.value) mediaLayoutObserver.observe(playerMainRef.value)
+    if (nowPanelRef.value) mediaLayoutObserver.observe(nowPanelRef.value)
   }
   updateMediaFrameSize()
   syncFullPlayerTheme()
@@ -3375,13 +3427,17 @@ onMounted(() => {
   window.addEventListener('wavebypass-theme-chrome-sync', handleThemeChromeSync)
   document.addEventListener('click', closeSourceMenu)
   window.addEventListener('resize', updateSourceMenuPosition)
-  window.addEventListener('resize', updateMediaFrameSize)
+  window.addEventListener('resize', scheduleMediaFrameSizeUpdate)
   window.addEventListener('orientationchange', updateSourceMenuPosition)
-  window.addEventListener('orientationchange', updateMediaFrameSize)
+  window.addEventListener('orientationchange', scheduleMediaFrameSizeUpdate)
 })
 
 onBeforeUnmount(() => {
   setFullPlayerChromeOpen(false)
+  if (mediaLayoutRaf) {
+    window.cancelAnimationFrame(mediaLayoutRaf)
+    mediaLayoutRaf = 0
+  }
   mediaLayoutObserver?.disconnect()
   mediaLayoutObserver = null
   themeObserver?.disconnect()
@@ -3389,9 +3445,9 @@ onBeforeUnmount(() => {
   window.removeEventListener('wavebypass-theme-chrome-sync', handleThemeChromeSync)
   document.removeEventListener('click', closeSourceMenu)
   window.removeEventListener('resize', updateSourceMenuPosition)
-  window.removeEventListener('resize', updateMediaFrameSize)
+  window.removeEventListener('resize', scheduleMediaFrameSizeUpdate)
   window.removeEventListener('orientationchange', updateSourceMenuPosition)
-  window.removeEventListener('orientationchange', updateMediaFrameSize)
+  window.removeEventListener('orientationchange', scheduleMediaFrameSizeUpdate)
   _playAttemptId++
   stopPlaybackWatchdogs()
   cancelCurrentStartup()
@@ -3480,31 +3536,31 @@ onBeforeUnmount(() => {
   --gold: #c79a2b;
   --muted: #8d9299;
   --line: rgba(17, 24, 39, 0.08);
-  --layout-width: calc(100% - clamp(48px, 5vw, 96px));
+  --layout-width: calc(100% - clamp(24px, 3.5vw, 64px));
   --layout-height: 100dvh;
-  --layout-gap: clamp(24px, 2vw, 40px);
-  --layout-padding: clamp(44px, 5.5vh, 64px) 0 clamp(24px, 3.2vh, 36px);
-  --player-main-offset: 16px;
+  --layout-gap: clamp(16px, 1.5vw, 28px);
+  --layout-padding: clamp(22px, 3.5vh, 42px) 0 clamp(12px, 1.8vh, 22px);
+  --player-main-offset: 6px;
   --media-width: 100%;
   --media-height: auto;
   --media-aspect-ratio: 16 / 9;
   --media-radius: 8px;
   --media-shadow: 0 18px 42px rgba(15, 23, 42, 0.18);
-  --panel-inline: 22px;
-  --title-size: clamp(26px, 2.4vw, 36px);
+  --panel-inline: 18px;
+  --title-size: clamp(22px, 2vw, 30px);
   --title-weight: 750;
   --subtitle-size: 15px;
   --meta-size: 14px;
-  --control-gap: clamp(38px, 5vw, 60px);
-  --control-main-size: 62px;
-  --control-main-icon: 26px;
-  --control-side-size: 44px;
-  --control-side-icon: 28px;
-  --utility-gap: 30px;
-  --utility-size: 30px;
-  --utility-icon: 22px;
-  --tab-gap: 30px;
-  --tab-min-height: 42px;
+  --control-gap: clamp(30px, 4vw, 48px);
+  --control-main-size: 56px;
+  --control-main-icon: 24px;
+  --control-side-size: 40px;
+  --control-side-icon: 24px;
+  --utility-gap: 24px;
+  --utility-size: 28px;
+  --utility-icon: 20px;
+  --tab-gap: 22px;
+  --tab-min-height: 36px;
   --tab-size: 15px;
   --tab-weight: 400;
   --tab-active-weight: 600;
@@ -3512,8 +3568,8 @@ onBeforeUnmount(() => {
   --channel-grid: 64px minmax(0, 1fr) 34px;
   --channel-gap: 16px;
   --channel-logo-size: 58px;
-  --channel-min-height: 78px;
-  --channel-margin: 12px;
+  --channel-min-height: 68px;
+  --channel-margin: 8px;
   --channel-padding: 10px 14px 10px 8px;
   --channel-title-size: 16px;
   --channel-title-weight: 500;
@@ -3524,7 +3580,7 @@ onBeforeUnmount(() => {
   --eq-opacity: 0.35;
   --timeline-grid: 66px 46px minmax(0, 1fr);
   --timeline-line-left: 89px;
-  --timeline-row-height: 84px;
+  --timeline-row-height: 72px;
   --timeline-time-size: 15px;
   --timeline-title-size: 18px;
   --progress-track: rgba(17, 24, 39, 0.10);
@@ -3606,7 +3662,7 @@ onBeforeUnmount(() => {
   grid-template-columns: var(--media-frame-width, minmax(0, 1fr)) var(--side-panel-width, minmax(360px, 500px));
   gap: var(--layout-gap);
   width: var(--layout-width);
-  max-width: calc(100% - clamp(48px, 5vw, 96px));
+  max-width: calc(100% - clamp(24px, 3.5vw, 64px));
   height: var(--layout-height);
   margin: 0 auto;
   padding: var(--layout-padding);
@@ -3656,7 +3712,7 @@ onBeforeUnmount(() => {
   box-sizing: border-box;
   overflow: hidden;
   width: var(--media-frame-width, var(--media-width));
-  height: var(--media-frame-height, var(--media-height));
+  height: var(--media-height);
   aspect-ratio: var(--media-aspect-ratio);
   border-radius: var(--media-radius);
   background: var(--media-placeholder-bg);
@@ -3819,7 +3875,7 @@ onBeforeUnmount(() => {
 
 .now-panel {
   width: var(--media-frame-width, var(--media-width));
-  padding: 18px var(--panel-inline) 0;
+  padding: 10px var(--panel-inline) 0;
   text-align: center;
 }
 
@@ -3827,13 +3883,13 @@ onBeforeUnmount(() => {
   margin: 0;
   overflow-wrap: anywhere;
   font-size: var(--title-size);
-  line-height: 1.18;
+  line-height: 1.12;
   font-weight: 700;
   letter-spacing: 0;
 }
 
 .now-panel > p {
-  margin: 10px 0 0;
+  margin: 5px 0 0;
   color: var(--text-tertiary);
   font-size: var(--subtitle-size);
   font-weight: 500;
@@ -3841,7 +3897,7 @@ onBeforeUnmount(() => {
 }
 
 .program-progress {
-  margin-top: 18px;
+  margin-top: 10px;
 }
 
 .progress-track {
@@ -3874,7 +3930,7 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-top: 14px;
+  margin-top: 8px;
   color: var(--text-primary);
   font-size: var(--meta-size);
   font-weight: 400;
@@ -3924,7 +3980,7 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: center;
   gap: var(--control-gap);
-  margin-top: 20px;
+  margin-top: 10px;
 }
 
 .transport-side,
@@ -3968,8 +4024,8 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: center;
   gap: var(--utility-gap);
-  margin-top: 14px;
-  min-height: 30px;
+  margin-top: 6px;
+  min-height: var(--utility-size);
 }
 
 .utility-btn {
@@ -4055,13 +4111,13 @@ onBeforeUnmount(() => {
 }
 
 .desktop-panel-scroll {
-  max-height: calc(100dvh - 126px);
+  max-height: calc(100dvh - 80px);
   overflow-y: auto;
   padding-right: 8px;
 }
 
 .channel-panel {
-  padding-top: 24px;
+  padding-top: 14px;
 }
 
 .channel-sort-bar {
@@ -4194,7 +4250,7 @@ onBeforeUnmount(() => {
 }
 
 .schedule-panel {
-  padding-top: 30px;
+  padding-top: 18px;
 }
 
 .schedule-date {
@@ -4263,7 +4319,7 @@ onBeforeUnmount(() => {
 
 .timeline {
   position: relative;
-  margin-top: 34px;
+  margin-top: 22px;
 }
 
 .timeline::before {
