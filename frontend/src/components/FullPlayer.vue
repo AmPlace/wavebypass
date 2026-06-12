@@ -1275,6 +1275,7 @@ function trackHlsSource(hls, url) {
 }
 
 function releaseTrackedHls(hls) {
+  clearRuntimeHandlerCleanup(hls)
   clearHlsInternalTimers(hls)
   releaseWideProxyUrl(hls?.__wavebypassSourceUrl)
 }
@@ -1291,6 +1292,7 @@ function destroyIptvMpegts() {
   if (!iptvMpegtsRef.value) return
   const player = iptvMpegtsRef.value
   iptvMpegtsRef.value = null
+  clearRuntimeHandlerCleanup(player)
   try {
     player.destroy()
   } catch (e) {
@@ -2055,8 +2057,18 @@ async function switchIptvSource(index) {
   await playCurrentIptvUrl(attemptId, { allowStartupRace: false })
 }
 
+function clearRuntimeHandlerCleanup(target) {
+  const cleanup = target?.__wavebypassRuntimeCleanup
+  if (!cleanup) return
+  try {
+    cleanup()
+  } catch (e) {
+    console.warn('[IPTV] runtime handler cleanup failed:', e?.message || e)
+  }
+}
 
 function attachRuntimeHlsErrorHandlers(hls, sourceUrl, usingProxy, attemptId, sourceIndex = -1) {
+  clearRuntimeHandlerCleanup(hls)
   let fragFail = 0
   let switching = false
   const threshold = usingProxy ? 2 : 3
@@ -2068,6 +2080,7 @@ function attachRuntimeHlsErrorHandlers(hls, sourceUrl, usingProxy, attemptId, so
   const cleanup = () => {
     hls.off(Hls.Events.FRAG_LOADED, onFragLoaded)
     hls.off(Hls.Events.ERROR, onError)
+    if (hls.__wavebypassRuntimeCleanup === cleanup) hls.__wavebypassRuntimeCleanup = null
   }
 
   const switchToFallback = async (reason) => {
@@ -2101,9 +2114,11 @@ function attachRuntimeHlsErrorHandlers(hls, sourceUrl, usingProxy, attemptId, so
 
   hls.on(Hls.Events.FRAG_LOADED, onFragLoaded)
   hls.on(Hls.Events.ERROR, onError)
+  hls.__wavebypassRuntimeCleanup = cleanup
 }
 
 function attachRuntimeMpegtsErrorHandlers(player, sourceUrl, usingProxy, attemptId, sourceIndex = -1) {
+  clearRuntimeHandlerCleanup(player)
   let switching = false
   let completeWatchTimer = null
   const setRuntimeStatus = (status) => {
@@ -2121,6 +2136,7 @@ function attachRuntimeMpegtsErrorHandlers(player, sourceUrl, usingProxy, attempt
     clearCompleteWatchTimer()
     player.off(mpegts.Events.ERROR, onError)
     player.off(mpegts.Events.LOADING_COMPLETE, onComplete)
+    if (player.__wavebypassRuntimeCleanup === cleanup) player.__wavebypassRuntimeCleanup = null
   }
 
   const switchToFallback = async (reason) => {
@@ -2205,6 +2221,7 @@ function attachRuntimeMpegtsErrorHandlers(player, sourceUrl, usingProxy, attempt
 
   player.on(mpegts.Events.ERROR, onError)
   player.on(mpegts.Events.LOADING_COMPLETE, onComplete)
+  player.__wavebypassRuntimeCleanup = cleanup
 }
 
 async function tryPlayIptv(url, usingProxy = false, customUa = '', attemptId = 0, sourceIndex = -1, playbackSourceType = '', options = {}) {
