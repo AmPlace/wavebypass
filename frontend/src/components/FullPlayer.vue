@@ -1052,31 +1052,43 @@ function sourceStatusLabel(status) {
 function syncIptvMediaSession(playbackState = isPlaying.value ? 'playing' : 'paused') {
   if (!isIptvMode.value || !('mediaSession' in navigator)) return
   try {
-    navigator.mediaSession.metadata = new MediaMetadata({
-      title: currentProgram.value?.title || currentStationName.value,
-      artist: currentStationName.value,
-      artwork: currentArtworkUrl.value ? [{ src: currentArtworkUrl.value }] : [],
-    })
-    navigator.mediaSession.playbackState = playbackState
-    navigator.mediaSession.setActionHandler('play', () => {
+    const session = navigator.mediaSession
+    if (typeof MediaMetadata === 'function') {
+      session.metadata = new MediaMetadata({
+        title: currentProgram.value?.title || currentStationName.value,
+        artist: currentStationName.value,
+        artwork: currentArtworkUrl.value ? [{ src: currentArtworkUrl.value }] : [],
+      })
+    }
+    session.playbackState = playbackState
+    registerMediaSessionAction('play', () => {
       if (activeIptvEngine.value === 'youtube') {
         try { _youtubePlayer?.playVideo?.() } catch {}
       }
       resumeIptvFromMediaSession()
     })
-    navigator.mediaSession.setActionHandler('pause', () => {
+    registerMediaSessionAction('pause', () => {
       if (activeIptvEngine.value === 'youtube') {
         try { _youtubePlayer?.pauseVideo?.() } catch {}
       }
       playerStore.togglePlay(false)
     })
-    navigator.mediaSession.setActionHandler('stop', () => {
+    registerMediaSessionAction('stop', () => {
       if (activeIptvEngine.value === 'youtube') destroyYoutubePlayer()
       playerStore.togglePlay(false)
-      navigator.mediaSession.playbackState = 'none'
+      session.playbackState = 'none'
     })
   } catch (e) {
     console.warn('[IPTV] MediaSession 更新失败:', e)
+  }
+}
+
+function registerMediaSessionAction(action, handler) {
+  if (!('mediaSession' in navigator)) return
+  try {
+    navigator.mediaSession.setActionHandler(action, handler)
+  } catch (e) {
+    console.warn(`[IPTV] MediaSession action ${action} 注册失败:`, e?.message || e)
   }
 }
 
@@ -1094,18 +1106,6 @@ async function resumeIptvFromMediaSession() {
   if (video && !video.paused && !video.ended) {
     syncIptvMediaSession('playing')
     return
-  }
-
-  if (video && (iptvHlsRef.value || iptvMpegtsRef.value || video.currentSrc || video.src)) {
-    try {
-      video.volume = volume.value
-      await video.play()
-      playerStore.setLoading(false)
-      syncIptvMediaSession('playing')
-      return
-    } catch (e) {
-      console.warn('[IPTV] MediaSession resume play() failed:', e?.message || e)
-    }
   }
 
   const attemptId = ++_playAttemptId
@@ -1310,6 +1310,40 @@ function resetIptvVideo() {
   iptvVideoRef.value.pause()
   iptvVideoRef.value.removeAttribute('src')
   iptvVideoRef.value.load()
+}
+
+function pauseIptvPlaybackPreservingFrame() {
+  _playAttemptId++
+  cancelCurrentStartup()
+  cancelActiveProxyRace()
+  clearStallRecoveryTimer()
+  stopVideoFrameWatch()
+
+  if (iptvHlsRef.value) {
+    try {
+      iptvHlsRef.value.stopLoad?.()
+    } catch (e) {
+      console.warn('[IPTV] HLS soft pause stopLoad failed:', e?.message || e)
+    }
+    releaseTrackedHls(iptvHlsRef.value)
+  }
+
+  if (iptvMpegtsRef.value) {
+    try {
+      iptvMpegtsRef.value.pause?.()
+    } catch (e) {
+      console.warn('[IPTV] MPEG-TS soft pause failed:', e?.message || e)
+    }
+  }
+
+  const video = iptvVideoRef.value
+  if (video && !video.paused) {
+    try {
+      video.pause()
+    } catch {}
+  }
+  playerStore.setLoading(false)
+  syncIptvMediaSession('paused')
 }
 
 function clearYoutubeStartupTimer() {
@@ -3334,23 +3368,18 @@ watch(isPlaying, (playing) => {
     return
   }
   if (!iptvVideoRef.value) return
-  // 用户手动暂停即释放直播代理资源，恢复时重新拉当前源。
+  // 用户手动暂停保留当前画面；恢复时重新拉当前源，避免复用已释放的旧代理会话。
   if (playing && iptvVideoRef.value.paused) {
     const attemptId = ++_playAttemptId
-    playCurrentIptvUrl(attemptId, { allowStartupRace: false }).catch((e) => {
+    playCurrentIptvUrl(attemptId, { allowStartupRace: false }).then(() => {
+      syncIptvMediaSession('playing')
+    }).catch((e) => {
       if (e?.message !== 'cancelled') console.warn('[IPTV] resume after pause failed:', e?.message || e)
     })
-    syncIptvMediaSession('playing')
     return
   }
   if (!playing) {
-    _playAttemptId++
-    cancelCurrentStartup()
-    cancelActiveProxyRace()
-    destroyIptvEngines()
-    resetIptvVideo()
-    playerStore.setLoading(false)
-    syncIptvMediaSession('paused')
+    pauseIptvPlaybackPreservingFrame()
   }
 })
 
