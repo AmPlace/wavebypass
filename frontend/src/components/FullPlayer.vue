@@ -1108,14 +1108,18 @@ async function resumeIptvFromMediaSession() {
     return
   }
 
-  const attemptId = ++_playAttemptId
   try {
-    await playCurrentIptvUrl(attemptId, { allowStartupRace: false })
-    syncIptvMediaSession('playing')
+    if (await resumeSoftPausedIptv('media-session-resume')) return
+    const recovered = await recoverIptvPlayback('media-session-resume', {
+      force: true,
+      statusText: '正在恢复播放...',
+    })
+    syncIptvMediaSession(recovered ? 'playing' : (isPlaying.value ? 'playing' : 'paused'))
   } catch (e) {
     if (e?.message !== 'cancelled') {
       console.warn('[IPTV] MediaSession resume reload failed:', e?.message || e)
     }
+    syncIptvMediaSession(isPlaying.value ? 'playing' : 'paused')
   }
 }
 
@@ -1312,18 +1316,24 @@ function resetIptvVideo() {
   iptvVideoRef.value.load()
 }
 
-function pauseIptvPlaybackPreservingFrame() {
-  _playAttemptId++
-  cancelCurrentStartup()
-  cancelActiveProxyRace()
-  clearStallRecoveryTimer()
-  stopVideoFrameWatch()
+function clearPauseReleaseTimer() {
+  _pauseGraceSeq++
+  if (_pauseReleaseTimer) {
+    clearTimeout(_pauseReleaseTimer)
+    _pauseReleaseTimer = null
+  }
+}
+
+function releaseSoftPausedConnection(seq) {
+  _pauseReleaseTimer = null
+  if (seq !== _pauseGraceSeq || !isIptvMode.value || isPlaying.value || !_softPausedAt) return
+  _softPauseReleased = true
 
   if (iptvHlsRef.value) {
     try {
       iptvHlsRef.value.stopLoad?.()
     } catch (e) {
-      console.warn('[IPTV] HLS soft pause stopLoad failed:', e?.message || e)
+      console.warn('[IPTV] HLS pause grace stopLoad failed:', e?.message || e)
     }
     releaseTrackedHls(iptvHlsRef.value)
   }
@@ -1332,9 +1342,25 @@ function pauseIptvPlaybackPreservingFrame() {
     try {
       iptvMpegtsRef.value.pause?.()
     } catch (e) {
-      console.warn('[IPTV] MPEG-TS soft pause failed:', e?.message || e)
+      console.warn('[IPTV] MPEG-TS pause grace release failed:', e?.message || e)
     }
   }
+}
+
+function scheduleSoftPauseRelease() {
+  clearPauseReleaseTimer()
+  const seq = _pauseGraceSeq
+  _pauseReleaseTimer = setTimeout(() => releaseSoftPausedConnection(seq), PAUSE_GRACE_RELEASE_MS)
+}
+
+function pauseIptvPlaybackPreservingFrame() {
+  _playAttemptId++
+  _recoverySeq++
+  _recoveryInFlight = false
+  cancelCurrentStartup()
+  cancelActiveProxyRace()
+  clearStallRecoveryTimer()
+  stopVideoFrameWatch()
 
   const video = iptvVideoRef.value
   if (video && !video.paused) {
@@ -1342,8 +1368,70 @@ function pauseIptvPlaybackPreservingFrame() {
       video.pause()
     } catch {}
   }
+  _softPausedAt = Date.now()
+  _softPauseReleased = false
+  scheduleSoftPauseRelease()
   playerStore.setLoading(false)
   syncIptvMediaSession('paused')
+}
+
+async function resumeSoftPausedIptv(reason = 'resume') {
+  if (_softResumePromise) return await _softResumePromise
+
+  const run = async () => {
+    const video = iptvVideoRef.value
+    if (!video || !_softPausedAt || _softPauseReleased) return false
+    if (Date.now() - _softPausedAt > PAUSE_GRACE_RELEASE_MS) return false
+
+    clearPauseReleaseTimer()
+    const attemptId = ++_playAttemptId
+    _recoverySeq++
+    _recoveryInFlight = false
+    clearStallRecoveryTimer()
+    const sourceIndex = playerStore.iptvUrlIndex
+    const entry = playerStore.iptvUrls[sourceIndex]
+    const sourceUrl = entry?.url || iptvHlsRef.value?.__wavebypassSourceUrl || ''
+    const usingProxy = Boolean(entry?.via_proxy)
+
+    try {
+      playerStore.clearPlaybackError()
+      playerStore.setLoading(false)
+
+      if (iptvHlsRef.value) {
+        await video.play()
+        attachRuntimeHlsErrorHandlers(iptvHlsRef.value, sourceUrl, usingProxy, attemptId, sourceIndex)
+      } else if (iptvMpegtsRef.value) {
+        await video.play()
+        attachRuntimeMpegtsErrorHandlers(iptvMpegtsRef.value, sourceUrl, usingProxy, attemptId, sourceIndex)
+      } else if (video.src || video.currentSrc) {
+        await video.play()
+      } else {
+        return false
+      }
+
+      _softPausedAt = 0
+      _softPauseReleased = false
+      markVideoProgress(video)
+      startVideoFrameWatch(video)
+      playerStore.togglePlay(true)
+      setSourceRuntimeStatus(sourceIndex, 'playing')
+      syncIptvMediaSession('playing')
+      console.warn('[IPTV] soft pause resumed', { reason, sourceIndex })
+      return true
+    } catch (e) {
+      console.warn('[IPTV] soft pause resume failed:', e?.message || e)
+      _softPausedAt = 0
+      _softPauseReleased = true
+      return false
+    }
+  }
+
+  _softResumePromise = run()
+  try {
+    return await _softResumePromise
+  } finally {
+    _softResumePromise = null
+  }
 }
 
 function clearYoutubeStartupTimer() {
@@ -1669,8 +1757,24 @@ const MPEGTS_EOF_RECONNECT_DELAY_MS = 300
 const MPEGTS_ERROR_RECONNECT_DELAY_MS = 1200
 const MPEGTS_RECONNECT_WINDOW_MS = 60_000
 const MPEGTS_RECONNECT_LIMIT = 3
+const RECOVERY_LOADING_DELAY_MS = 400
+const RECOVERY_SOFT_RECOVER_MS = 2500
+const RECOVERY_HARD_RELOAD_MS = 4000
+const RECOVERY_CURRENT_RETRY_LIMIT = 2
+const RECOVERY_CURRENT_TTL_MS = 4000
+const RECOVERY_FALLBACK_TTL_MS = 5000
+const RECOVERY_RETRY_DELAYS_MS = [300, 800]
+const RECOVERY_PROGRESS_WATCH_INTERVAL_MS = 750
+const PAUSE_GRACE_RELEASE_MS = 30_000
 
 let _playAttemptId = 0
+let _recoverySeq = 0
+let _recoveryInFlight = false
+let _pauseReleaseTimer = null
+let _pauseGraceSeq = 0
+let _softPausedAt = 0
+let _softPauseReleased = false
+let _softResumePromise = null
 let _racedLosers = new Set()
 let _mpegtsRecoveries = new Map()
 let _cleanupActiveRace = null
@@ -1689,6 +1793,32 @@ function isAttemptActive(attemptId) {
 
 function cancelledError() {
   return new Error('cancelled')
+}
+
+function wait(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+function jitter(ms, spread = 120) {
+  return Math.max(0, ms + Math.round((Math.random() - 0.5) * spread))
+}
+
+async function withAttemptTimeout(promise, attemptId, timeoutMs, message) {
+  if (!timeoutMs) return await promise
+  let timer = null
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          if (isAttemptActive(attemptId)) _playAttemptId++
+          reject(new Error(message))
+        }, timeoutMs)
+      }),
+    ])
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 function clearCurrentHlsIf(hls) {
@@ -1752,6 +1882,123 @@ function setSourceRuntimeStatusByEntry(entry, status) {
   setSourceRuntimeStatus(index, status)
 }
 
+function isRecoveryActive(seq) {
+  return seq === _recoverySeq && isIptvMode.value && isPlaying.value
+}
+
+async function refreshVolatileEntryForRecovery(entry, attemptId, reason) {
+  if (!entry?.adapter_volatile_url || !entry?.adapter_source_url) return false
+  const retryCount = entry._volatileRetryCount || 0
+  if (retryCount >= RECOVERY_CURRENT_RETRY_LIMIT) return false
+
+  console.warn('[IPTV] recovery 重新 resolve 当前源...', {
+    reason,
+    retry: retryCount + 1,
+    limit: RECOVERY_CURRENT_RETRY_LIMIT,
+  })
+  playerStore.setPlaybackError('正在获取新的播放地址...')
+  const resolved = await playerStore.reResolveAdapterUrl(entry.adapter_source_url)
+  if (!isAttemptActive(attemptId)) return false
+  if (!resolved?.url) return false
+  entry.url = resolved.url
+  entry._volatileRetryCount = retryCount + 1
+  return true
+}
+
+async function recoverIptvPlayback(reason = 'stalled', options = {}) {
+  if (!isIptvMode.value || !playerStore.currentIptvChannel || !isPlaying.value) return false
+  if (_recoveryInFlight && !options.force) return false
+
+  const seq = ++_recoverySeq
+  _recoveryInFlight = true
+  clearStallRecoveryTimer()
+  cancelCurrentStartup()
+  cancelActiveProxyRace()
+
+  const startIndex = playerStore.iptvUrlIndex
+  const currentEntry = playerStore.iptvUrls[startIndex]
+  const currentRetryLimit = options.currentRetryLimit ?? RECOVERY_CURRENT_RETRY_LIMIT
+  const currentTtlMs = options.currentTtlMs ?? RECOVERY_CURRENT_TTL_MS
+  const fallbackTtlMs = options.fallbackTtlMs ?? RECOVERY_FALLBACK_TTL_MS
+  const allowFallbackRace = options.allowFallbackRace !== false
+  const statusText = options.statusText || '直播卡顿，正在重新连接当前源'
+
+  playerStore.setLoading(true)
+  playerStore.setPlaybackError(statusText)
+  setSourceRuntimeStatus(startIndex, 'trying')
+  console.warn('[IPTV] recovery start', { reason, startIndex, currentRetryLimit, currentTtlMs })
+
+  try {
+    for (let i = 0; i < currentRetryLimit; i += 1) {
+      if (!isRecoveryActive(seq)) return false
+      const delayMs = jitter(RECOVERY_RETRY_DELAYS_MS[i] ?? RECOVERY_RETRY_DELAYS_MS[RECOVERY_RETRY_DELAYS_MS.length - 1])
+      if (delayMs) await wait(delayMs)
+      if (!isRecoveryActive(seq)) return false
+
+      const attemptId = ++_playAttemptId
+      if (currentEntry?.adapter_volatile_url && currentEntry?.adapter_source_url) {
+        try {
+          await refreshVolatileEntryForRecovery(currentEntry, attemptId, reason)
+        } catch (e) {
+          console.warn('[IPTV] recovery resolve 当前源失败:', e?.message || e)
+        }
+      }
+
+      try {
+        await withAttemptTimeout(
+          playCurrentIptvUrl(attemptId, {
+            allowStartupRace: false,
+            allowFallback: false,
+            allowCurrentRetry: false,
+            allowVolatileResolve: false,
+            preserveFrame: true,
+            startupTimeoutMs: currentTtlMs,
+          }),
+          attemptId,
+          currentTtlMs + 300,
+          '当前源重连超时',
+        )
+        if (!isRecoveryActive(seq)) return false
+        playerStore.clearPlaybackError()
+        playerStore.setLoading(false)
+        syncIptvMediaSession('playing')
+        return true
+      } catch (e) {
+        if (!isRecoveryActive(seq)) return false
+        console.warn('[IPTV] recovery 当前源重连失败:', {
+          retry: i + 1,
+          limit: currentRetryLimit,
+          reason: e?.message || e,
+        })
+        setSourceRuntimeStatus(startIndex, 'failed')
+      }
+    }
+
+    if (currentEntry?.url && (currentEntry.type === 'proxy' || currentEntry.via_proxy)) {
+      _racedLosers.add(currentEntry.url)
+    }
+
+    if (!allowFallbackRace || !isRecoveryActive(seq)) return false
+
+    const fallbackAttemptId = ++_playAttemptId
+    if (await setIptvUrlIndexForAttempt(startIndex, fallbackAttemptId)) {
+      if (await fallbackToNextIptvUrl(fallbackAttemptId)) {
+        playerStore.setPlaybackError('当前源不可用，正在尝试备用源...')
+        await playCurrentIptvUrl(fallbackAttemptId, {
+          allowStartupRace: true,
+          startupTimeoutMs: fallbackTtlMs,
+          raceTimeoutMs: fallbackTtlMs,
+        })
+        return isRecoveryActive(seq)
+      }
+    }
+    markAllIptvSourcesUnavailable(fallbackAttemptId)
+    return false
+  } finally {
+    if (seq === _recoverySeq) _recoveryInFlight = false
+  }
+}
+
 async function fallbackToNextIptvUrl(attemptId) {
   if (!isAttemptActive(attemptId)) return false
   _suppressIptvUrlWatch++
@@ -1806,6 +2053,7 @@ async function switchIptvSource(index) {
   await playCurrentIptvUrl(attemptId, { allowStartupRace: false })
 }
 
+
 function attachRuntimeHlsErrorHandlers(hls, sourceUrl, usingProxy, attemptId, sourceIndex = -1) {
   let fragFail = 0
   let switching = false
@@ -1823,45 +2071,13 @@ function attachRuntimeHlsErrorHandlers(hls, sourceUrl, usingProxy, attemptId, so
   const switchToFallback = async (reason) => {
     if (switching || !isAttemptActive(attemptId)) return
     switching = true
-    console.warn(`[IPTV] 播放中断，切备用源: ${reason}`)
+    console.warn(`[IPTV] HLS 播放中断，进入恢复流程: ${reason}`)
     cleanup()
     setRuntimeStatus('failed')
-    if (usingProxy) _racedLosers.add(sourceUrl)
     releaseTrackedHls(hls)
     hls.destroy()
     clearCurrentHlsIf(hls)
-
-    // Volatile adapter: try re-resolving for a fresh URL before falling back
-    if (!usingProxy) {
-      const currentEntry = playerStore.iptvUrls[playerStore.iptvUrlIndex]
-      if (currentEntry?.adapter_volatile_url && currentEntry?.adapter_source_url) {
-        const retryCount = currentEntry._volatileRetryCount || 0
-        if (retryCount < 2) {
-          try {
-            console.warn('[IPTV] volatile runtime 中断，重新 resolve... (retry ' + (retryCount + 1) + '/2)')
-            setRuntimeStatus('trying')
-            playerStore.setPlaybackError('直连中断，正在获取新地址...')
-            playerStore.setLoading(true)
-            const resolved = await playerStore.reResolveAdapterUrl(currentEntry.adapter_source_url)
-            if (!isAttemptActive(attemptId)) return
-            if (resolved && resolved.url) {
-              currentEntry.url = resolved.url
-              currentEntry._volatileRetryCount = retryCount + 1
-              const nextAttemptId = ++_playAttemptId
-              return await playCurrentIptvUrl(nextAttemptId, { allowStartupRace: false })
-            }
-          } catch (reErr) {
-            console.warn('[IPTV] volatile re-resolve 失败:', reErr?.message)
-          }
-        }
-      }
-    }
-
-    const nextAttemptId = ++_playAttemptId
-    if (await fallbackToNextIptvUrl(nextAttemptId)) {
-      return await playCurrentIptvUrl(nextAttemptId)
-    }
-    markAllIptvSourcesUnavailable(nextAttemptId)
+    return await recoverIptvPlayback(`HLS:${reason}`, { force: true })
   }
 
   const onFragLoaded = () => {
@@ -1908,10 +2124,9 @@ function attachRuntimeMpegtsErrorHandlers(player, sourceUrl, usingProxy, attempt
   const switchToFallback = async (reason) => {
     if (switching || !isAttemptActive(attemptId)) return
     switching = true
-    console.warn(`[IPTV] MPEG-TS 播放中断，切备用源: ${reason}`)
+    console.warn(`[IPTV] MPEG-TS 播放中断，进入恢复流程: ${reason}`)
     cleanup()
     setRuntimeStatus('failed')
-    if (usingProxy) _racedLosers.add(sourceUrl)
     clearCurrentMpegtsIf(player)
     try {
       player.destroy()
@@ -1921,38 +2136,7 @@ function attachRuntimeMpegtsErrorHandlers(player, sourceUrl, usingProxy, attempt
         console.warn('[IPTV] mpegts runtime cleanup failed:', e)
       }
     }
-
-    // Volatile adapter: try re-resolving for a fresh URL before falling back
-    if (!usingProxy) {
-      const currentEntry = playerStore.iptvUrls[playerStore.iptvUrlIndex]
-      if (currentEntry?.adapter_volatile_url && currentEntry?.adapter_source_url) {
-        const retryCount = currentEntry._volatileRetryCount || 0
-        if (retryCount < 2) {
-          try {
-            console.warn('[IPTV] volatile MPEG-TS 中断，重新 resolve... (retry ' + (retryCount + 1) + '/2)')
-            setRuntimeStatus('trying')
-            playerStore.setPlaybackError('直连中断，正在获取新地址...')
-            playerStore.setLoading(true)
-            const resolved = await playerStore.reResolveAdapterUrl(currentEntry.adapter_source_url)
-            if (!isAttemptActive(attemptId)) return
-            if (resolved && resolved.url) {
-              currentEntry.url = resolved.url
-              currentEntry._volatileRetryCount = retryCount + 1
-              const nextAttemptId = ++_playAttemptId
-              return await playCurrentIptvUrl(nextAttemptId, { allowStartupRace: false })
-            }
-          } catch (reErr) {
-            console.warn('[IPTV] volatile re-resolve 失败:', reErr?.message)
-          }
-        }
-      }
-    }
-
-    const nextAttemptId = ++_playAttemptId
-    if (await fallbackToNextIptvUrl(nextAttemptId)) {
-      return await playCurrentIptvUrl(nextAttemptId)
-    }
-    markAllIptvSourcesUnavailable(nextAttemptId)
+    return await recoverIptvPlayback(`MPEG-TS:${reason}`, { force: true })
   }
 
   const destroyCurrentPlayer = (label) => {
@@ -1971,21 +2155,13 @@ function attachRuntimeMpegtsErrorHandlers(player, sourceUrl, usingProxy, attempt
     if (switching || !isAttemptActive(attemptId)) return
     const destroyBeforeDelay = options.destroyBeforeDelay !== false
     const delayMs = options.delayMs ?? MPEGTS_ERROR_RECONNECT_DELAY_MS
-    const reconnectCount = recordMpegtsReconnect(sourceUrl)
     const video = iptvVideoRef.value
     console.warn('[IPTV] MPEG-TS 播放中断，准备重连当前源', {
       reason,
-      reconnectCount,
-      limit: MPEGTS_RECONNECT_LIMIT,
       currentTime: Number.isFinite(video?.currentTime) ? video.currentTime : null,
       readyState: video?.readyState,
       networkState: video?.networkState,
     })
-
-    if (reconnectCount > MPEGTS_RECONNECT_LIMIT) {
-      switchToFallback(`${reason} repeated`)
-      return
-    }
 
     switching = true
     cleanup()
@@ -2004,8 +2180,7 @@ function attachRuntimeMpegtsErrorHandlers(player, sourceUrl, usingProxy, attempt
         destroyCurrentPlayer('reconnect')
       }
 
-      const nextAttemptId = ++_playAttemptId
-      await playCurrentIptvUrl(nextAttemptId, { allowStartupRace: false })
+      await recoverIptvPlayback(`MPEG-TS:${reason}`, { force: true })
     }, delayMs)
   }
 
@@ -2030,9 +2205,12 @@ function attachRuntimeMpegtsErrorHandlers(player, sourceUrl, usingProxy, attempt
   player.on(mpegts.Events.LOADING_COMPLETE, onComplete)
 }
 
-async function tryPlayIptv(url, usingProxy = false, customUa = '', attemptId = 0, sourceIndex = -1, playbackSourceType = '') {
+async function tryPlayIptv(url, usingProxy = false, customUa = '', attemptId = 0, sourceIndex = -1, playbackSourceType = '', options = {}) {
   if (!isAttemptActive(attemptId)) throw cancelledError()
   if (!iptvVideoRef.value) throw new Error('播放器未就绪')
+  clearPauseReleaseTimer()
+  _softPausedAt = 0
+  _softPauseReleased = false
 
   const setRuntimeStatus = (status) => {
     if (sourceIndex >= 0) setSourceRuntimeStatus(sourceIndex, status)
@@ -2059,7 +2237,12 @@ async function tryPlayIptv(url, usingProxy = false, customUa = '', attemptId = 0
   cancelActiveProxyRace()
   destroyIptvEngines()
   activeIptvEngine.value = 'video'
-  resetIptvVideo()
+  if (options.preserveFrame) {
+    stopPlaybackWatchdogs()
+    resetMediaAspect()
+  } else {
+    resetIptvVideo()
+  }
   playerStore.setLoading(true)
   console.log(`[START] ${usingProxy ? '(proxy) ' : ''}${url.slice(0, 80)}...`)
 
@@ -2220,7 +2403,7 @@ async function tryPlayIptv(url, usingProxy = false, customUa = '', attemptId = 0
 
       player.attachMediaElement(video)
       player.load()
-      timer = setTimeout(() => safeReject(new Error('MPEG-TS 加载超时')), 12_000)
+      timer = setTimeout(() => safeReject(new Error('MPEG-TS 加载超时')), options.startupTimeoutMs ?? 12_000)
       return
     }
 
@@ -2269,7 +2452,7 @@ async function tryPlayIptv(url, usingProxy = false, customUa = '', attemptId = 0
 
       hls.loadSource(url)
       hls.attachMedia(iptvVideoRef.value)
-      timer = setTimeout(() => safeReject(new Error('HLS 加载超时')), 10_000)
+      timer = setTimeout(() => safeReject(new Error('HLS 加载超时')), options.startupTimeoutMs ?? 10_000)
       return
     }
 
@@ -2285,7 +2468,7 @@ async function tryPlayIptv(url, usingProxy = false, customUa = '', attemptId = 0
         video.removeEventListener('loadedmetadata', onLoaded)
         video.removeEventListener('error', onErr)
       }
-      timer = setTimeout(() => safeReject(new Error('原生 HLS 超时')), 10_000)
+      timer = setTimeout(() => safeReject(new Error('原生 HLS 超时')), options.startupTimeoutMs ?? 10_000)
       return
     }
 
@@ -2320,6 +2503,9 @@ async function playCurrentIptvUrl(attemptId = 0, options = {}) {
   if (!isAttemptActive(attemptId)) return
   if (!iptvVideoRef.value || !playerStore.currentIptvChannel) return
   const allowStartupRace = options.allowStartupRace !== false
+  const allowFallback = options.allowFallback !== false
+  const allowCurrentRetry = options.allowCurrentRetry !== false
+  const allowVolatileResolve = options.allowVolatileResolve !== false
   const urls = playerStore.iptvUrls
   const idx = playerStore.iptvUrlIndex
   preflightYoutubeApiForQueue(urls)
@@ -2332,15 +2518,19 @@ async function playCurrentIptvUrl(attemptId = 0, options = {}) {
   if (st === 'unsupported_youtube_url') {
     setSourceRuntimeStatus(idx, 'failed')
     console.warn('[IPTV] 不支持的 YouTube URL:', entry.url)
-    if (await fallbackToNextIptvUrl(attemptId)) {
-      return await playCurrentIptvUrl(attemptId)
+    if (!allowFallback) throw new Error('不支持的 YouTube URL')
+    if (allowFallback && await fallbackToNextIptvUrl(attemptId)) {
+      return await playCurrentIptvUrl(attemptId, options)
     }
     markAllIptvSourcesUnavailable(attemptId)
     return
   }
   const startupRacers = allowStartupRace && st !== 'youtube' ? startupRaceEntries(urls, idx) : []
   if (startupRacers.length > 1) {
-    const raced = await raceStartupSources(startupRacers, attemptId)
+    const raced = await raceStartupSources(startupRacers, attemptId, {
+      timeoutMs: options.raceTimeoutMs,
+      playCurrentOptions: options,
+    })
     if (raced !== false) return raced
     if (!isAttemptActive(attemptId)) return
   }
@@ -2351,7 +2541,10 @@ async function playCurrentIptvUrl(attemptId = 0, options = {}) {
     if (st === 'youtube') {
       await startYoutubeCandidate(entry, attemptId, idx)
     } else {
-      await tryPlayIptv(entry.url, Boolean(entry.via_proxy), entry.custom_ua || '', attemptId, idx, st)
+      await tryPlayIptv(entry.url, Boolean(entry.via_proxy), entry.custom_ua || '', attemptId, idx, st, {
+        startupTimeoutMs: options.startupTimeoutMs,
+        preserveFrame: options.preserveFrame,
+      })
     }
     if (!isAttemptActive(attemptId)) return
     setSourceRuntimeStatus(idx, 'playing')
@@ -2361,7 +2554,7 @@ async function playCurrentIptvUrl(attemptId = 0, options = {}) {
     if (!isAttemptActive(attemptId)) return
     setSourceRuntimeStatus(idx, 'failed')
     console.warn('[IPTV] 失败:', e?.message)
-    if (isMpegTsEngineType(st) && allowStartupRace === false) {
+    if (allowCurrentRetry && isMpegTsEngineType(st) && allowStartupRace === false) {
       const reconnectCount = recordMpegtsReconnect(entry.url)
       if (reconnectCount <= MPEGTS_RECONNECT_LIMIT) {
         console.warn('[IPTV] MPEG-TS 重连起播失败，继续重试当前源', {
@@ -2375,11 +2568,11 @@ async function playCurrentIptvUrl(attemptId = 0, options = {}) {
         await new Promise(resolve => setTimeout(resolve, MPEGTS_ERROR_RECONNECT_DELAY_MS))
         if (!isAttemptActive(attemptId)) return
         const nextAttemptId = ++_playAttemptId
-        return await playCurrentIptvUrl(nextAttemptId, { allowStartupRace: false })
+        return await playCurrentIptvUrl(nextAttemptId, { ...options, allowStartupRace: false })
       }
     }
     // Volatile adapter: re-resolve for a fresh URL before giving up
-    if (entry.adapter_volatile_url && entry.adapter_source_url) {
+    if (allowVolatileResolve && entry.adapter_volatile_url && entry.adapter_source_url) {
       const retryCount = entry._volatileRetryCount || 0
       if (retryCount < 2) {
         try {
@@ -2393,15 +2586,16 @@ async function playCurrentIptvUrl(attemptId = 0, options = {}) {
             entry.url = resolved.url
             entry._volatileRetryCount = retryCount + 1
             const nextAttemptId = ++_playAttemptId
-            return await playCurrentIptvUrl(nextAttemptId, { allowStartupRace: false })
+            return await playCurrentIptvUrl(nextAttemptId, { ...options, allowStartupRace: false })
           }
         } catch (reErr) {
           console.warn('[IPTV] volatile adapter re-resolve 失败:', reErr?.message)
         }
       }
     }
+    if (!allowFallback) throw e
     if (await fallbackToNextIptvUrl(attemptId)) {
-      return await playCurrentIptvUrl(attemptId)
+      return await playCurrentIptvUrl(attemptId, options)
     }
     markAllIptvSourcesUnavailable(attemptId)
   }
@@ -2409,8 +2603,9 @@ async function playCurrentIptvUrl(attemptId = 0, options = {}) {
 
 function resetRacedLosers() { _racedLosers.clear() }
 
-async function raceStartupSources(candidates, attemptId = 0) {
+async function raceStartupSources(candidates, attemptId = 0, options = {}) {
   if (!isAttemptActive(attemptId)) return
+  const playCurrentOptions = options.playCurrentOptions || {}
   cancelCurrentStartup()
   cancelActiveProxyRace()
   destroyIptvEngines()
@@ -2502,7 +2697,7 @@ async function raceStartupSources(candidates, attemptId = 0) {
         }
       }
       finish(null)
-    }, 12_000)
+    }, options.timeoutMs ?? 12_000)
 
     fresh.forEach(({ entry, index, kind }, i) => {
       const probeVideo = document.createElement('video')
@@ -2572,7 +2767,7 @@ async function raceStartupSources(candidates, attemptId = 0) {
     const lastRacedIndex = Math.max(...fresh.map(({ index }) => index))
     if (lastRacedIndex >= 0) await setIptvUrlIndexForAttempt(lastRacedIndex, attemptId)
     if (await fallbackToNextIptvUrl(attemptId)) {
-      return await playCurrentIptvUrl(attemptId)
+      return await playCurrentIptvUrl(attemptId, playCurrentOptions)
     }
     markAllIptvSourcesUnavailable(attemptId)
     return
@@ -2582,7 +2777,10 @@ async function raceStartupSources(candidates, attemptId = 0) {
   if (!(await setIptvUrlIndexForAttempt(winnerIndex, attemptId))) return
 
   try {
-    await tryPlayIptv(winnerEntry.url, Boolean(winnerEntry.via_proxy), winnerEntry.custom_ua || '', attemptId, winnerIndex, sourceType(winnerEntry))
+    await tryPlayIptv(winnerEntry.url, Boolean(winnerEntry.via_proxy), winnerEntry.custom_ua || '', attemptId, winnerIndex, sourceType(winnerEntry), {
+      startupTimeoutMs: playCurrentOptions.startupTimeoutMs,
+      preserveFrame: playCurrentOptions.preserveFrame,
+    })
     if (!isAttemptActive(attemptId)) return
     setSourceRuntimeStatus(winnerIndex, 'playing')
     playerStore.clearPlaybackError()
@@ -2593,7 +2791,7 @@ async function raceStartupSources(candidates, attemptId = 0) {
     setSourceRuntimeStatus(winnerIndex, 'failed')
     console.warn('[RACE:startup] 胜出源正式起播失败:', e?.message)
     if (await fallbackToNextIptvUrl(attemptId)) {
-      return await playCurrentIptvUrl(attemptId)
+      return await playCurrentIptvUrl(attemptId, playCurrentOptions)
     }
     markAllIptvSourcesUnavailable(attemptId)
   }
@@ -3010,12 +3208,8 @@ async function handleIptvError(e) {
   if (iptvHlsRef.value || iptvMpegtsRef.value) return
   // 起播阶段（Promise 还没 resolve）→ 由 Promise reject 处理
   if (playerStore.isLoading) return
-  // 播放中途暴毙 → 触发 fallback
-  const attemptId = ++_playAttemptId
-  if (await fallbackToNextIptvUrl(attemptId)) {
-    return await playCurrentIptvUrl(attemptId)
-  }
-  markAllIptvSourcesUnavailable(attemptId)
+  // 播放中途暴毙 -> 先恢复当前源，失败后再 fallback
+  await recoverIptvPlayback('video-error', { force: true })
 }
 
 let _stallRecovering = false
@@ -3048,6 +3242,7 @@ function stopVideoFrameWatch() {
     _videoFrameWatchTimer = null
   }
 }
+
 
 function stopPlaybackWatchdogs() {
   clearStallRecoveryTimer()
@@ -3134,6 +3329,11 @@ async function doRecovery(v, reason = 'stalled') {
   })
 
   try {
+    try {
+      iptvHlsRef.value?.startLoad?.(-1)
+    } catch (e) {
+      console.warn('[IPTV] stalled HLS startLoad failed:', e?.message || e)
+    }
     await v.play()
     if (Date.now() - _lastVideoProgressAt > 3000) {
       seekNearLiveEdge(v)
@@ -3149,15 +3349,7 @@ async function reconnectCurrentIptvSource(reason = 'stalled') {
   if (!isIptvMode.value || !playerStore.currentIptvChannel) return
   if (Date.now() - _lastReconnectTime < 15_000) return
   _lastReconnectTime = Date.now()
-
-  const idx = playerStore.iptvUrlIndex
-  setSourceRuntimeStatus(idx, 'trying')
-  playerStore.setLoading(true)
-  playerStore.setPlaybackError('播放卡住，正在重新连接当前源')
-  console.warn(`[IPTV] ${reason}，重新连接当前源 #${idx + 1}`)
-
-  const attemptId = ++_playAttemptId
-  await playCurrentIptvUrl(attemptId, { allowStartupRace: false })
+  await recoverIptvPlayback(reason, { force: true })
 }
 
 function seekForwardTiny(v) {
@@ -3207,16 +3399,31 @@ async function recoverAvSync(v, reason = 'video-frame-stall') {
 
 function scheduleStallRecovery(reason) {
   const v = iptvVideoRef.value
-  if (!v || v.paused || _stallRecovering) return
+  if (!v || v.paused || !isIptvMode.value || !isPlaying.value || _stallRecovering) return
   if (!_lastVideoProgressAt) markVideoProgress(v)
   if (_stallRecoveryTimer) return
 
-  _stallRecoveryTimer = setTimeout(() => {
+  const check = () => {
     _stallRecoveryTimer = null
-    if (!iptvVideoRef.value || iptvVideoRef.value.paused) return
-    if (Date.now() - _lastVideoProgressAt < 6000) return
-    doRecovery(iptvVideoRef.value, reason)
-  }, 6500)
+    const current = iptvVideoRef.value
+    if (!current || current.paused || !isIptvMode.value || !isPlaying.value) return
+    const progressAge = Date.now() - _lastVideoProgressAt
+    if (progressAge > RECOVERY_LOADING_DELAY_MS) {
+      playerStore.setLoading(true)
+    }
+    if (progressAge > RECOVERY_SOFT_RECOVER_MS) {
+      doRecovery(current, reason)
+    }
+    if (progressAge > RECOVERY_HARD_RELOAD_MS) {
+      recoverIptvPlayback(reason).catch((e) => {
+        console.warn('[IPTV] stalled recovery failed:', e?.message || e)
+      })
+      return
+    }
+    _stallRecoveryTimer = setTimeout(check, 500)
+  }
+
+  _stallRecoveryTimer = setTimeout(check, RECOVERY_LOADING_DELAY_MS)
 }
 
 function onVideoTimeUpdate() {
@@ -3294,6 +3501,9 @@ function onVideoStalled() {
 
 function onVideoEvent(evt) {
   if (evt === 'playing') {
+    clearPauseReleaseTimer()
+    _softPausedAt = 0
+    _softPauseReleased = false
     markVideoProgress(iptvVideoRef.value)
     startVideoFrameWatch(iptvVideoRef.value)
     clearStallRecoveryTimer()
@@ -3307,6 +3517,7 @@ function onVideoEvent(evt) {
     syncIptvMediaSession('paused')
   }
   if (evt === 'waiting') {
+    playerStore.setLoading(true)
     scheduleStallRecovery('waiting')
   }
 }
@@ -3368,10 +3579,16 @@ watch(isPlaying, (playing) => {
     return
   }
   if (!iptvVideoRef.value) return
-  // 用户手动暂停保留当前画面；恢复时重新拉当前源，避免复用已释放的旧代理会话。
+  // 用户手动暂停先保留当前管线；超过宽限期或软恢复失败后再重拉当前源。
   if (playing && iptvVideoRef.value.paused) {
-    const attemptId = ++_playAttemptId
-    playCurrentIptvUrl(attemptId, { allowStartupRace: false }).then(() => {
+    resumeSoftPausedIptv('resume-after-pause').then((resumed) => {
+      if (resumed) return true
+      return recoverIptvPlayback('resume-after-pause', {
+        force: true,
+        statusText: '正在恢复播放...',
+      })
+    }).then((recovered) => {
+      if (!recovered) return
       syncIptvMediaSession('playing')
     }).catch((e) => {
       if (e?.message !== 'cancelled') console.warn('[IPTV] resume after pause failed:', e?.message || e)
@@ -3504,6 +3721,11 @@ onBeforeUnmount(() => {
   window.removeEventListener('orientationchange', updateSourceMenuPosition)
   window.removeEventListener('orientationchange', scheduleMediaFrameSizeUpdate)
   _playAttemptId++
+  _recoverySeq++
+  _recoveryInFlight = false
+  clearPauseReleaseTimer()
+  _softPausedAt = 0
+  _softPauseReleased = false
   stopPlaybackWatchdogs()
   cancelCurrentStartup()
   cancelActiveProxyRace()
