@@ -130,6 +130,9 @@ def parse_adapter_url(target_url: str) -> AdapterRequest:
     elif scheme == "sdtv":
         adapter = "sdtv"
         resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
+    elif scheme == "sdly":
+        adapter = "sdly"
+        resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
     elif scheme == "douyin":
         adapter = "douyin"
         resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
@@ -321,6 +324,7 @@ from .migu import resolve_migu
 from .hbtv import resolve_hbtv
 from .jstv import resolve_jstv
 from .sdtv import resolve_sdtv
+from .sdly import resolve_sdly
 import importlib as _importlib
 resolve_17live = _importlib.import_module(".17live", __package__).resolve_17live
 from .hnntv import resolve_hnntv
@@ -378,6 +382,7 @@ _ADAPTER_REGISTRY = {
     "nmtv": resolve_nmtv,
     "jstv": resolve_jstv,
     "sdtv": resolve_sdtv,
+    "sdly": resolve_sdly,
     "hnntv": resolve_hnntv,
     "gzstv": resolve_gzstv,
     "sxbc": resolve_sxbc,
