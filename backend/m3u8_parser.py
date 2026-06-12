@@ -13,7 +13,7 @@ _channel_alias = Alias(_ALIAS_PATH)
 # 匹配 key="value" 或 key='value' 形式的属性
 _ATTR_RE = re.compile(r'''(\w[\w-]*)=(?:"([^"]*)"|'([^']*)')''')
 
-_STREAM_URL_PREFIXES = ('http://', 'https://', 'rtmp://', 'rtsp://', 'migu://', 'hnntv://', 'nmtv://', 'gzstv://', 'sxbc://', 'xjtv://', 'jstv://', 'sdtv://', 'sdly://', 'douyin://', 'douyu://', 'huya://', 'hbtv://', 'redbook://', 'tiktok://', 'kuaishou://', 'bilibili://', 'yy://', 'bigo://', 'blued://', 'soop://', 'netease://', 'pandatv://', 'maoer://', 'look://', 'flextv://', 'popkontv://', 'twitcasting://', 'baidu://', 'weibo://', 'kugou://', 'twitch://', 'huajiao://', 'showroom://', 'inke://', 'acfun://', 'haixiu://', 'liveme://', 'zhihu://', 'chzzk://', 'live17://', 'langlive://', 'changliao://', 'jd://', 'faceit://', 'lianjie://', 'sixroom://', 'lehai://', 'huamao://', 'shopee://', 'laixiu://', 'picarto://', 'ytsl://', 'youtube://', 'adapter://')
+_STREAM_URL_PREFIXES = ('http://', 'https://', 'rtmp://', 'rtsp://', 'migu://', 'hnntv://', 'nmtv://', 'gzstv://', 'sxbc://', 'xjtv://', 'jstv://', 'sdtv://', 'sdly://', 'douyin://', 'douyu://', 'huya://', 'hbtv://', 'hntv://', 'redbook://', 'tiktok://', 'kuaishou://', 'bilibili://', 'yy://', 'bigo://', 'blued://', 'soop://', 'netease://', 'pandatv://', 'maoer://', 'look://', 'flextv://', 'popkontv://', 'twitcasting://', 'baidu://', 'weibo://', 'kugou://', 'twitch://', 'huajiao://', 'showroom://', 'inke://', 'acfun://', 'haixiu://', 'liveme://', 'zhihu://', 'chzzk://', 'live17://', 'langlive://', 'changliao://', 'jd://', 'faceit://', 'lianjie://', 'sixroom://', 'lehai://', 'huamao://', 'shopee://', 'laixiu://', 'picarto://', 'ytsl://', 'youtube://', 'adapter://')
 
 # 简单的逐行解析用
 _EXTINF_RE = re.compile(r'#EXTINF:([^,]*),(.*)')
@@ -295,6 +295,8 @@ def adapter_provider(url: str) -> str:
         return 'huya'
     if scheme == 'hbtv':
         return 'hbtv'
+    if scheme == 'hntv':
+        return 'hntv'
     if scheme == 'redbook':
         return 'redbook'
     if scheme == 'tiktok':
