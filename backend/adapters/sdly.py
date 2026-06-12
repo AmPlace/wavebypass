@@ -84,6 +84,11 @@ SDLY_CHANNELS: dict[str, list[int]] = {
     "whxwzh": [157, 1], "whdssh": [157, 3], "whhy": [157, 12], "whhczh": [213, 5],
     "whrczh": [77, 10], "whrcsh": [77, 11], "whrszh": [143, 8], "whrssh": [143, 9],
     "whwd1": [91, 7], "whwd2": [91, 8],
+    # 新增
+    "sgzh": [279, 1], "sgsc": [279, 3],  # 寿光综合、寿光蔬菜
+    "jzxw": [423, 1], "jzzh": [423, 3], "jzyl": [423, 5],  # 胶州新闻/综合/娱乐
+    "dzxwzh2": [519, 18], "dzjjsh2": [519, 20], "dztw2": [519, 22],  # 德州(备用源)
+    "hdsh": [672, 1], "hdzh": [672, 3],  # 黄岛生活/综合
 }
 
 SDLY_API_URL = "https://app.litenews.cn/v1/app/play/tv/live"
@@ -101,8 +106,17 @@ async def resolve_sdly(request: AdapterRequest, client: httpx.AsyncClient) -> di
     channel_key = request.resource_id.strip("/").lower()
     mapping = SDLY_CHANNELS.get(channel_key)
     if not mapping:
-        if channel_key.isdigit():
+        # 支持 orgid:ch_id 格式
+        if ":" in channel_key:
+            parts = channel_key.split(":", 1)
+            if parts[0].isdigit() and parts[1].isdigit():
+                orgid = int(parts[0])
+                ch_id = int(parts[1])
+            else:
+                raise AdapterResolveError("invalid_sdly_channel_id", f"无效格式: {channel_key}")
+        elif channel_key.isdigit():
             orgid = int(channel_key)
+            ch_id = 0  # 0 表示取第一个频道
         else:
             supported = ", ".join(list(SDLY_CHANNELS.keys())[:20])
             raise AdapterResolveError(
@@ -134,6 +148,9 @@ async def resolve_sdly(request: AdapterRequest, client: httpx.AsyncClient) -> di
     data = resp.json()
     stream = None
     for v in data.get("data", []):
+        if ch_id == 0:
+            stream = v.get("stream", "")
+            break
         if v.get("id") == ch_id:
             stream = v.get("stream", "")
             break
