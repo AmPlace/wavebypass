@@ -63,13 +63,25 @@
             @click="playChannel(item.channel)"
           >
             <span class="channel-card__logo-card-visual" aria-hidden="true">
-              <img
-                v-if="channelLogoUrl(item.channel)"
-                class="channel-card__center-logo"
-                :src="channelLogoUrl(item.channel)"
-                alt=""
-                @error="onCenterLogoError"
-              />
+              <span class="channel-card__logo-stage">
+                <img
+                  v-if="shouldShowChannelLogo(item.channel)"
+                  class="channel-card__center-logo"
+                  :src="channelLogoUrl(item.channel)"
+                  alt=""
+                  loading="lazy"
+                  decoding="async"
+                  @error="markChannelLogoFailed(item.channel)"
+                />
+                <span
+                  v-else
+                  class="channel-card__text-logo"
+                  :class="textLogoSizeClass(item.channel)"
+                  :title="channelDisplayName(item.channel)"
+                >
+                  {{ channelDisplayName(item.channel) }}
+                </span>
+              </span>
               <span class="channel-card__logo-card-shade"></span>
             </span>
             <span class="card-info">
@@ -110,6 +122,7 @@ const allGroups = ref([])
 const selectedGroup = ref('')
 const loading = ref(false)
 const epgMap = ref({})
+const failedLogoKeys = ref({})
 const channelSortMode = ref('original')
 const categoryTabs = computed(() => ['全部', ...allGroups.value])
 
@@ -243,12 +256,37 @@ function defaultCoverClass() {
   return 'channel-card--logo-card'
 }
 
-function onCenterLogoError(event) {
-  if (event?.currentTarget) event.currentTarget.style.display = 'none'
-}
-
 function channelLogoUrl(ch) {
   return ch.logo_url || knownIptvLogoUrl(ch) || ''
+}
+
+function channelDisplayName(ch) {
+  return String(ch?.name || '未知频道').trim() || '未知频道'
+}
+
+function channelLogoFailureKey(ch) {
+  return `${ch?.canonical_key || ch?.tvg_id || ch?.tvg_name || ch?.name || ''}|${channelLogoUrl(ch)}`
+}
+
+function shouldShowChannelLogo(ch) {
+  const logo = channelLogoUrl(ch)
+  if (!logo) return false
+  return !failedLogoKeys.value[channelLogoFailureKey(ch)]
+}
+
+function markChannelLogoFailed(ch) {
+  failedLogoKeys.value = {
+    ...failedLogoKeys.value,
+    [channelLogoFailureKey(ch)]: true,
+  }
+}
+
+function textLogoSizeClass(ch) {
+  const length = Array.from(channelDisplayName(ch)).length
+  if (length <= 4) return 'channel-card__text-logo--xl'
+  if (length <= 8) return 'channel-card__text-logo--lg'
+  if (length <= 14) return 'channel-card__text-logo--md'
+  return 'channel-card__text-logo--sm'
 }
 
 function knownIptvLogoUrl(ch) {
