@@ -4,6 +4,7 @@
     <div
       class="flex flex-wrap items-start gap-2 overflow-hidden"
       :style="{ maxHeight: expanded ? `${expandedHeight}px` : '44px', transition: 'max-height 260ms cubic-bezier(0.4, 0, 0.2, 1)' }"
+      @transitionend="onTransitionEnd"
     >
       <button
         v-for="(item, index) in displayItems"
@@ -18,7 +19,7 @@
 
       <!-- 折叠态下，被截掉的选中项额外提到行尾保留可见性 -->
       <button
-        v-if="!expanded && hiddenSelectedItem"
+        v-if="!expanded && !collapsing && hiddenSelectedItem"
         type="button"
         class="h-11 shrink-0 rounded-full border px-5 text-sm font-medium transition-colors"
         :class="pillClass(true)"
@@ -66,6 +67,7 @@ const emit = defineEmits(['select'])
 
 const rootRef = ref(null)
 const expanded = ref(false)
+const collapsing = ref(false)
 const visibleCount = ref(props.items.length)
 const expandedHeight = ref(0)
 
@@ -87,7 +89,8 @@ const hiddenSelectedItem = computed(() => {
   const hidden = props.items.slice(visibleCount.value)
   return hidden.find((it) => props.isActive(it)) || null
 })
-const displayItems = computed(() => (expanded.value ? props.items : visibleItems.value))
+// 收起过程中保持全量渲染，动画结束后才切回截断
+const displayItems = computed(() => (expanded.value || collapsing.value ? props.items : visibleItems.value))
 
 /* 测量：在不可见的克隆容器里逐个累加按钮宽度，得出一行能放下多少个，
    再为「更多」按钮（必要时还有隐藏选中 chip）预留宽度。
@@ -181,5 +184,19 @@ onBeforeUnmount(() => {
 
 watch(() => props.items, () => nextTick(measure), { deep: false })
 
-function toggle() { expanded.value = !expanded.value }
+function toggle() {
+  if (expanded.value) {
+    // 收起：先标记 collapsing，动画结束再清除
+    collapsing.value = true
+    expanded.value = false
+  } else {
+    expanded.value = true
+  }
+}
+
+function onTransitionEnd(e) {
+  if (e.propertyName === 'max-height' && collapsing.value) {
+    collapsing.value = false
+  }
+}
 </script>
