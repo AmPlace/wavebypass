@@ -18,15 +18,17 @@
       </button>
 
       <!-- 折叠态下，被截掉的选中项额外提到行尾保留可见性 -->
-      <button
-        v-if="!expanded && !collapsing && hiddenSelectedItem"
-        type="button"
-        class="h-11 shrink-0 rounded-full border px-5 text-sm font-medium transition-colors"
-        :class="pillClass(true)"
-        @click="$emit('select', hiddenSelectedItem)"
-      >
-        {{ itemLabel(hiddenSelectedItem) }}
-      </button>
+      <Transition name="chip">
+        <button
+          v-if="!expanded && !collapsing && hiddenSelectedItem"
+          type="button"
+          class="h-11 shrink-0 rounded-full border px-5 text-sm font-medium transition-colors"
+          :class="pillClass(true)"
+          @click="$emit('select', hiddenSelectedItem)"
+        >
+          {{ itemLabel(hiddenSelectedItem) }}
+        </button>
+      </Transition>
 
       <button
         v-if="hasOverflow"
@@ -200,3 +202,20 @@ function onTransitionEnd(e) {
   }
 }
 </script>
+
+
+<style scoped>
+.chip-enter-active {
+  transition: opacity 200ms ease, transform 200ms ease;
+}
+.chip-leave-active {
+  transition: opacity 150ms ease;
+}
+.chip-enter-from {
+  opacity: 0;
+  transform: translateY(4px);
+}
+.chip-leave-to {
+  opacity: 0;
+}
+</style>
