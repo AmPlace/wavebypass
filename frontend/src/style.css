@@ -151,6 +151,16 @@
     transition: opacity 180ms ease;
   }
 
+  .nav-item-just-activated {
+    animation: nav-switch-pulse 350ms cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+
+  @keyframes nav-switch-pulse {
+    0% { transform: scale(1); }
+    50% { transform: scale(0.94); }
+    100% { transform: scale(1); }
+  }
+
   .sidebar-brand {
     transition: opacity 180ms ease;
   }
