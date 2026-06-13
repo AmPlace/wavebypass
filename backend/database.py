@@ -33,12 +33,28 @@ CREATE TABLE IF NOT EXISTS channels (
     group_name      TEXT DEFAULT '',
     tvg_id          TEXT DEFAULT '',
     tvg_name        TEXT DEFAULT '',
-    is_working      INTEGER DEFAULT -1,
+    is_working      INTEGER DEFAULT 0,
     latency_ms      REAL DEFAULT 0,
     last_tested     TEXT DEFAULT '',
     source_type     TEXT DEFAULT 'hls',
     youtube_video_id TEXT DEFAULT '',
     referer         TEXT DEFAULT '',
+    probe_status    TEXT DEFAULT 'untested',
+    live_status     TEXT DEFAULT 'unknown',
+    probe_method    TEXT DEFAULT '',
+    speed_mbps      REAL DEFAULT 0,
+    resolution      TEXT DEFAULT '',
+    fps             REAL DEFAULT 0,
+    video_codec     TEXT DEFAULT '',
+    audio_codec     TEXT DEFAULT '',
+    requires_headers INTEGER DEFAULT 0,
+    requires_proxy_declared INTEGER DEFAULT 0,
+    proxy_required_hint INTEGER DEFAULT 0,
+    last_success_at TEXT DEFAULT '',
+    last_error      TEXT DEFAULT '',
+    adapter_provider TEXT DEFAULT '',
+    adapter_title   TEXT DEFAULT '',
+    probe_meta_json TEXT DEFAULT '{}',
     market_package_id TEXT DEFAULT '',
     market_source_id TEXT DEFAULT '',
     market_channel_id TEXT DEFAULT '',
@@ -149,6 +165,22 @@ async def initialize():
             ('source_type', 'TEXT', "'hls'"),
             ('youtube_video_id', 'TEXT', "''"),
             ('referer', 'TEXT', "''"),
+            ('probe_status', 'TEXT', "'untested'"),
+            ('live_status', 'TEXT', "'unknown'"),
+            ('probe_method', 'TEXT', "''"),
+            ('speed_mbps', 'REAL', '0'),
+            ('resolution', 'TEXT', "''"),
+            ('fps', 'REAL', '0'),
+            ('video_codec', 'TEXT', "''"),
+            ('audio_codec', 'TEXT', "''"),
+            ('requires_headers', 'INTEGER', '0'),
+            ('requires_proxy_declared', 'INTEGER', '0'),
+            ('proxy_required_hint', 'INTEGER', '0'),
+            ('last_success_at', 'TEXT', "''"),
+            ('last_error', 'TEXT', "''"),
+            ('adapter_provider', 'TEXT', "''"),
+            ('adapter_title', 'TEXT', "''"),
+            ('probe_meta_json', 'TEXT', "'{}'"),
             ('market_package_id', 'TEXT', "''"),
             ('market_source_id', 'TEXT', "''"),
             ('market_channel_id', 'TEXT', "''"),
@@ -279,9 +311,9 @@ async def add_channels_bulk(sub_id: int, channels: list[dict]):
         conn.executemany(
             "INSERT INTO channels("
             "subscription_id, name, url, logo_url, group_name, tvg_id, tvg_name, "
-            "source_type, youtube_video_id, referer, market_package_id, market_source_id, "
-            "market_channel_id, market_source_item_id"
-            ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "is_working, probe_status, live_status, source_type, youtube_video_id, referer, "
+            "market_package_id, market_source_id, market_channel_id, market_source_item_id"
+            ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 (
                     sub_id,
@@ -291,6 +323,9 @@ async def add_channels_bulk(sub_id: int, channels: list[dict]):
                     ch.get('group_name', ''),
                     ch.get('tvg_id', ''),
                     ch.get('tvg_name', ''),
+                    0,
+                    'untested',
+                    'unknown',
                     ch.get('source_type', 'hls'),
                     ch.get('youtube_video_id', ''),
                     ch.get('referer', ''),
@@ -586,11 +621,91 @@ async def update_channel_status(ch_id: int, is_working: int, latency_ms: float =
     await asyncio.to_thread(_update)
 
 
+async def update_channel_probe_result(ch_id: int, result: dict):
+    def _update():
+        conn = _connect()
+        now = datetime.now(timezone.utc).isoformat()
+        probe_status = str(result.get('probe_status') or 'error')
+        is_working = 1 if probe_status == 'online' else 0
+        last_success_at = now if probe_status == 'online' else str(result.get('last_success_at') or '')
+        conn.execute(
+            """
+            UPDATE channels SET
+                is_working=?,
+                latency_ms=?,
+                last_tested=?,
+                probe_status=?,
+                live_status=?,
+                probe_method=?,
+                speed_mbps=?,
+                resolution=?,
+                fps=?,
+                video_codec=?,
+                audio_codec=?,
+                requires_headers=?,
+                requires_proxy_declared=?,
+                proxy_required_hint=?,
+                last_success_at=COALESCE(NULLIF(?, ''), last_success_at),
+                last_error=?,
+                adapter_provider=?,
+                adapter_title=?,
+                probe_meta_json=?
+            WHERE id=?
+            """,
+            (
+                is_working,
+                float(result.get('latency_ms') or 0),
+                now,
+                probe_status,
+                str(result.get('live_status') or 'unknown'),
+                str(result.get('probe_method') or ''),
+                float(result.get('speed_mbps') or 0),
+                str(result.get('resolution') or ''),
+                float(result.get('fps') or 0),
+                str(result.get('video_codec') or ''),
+                str(result.get('audio_codec') or ''),
+                1 if result.get('requires_headers') else 0,
+                1 if result.get('requires_proxy_declared') else 0,
+                1 if result.get('proxy_required_hint') else 0,
+                last_success_at,
+                str(result.get('last_error') or ''),
+                str(result.get('adapter_provider') or ''),
+                str(result.get('adapter_title') or ''),
+                str(result.get('probe_meta_json') or '{}'),
+                ch_id,
+            ),
+        )
+        conn.commit()
+        conn.close()
+    await asyncio.to_thread(_update)
+
+
 async def reset_channel_statuses(sub_id: int):
     def _reset():
         conn = _connect()
         conn.execute(
-            "UPDATE channels SET is_working=-1, latency_ms=0, last_tested='' WHERE subscription_id=?",
+            """
+            UPDATE channels SET
+                is_working=0,
+                latency_ms=0,
+                last_tested='',
+                probe_status='untested',
+                live_status='unknown',
+                probe_method='',
+                speed_mbps=0,
+                resolution='',
+                fps=0,
+                video_codec='',
+                audio_codec='',
+                requires_headers=0,
+                requires_proxy_declared=0,
+                proxy_required_hint=0,
+                adapter_provider='',
+                adapter_title='',
+                probe_meta_json='{}',
+                last_error=''
+            WHERE subscription_id=?
+            """,
             (sub_id,),
         )
         conn.commit()
@@ -601,7 +716,29 @@ async def reset_channel_statuses(sub_id: int):
 async def reset_channel_statuses_all():
     def _reset():
         conn = _connect()
-        conn.execute("UPDATE channels SET is_working=-1, latency_ms=0, last_tested=''")
+        conn.execute(
+            """
+            UPDATE channels SET
+                is_working=0,
+                latency_ms=0,
+                last_tested='',
+                probe_status='untested',
+                live_status='unknown',
+                probe_method='',
+                speed_mbps=0,
+                resolution='',
+                fps=0,
+                video_codec='',
+                audio_codec='',
+                requires_headers=0,
+                requires_proxy_declared=0,
+                proxy_required_hint=0,
+                adapter_provider='',
+                adapter_title='',
+                probe_meta_json='{}',
+                last_error=''
+            """
+        )
         conn.commit()
         conn.close()
     await asyncio.to_thread(_reset)

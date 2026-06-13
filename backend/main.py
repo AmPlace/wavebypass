@@ -23,6 +23,7 @@ from contextlib import asynccontextmanager
 from fetchers import STATION_FETCHER_MAP, yunting
 import database
 from adapters import AdapterResolveError, resolve_adapter_source
+from iptv_probe import probe_channel_source
 
 
 TOKEN_REFRESH_INTERVAL_SECONDS = 18_000
@@ -1928,6 +1929,23 @@ async def _get_aggregated_iptv_channels(group: str = '', search: str = '') -> tu
             'url': ch['url'],
             'is_working': ch['is_working'],
             'latency_ms': ch['latency_ms'],
+            'last_tested': ch.get('last_tested', ''),
+            'probe_status': ch.get('probe_status', 'untested'),
+            'live_status': ch.get('live_status', 'unknown'),
+            'probe_method': ch.get('probe_method', ''),
+            'speed_mbps': ch.get('speed_mbps', 0),
+            'resolution': ch.get('resolution', ''),
+            'fps': ch.get('fps', 0),
+            'video_codec': ch.get('video_codec', ''),
+            'audio_codec': ch.get('audio_codec', ''),
+            'requires_headers': ch.get('requires_headers', 0),
+            'requires_proxy_declared': ch.get('requires_proxy_declared', 0),
+            'proxy_required_hint': ch.get('proxy_required_hint', 0),
+            'last_success_at': ch.get('last_success_at', ''),
+            'last_error': ch.get('last_error', ''),
+            'adapter_provider': ch.get('adapter_provider', ''),
+            'adapter_title': ch.get('adapter_title', ''),
+            'probe_meta_json': ch.get('probe_meta_json', '{}'),
             'sub_title': ch.get('sub_title', ''),
             'custom_ua': ch.get('custom_ua', ''),
             'referer': ch.get('referer', ''),
@@ -2009,6 +2027,61 @@ async def aggregated_channels(group: str = '', search: str = ''):
 # 测速进度存储（内存）
 _test_progress: dict[int, dict] = {}
 _global_test_progress: dict = {}
+_speed_test_lock = asyncio.Lock()
+_speed_test_running = False
+_speed_test_cancel_event: asyncio.Event | None = None
+_speed_test_task: asyncio.Task | None = None
+
+
+def _empty_test_progress(total: int = 0) -> dict:
+    return {
+        "total": total,
+        "tested": 0,
+        "working": 0,
+        "failed": 0,
+        "not_live": 0,
+        "untested": 0,
+        "phase": "",
+        "current": "",
+        "ffmpeg_active": 0,
+        "cancelled": False,
+    }
+
+
+async def _begin_speed_test() -> None:
+    global _speed_test_cancel_event, _speed_test_running
+    async with _speed_test_lock:
+        if _speed_test_running:
+            raise HTTPException(status_code=409, detail="已有测速任务正在进行中")
+        _speed_test_running = True
+        _speed_test_cancel_event = asyncio.Event()
+
+
+async def _finish_speed_test() -> None:
+    global _speed_test_cancel_event, _speed_test_running, _speed_test_task
+    async with _speed_test_lock:
+        _speed_test_running = False
+        _speed_test_cancel_event = None
+        _speed_test_task = None
+
+
+def _set_speed_test_task(task: asyncio.Task) -> None:
+    global _speed_test_task
+    _speed_test_task = task
+
+
+def _current_speed_test_cancel_event() -> asyncio.Event:
+    return _speed_test_cancel_event or asyncio.Event()
+
+
+def _probe_status_to_bucket(status: str) -> str:
+    if status == "online":
+        return "working"
+    if status == "not_live":
+        return "not_live"
+    if status in {"unsupported", "untested"}:
+        return "untested"
+    return "failed"
 
 
 @app.post("/api/iptv/test-all")
@@ -2028,10 +2101,17 @@ async def test_all_subscriptions():
     if not total:
         raise HTTPException(status_code=400, detail="无频道可测速")
 
-    await db.reset_channel_statuses_all()
-    _global_test_progress.update({"total": total, "tested": 0, "working": 0, "failed": 0})
+    await _begin_speed_test()
+    try:
+        await db.reset_channel_statuses_all()
+    except Exception:
+        await _finish_speed_test()
+        raise
+    _global_test_progress.clear()
+    _global_test_progress.update(_empty_test_progress(total))
     logger.info("开始测速: %d 个频道", total)
-    asyncio.create_task(_run_speed_test_global(all_channels))
+    task = asyncio.create_task(_run_speed_test_global(all_channels, _current_speed_test_cancel_event()))
+    _set_speed_test_task(task)
     return {"total": total}
 
 
@@ -2046,197 +2126,172 @@ async def test_subscription(sub_id: int):
     if not channels:
         raise HTTPException(status_code=400, detail="该订阅无频道")
 
-    await db.reset_channel_statuses(sub_id)
-    _test_progress[sub_id] = {"total": len(channels), "tested": 0, "working": 0, "failed": 0}
-    _global_test_progress.update({"total": len(channels), "tested": 0, "working": 0, "failed": 0})
+    await _begin_speed_test()
+    try:
+        await db.reset_channel_statuses(sub_id)
+    except Exception:
+        await _finish_speed_test()
+        raise
+    _test_progress[sub_id] = _empty_test_progress(len(channels))
+    _global_test_progress.clear()
+    _global_test_progress.update(_empty_test_progress(len(channels)))
     logger.info("开始测速订阅 %s: %d 个频道", sub['title'], len(channels))
-    asyncio.create_task(_run_speed_test_sub(sub_id, channels))
+    task = asyncio.create_task(_run_speed_test_sub(sub_id, channels, _current_speed_test_cancel_event()))
+    _set_speed_test_task(task)
     return {"total": len(channels)}
 
 
-async def _run_speed_test_sub(sub_id: int, channels: list[dict]):
+async def _run_speed_test_sub(sub_id: int, channels: list[dict], cancel_event: asyncio.Event):
     semaphore = asyncio.Semaphore(10)
+    tasks: list[asyncio.Task] = []
 
     async def _limited_test(ch):
         async with semaphore:
+            if cancel_event.is_set():
+                return ch, {"probe_status": "untested", "latency_ms": 0, "last_error": "cancelled"}
             try:
-                return ch, await asyncio.wait_for(_test_single_channel(ch), timeout=12)
+                return ch, await asyncio.wait_for(probe_channel_source(ch, http_client), timeout=24)
             except asyncio.TimeoutError:
-                return ch, {"working": False, "latency_ms": 0}
+                return ch, {"probe_status": "timeout", "latency_ms": 0, "last_error": "timeout"}
+            except Exception as exc:
+                return ch, {"probe_status": "error", "latency_ms": 0, "last_error": str(exc)[:300]}
 
-    tasks = [_limited_test(ch) for ch in channels]
-    for coro in asyncio.as_completed(tasks):
-        try:
-            ch, result = await coro
-            await db.update_channel_status(ch['id'], is_working = 1 if result['working'] is True else (-1 if result['working'] == -1 else 0), latency_ms=result['latency_ms'])
-        except Exception as e:
-            logger.warning("测速异常: %s", e)
-        _test_progress[sub_id]['tested'] += 1
-        _global_test_progress['tested'] += 1
-        if result.get('working'):
-            _test_progress[sub_id]['working'] += 1
-            _global_test_progress['working'] += 1
+    try:
+        tasks = [asyncio.create_task(_limited_test(ch)) for ch in channels]
+        for coro in asyncio.as_completed(tasks):
+            if cancel_event.is_set():
+                break
+            result = {"probe_status": "error", "latency_ms": 0, "last_error": "unknown"}
+            ch = None
+            try:
+                ch, result = await coro
+                _test_progress[sub_id]["current"] = ch.get("name", "")
+                _test_progress[sub_id]["phase"] = result.get("probe_method", "")
+                _global_test_progress["current"] = ch.get("name", "")
+                _global_test_progress["phase"] = result.get("probe_method", "")
+                await db.update_channel_probe_result(ch['id'], result)
+            except Exception as e:
+                logger.warning("测速异常: %s", e)
+                if ch:
+                    await db.update_channel_probe_result(ch['id'], result)
+            bucket = _probe_status_to_bucket(str(result.get("probe_status") or "error"))
+            _test_progress[sub_id]['tested'] += 1
+            _global_test_progress['tested'] += 1
+            _test_progress[sub_id][bucket] += 1
+            _global_test_progress[bucket] += 1
+        if cancel_event.is_set():
+            for task in tasks:
+                task.cancel()
+            _test_progress[sub_id]["phase"] = "cancelled"
+            _global_test_progress["phase"] = "cancelled"
+            _test_progress[sub_id]["cancelled"] = True
+            _global_test_progress["cancelled"] = True
+            await asyncio.gather(*tasks, return_exceptions=True)
         else:
-            _test_progress[sub_id]['failed'] += 1
-            _global_test_progress['failed'] += 1
-    await db.update_subscription(sub_id, last_tested=datetime.now(timezone.utc).isoformat())
+            await db.update_subscription(sub_id, last_tested=datetime.now(timezone.utc).isoformat())
+    except asyncio.CancelledError:
+        cancel_event.set()
+        _test_progress[sub_id]["phase"] = "cancelled"
+        _global_test_progress["phase"] = "cancelled"
+        _test_progress[sub_id]["cancelled"] = True
+        _global_test_progress["cancelled"] = True
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+    finally:
+        await _finish_speed_test()
 
 
-async def _run_speed_test_global(channels: list[dict]):
+async def _run_speed_test_global(channels: list[dict], cancel_event: asyncio.Event):
     semaphore = asyncio.Semaphore(10)
+    tasks: list[asyncio.Task] = []
 
     async def _limited_test(ch):
         async with semaphore:
+            if cancel_event.is_set():
+                return ch, {"probe_status": "untested", "latency_ms": 0, "last_error": "cancelled"}
             try:
-                return ch, await asyncio.wait_for(_test_single_channel(ch), timeout=12)
+                return ch, await asyncio.wait_for(probe_channel_source(ch, http_client), timeout=24)
             except asyncio.TimeoutError:
                 logger.warning("测速超时: %s", ch.get('name', ch.get('url', ''))[:60])
-                return ch, {"working": False, "latency_ms": 0}
+                return ch, {"probe_status": "timeout", "latency_ms": 0, "last_error": "timeout"}
+            except Exception as exc:
+                return ch, {"probe_status": "error", "latency_ms": 0, "last_error": str(exc)[:300]}
 
-    tasks = [_limited_test(ch) for ch in channels]
-    for coro in asyncio.as_completed(tasks):
-        try:
-            ch, result = await coro
-            await db.update_channel_status(
-                ch['id'],
-                is_working = 1 if result['working'] is True else (-1 if result['working'] == -1 else 0),
-                latency_ms=result['latency_ms'],
-            )
-        except Exception as e:
-            logger.warning("测速异常: %s", e)
-        _global_test_progress['tested'] += 1
-        if result.get('working'):
-            _global_test_progress['working'] += 1
+    try:
+        tasks = [asyncio.create_task(_limited_test(ch)) for ch in channels]
+        for coro in asyncio.as_completed(tasks):
+            if cancel_event.is_set():
+                break
+            result = {"probe_status": "error", "latency_ms": 0, "last_error": "unknown"}
+            ch = None
+            try:
+                ch, result = await coro
+                _global_test_progress["current"] = ch.get("name", "")
+                _global_test_progress["phase"] = result.get("probe_method", "")
+                await db.update_channel_probe_result(ch['id'], result)
+            except Exception as e:
+                logger.warning("测速异常: %s", e)
+                if ch:
+                    await db.update_channel_probe_result(ch['id'], result)
+            bucket = _probe_status_to_bucket(str(result.get("probe_status") or "error"))
+            _global_test_progress['tested'] += 1
+            _global_test_progress[bucket] += 1
+            tested = _global_test_progress['tested']
+            total = _global_test_progress['total']
+            if tested % 50 == 0 or tested == total:
+                logger.info(
+                    "测速进度: %d/%d (可用:%d 不可用:%d 未开播:%d 未测试:%d)",
+                    tested,
+                    total,
+                    _global_test_progress['working'],
+                    _global_test_progress['failed'],
+                    _global_test_progress['not_live'],
+                    _global_test_progress['untested'],
+                )
+        if cancel_event.is_set():
+            for task in tasks:
+                task.cancel()
+            _global_test_progress["phase"] = "cancelled"
+            _global_test_progress["cancelled"] = True
+            await asyncio.gather(*tasks, return_exceptions=True)
         else:
-            _global_test_progress['failed'] += 1
-        tested = _global_test_progress['tested']
-        total = _global_test_progress['total']
-        if tested % 50 == 0 or tested == total:
-            logger.info("测速进度: %d/%d (可用:%d 不可用:%d)", tested, total, _global_test_progress['working'], _global_test_progress['failed'])
-    # 测速完成，更新所有订阅的 last_tested
-    now = datetime.now(timezone.utc).isoformat()
-    subs = await db.get_subscriptions()
-    for sub in subs:
-        await db.update_subscription(sub['id'], last_tested=now)
+            # 测速完成，更新所有订阅的 last_tested
+            now = datetime.now(timezone.utc).isoformat()
+            subs = await db.get_subscriptions()
+            for sub in subs:
+                await db.update_subscription(sub['id'], last_tested=now)
+    except asyncio.CancelledError:
+        cancel_event.set()
+        _global_test_progress["phase"] = "cancelled"
+        _global_test_progress["cancelled"] = True
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+    finally:
+        await _finish_speed_test()
+
+
+@app.post("/api/iptv/test-cancel")
+async def cancel_speed_test():
+    async with _speed_test_lock:
+        if not _speed_test_running:
+            return {"cancelled": False, "running": False}
+        if _speed_test_cancel_event:
+            _speed_test_cancel_event.set()
+        if _speed_test_task and not _speed_test_task.done():
+            _speed_test_task.cancel()
+        return {"cancelled": True, "running": True}
 
 
 @app.get("/api/iptv/test-status")
 async def global_test_status():
-    return _global_test_progress
-
-
-async def _test_single_channel(ch: dict) -> dict:
-    """测速单个频道：GET URL → 判断是否 M3U8 → HEAD 第一个 TS 分片"""
-    url = ch['url']
-    custom_ua = ch.get('custom_ua', '')
-    headers = {'User-Agent': custom_ua} if custom_ua else {}
-    if ch.get('referer'):
-        headers['Referer'] = ch.get('referer')
-    start = time.time()
-    from m3u8_parser import detect_source_type
-
-    source_type = ch.get('source_type') if ch.get('source_type') and ch.get('source_type') != 'hls' else detect_source_type(url)
-    if source_type == 'adapter':
-        try:
-            resolved = await resolve_adapter_source(url, http_client)
-            url = str(resolved.get('url') or '')
-            resolved_headers = resolved.get('headers') if isinstance(resolved.get('headers'), dict) else {}
-            headers.update({str(k): str(v) for k, v in resolved_headers.items()})
-        except AdapterResolveError:
-            return {"working": False, "latency_ms": 0}
-
-    # RTSP/RTMP 暂不支持 HTTP 测速，标记为未测试
-    if url.startswith(('rtsp://', 'rtmp://')):
-        return {"working": -1, "latency_ms": 0}
-    try:
-        resp = await http_client.get(url, follow_redirects=True, timeout=8, headers=headers)
-        latency = (time.time() - start) * 1000
-
-        content_type = resp.headers.get('content-type', '').lower()
-        is_m3u8 = any(t in content_type for t in ('mpegurl', 'm3u8', 'x-mpegurl')) or url.endswith('.m3u8')
-
-        if is_m3u8 and resp.status_code == 200:
-            # 解析 M3U8 找第一个 TS 分片
-            ts_url = _find_first_ts_url(resp.text, url)
-            if ts_url:
-                ts_start = time.time()
-                ts_resp = await http_client.head(ts_response_url(ts_url), follow_redirects=True, timeout=5, headers=headers)
-                ts_latency = (time.time() - ts_start) * 1000
-                if ts_resp.status_code < 400:
-                    return {"working": True, "latency_ms": round(latency + ts_latency, 1)}
-            # M3U8 可达就算可用
-            return {"working": True, "latency_ms": round(latency, 1)}
-
-        if resp.status_code < 400:
-            return {"working": True, "latency_ms": round(latency, 1)}
-
-        return {"working": False, "latency_ms": 0}
-    except Exception:
-        return {"working": False, "latency_ms": 0}
-
-
-def _find_first_ts_url(m3u8_text: str, base_url: str) -> str | None:
-    """从 M3U8 文本中找第一个 TS 分片 URL"""
-    base = base_url.rsplit('/', 1)[0] + '/'
-    for line in m3u8_text.splitlines():
-        line = line.strip()
-        if line and not line.startswith('#') and (
-            '.ts' in line or '.aac' in line or '.mp4' in line or '.fmp4' in line
-        ):
-            if line.startswith('http'):
-                return line
-            return base + line
-    return None
-
-
-def ts_response_url(ts_url: str) -> str:
-    return ts_url
-
-
-@app.post("/api/iptv/subscriptions/{sub_id}/test-all")
-async def test_all_channels(sub_id: int):
-    sub = await db.get_subscription(sub_id)
-    if not sub:
-        raise HTTPException(status_code=404, detail="订阅不存在")
-
-    channels = await db.get_channels(sub_id)
-    if not channels:
-        raise HTTPException(status_code=400, detail="无频道可测速")
-
-    # 重置状态
-    await db.reset_channel_statuses(sub_id)
-    _test_progress[sub_id] = {"total": len(channels), "tested": 0, "working": 0, "failed": 0}
-
-    asyncio.create_task(_run_speed_test(sub_id, channels))
-    return {"total": len(channels)}
-
-
-async def _run_speed_test(sub_id: int, channels: list[dict]):
-    semaphore = asyncio.Semaphore(10)
-
-    async def _limited_test(ch):
-        async with semaphore:
-            return ch, await _test_single_channel(ch)
-
-    tasks = [_limited_test(ch) for ch in channels]
-    for coro in asyncio.as_completed(tasks):
-        ch, result = await coro
-        await db.update_channel_status(
-            ch['id'],
-            is_working = 1 if result['working'] is True else (-1 if result['working'] == -1 else 0),
-            latency_ms=result['latency_ms'],
-        )
-        prog = _test_progress[sub_id]
-        prog['tested'] += 1
-        if result['working']:
-            prog['working'] += 1
-        else:
-            prog['failed'] += 1
+    return _global_test_progress or _empty_test_progress()
 
 
 @app.get("/api/iptv/subscriptions/{sub_id}/test-status")
 async def test_status(sub_id: int):
-    return _test_progress.get(sub_id, {"total": 0, "tested": 0, "working": 0, "failed": 0})
+    return _test_progress.get(sub_id, _empty_test_progress())
 
 
 # ── 播放代理 ──
@@ -3121,6 +3176,7 @@ def _sorted_sources(sources: list[dict]) -> list[dict]:
     return sorted(sources, key=lambda u: (
         0 if u.get('is_working') == 1 else 1 if u.get('is_working') == -1 else 2,
         u.get('latency_ms') or 9999,
+        -(u.get('speed_mbps') or 0),
     ))
 
 
@@ -3195,6 +3251,7 @@ def _subscription_urls_for_channel(channel: dict, mode: str, request: Request, h
             and not source.get('force_proxy')
             and not source.get('custom_ua')
             and not source.get('referer')
+            and not source.get('proxy_required_hint')
         ]
 
     if mode == 'proxy':
@@ -3204,7 +3261,7 @@ def _subscription_urls_for_channel(channel: dict, mode: str, request: Request, h
     proxy_only_sources = []
     for source in sources:
         source_type = _source_type(source)
-        if source_type in {'adapter', 'rtsp'} or source.get('force_proxy') or source.get('custom_ua') or source.get('referer'):
+        if source_type in {'adapter', 'rtsp'} or source.get('force_proxy') or source.get('custom_ua') or source.get('referer') or source.get('proxy_required_hint'):
             proxy_only_sources.append(source)
         else:
             direct_sources.append(source)
