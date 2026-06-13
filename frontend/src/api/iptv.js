@@ -62,6 +62,11 @@ export async function testAllChannels(subId) {
   return res.json()
 }
 
+export async function cancelTest() {
+  const res = await request('/api/iptv/test-cancel', { method: 'POST' })
+  return res.json()
+}
+
 export async function fetchTestStatus(subId) {
   const res = await request(`/api/iptv/subscriptions/${subId}/test-status`)
   return res.json()

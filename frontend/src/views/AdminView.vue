@@ -28,8 +28,13 @@
         </button>
         <button type="button"
           class="rounded-full border border-neutral-200 bg-white/70 px-3 py-1.5 text-xs font-medium text-neutral-600 backdrop-blur-xl transition-all hover:scale-[1.03] active:scale-95 dark:border-neutral-700 dark:bg-neutral-800/70 dark:text-neutral-300"
-          :disabled="testRunning" @click="handleTestAll">
+          @click="handleTestAll">
           {{ testRunning ? `测速中 ${testProgress.tested}/${testProgress.total}` : '全部测速' }}
+        </button>
+        <button v-if="testRunning" type="button"
+          class="rounded-full border border-red-200 bg-red-50/80 px-3 py-1.5 text-xs font-medium text-red-500 backdrop-blur-xl transition-all hover:scale-[1.03] active:scale-95 dark:border-red-900/60 dark:bg-red-950/30 dark:text-red-300"
+          @click="handleCancelTest">
+          取消测速
         </button>
         <button type="button"
           class="rounded-full bg-neutral-950 px-3 py-1.5 text-xs font-medium text-white transition-all hover:scale-[1.03] active:scale-95 dark:bg-white dark:text-black"
@@ -48,7 +53,11 @@
     <div v-if="testRunning" class="mb-4 flex gap-4 text-xs text-neutral-400 dark:text-neutral-500">
       <span>可用: {{ testProgress.working }}</span>
       <span>不可用: {{ testProgress.failed }}</span>
-      <span>剩余: {{ testProgress.total - testProgress.tested }}</span>
+      <span v-if="testProgress.not_live">未开播: {{ testProgress.not_live }}</span>
+      <span v-if="testProgress.untested">未测试: {{ testProgress.untested }}</span>
+      <span>剩余: {{ Math.max(0, testProgress.total - testProgress.tested) }}</span>
+      <span v-if="testProgress.phase">阶段: {{ testProgress.phase }}</span>
+      <span v-if="testProgress.current">当前: {{ testProgress.current }}</span>
     </div>
 
     <!-- 添加订阅 -->
@@ -293,7 +302,7 @@
 import { ref, onMounted, onBeforeUnmount } from 'vue'
 import {
   fetchSubscriptions, addSubscription, deleteSubscription, refreshSubscription, refreshAllSubscriptions,
-  testAllGlobal, fetchGlobalTestStatus,
+  testAllChannels, testAllGlobal, fetchGlobalTestStatus, cancelTest,
 } from '../api/iptv'
 import { API_BASE } from '../apiBase'
 
@@ -306,7 +315,18 @@ const addError = ref('')
 const addLoading = ref(false)
 const refreshRunning = ref(false)
 const testRunning = ref(false)
-const testProgress = ref({ total: 0, tested: 0, working: 0, failed: 0 })
+const emptyTestProgress = (total = 0) => ({
+  total,
+  tested: 0,
+  working: 0,
+  failed: 0,
+  not_live: 0,
+  untested: 0,
+  phase: '',
+  current: '',
+  cancelled: false,
+})
+const testProgress = ref(emptyTestProgress())
 const exportDialogOpen = ref(false)
 const advancedOpen = ref(false)
 const copiedMode = ref('')
@@ -415,12 +435,14 @@ async function handleRefreshAll() {
 }
 
 async function handleTestSub(sub) {
-  if (testRunning.value) return
+  if (testRunning.value) {
+    alert('已有测速任务正在进行中')
+    return
+  }
   try {
-    const res = await fetch(`${API_BASE}/api/iptv/subscriptions/${sub.id}/test-all`, { method: 'POST' })
-    const data = await res.json()
+    const data = await testAllChannels(sub.id)
     testRunning.value = true
-    testProgress.value = { total: data.total || 0, tested: 0, working: 0, failed: 0 }
+    testProgress.value = emptyTestProgress(data.total || 0)
     testTimer = setInterval(pollTestStatus, 1000)
   } catch (e) {
     alert(`测速失败: ${e.message}`)
@@ -428,22 +450,40 @@ async function handleTestSub(sub) {
 }
 
 async function handleTestAll() {
-  if (testRunning.value) return
+  if (testRunning.value) {
+    alert('已有测速任务正在进行中')
+    return
+  }
   try {
     const res = await testAllGlobal()
     testRunning.value = true
-    testProgress.value = { total: res.total || 0, tested: 0, working: 0, failed: 0 }
+    testProgress.value = emptyTestProgress(res.total || 0)
     testTimer = setInterval(pollTestStatus, 1000)
   } catch (e) {
     alert(`启动测速失败: ${e.message}`)
   }
 }
 
+async function handleCancelTest() {
+  try {
+    await cancelTest()
+    testProgress.value = { ...testProgress.value, cancelled: true, phase: 'cancelled' }
+  } catch (e) {
+    alert(`取消测速失败: ${e.message}`)
+    return
+  }
+  testRunning.value = false
+  if (testTimer) {
+    clearInterval(testTimer)
+    testTimer = null
+  }
+}
+
 async function pollTestStatus() {
   try {
     const status = await fetchGlobalTestStatus()
-    testProgress.value = status
-    if (status.tested >= status.total && status.total > 0) {
+    testProgress.value = { ...emptyTestProgress(), ...status }
+    if (status.cancelled || (status.tested >= status.total && status.total > 0)) {
       testRunning.value = false
       clearInterval(testTimer)
       testTimer = null
