@@ -56,17 +56,13 @@
             :key="item.channel.name"
             type="button"
             :aria-label="`播放 ${item.channel.name}`"
-            :style="[coverStyle(item.channel), { height: `${cardHeight}px` }]"
+            :style="{ height: `${cardHeight}px` }"
             :disabled="isUnavailable(item.channel)"
             class="channel-card group relative overflow-hidden rounded-[18px] border border-[var(--border)] bg-[var(--card-bg)] text-left outline-none transition duration-200 ease-out hover:-translate-y-0.5 hover:border-[var(--border-strong)] disabled:cursor-not-allowed disabled:opacity-45"
             :class="[defaultCoverClass(item.channel), { 'channel-card-current': isCurrentChannel(item.channel) }]"
             @click="playChannel(item.channel)"
           >
-            <span
-              v-if="cardVisualType(item.channel) === 'logo-card'"
-              class="channel-card__logo-card-visual"
-              aria-hidden="true"
-            >
+            <span class="channel-card__logo-card-visual" aria-hidden="true">
               <img
                 v-if="channelLogoUrl(item.channel)"
                 class="channel-card__center-logo"
@@ -76,37 +72,18 @@
               />
               <span class="channel-card__logo-card-shade"></span>
             </span>
-            <span class="channel-index-badge">{{ item.index + 1 }}</span>
-            <span v-if="cardVisualType(item.channel) === 'cover'" class="channel-card-scrim"></span>
             <span class="card-info">
               <span class="card-channel">
-                <img
-                  class="card-logo"
-                  :src="channelLogoUrl(item.channel) || DEFAULT_LOGO_URL"
-                  :alt="item.channel.name"
-                  @error="useDefaultLogo"
+                <span
+                  class="channel-play-state-dot"
+                  :class="channelStatusDotClass(item.channel)"
+                  :title="channelStatusLabel(item.channel)"
+                  :aria-label="channelStatusLabel(item.channel)"
+                  role="img"
                 />
                 <span class="card-channel-name">{{ item.channel.name }}</span>
               </span>
               <span class="card-program-name">{{ cardSubtitle(item.channel) }}</span>
-            </span>
-            <span
-              v-if="isUntested(item.channel)"
-              class="channel-status-badge channel-status-badge--neutral"
-            >
-              未测试
-            </span>
-            <span
-              v-else-if="isAllNotLive(item.channel)"
-              class="channel-status-badge channel-status-badge--warn"
-            >
-              未开播
-            </span>
-            <span
-              v-else-if="isAllFailed(item.channel)"
-              class="channel-status-badge channel-status-badge--danger"
-            >
-              不可用
             </span>
           </button>
         </div>
@@ -121,7 +98,6 @@ import { useScroll, useThrottleFn } from '@vueuse/core'
 import { usePlayerStore } from '../stores/player'
 import { fetchAggregatedChannels } from '../api/iptv'
 import { useEpg } from '../composables/useEpg'
-import { publicAsset } from '../publicAsset'
 import TagFilterRow from '../components/TagFilterRow.vue'
 
 const playerStore = usePlayerStore()
@@ -135,7 +111,6 @@ const selectedGroup = ref('')
 const loading = ref(false)
 const epgMap = ref({})
 const channelSortMode = ref('original')
-const DEFAULT_LOGO_URL = publicAsset('/logos/default.png')
 const categoryTabs = computed(() => ['全部', ...allGroups.value])
 
 const SORT_MODES = [
@@ -162,13 +137,6 @@ function selectCategoryTab(tab) {
 
 function isSelectedCategory(tab) {
   return tab === '全部' ? !selectedGroup.value : selectedGroup.value === tab
-}
-
-function useDefaultLogo(event) {
-  const img = event?.target
-  if (!img || img.dataset.logoFallback === '1') return
-  img.dataset.logoFallback = '1'
-  img.src = DEFAULT_LOGO_URL
 }
 
 async function loadChannels() {
@@ -243,27 +211,26 @@ function cardSubtitle(ch) {
   return currentProgramTitle(ch) || ch.group_name || ''
 }
 
-function channelCoverUrl(ch) {
-  return ch.cover || ch.cover_url || ch.poster || ch.poster_url || ch.thumbnail || ch.thumbnail_url || ch.image || ch.image_url || ''
+function channelStatusKind(ch) {
+  if (isAllNotLive(ch)) return 'warn'
+  if (isAllFailed(ch)) return 'danger'
+  if (isUntested(ch)) return 'neutral'
+  return 'live'
 }
 
-function cardVisualType(ch) {
-  if (channelCoverUrl(ch)) return 'cover'
-  return 'logo-card'
+function channelStatusDotClass(ch) {
+  return `channel-play-state-dot--${channelStatusKind(ch)}`
 }
 
-function coverStyle(ch) {
-  const cover = channelCoverUrl(ch)
-  if (!cover) return {}
-  return {
-    backgroundImage: `url("${String(cover).replace(/"/g, '\\"')}")`,
-    backgroundSize: 'cover',
-    backgroundPosition: 'center',
-  }
+function channelStatusLabel(ch) {
+  const kind = channelStatusKind(ch)
+  if (kind === 'warn') return '未开播'
+  if (kind === 'danger') return '不可用'
+  if (kind === 'neutral') return '未测试'
+  return '可播放'
 }
 
-function defaultCoverClass(ch) {
-  if (channelCoverUrl(ch)) return 'has-cover-image'
+function defaultCoverClass() {
   return 'channel-card--logo-card'
 }
 
@@ -312,8 +279,8 @@ const gap = computed(() => 20)
 
 const columns = computed(() => {
   const w = viewportWidth.value
-  if (w >= 1280) return 4
-  if (w >= 1024) return 3
+  if (w >= 1280) return 5
+  if (w >= 1024) return 4
   return 2
 })
 
@@ -330,9 +297,8 @@ const rows = computed(() => {
   const channels = filteredChannels.value
   const result = []
   for (let i = 0; i < channels.length; i += cols) {
-    result.push(channels.slice(i, i + cols).map((channel, offset) => ({
+    result.push(channels.slice(i, i + cols).map((channel) => ({
       channel,
-      index: i + offset,
     })))
   }
   return result
