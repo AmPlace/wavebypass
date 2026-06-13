@@ -2,21 +2,42 @@
   <div
     ref="scrollRef"
     class="app-root h-dvh overflow-y-auto font-sans text-[var(--text-primary)] antialiased transition-colors duration-300"
-    :class="{ 'desktop-shell': hasDesktopShell }"
+    :class="{ 'desktop-shell': hasDesktopShell, 'sidebar-collapsed': sidebarCollapsed }"
   >
     <aside
-      class="fixed bottom-0 left-0 top-0 z-40 hidden w-[232px] border-r border-[var(--border)] bg-[var(--sidebar-bg)] px-3 py-6 backdrop-blur-[10px] backdrop-saturate-110 lg:flex lg:flex-col"
+      class="app-sidebar fixed bottom-0 left-0 top-0 z-40 hidden border-r border-[var(--border)] bg-[var(--sidebar-bg)] px-3 py-6 backdrop-blur-[10px] backdrop-saturate-110 lg:flex lg:flex-col"
     >
+      <div class="sidebar-header relative mb-8 h-9">
+        <button
+          type="button"
+          class="sidebar-brand absolute left-3 top-0 flex h-9 min-w-0 items-center gap-3 text-left"
+          :tabindex="sidebarCollapsed ? -1 : 0"
+          aria-label="WaveBypass 首页"
+          @click="router.push('/')"
+        >
+          <span class="flex size-9 shrink-0 items-center justify-center rounded-2xl border border-[var(--border)] bg-[var(--surface)] text-[var(--text-primary)]">
+            <svg class="size-5" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m12 3 8 4.5-8 4.5-8-4.5L12 3Zm8 9-8 4.5L4 12m16 4.5L12 21l-8-4.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </span>
+          <span class="truncate text-sm font-semibold tracking-normal">WaveBypass</span>
+        </button>
+      </div>
+
       <button
         type="button"
-        class="mb-8 flex items-center gap-3 px-3 text-left"
-        aria-label="WaveBypass 首页"
-        @click="router.push('/')"
+        class="sidebar-toggle flex size-9 shrink-0 items-center justify-center rounded-2xl border border-transparent text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)]"
+        :title="sidebarCollapsed ? '展开侧边栏' : '折叠侧边栏'"
+        :aria-label="sidebarCollapsed ? '展开侧边栏' : '折叠侧边栏'"
+        @click="toggleSidebar"
       >
-        <span class="flex size-9 items-center justify-center rounded-2xl border border-[var(--border)] bg-[var(--surface)] text-[var(--text-primary)]">
-          <svg class="size-5" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m12 3 8 4.5-8 4.5-8-4.5L12 3Zm8 9-8 4.5L4 12m16 4.5L12 21l-8-4.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        </span>
-        <span class="text-sm font-semibold tracking-normal">WaveBypass</span>
+        <svg
+          class="size-5 transition-transform duration-300"
+          :class="{ 'rotate-180': sidebarCollapsed }"
+          viewBox="0 0 24 24"
+          fill="none"
+          aria-hidden="true"
+        >
+          <path d="M15 6 9 12l6 6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
       </button>
 
       <nav class="flex flex-1 flex-col gap-1">
@@ -24,8 +45,9 @@
           v-for="item in primaryNavItems"
           :key="item.label"
           type="button"
-          class="flex h-12 items-center gap-3 rounded-2xl border px-3 text-sm font-medium transition-colors"
+          class="nav-item flex h-12 items-center gap-3 rounded-2xl border px-3 text-sm font-medium transition-colors"
           :class="navItemClass(item)"
+          :title="sidebarCollapsed ? item.label : undefined"
           :aria-current="item.active ? 'page' : undefined"
           @click="activateNavItem(item)"
         >
@@ -34,7 +56,7 @@
           <svg v-else-if="item.icon === 'star'" class="size-5 shrink-0" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m12 4 2.35 4.76 5.25.76-3.8 3.7.9 5.23L12 15.98l-4.7 2.47.9-5.23-3.8-3.7 5.25-.76L12 4Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
           <svg v-else-if="item.icon === 'calendar'" class="size-5 shrink-0" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="4" y="5.5" width="16" height="15" rx="2" stroke="currentColor" stroke-width="1.8"/><path d="M8 3.5v4M16 3.5v4M4 10h16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
           <svg v-else-if="item.icon === 'clock'" class="size-5 shrink-0" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="8" stroke="currentColor" stroke-width="1.8"/><path d="M12 7.5v5l3 1.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          <span class="truncate">{{ item.label }}</span>
+          <span class="nav-label truncate">{{ item.label }}</span>
         </button>
 
         <div class="my-4 h-px bg-[var(--border)]"></div>
@@ -43,15 +65,16 @@
           v-for="item in secondaryNavItems"
           :key="item.label"
           type="button"
-          class="flex h-12 items-center gap-3 rounded-2xl border px-3 text-sm font-medium transition-colors"
+          class="nav-item flex h-12 items-center gap-3 rounded-2xl border px-3 text-sm font-medium transition-colors"
           :class="navItemClass(item)"
+          :title="sidebarCollapsed ? item.label : undefined"
           :aria-current="item.active ? 'page' : undefined"
           @click="activateNavItem(item)"
         >
           <svg v-if="item.icon === 'layers'" class="size-5 shrink-0" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 8.4 12 4l8 4.4-8 4.4L4 8.4Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M4 12.2 12 16.6l8-4.4M4 16l8 4.4L20 16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
           <svg v-else-if="item.icon === 'settings'" class="size-5 shrink-0" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12.22 3h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V5a2 2 0 0 0-2-2Z" stroke="currentColor" stroke-width="1.65"/><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="1.65"/></svg>
           <svg v-else class="size-5 shrink-0" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="8" stroke="currentColor" stroke-width="1.8"/><path d="M12 11.5v5M12 8h.01" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-          <span class="truncate">{{ item.label }}</span>
+          <span class="nav-label truncate">{{ item.label }}</span>
         </button>
       </nav>
     </aside>
@@ -137,7 +160,7 @@
       </button>
     </div>
 
-    <div class="lg:pl-[232px]">
+    <div class="app-main">
       <router-view />
     </div>
 
@@ -170,6 +193,14 @@ const { activeMode } = storeToRefs(playerStore)
 const router = useRouter()
 const route = useRoute()
 const hasDesktopShell = computed(() => true)
+const SIDEBAR_STORAGE_KEY = 'wavebypass-sidebar-collapsed'
+const sidebarCollapsed = ref(window.localStorage.getItem(SIDEBAR_STORAGE_KEY) === '1')
+watch(sidebarCollapsed, (value) => {
+  window.localStorage.setItem(SIDEBAR_STORAGE_KEY, value ? '1' : '0')
+})
+function toggleSidebar() {
+  sidebarCollapsed.value = !sidebarCollapsed.value
+}
 const primaryNavItems = computed(() => [
   { label: '首页', icon: 'home', route: '/', active: route.path === '/' },
   { label: '直播', icon: 'tv', route: '/iptv', active: route.path === '/iptv' },
