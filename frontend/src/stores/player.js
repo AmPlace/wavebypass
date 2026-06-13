@@ -33,6 +33,11 @@ export const usePlayerStore = defineStore('player', {
         return
       }
 
+      // 停止 IPTV 播放
+      this.currentIptvChannel = null
+      this.pendingIptvChannel = null
+      this.iptvUrls = []
+      this.iptvUrlIndex = 0
       this.currentStation = stationId
 
       this.playbackError = ''
@@ -87,9 +92,6 @@ export const usePlayerStore = defineStore('player', {
       const merged = { ...this.stationMap }
       for (const s of stations) merged[s.id] = s
       this.stationMap = merged
-      if (!this.currentStation && stations.length) {
-        this.currentStation = stations[0].id
-      }
     },
 
     updateStationEpg(stationId, subtitle) {

@@ -518,17 +518,26 @@ onMounted(() => {
   if (audioRef.value) {
     audioRef.value.volume = volume.value
   }
-  loadStation(currentStation.value)
+  if (playerStore.isPlaying) {
+    loadStation(currentStation.value)
+  }
 })
 
 watch(currentStation, (stationId) => {
-  loadStation(stationId)
+  if (playerStore.isPlaying) {
+    loadStation(stationId)
+  }
 })
 
 watch(isPlaying, (nextIsPlaying) => {
   if (!audioRef.value) return
   if (nextIsPlaying) {
     if (playerStore.currentIptvChannel) return // IPTV 模式下 AudioEngine 不播
+    // 首次播放时音源尚未加载，通过 loadStation 加载并播放
+    if (!audioRef.value.src && !hlsRef.value && !directStreamMode.value) {
+      loadStation(currentStation.value)
+      return
+    }
     playAudioSafely()
     return
   }

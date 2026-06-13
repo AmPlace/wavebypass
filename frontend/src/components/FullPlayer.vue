@@ -764,7 +764,7 @@ const currentStationData = computed(() => stationMap.value[currentStation.value]
 
 const currentStationName = computed(() => {
   if (displayIptvChannel.value) return displayIptvChannel.value.name
-  return currentStationData.value?.name || '未选择电台'
+  return currentStationData.value?.name || '未选择频道'
 })
 
 const statusText = computed(() => {
@@ -773,7 +773,7 @@ const statusText = computed(() => {
   if (displayIptvChannel.value) return displayIptvChannel.value.group_name || 'IPTV'
   const subtitle = currentStationData.value?.subtitle
   if (subtitle) return subtitle
-  return 'Live'
+  return 'WaveFlow'
 })
 
 const channelList = computed(() => stationList.value)
@@ -3665,6 +3665,12 @@ watch(iptvVideoRef, (el) => {
 
 // IptvHome 已同步设置 src + play，这里跳过
 watch(() => playerStore.currentIptvChannel, async (ch) => {
+  if (!ch) {
+    resetIptvVideo()
+    destroyIptvEngines()
+    iptvSourceRuntimeStatus.value = {}
+    return
+  }
   if (ch) {
     sourceMenuOpen.value = false
     iptvSourceRuntimeStatus.value = {}

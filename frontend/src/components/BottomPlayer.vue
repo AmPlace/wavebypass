@@ -113,7 +113,7 @@ const currentStationName = computed(() => {
   if (displayIptvChannel.value) {
     return displayIptvChannel.value.name
   }
-  return playerStore.stationMap[currentStation.value]?.name || currentStation.value || '未选择电台'
+  return playerStore.stationMap[currentStation.value]?.name || currentStation.value || '未选择频道'
 })
 
 const currentLogoUrl = computed(() => {
@@ -135,7 +135,7 @@ const statusText = computed(() => {
     return prog?.title || displayIptvChannel.value.group_name || 'IPTV'
   }
 
-  return 'Live'
+  return 'WaveFlow'
 })
 </script>
 
