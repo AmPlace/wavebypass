@@ -5,17 +5,63 @@
 @tailwind utilities;
 
 @layer base {
+  :root {
+    --bg: #F6F7F8;
+    --bg-soft: #FFFFFF;
+    --surface: rgba(0,0,0,0.035);
+    --surface-strong: rgba(0,0,0,0.065);
+    --surface-hover: rgba(0,0,0,0.085);
+    --surface-active: rgba(0,0,0,0.10);
+    --border: rgba(0,0,0,0.08);
+    --border-strong: rgba(0,0,0,0.13);
+    --text-primary: rgba(0,0,0,0.88);
+    --text-secondary: rgba(0,0,0,0.58);
+    --text-tertiary: rgba(0,0,0,0.38);
+    --sidebar-bg: rgba(255,255,255,0.82);
+    --player-bg: rgba(255,255,255,0.82);
+    --card-bg: rgba(255,255,255,0.72);
+    --fallback-card-bg: #DDE0E4;
+    --fallback-card-start: #EEF0F2;
+    --fallback-card-end: #C9CED4;
+    --fallback-card-soft: rgba(255,255,255,0.22);
+    --fallback-border: rgba(0,0,0,0.10);
+    --fallback-shadow: 0 5px 18px rgba(0,0,0,0.10);
+  }
+
+  .dark {
+    --bg: #090A0B;
+    --bg-soft: #0D0E10;
+    --surface: rgba(255,255,255,0.045);
+    --surface-strong: rgba(255,255,255,0.075);
+    --surface-hover: rgba(255,255,255,0.095);
+    --surface-active: rgba(255,255,255,0.13);
+    --border: rgba(255,255,255,0.075);
+    --border-strong: rgba(255,255,255,0.13);
+    --text-primary: rgba(255,255,255,0.94);
+    --text-secondary: rgba(255,255,255,0.66);
+    --text-tertiary: rgba(255,255,255,0.42);
+    --sidebar-bg: rgba(10,11,12,0.84);
+    --player-bg: rgba(24,25,27,0.78);
+    --card-bg: rgba(255,255,255,0.045);
+    --fallback-card-bg: #25282D;
+    --fallback-card-start: #343840;
+    --fallback-card-end: #191C21;
+    --fallback-card-soft: rgba(255,255,255,0.055);
+    --fallback-border: rgba(255,255,255,0.08);
+    --fallback-shadow: none;
+  }
+
   html {
     height: 100%;
     min-height: 100%;
-    background: #f8f8f7;
+    background: var(--bg);
     color-scheme: light;
     -webkit-text-size-adjust: 100%;
     text-size-adjust: 100%;
   }
 
   html.dark {
-    background: #111113;
+    background: var(--bg);
     color-scheme: dark;
   }
 
@@ -24,23 +70,23 @@
     height: 100%;
     min-height: 100%;
     min-width: 320px;
-    background: #f8f8f7;
+    background: var(--bg);
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
   }
 
   html.dark body {
-    background: #111113;
+    background: var(--bg);
   }
 
   #app {
     height: 100%;
     min-height: 100%;
-    background: #f8f8f7;
+    background: var(--bg);
   }
 
   html.dark #app {
-    background: #111113;
+    background: var(--bg);
   }
 
   button,
@@ -50,6 +96,35 @@
 }
 
 @layer components {
+  .app-root {
+    background: var(--bg);
+  }
+
+  .mobile-action-btn,
+  .desktop-action-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 2.5rem;
+    height: 2.5rem;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text-primary);
+    transition: background-color 180ms ease, transform 180ms ease, border-color 180ms ease;
+  }
+
+  .mobile-action-btn:hover,
+  .desktop-action-btn:hover {
+    background: var(--surface-hover);
+    border-color: var(--border-strong);
+  }
+
+  .mobile-action-btn:active,
+  .desktop-action-btn:active {
+    transform: scale(0.96);
+  }
+
   /* 去掉 Firefox range 轨道默认边框。 */
   input[type='range']::-moz-range-track {
     border: 0;
