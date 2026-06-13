@@ -1,43 +1,39 @@
 <template>
-  <main class="mx-auto flex min-h-screen w-full max-w-7xl flex-col items-center px-5 pt-[calc(env(safe-area-inset-top)+3.5rem)] pb-36 sm:px-8 lg:px-10">
-
-    <header class="mb-6 w-full space-y-3">
-      <div class="flex flex-wrap items-center gap-2">
-        <span class="shrink-0 text-xs text-gray-400 dark:text-gray-500">分组</span>
-        <button
-          type="button"
-          class="rounded-full border px-3 py-1 text-xs transition-colors"
-          :class="pillClass(!selectedGroup)"
-          @click="selectedGroup = ''; loadChannels()"
-        >
-          全部
-        </button>
-        <button
-          v-for="g in allGroups"
-          :key="g"
-          type="button"
-          class="rounded-full border px-3 py-1 text-xs transition-colors"
-          :class="pillClass(selectedGroup === g)"
-          @click="selectedGroup = g; loadChannels()"
-        >
-          {{ g }}
-        </button>
+  <main class="iptv-main min-h-screen w-full px-5 pb-32 pt-[calc(env(safe-area-inset-top)+4rem)] sm:px-8 lg:px-10 lg:pb-40 lg:pt-6">
+    <header class="mb-7 space-y-7">
+      <div class="flex min-h-12 items-start justify-between gap-6 lg:pr-[300px]">
+        <div class="scrollbar-hide flex max-w-full gap-2 overflow-x-auto pb-1">
+          <button
+            v-for="tab in categoryTabs"
+            :key="tab"
+            type="button"
+            class="h-11 shrink-0 rounded-full border px-5 text-sm font-medium transition-colors"
+            :class="pillClass(isSelectedCategory(tab))"
+            @click="selectCategoryTab(tab)"
+          >
+            {{ tab }}
+          </button>
+        </div>
       </div>
 
-      <div class="flex items-center justify-between">
-        <p class="text-xs text-gray-400 dark:text-gray-500">
-          共 {{ filteredChannels.length }} 个频道
-          <span v-if="loading" class="ml-2">加载中…</span>
-        </p>
+      <div class="flex items-center justify-between gap-4">
+        <div class="flex min-w-0 items-center gap-3">
+          <span class="flex size-8 shrink-0 items-center justify-center rounded-full bg-[var(--surface)] text-[var(--text-primary)]">
+            <svg class="size-4" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 12a7 7 0 0 1 14 0M2.5 12a9.5 9.5 0 0 1 19 0M9 12a3 3 0 0 1 6 0" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+          </span>
+          <h1 class="truncate text-lg font-semibold leading-none text-[var(--text-primary)]">正在直播</h1>
+          <span class="shrink-0 text-sm text-[var(--text-secondary)]">
+            共 {{ filteredChannels.length }} 个频道
+          </span>
+          <span v-if="loading" class="hidden text-sm text-[var(--text-tertiary)] sm:inline">加载中...</span>
+        </div>
+
         <button
           type="button"
-          class="inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-xs transition-colors"
-          :class="channelSortMode !== 'original'
-            ? 'border-green-500 bg-green-50 text-green-600 dark:border-green-400 dark:bg-green-900/30 dark:text-green-400'
-            : 'border-gray-300 bg-white text-gray-500 hover:bg-gray-100 dark:border-neutral-600 dark:bg-neutral-800 dark:text-gray-400 dark:hover:bg-neutral-700'"
+          class="inline-flex h-10 shrink-0 items-center gap-2 rounded-full border border-[var(--border)] bg-[var(--surface)] px-4 text-sm font-medium text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)]"
           @click="nextSortMode"
         >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="12" height="12">
+          <svg class="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="16" y2="12"/><line x1="4" y1="18" x2="12" y2="18"/>
           </svg>
           {{ currentSortLabel }}
@@ -57,68 +53,48 @@
         :style="{ transform: `translateY(${row.startIndex * (rowHeight + gap)}px)` }"
       >
         <div
-          class="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6"
-          :style="{ gap: `${gap}px` }"
+          class="grid"
+          :style="{ gap: `${gap}px`, gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }"
         >
           <button
-            v-for="ch in row.items"
-            :key="ch.name"
+            v-for="item in row.items"
+            :key="item.channel.name"
             type="button"
-            :aria-label="`播放 ${ch.name}`"
-            :style="{ height: `${cardSize}px` }"
-            :disabled="isAllFailed(ch)"
-            class="group rounded-3xl border border-white/70 bg-gray-50/80 p-3 text-left shadow-none outline-none backdrop-blur-none transition-colors duration-200 ease-out hover:bg-white/90 active:bg-white dark:border-white/10 dark:bg-neutral-800/50 dark:hover:bg-neutral-800/75"
-            :class="{
-              'ring-2 ring-black dark:ring-white': isCurrentChannel(ch),
-              'cursor-not-allowed opacity-40 hover:scale-100 hover:bg-gray-50/80 dark:hover:bg-neutral-800/50': isAllFailed(ch),
-            }"
-            @click="playChannel(ch)"
+            :aria-label="`播放 ${item.channel.name}`"
+            :style="[coverStyle(item.channel), { height: `${cardHeight}px` }]"
+            :disabled="isAllFailed(item.channel)"
+            class="channel-card group relative overflow-hidden rounded-[18px] border border-[var(--border)] bg-[var(--card-bg)] text-left outline-none transition duration-200 ease-out hover:-translate-y-0.5 hover:border-[var(--border-strong)] disabled:cursor-not-allowed disabled:opacity-45"
+            :class="[defaultCoverClass(item.channel), { 'channel-card-current': isCurrentChannel(item.channel) }]"
+            @click="playChannel(item.channel)"
           >
-            <div class="flex h-full flex-col overflow-hidden rounded-[1.25rem]">
-              <div class="flex basis-3/5 items-center justify-center">
-                <div
-                  class="flex size-16 items-center justify-center overflow-hidden rounded-full border border-black/5 bg-white text-lg font-semibold text-neutral-700 shadow-sm shadow-black/[0.04] transition-transform duration-300 ease-out group-hover:scale-105 dark:border-white/10 dark:bg-neutral-900 dark:text-neutral-200 sm:size-20"
-                >
-                  <img
-                    v-if="ch.logo_url"
-                    class="h-full w-full object-cover"
-                    :src="ch.logo_url"
-                    :alt="ch.name"
-                    @error="useDefaultLogo"
-                  />
-                  <span v-else>{{ ch.name.slice(0, 2) }}</span>
-                </div>
-              </div>
-              <div class="flex basis-2/5 flex-col items-center justify-center px-2 text-center">
-                <span class="line-clamp-1 text-sm font-medium text-gray-800 dark:text-gray-200 sm:text-[0.95rem]">
-                  {{ ch.name }}
-                </span>
-                <span
-                  v-if="ch.group_name"
-                  class="mt-0.5 line-clamp-1 text-[0.7rem] text-gray-400 dark:text-gray-500"
-                >
-                  {{ ch.group_name }}
-                </span>
-                <span
-                  v-if="epgMap[ch.canonical_key]?.current?.title"
-                  class="mt-0.5 line-clamp-1 text-[0.65rem] text-gray-500 dark:text-gray-400 italic"
-                >
-                  {{ epgMap[ch.canonical_key].current.title }}
-                </span>
-                <span
-                  v-if="isUntested(ch)"
-                  class="mt-1 rounded-full bg-neutral-200 px-1.5 py-0.5 text-[0.6rem] text-neutral-500 dark:bg-neutral-700 dark:text-neutral-400"
-                >
-                  未测试
-                </span>
-                <span
-                  v-else-if="isAllFailed(ch)"
-                  class="mt-1 rounded-full bg-red-100 px-1.5 py-0.5 text-[0.6rem] text-red-500 dark:bg-red-900/30 dark:text-red-400"
-                >
-                  不可用
-                </span>
-              </div>
-            </div>
+            <span
+              v-if="cardVisualType(item.channel) === 'logo-card'"
+              class="channel-card__logo-card-visual"
+              aria-hidden="true"
+            >
+              <img
+                v-if="channelLogoUrl(item.channel)"
+                class="channel-card__center-logo"
+                :src="channelLogoUrl(item.channel)"
+                alt=""
+                @error="onCenterLogoError"
+              />
+              <span class="channel-card__logo-card-shade"></span>
+            </span>
+            <span class="channel-index-badge">{{ item.index + 1 }}</span>
+            <span v-if="cardVisualType(item.channel) === 'cover'" class="channel-card-scrim"></span>
+            <span class="card-info">
+              <span class="card-channel">
+                <img
+                  class="card-logo"
+                  :src="channelLogoUrl(item.channel) || DEFAULT_LOGO_URL"
+                  :alt="item.channel.name"
+                  @error="useDefaultLogo"
+                />
+                <span class="card-channel-name">{{ item.channel.name }}</span>
+              </span>
+              <span class="card-program-name">{{ currentProgramTitle(item.channel) }}</span>
+            </span>
           </button>
         </div>
       </div>
@@ -149,11 +125,12 @@ const loading = ref(false)
 const epgMap = ref({})
 const channelSortMode = ref('original')
 const DEFAULT_LOGO_URL = publicAsset('/logos/default.png')
+const categoryTabs = computed(() => ['全部', ...allGroups.value])
 
 const SORT_MODES = [
-  { key: 'original', label: '默认' },
-  { key: 'natural', label: 'A-Z' },
-  { key: 'group', label: '分组' },
+  { key: 'original', label: '默认排序' },
+  { key: 'natural', label: 'A-Z排序' },
+  { key: 'group', label: '分组排序' },
 ]
 function naturalSort(a, b) {
   return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' })
@@ -162,7 +139,16 @@ function nextSortMode() {
   const idx = SORT_MODES.findIndex(m => m.key === channelSortMode.value)
   channelSortMode.value = SORT_MODES[(idx + 1) % SORT_MODES.length].key
 }
-const currentSortLabel = computed(() => SORT_MODES.find(m => m.key === channelSortMode.value)?.label || '默认')
+const currentSortLabel = computed(() => SORT_MODES.find(m => m.key === channelSortMode.value)?.label || '默认排序')
+
+function selectCategoryTab(tab) {
+  selectedGroup.value = tab === '全部' ? '' : tab
+  loadChannels()
+}
+
+function isSelectedCategory(tab) {
+  return tab === '全部' ? !selectedGroup.value : selectedGroup.value === tab
+}
 
 function useDefaultLogo(event) {
   const img = event?.target
@@ -219,6 +205,57 @@ function isAllFailed(ch) {
   return ch.urls.every(u => u.is_working === 0)
 }
 
+function currentProgramTitle(ch) {
+  return epgMap.value[ch.canonical_key]?.current?.title || ''
+}
+
+function channelCoverUrl(ch) {
+  return ch.cover || ch.cover_url || ch.poster || ch.poster_url || ch.thumbnail || ch.thumbnail_url || ch.image || ch.image_url || ''
+}
+
+function cardVisualType(ch) {
+  if (channelCoverUrl(ch)) return 'cover'
+  return 'logo-card'
+}
+
+function coverStyle(ch) {
+  const cover = channelCoverUrl(ch)
+  if (!cover) return {}
+  return {
+    backgroundImage: `url("${String(cover).replace(/"/g, '\\"')}")`,
+    backgroundSize: 'cover',
+    backgroundPosition: 'center',
+  }
+}
+
+function defaultCoverClass(ch) {
+  if (channelCoverUrl(ch)) return 'has-cover-image'
+  return 'channel-card--logo-card'
+}
+
+function onCenterLogoError(event) {
+  if (event?.currentTarget) event.currentTarget.style.display = 'none'
+}
+
+function channelLogoUrl(ch) {
+  return ch.logo_url || knownIptvLogoUrl(ch) || ''
+}
+
+function knownIptvLogoUrl(ch) {
+  const normalized = normalizeChannelLogoKey(`${ch.name || ''} ${ch.tvg_name || ''} ${ch.canonical_key || ''}`)
+  if (normalized.includes('cgtn')) return 'https://live.fanmingming.com/tv/CGTN.png'
+  const cctvMatch = normalized.match(/cctv(\d{1,2})(plus|\+)?/)
+  if (!cctvMatch) return ''
+  const suffix = cctvMatch[2] ? `${cctvMatch[1]}%2B` : cctvMatch[1]
+  return `https://live.fanmingming.com/tv/CCTV${suffix}.png`
+}
+
+function normalizeChannelLogoKey(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[\s_\-－综合高清新闻纪录少儿音乐电影电视剧体育中文外语财经农业农村科教社会与法国防军事戏曲]/g, '')
+}
+
 async function playChannel(ch) {
   if (isAllFailed(ch)) return
   if (!ch.urls || !ch.urls.length) return
@@ -231,13 +268,14 @@ async function playChannel(ch) {
 function pillClass(active) {
   return active
     ? 'border-black bg-black text-white dark:border-white dark:bg-white dark:text-black'
-    : 'border-gray-300 bg-white text-gray-600 hover:bg-gray-100 dark:border-neutral-600 dark:bg-neutral-800 dark:text-gray-300 dark:hover:bg-neutral-700'
+    : 'border-[var(--border)] bg-[var(--surface)] text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)]'
 }
 
 // ── 虚拟滚动 ──
 
 const gridRef = ref(null)
 const containerWidth = ref(1024)
+const viewportWidth = ref(typeof window === 'undefined' ? 1280 : window.innerWidth)
 let resizeObserver = null
 
 const { y: scrollY } = useScroll(scrollRef)
@@ -248,25 +286,29 @@ watchEffect(() => { throttledScrollY(scrollY.value) })
 const gap = computed(() => 20)
 
 const columns = computed(() => {
-  const w = containerWidth.value
-  if (w >= 1024) return 6
-  if (w >= 640) return 4
+  const w = viewportWidth.value
+  if (w >= 1280) return 4
+  if (w >= 1024) return 3
   return 2
 })
 
 const rowHeight = computed(() => {
   const cols = columns.value
-  return (containerWidth.value - gap.value * (cols - 1)) / cols
+  const cardWidth = (containerWidth.value - gap.value * (cols - 1)) / cols
+  return cardWidth * 9 / 16
 })
 
-const cardSize = computed(() => rowHeight.value)
+const cardHeight = computed(() => rowHeight.value)
 
 const rows = computed(() => {
   const cols = columns.value
   const channels = filteredChannels.value
   const result = []
   for (let i = 0; i < channels.length; i += cols) {
-    result.push(channels.slice(i, i + cols))
+    result.push(channels.slice(i, i + cols).map((channel, offset) => ({
+      channel,
+      index: i + offset,
+    })))
   }
   return result
 })
@@ -290,6 +332,7 @@ onMounted(() => {
   resizeObserver = new ResizeObserver((entries) => {
     for (const entry of entries) {
       containerWidth.value = entry.contentRect.width
+      viewportWidth.value = window.innerWidth
     }
   })
   if (gridRef.value) resizeObserver.observe(gridRef.value)

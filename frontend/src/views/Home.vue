@@ -1,12 +1,12 @@
 <template>
-  <main class="mx-auto flex min-h-screen w-full max-w-7xl flex-col items-center px-5 pt-[calc(env(safe-area-inset-top)+3.5rem)] pb-36 sm:px-8 lg:px-10">
-
-    <header class="mb-6 w-full space-y-3">
-      <div class="relative flex items-center">
+  <main class="radio-main min-h-screen w-full px-5 pb-32 pt-[calc(env(safe-area-inset-top)+4rem)] sm:px-8 lg:px-10 lg:pb-40 lg:pt-6">
+    <header class="mb-7 space-y-7">
+      <div class="space-y-3 lg:pr-[300px]">
+        <div class="relative flex min-h-11 items-center">
         <button
           v-show="canScrollLeft"
           type="button"
-          class="hidden shrink-0 sm:flex absolute left-0 z-10 size-7 items-center justify-center rounded-full bg-white/90 text-gray-500 shadow-sm hover:text-gray-800 dark:bg-neutral-800/90 dark:text-gray-400 dark:hover:text-gray-200"
+          class="absolute left-0 z-10 hidden size-8 shrink-0 items-center justify-center rounded-full border border-[var(--border)] bg-[var(--bg-soft)]/90 text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)] sm:flex"
           aria-label="向左滚动"
           @click="scrollRegionBy(-150)"
         >
@@ -15,23 +15,22 @@
 
         <div
           ref="regionScrollRef"
-          class="flex items-center gap-2 overflow-x-auto scrollbar-hide"
+          class="scrollbar-hide flex items-center gap-2 overflow-x-auto sm:px-10"
           @scroll="onRegionScroll"
         >
-          <span class="shrink-0 text-xs text-gray-400 dark:text-gray-500">地区</span>
           <button
             type="button"
-            class="shrink-0 rounded-full border px-3 py-1 text-xs transition-colors"
+            class="h-11 shrink-0 rounded-full border px-5 text-sm font-medium transition-colors"
             :class="pillClass(!selectedRegion)"
             @click="selectedRegion = ''"
           >
-            全部
+            全部地区
           </button>
           <button
             v-for="r in regions"
             :key="r"
             type="button"
-            class="shrink-0 rounded-full border px-3 py-1 text-xs transition-colors"
+            class="h-11 shrink-0 rounded-full border px-5 text-sm font-medium transition-colors"
             :class="pillClass(selectedRegion === r)"
             @click="selectedRegion = selectedRegion === r ? '' : r"
           >
@@ -42,7 +41,7 @@
         <button
           v-show="canScrollRight"
           type="button"
-          class="hidden shrink-0 sm:flex absolute right-0 z-10 size-7 items-center justify-center rounded-full bg-white/90 text-gray-500 shadow-sm hover:text-gray-800 dark:bg-neutral-800/90 dark:text-gray-400 dark:hover:text-gray-200"
+          class="absolute right-0 z-10 hidden size-8 shrink-0 items-center justify-center rounded-full border border-[var(--border)] bg-[var(--bg-soft)]/90 text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)] sm:flex"
           aria-label="向右滚动"
           @click="scrollRegionBy(150)"
         >
@@ -51,46 +50,48 @@
 
         <div
           v-show="canScrollRight"
-          class="pointer-events-none absolute right-0 top-0 bottom-0 w-12 bg-gradient-to-l from-gray-100 to-transparent dark:from-neutral-900 sm:hidden"
+          class="pointer-events-none absolute bottom-0 right-0 top-0 w-12 bg-gradient-to-l from-[var(--bg)] to-transparent sm:hidden"
         ></div>
       </div>
 
-      <div class="flex flex-wrap items-center gap-2">
-        <span class="shrink-0 text-xs text-gray-400 dark:text-gray-500">类型</span>
+        <div class="scrollbar-hide flex max-w-full gap-2 overflow-x-auto pb-1">
         <button
           type="button"
-          class="rounded-full border px-3 py-1 text-xs transition-colors"
+          class="h-11 shrink-0 rounded-full border px-5 text-sm font-medium transition-colors"
           :class="pillClass(!selectedType)"
           @click="selectedType = ''"
         >
-          全部
+          全部类型
         </button>
         <button
           v-for="t in types"
           :key="t"
           type="button"
-          class="rounded-full border px-3 py-1 text-xs transition-colors"
+          class="h-11 shrink-0 rounded-full border px-5 text-sm font-medium transition-colors"
           :class="pillClass(selectedType === t)"
           @click="selectedType = selectedType === t ? '' : t"
         >
           {{ typeLabels[t] || t }}
         </button>
+        </div>
       </div>
 
-      <div class="flex items-center justify-between">
-        <p class="text-xs text-gray-400 dark:text-gray-500">
-          共 {{ filteredStations.length }} 个电台
-          <span v-if="ytLoading || mrLoading" class="ml-2">正在加载…</span>
-        </p>
+      <div class="flex items-center justify-between gap-4">
+        <div class="flex min-w-0 items-center gap-3">
+          <span class="flex size-8 shrink-0 items-center justify-center rounded-full bg-[var(--surface)] text-[var(--text-primary)]">
+            <svg class="size-4" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 10.5a7 7 0 0 1 14 0M8 10.5a4 4 0 0 1 8 0M12 11.5v6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="12" cy="8.5" r="1.2" fill="currentColor"/></svg>
+          </span>
+          <h1 class="truncate text-lg font-semibold leading-none text-[var(--text-primary)]">电台直播</h1>
+          <span class="shrink-0 text-sm text-[var(--text-secondary)]">共 {{ filteredStations.length }} 个电台</span>
+          <span v-if="ytLoading || mrLoading" class="hidden text-sm text-[var(--text-tertiary)] sm:inline">正在加载...</span>
+        </div>
+
         <button
           type="button"
-          class="inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-xs transition-colors"
-          :class="stationSortMode !== 'original'
-            ? 'border-green-500 bg-green-50 text-green-600 dark:border-green-400 dark:bg-green-900/30 dark:text-green-400'
-            : 'border-gray-300 bg-white text-gray-500 hover:bg-gray-100 dark:border-neutral-600 dark:bg-neutral-800 dark:text-gray-400 dark:hover:bg-neutral-700'"
+          class="inline-flex h-10 shrink-0 items-center gap-2 rounded-full border border-[var(--border)] bg-[var(--surface)] px-4 text-sm font-medium text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)]"
           @click="nextSortMode"
         >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="12" height="12">
+          <svg class="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="16" y2="12"/><line x1="4" y1="18" x2="12" y2="18"/>
           </svg>
           {{ currentSortLabel }}
@@ -110,49 +111,43 @@
         :style="{ transform: `translateY(${row.startIndex * (rowHeight + gap)}px)` }"
       >
         <div
-          class="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6"
-          :style="{ gap: `${gap}px` }"
+          class="grid"
+          :style="{ gap: `${gap}px`, gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }"
         >
           <button
-            v-for="station in row.items"
-            :key="station.id"
+            v-for="item in row.items"
+            :key="item.station.id"
             type="button"
-            :aria-label="`切换到 ${station.name}`"
-            :style="{ height: `${cardSize}px` }"
-            class="group rounded-3xl border border-white/70 bg-gray-50/80 p-3 text-left shadow-sm shadow-black/[0.03] outline-none backdrop-blur-xl transition-[background-color,transform,box-shadow,border-color] duration-300 ease-out hover:scale-[1.02] hover:bg-white/90 active:scale-95 dark:border-white/10 dark:bg-neutral-800/50 dark:shadow-black/20 dark:hover:bg-neutral-800/75"
-            :class="{
-              'ring-2 ring-black dark:ring-white': isCurrentStationPlaying(station.id),
-            }"
-            @click="playerStore.switchStation(station.id)"
+            :aria-label="`切换到 ${item.station.name}`"
+            :style="{ height: `${cardHeight}px` }"
+            class="channel-card group relative overflow-hidden rounded-[18px] border border-[var(--border)] bg-[var(--card-bg)] text-left outline-none transition duration-200 ease-out hover:-translate-y-0.5 hover:border-[var(--border-strong)]"
+            :class="['channel-card--logo-card', { 'channel-card-current': isCurrentStationPlaying(item.station.id) }]"
+            @click="playerStore.switchStation(item.station.id)"
           >
-            <div class="flex h-full flex-col overflow-hidden rounded-[1.25rem]">
-              <div class="flex basis-3/5 items-center justify-center">
-                <div
-                  class="flex size-16 items-center justify-center overflow-hidden rounded-full border border-black/5 bg-white text-lg font-semibold text-neutral-700 shadow-sm shadow-black/[0.04] transition-transform duration-300 ease-out group-hover:scale-105 dark:border-white/10 dark:bg-neutral-900 dark:text-neutral-200 sm:size-20"
-                  :class="{ 'animate-pulse': isCurrentStationLoading(station.id) }"
-                >
-                  <img
-                    v-if="station.logoUrl"
-                    class="h-full w-full object-cover"
-                    :src="station.logoUrl"
-                    :alt="`${station.name} logo`"
-                    @error="useDefaultLogo"
-                  />
-                  <span v-else>{{ station.logoText }}</span>
-                </div>
-              </div>
-              <div class="flex basis-2/5 flex-col items-center justify-center px-2 text-center">
-                <span class="line-clamp-1 text-sm font-medium text-gray-800 dark:text-gray-200 sm:text-[0.95rem]">
-                  {{ station.name }}
-                </span>
-                <span
-                  v-if="station.subtitle || epgMap[station.id.replace('yt_', '')]"
-                  class="mt-0.5 line-clamp-1 text-[0.7rem] text-gray-400 dark:text-gray-500"
-                >
-                  {{ station.subtitle || epgMap[station.id.replace('yt_', '')] }}
-                </span>
-              </div>
-            </div>
+            <span class="channel-card__logo-card-visual" aria-hidden="true">
+              <img
+                v-if="stationLogoUrl(item.station)"
+                class="channel-card__center-logo"
+                :src="stationLogoUrl(item.station)"
+                alt=""
+                @error="onCenterLogoError"
+              />
+              <span class="channel-card__logo-card-shade"></span>
+            </span>
+            <span class="channel-index-badge">{{ item.index + 1 }}</span>
+            <span class="card-info">
+              <span class="card-channel">
+                <img
+                  class="card-logo"
+                  :class="{ 'animate-pulse': isCurrentStationLoading(item.station.id) }"
+                  :src="stationLogoUrl(item.station) || DEFAULT_LOGO_URL"
+                  :alt="`${item.station.name} logo`"
+                  @error="useDefaultLogo"
+                />
+                <span class="card-channel-name">{{ item.station.name }}</span>
+              </span>
+              <span class="card-program-name">{{ stationSubtitle(item.station) }}</span>
+            </span>
           </button>
         </div>
       </div>
@@ -264,8 +259,8 @@ const searchQuery = inject('searchQuery')
 const stationSortMode = ref('original')
 
 const SORT_MODES = [
-  { key: 'original', label: '默认' },
-  { key: 'natural', label: 'A-Z' },
+  { key: 'original', label: '默认排序' },
+  { key: 'natural', label: 'A-Z排序' },
 ]
 function naturalSort(a, b) {
   return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' })
@@ -274,7 +269,7 @@ function nextSortMode() {
   const idx = SORT_MODES.findIndex(m => m.key === stationSortMode.value)
   stationSortMode.value = SORT_MODES[(idx + 1) % SORT_MODES.length].key
 }
-const currentSortLabel = computed(() => SORT_MODES.find(m => m.key === stationSortMode.value)?.label || '默认')
+const currentSortLabel = computed(() => SORT_MODES.find(m => m.key === stationSortMode.value)?.label || '默认排序')
 
 const regionScrollRef = ref(null)
 const canScrollLeft = ref(false)
@@ -342,7 +337,7 @@ watchEffect(() => {
 function pillClass(active) {
   return active
     ? 'border-black bg-black text-white dark:border-white dark:bg-white dark:text-black'
-    : 'border-gray-300 bg-white text-gray-600 hover:bg-gray-100 dark:border-neutral-600 dark:bg-neutral-800 dark:text-gray-300 dark:hover:bg-neutral-700'
+    : 'border-[var(--border)] bg-[var(--surface)] text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)]'
 }
 
 function isCurrentStationPlaying(stationId) {
@@ -353,9 +348,22 @@ function isCurrentStationLoading(stationId) {
   return currentStation.value === stationId && isLoading.value
 }
 
+function stationSubtitle(station) {
+  return station.subtitle || epgMap.value[station.id.replace('yt_', '')] || ''
+}
+
+function stationLogoUrl(station) {
+  return station.logoUrl || ''
+}
+
+function onCenterLogoError(event) {
+  if (event?.currentTarget) event.currentTarget.style.display = 'none'
+}
+
 const scrollRef = inject('scrollRef')
 const gridRef = ref(null)
 const containerWidth = ref(1024)
+const viewportWidth = ref(typeof window === 'undefined' ? 1280 : window.innerWidth)
 let resizeObserver = null
 let epgTimer = null
 
@@ -365,9 +373,9 @@ const scrollPosition = ref(0)
 watchEffect(() => { throttledScrollY(scrollY.value) })
 
 const columns = computed(() => {
-  const w = containerWidth.value
-  if (w >= 1024) return 6
-  if (w >= 640) return 4
+  const w = viewportWidth.value
+  if (w >= 1280) return 4
+  if (w >= 1024) return 3
   return 2
 })
 
@@ -375,17 +383,21 @@ const gap = computed(() => 20)
 
 const rowHeight = computed(() => {
   const cols = columns.value
-  return (containerWidth.value - gap.value * (cols - 1)) / cols
+  const cardWidth = (containerWidth.value - gap.value * (cols - 1)) / cols
+  return cardWidth * 9 / 16
 })
 
-const cardSize = computed(() => rowHeight.value)
+const cardHeight = computed(() => rowHeight.value)
 
 const rows = computed(() => {
   const cols = columns.value
   const stations = filteredStations.value
   const result = []
   for (let i = 0; i < stations.length; i += cols) {
-    result.push(stations.slice(i, i + cols))
+    result.push(stations.slice(i, i + cols).map((station, offset) => ({
+      station,
+      index: i + offset,
+    })))
   }
   return result
 })
@@ -409,6 +421,7 @@ onMounted(() => {
   resizeObserver = new ResizeObserver((entries) => {
     for (const entry of entries) {
       containerWidth.value = entry.contentRect.width
+      viewportWidth.value = window.innerWidth
     }
   })
   if (gridRef.value) resizeObserver.observe(gridRef.value)
