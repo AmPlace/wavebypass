@@ -18,7 +18,7 @@ if (!(Test-Path ".venv")) {
 
 .\.venv\Scripts\pyinstaller.exe `
   --clean `
-  --onefile `
+  --onedir `
   --add-data "config;config" `
   --name waveflow-backend `
   desktop_entry.py
@@ -31,7 +31,19 @@ if (Test-Path "backend_dist") {
 }
 
 New-Item -ItemType Directory backend_dist | Out-Null
-Copy-Item backend\dist\waveflow-backend.exe backend_dist\waveflow-backend.exe -Force
+Copy-Item backend\dist\waveflow-backend\* backend_dist\ -Recurse -Force
+
+Write-Host "== Bundle ffmpeg =="
+if (-not (Test-Path "ffmpeg\win-x64fmpeg.exe")) {
+  Write-Host "  Downloading ffmpeg for Windows x64..."
+  bash scripts/download-ffmpeg.sh win
+}
+if (Test-Path "ffmpeg\win-x64fmpeg.exe") {
+  Copy-Item ffmpeg\win-x64fmpeg.exe backend_distfmpeg.exe -Force
+  Write-Host "  Bundled ffmpeg.exe"
+} else {
+  Write-Host "  WARNING: ffmpeg.exe not found, will NOT be bundled"
+}
 
 Write-Host "== Install desktop deps =="
 npm install

@@ -64,7 +64,7 @@ function startBackendInDebugTerminal(backendPath, backendArgs) {
 
     return spawn('cmd.exe', ['/k', command], {
       windowsHide: false,
-      stdio: 'ignore',
+      stdio: ['ignore', 'ignore', fs.openSync(app.getPath('userData') + '/backend.log', 'w')],
     })
   }
 
@@ -86,7 +86,7 @@ function startBackendInDebugTerminal(backendPath, backendArgs) {
     const script = `tell application "Terminal" to do script ${JSON.stringify(command)}`
 
     return spawn('osascript', ['-e', script], {
-      stdio: 'ignore',
+      stdio: ['ignore', 'ignore', fs.openSync(app.getPath('userData') + '/backend.log', 'w')],
     })
   }
 
@@ -104,7 +104,7 @@ function startBackend() {
   } else {
     backendProcess = spawn(backendPath, backendArgs, {
       windowsHide: true,
-      stdio: 'ignore',
+      stdio: ['ignore', 'ignore', fs.openSync(app.getPath('userData') + '/backend.log', 'w')],
     })
   }
 
@@ -137,7 +137,7 @@ function waitForBackend(timeoutMs = 12000) {
 
   return new Promise((resolve, reject) => {
     const check = () => {
-      const req = http.get(`${API_BASE}/docs`, () => {
+      const req = http.get(`${API_BASE}/health`, () => {
         resolve()
       })
 

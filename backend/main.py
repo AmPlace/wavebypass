@@ -24,6 +24,7 @@ from fetchers import STATION_FETCHER_MAP, yunting
 import database
 from adapters import AdapterResolveError, resolve_adapter_source
 from iptv_probe import probe_channel_source
+import sys
 
 
 TOKEN_REFRESH_INTERVAL_SECONDS = 18_000
@@ -381,20 +382,43 @@ RTSP_SESSION_ID_RE = re.compile(r"^[0-9a-f]{24}$")
 def _ffmpeg_bin() -> str | None:
     configured = os.getenv("FFMPEG_BIN", "").strip()
     if configured:
+        logger.info("ffmpeg: using FFMPEG_BIN=%s", configured)
         return configured
-    backend_dir = Path(__file__).resolve().parent
+    frozen = getattr(sys, "frozen", False)
+    backend_dir = Path(sys.executable if frozen else __file__).resolve().parent
+    logger.info(
+        "ffmpeg lookup: frozen=%s exec=%s backend_dir=%s exists=%s",
+        frozen, sys.executable, backend_dir, backend_dir.exists(),
+    )
     candidates = [
-        backend_dir / "ffmpeg.exe",
-        backend_dir / "bin" / "ffmpeg.exe",
-        backend_dir / "ffmpeg" / "ffmpeg.exe",
-        backend_dir / "ffmpeg" / "bin" / "ffmpeg.exe",
-        backend_dir / "ffmpeg",
-        backend_dir / "bin" / "ffmpeg",
+        (backend_dir / "ffmpeg.exe", "ffmpeg.exe (sibling)"),
+        (backend_dir / "bin" / "ffmpeg.exe", "bin/ffmpeg.exe"),
+        (backend_dir / "ffmpeg" / "ffmpeg.exe", "ffmpeg/ffmpeg.exe"),
+        (backend_dir / "ffmpeg" / "bin" / "ffmpeg.exe", "ffmpeg/bin/ffmpeg.exe"),
+        (backend_dir / "ffmpeg", "ffmpeg (sibling)"),
+        (backend_dir / "bin" / "ffmpeg", "bin/ffmpeg"),
     ]
-    for candidate in candidates:
-        if candidate.exists() and candidate.is_file():
+    for candidate, label in candidates:
+        exists = candidate.exists()
+        is_file = candidate.is_file() if exists else False
+        is_exec = os.access(str(candidate), os.X_OK) if is_file else False
+        logger.info(
+            "ffmpeg candidate: %s exists=%s is_file=%s is_exec=%s path=%s",
+            label, exists, is_file, is_exec, candidate,
+        )
+        if exists and is_file and is_exec:
+            logger.info("ffmpeg found at: %s", candidate)
+            try:
+                with open("/tmp/wf-ffmpeg-diag.txt", "a") as f:
+                    f.write(f"DIAG: found ffmpeg at {candidate}\n")
+            except: pass
             return str(candidate)
-    return shutil.which("ffmpeg")
+    system_ffmpeg = shutil.which("ffmpeg")
+    if system_ffmpeg:
+        logger.info("ffmpeg found in system PATH: %s", system_ffmpeg)
+    else:
+        logger.warning("ffmpeg NOT FOUND — checked all candidates in %s + PATH", backend_dir)
+    return system_ffmpeg
 
 
 def _rtsp_session_id(target_url: str, custom_ua: str = "", compat: bool = False) -> str:
@@ -682,6 +706,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
 
 
 def validate_target_url(target_url: str) -> None:

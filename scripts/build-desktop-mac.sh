@@ -22,8 +22,8 @@ fi
 
 .venv/bin/pyinstaller \
   --clean \
-  --onefile \
-  --add-data "config:config" \
+  --onedir \
+  --hidden-import adapters.17live --add-data "config:config" \
   --name waveflow-backend \
   desktop_entry.py
 
@@ -32,8 +32,26 @@ cd "$ROOT_DIR"
 echo "== Copy backend binary =="
 rm -rf backend_dist
 mkdir -p backend_dist
-cp backend/dist/waveflow-backend backend_dist/waveflow-backend
+cp -a backend/dist/waveflow-backend/. backend_dist/
 chmod +x backend_dist/waveflow-backend
+
+
+
+
+echo "== Bundle ffmpeg =="
+FFMPEG_SRC=$(ls "$ROOT_DIR/ffmpeg/macos-arm64/ffmpeg" 2>/dev/null)
+if [ -z "$FFMPEG_SRC" ]; then
+  echo "  Downloading ffmpeg static build for macOS arm64..."
+  bash "$ROOT_DIR/scripts/download-ffmpeg.sh" mac
+  FFMPEG_SRC="$ROOT_DIR/ffmpeg/macos-arm64/ffmpeg"
+fi
+if [ -f "$FFMPEG_SRC" ]; then
+  cp "$FFMPEG_SRC" "$ROOT_DIR/backend_dist/ffmpeg"
+  chmod +x "$ROOT_DIR/backend_dist/ffmpeg"
+  echo "  Bundled: $(file "$ROOT_DIR/backend_dist/ffmpeg" | cut -d: -f2-)"
+else
+  echo "  WARNING: ffmpeg not found, RTSP/HLS will NOT work"
+fi
 
 echo "== Install desktop deps =="
 npm install
