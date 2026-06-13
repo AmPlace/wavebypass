@@ -45,6 +45,13 @@ IPTV_STREAM_SHORT_CONNECTION_SECONDS = 2.0
 CDN_VERIFY_SSL = False
 
 
+def _env_int(name: str, default: int, minimum: int = 1) -> int:
+    try:
+        return max(minimum, int(os.getenv(name, "") or default))
+    except ValueError:
+        return default
+
+
 CDN_REQUEST_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -375,6 +382,10 @@ RTSP_HLS_ROOT = Path(os.getenv("RTSP_HLS_ROOT") or (Path(tempfile.gettempdir()) 
 RTSP_HLS_SESSIONS: dict[str, dict] = {}
 RTSP_HLS_IDLE_TTL = 90
 RTSP_HLS_START_TIMEOUT = 18
+RTSP_HLS_SEGMENT_SECONDS = _env_int("RTSP_HLS_SEGMENT_SECONDS", 2)
+RTSP_HLS_LIST_SIZE = _env_int("RTSP_HLS_LIST_SIZE", 15, minimum=3)
+RTSP_HLS_START_SEGMENTS = _env_int("RTSP_HLS_START_SEGMENTS", 2, minimum=1)
+RTSP_HLS_DELETE_THRESHOLD = _env_int("RTSP_HLS_DELETE_THRESHOLD", 4, minimum=1)
 RTSP_SEGMENT_RE = re.compile(r"^seg_\d+\.ts$")
 RTSP_SESSION_ID_RE = re.compile(r"^[0-9a-f]{24}$")
 
@@ -531,6 +542,9 @@ async def _ensure_rtsp_hls_session(target_url: str, custom_ua: str = "", compat:
             "-x264-params", "keyint=50:min-keyint=50:scenecut=0",
             "-force_key_frames", "expr:gte(t,n_forced*2)",
         ]
+    hls_flags = "delete_segments+append_list+omit_endlist"
+    if compat:
+        hls_flags += "+independent_segments"
 
     cmd = [
         ffmpeg,
@@ -547,9 +561,10 @@ async def _ensure_rtsp_hls_session(target_url: str, custom_ua: str = "", compat:
         "-c:a", "aac",
         "-b:a", "128k",
         "-f", "hls",
-        "-hls_time", "2",
-        "-hls_list_size", "8",
-        "-hls_flags", "delete_segments+append_list+omit_endlist+independent_segments",
+        "-hls_time", str(RTSP_HLS_SEGMENT_SECONDS),
+        "-hls_list_size", str(RTSP_HLS_LIST_SIZE),
+        "-hls_delete_threshold", str(RTSP_HLS_DELETE_THRESHOLD),
+        "-hls_flags", hls_flags,
         "-hls_segment_filename", str(session_dir / "seg_%05d.ts"),
         "-hls_base_url", f"/api/iptv/proxy/rtsp/segments/{session_id}/",
         str(playlist_path),
@@ -582,7 +597,7 @@ async def _ensure_rtsp_hls_session(target_url: str, custom_ua: str = "", compat:
 
     deadline = time.monotonic() + RTSP_HLS_START_TIMEOUT
     while time.monotonic() < deadline:
-        if playlist_path.exists() and list(session_dir.glob("seg_*.ts")):
+        if playlist_path.exists() and len(list(session_dir.glob("seg_*.ts"))) >= RTSP_HLS_START_SEGMENTS:
             RTSP_HLS_SESSIONS[session_id]["last_access"] = time.time()
             return session_id, playlist_path
         if _rtsp_proc_returncode(proc) is not None:
