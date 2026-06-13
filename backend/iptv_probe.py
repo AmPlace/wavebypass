@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import re
 import time
 from typing import Any
@@ -18,13 +19,30 @@ PLAYLIST_TIMEOUT = 8.0
 SEGMENT_TIMEOUT = 5.0
 STREAM_TIMEOUT = 8.0
 HLS_SEGMENT_SAMPLE_LIMIT = 3
-FFPROBE_TIMEOUT = 6.0
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, "") or default)
+    except ValueError:
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.getenv(name, "") or default))
+    except ValueError:
+        return default
+
+
+FFPROBE_TIMEOUT = _env_float("IPTV_FFPROBE_TIMEOUT", 6.0)
 FFPROBE_PROBESIZE = 1024 * 1024
 FFPROBE_ANALYZE_DURATION_US = 3_000_000
-FFPROBE_CONCURRENCY = 2
-FFMPEG_TIMEOUT = 7.0
+FFPROBE_CONCURRENCY = _env_int("IPTV_FFPROBE_CONCURRENCY", 2)
+FFMPEG_TIMEOUT = _env_float("IPTV_FFMPEG_TIMEOUT", 7.0)
+RT_FFMPEG_TIMEOUT = _env_float("IPTV_RT_FFMPEG_TIMEOUT", 5.0)
 FFMPEG_SAMPLE_SECONDS = 5.0
-FFMPEG_CONCURRENCY = 2
+FFMPEG_CONCURRENCY = _env_int("IPTV_FFMPEG_CONCURRENCY", 4)
 
 _FFPROBE_SEMAPHORE = asyncio.Semaphore(FFPROBE_CONCURRENCY)
 _FFMPEG_SEMAPHORE = asyncio.Semaphore(FFMPEG_CONCURRENCY)
@@ -104,6 +122,16 @@ def _ffmpeg_input_timeout_args(url: str, timeout_seconds: float) -> list[str]:
     if (url or "").lower().startswith("rtsp://"):
         return ["-timeout", timeout_us]
     return ["-rw_timeout", timeout_us]
+
+
+def _is_realtime_media_url(url: str) -> bool:
+    return (url or "").lower().startswith(("rtsp://", "rtmp://"))
+
+
+def _ffmpeg_probe_timeout(url: str) -> float:
+    if _is_realtime_media_url(url):
+        return RT_FFMPEG_TIMEOUT
+    return FFMPEG_TIMEOUT
 
 
 def _requires_headers(headers: dict[str, str]) -> bool:
@@ -249,7 +277,9 @@ def _parse_ffmpeg_output(text: str) -> dict[str, Any]:
     if total_bytes > 0 and seconds > 0:
         info["speed_mbps"] = round(total_bytes / seconds / 1024 / 1024, 3)
 
-    bitrate_match = re.search(r"bitrate=\s*([0-9.]+)\s*k?bits/s", text, re.I)
+    bitrate_match = re.search(r"bitrate\s*[:=]\s*([0-9.]+)\s*k?bits/s", text, re.I)
+    if not bitrate_match:
+        bitrate_match = re.search(r"(?:^|[,\s])([0-9.]+)\s*kb/s(?:[,\s]|$)", text, re.I)
     if "speed_mbps" not in info and bitrate_match:
         try:
             info["speed_mbps"] = round(float(bitrate_match.group(1)) / 8 / 1024, 3)
@@ -351,6 +381,8 @@ async def _probe_media_info(url: str, headers: dict[str, str]) -> dict[str, Any]
 async def _enrich_with_ffprobe(result: dict[str, Any], url: str, headers: dict[str, str]) -> dict[str, Any]:
     if result.get("probe_status") != "online":
         return result
+    if result.get("probe_method") == "ffmpeg":
+        return result
     info = await _probe_media_info(url, headers)
     for key in ("resolution", "fps", "video_codec", "audio_codec"):
         if info.get(key):
@@ -380,13 +412,14 @@ async def _probe_with_ffmpeg(url: str, headers: dict[str, str], *, reason: str) 
             probe_meta_json=_safe_meta({"probe_quality": "unsupported", "ffmpeg": False, "ffmpeg_reason": reason}),
         )
 
+    probe_timeout = _ffmpeg_probe_timeout(url)
     args = [
         ffmpeg_bin,
         "-hide_banner",
         "-nostdin",
         "-v",
         "info",
-        *_ffmpeg_input_timeout_args(url, FFMPEG_TIMEOUT),
+        *_ffmpeg_input_timeout_args(url, probe_timeout),
         "-t",
         str(FFMPEG_SAMPLE_SECONDS),
     ]
@@ -413,7 +446,7 @@ async def _probe_with_ffmpeg(url: str, headers: dict[str, str], *, reason: str) 
             )
             while True:
                 elapsed = time.monotonic() - started
-                if elapsed >= FFMPEG_TIMEOUT:
+                if elapsed >= probe_timeout:
                     await _kill_process(proc)
                     break
                 if proc.returncode is not None:
@@ -669,8 +702,9 @@ async def probe_channel_source(ch: dict[str, Any], client: httpx.AsyncClient) ->
         )
 
     lower_url = url.lower()
+    is_rt_stream = _is_realtime_media_url(lower_url)
     try:
-        if lower_url.startswith(("rtsp://", "rtmp://")):
+        if is_rt_stream:
             result = await _probe_with_ffmpeg(url, headers, reason="rt_stream")
         elif source_type == "hls" or _is_hls_url(url):
             result = await _probe_hls(client, url, headers)
@@ -683,11 +717,14 @@ async def probe_channel_source(ch: dict[str, Any], client: httpx.AsyncClient) ->
         except Exception:
             ffprobe_meta = {}
         should_try_ffmpeg = (
-            result.get("probe_status") in {"offline", "error", "timeout"}
-            or (
-                result.get("probe_status") == "online"
-                and not result.get("speed_mbps")
-                and ffprobe_meta.get("probe_quality") == "http_only"
+            not is_rt_stream
+            and (
+                result.get("probe_status") in {"offline", "error", "timeout"}
+                or (
+                    result.get("probe_status") == "online"
+                    and not result.get("speed_mbps")
+                    and ffprobe_meta.get("probe_quality") == "http_only"
+                )
             )
         )
         if should_try_ffmpeg:
