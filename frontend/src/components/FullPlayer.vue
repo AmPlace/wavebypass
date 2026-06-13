@@ -215,7 +215,8 @@
                     :key="item.key"
                     type="button"
                     class="channel-row"
-                    :class="{ active: item.active }"
+                    :class="{ active: item.active, disabled: item.disabled }"
+                    :disabled="item.disabled"
                     @click="handleChannelRowClick(item)"
                   >
                     <span class="channel-logo">
@@ -313,7 +314,8 @@
                   :key="item.key"
                   type="button"
                   class="channel-row"
-                  :class="{ active: item.active }"
+                  :class="{ active: item.active, disabled: item.disabled }"
+                  :disabled="item.disabled"
                   @click="handleChannelRowClick(item)"
                 >
                   <span class="channel-logo">
@@ -394,7 +396,11 @@
             :key="`${source.index}-${source.url}`"
             type="button"
             class="flex w-full items-center gap-2.5 rounded-xl px-2.5 py-2 text-left transition-colors hover:bg-neutral-100 dark:hover:bg-neutral-700/70"
-            :class="{ 'bg-neutral-100 dark:bg-neutral-700/70': source.active }"
+            :class="{
+              'bg-neutral-100 dark:bg-neutral-700/70': source.active,
+              'cursor-not-allowed opacity-45 hover:bg-transparent dark:hover:bg-transparent': source.disabled,
+            }"
+            :disabled="source.disabled"
             @click="switchIptvSource(source.index)"
           >
             <span
@@ -891,6 +897,8 @@ function normalizeGroupName(value) {
 }
 
 function channelRowSummary(ch, active) {
+  if (isIptvAllNotLive(ch)) return '未开播'
+  if (isIptvUnavailable(ch)) return '检测不可用'
   if (active) {
     if (hasCurrentEpgProgram.value) {
       const remaining = currentProgram.value.remaining
@@ -938,6 +946,7 @@ const displayChannelRows = computed(() => {
         live: playing,
         playing,
         active,
+        disabled: isIptvUnavailable(ch),
         channel: ch,
         summary: channelRowSummary(ch, active),
         select: () => playIptvChannelFromFullPlayer(ch),
@@ -967,6 +976,10 @@ const displayChannelRows = computed(() => {
 async function playIptvChannelFromFullPlayer(channel) {
   if (!channel?.urls?.length) {
     playerStore.setPlaybackError('频道没有可用播放源')
+    return
+  }
+  if (isIptvUnavailable(channel)) {
+    playerStore.setPlaybackError(isIptvAllNotLive(channel) ? '频道未开播' : '频道检测不可用')
     return
   }
 
@@ -1133,11 +1146,23 @@ const iptvSourceOptions = computed(() => {
     const working = Number(entry.is_working)
     const latency = Number(entry.latency_ms) > 0 ? `${entry.latency_ms}ms` : ''
     const runtimeStatus = iptvSourceRuntimeStatus.value[index] || 'idle'
-    const health = working === 1 ? '检测可用' : working === 0 ? '检测不可用' : '未检测'
+    const probeStatus = entry.probe_status || ''
+    const disabled = ['not_live', 'offline', 'error', 'timeout'].includes(probeStatus)
+    const health = probeStatus === 'not_live'
+      ? '未开播'
+      : probeStatus === 'untested'
+        ? '未检测'
+        : working === 1
+          ? '检测可用'
+          : working === 0
+            ? '检测不可用'
+            : '未检测'
     const healthLabel = runtimeStatus === 'idle' || health !== '未检测' ? health : ''
     const ua = entry.custom_ua ? 'UA' : ''
     const transcode = entry.rtsp_compat ? '转码' : ''
-    const meta = [sourceStatusLabel(runtimeStatus), healthLabel, latency, ua, transcode].filter(Boolean).join(' · ')
+    const speed = Number(entry.speed_mbps) > 0 ? `${Number(entry.speed_mbps).toFixed(1)}M/s` : ''
+    const quality = [entry.resolution, entry.video_codec, speed].filter(Boolean).join(' ')
+    const meta = [sourceStatusLabel(runtimeStatus), healthLabel, quality, latency, ua, transcode].filter(Boolean).join(' · ')
 
     return {
       index,
@@ -1149,6 +1174,7 @@ const iptvSourceOptions = computed(() => {
       status: runtimeStatus,
       statusClass: sourceStatusClass(runtimeStatus),
       active: index === playerStore.iptvUrlIndex,
+      disabled,
     }
   })
 })
@@ -1173,7 +1199,30 @@ function isCurrentIptv(ch) {
 }
 
 function isIptvUntested(ch) {
-  return ch.urls.every(u => u.is_working === -1)
+  return ch.urls.every(u => {
+    const status = u.probe_status || ''
+    return status ? status === 'untested' : u.is_working === -1
+  })
+}
+
+function isIptvAllFailed(ch) {
+  return ch.urls?.length > 0 && ch.urls.every(u => {
+    const status = u.probe_status || ''
+    if (status) return ['offline', 'error', 'timeout'].includes(status)
+    return u.is_working === 0
+  })
+}
+
+function isIptvAllNotLive(ch) {
+  return ch.urls?.length > 0 && ch.urls.every(u => u.probe_status === 'not_live')
+}
+
+function isIptvUnavailable(ch) {
+  return ch.urls?.length > 0 && ch.urls.every(u => {
+    const status = u.probe_status || ''
+    if (status) return ['offline', 'error', 'timeout', 'not_live'].includes(status)
+    return u.is_working === 0
+  })
 }
 
 // 切换到 IPTV 模式时加载频道列表
@@ -1186,7 +1235,7 @@ onMounted(() => {
 })
 
 function playAdjacentVisibleChannel(offset) {
-  const rows = displayChannelRows.value.filter((item) => typeof item?.select === 'function')
+  const rows = displayChannelRows.value.filter((item) => typeof item?.select === 'function' && !item.disabled)
   if (rows.length <= 1) return
   const activeIndex = rows.findIndex((item) => item.active)
   const currentIndex = activeIndex >= 0 ? activeIndex : 0
@@ -2025,6 +2074,12 @@ async function setIptvUrlIndexForAttempt(index, attemptId) {
 
 async function switchIptvSource(index) {
   if (!isIptvMode.value || index < 0 || index >= playerStore.iptvUrls.length) return
+  const option = iptvSourceOptions.value.find((item) => item.index === index)
+  if (option?.disabled) {
+    playerStore.setPlaybackError(option.meta?.includes('未开播') ? '播放源未开播' : '播放源检测不可用')
+    sourceMenuOpen.value = false
+    return
+  }
   sourceMenuOpen.value = false
 
   const entry = playerStore.iptvUrls[index]
@@ -4528,6 +4583,16 @@ onBeforeUnmount(() => {
 
 .channel-row.active {
   background: var(--row-active-bg);
+}
+
+.channel-row.disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.channel-row.disabled .eq-icon,
+.channel-row.disabled .live-dot {
+  display: none;
 }
 
 .channel-logo {

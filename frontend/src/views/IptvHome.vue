@@ -19,7 +19,9 @@
       <div class="flex items-center justify-between gap-4">
         <div class="flex min-w-0 items-center gap-3">
           <span class="flex size-8 shrink-0 items-center justify-center rounded-full bg-[var(--surface)] text-[var(--text-primary)]">
-            <svg class="size-4" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 12a7 7 0 0 1 14 0M2.5 12a9.5 9.5 0 0 1 19 0M9 12a3 3 0 0 1 6 0" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+            <svg class="size-4" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path d="M5 12a7 7 0 0 1 14 0M2.5 12a9.5 9.5 0 0 1 19 0M9 12a3 3 0 0 1 6 0" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+            </svg>
           </span>
           <h1 class="truncate text-lg font-semibold leading-none text-[var(--text-primary)]">正在直播</h1>
           <span class="shrink-0 text-sm text-[var(--text-secondary)]">
@@ -62,7 +64,7 @@
             type="button"
             :aria-label="`播放 ${item.channel.name}`"
             :style="[coverStyle(item.channel), { height: `${cardHeight}px` }]"
-            :disabled="isAllFailed(item.channel)"
+            :disabled="isUnavailable(item.channel)"
             class="channel-card group relative overflow-hidden rounded-[18px] border border-[var(--border)] bg-[var(--card-bg)] text-left outline-none transition duration-200 ease-out hover:-translate-y-0.5 hover:border-[var(--border-strong)] disabled:cursor-not-allowed disabled:opacity-45"
             :class="[defaultCoverClass(item.channel), { 'channel-card-current': isCurrentChannel(item.channel) }]"
             @click="playChannel(item.channel)"
@@ -93,7 +95,25 @@
                 />
                 <span class="card-channel-name">{{ item.channel.name }}</span>
               </span>
-              <span class="card-program-name">{{ currentProgramTitle(item.channel) }}</span>
+              <span class="card-program-name">{{ cardSubtitle(item.channel) }}</span>
+            </span>
+            <span
+              v-if="isUntested(item.channel)"
+              class="channel-status-badge channel-status-badge--neutral"
+            >
+              未测试
+            </span>
+            <span
+              v-else-if="isAllNotLive(item.channel)"
+              class="channel-status-badge channel-status-badge--warn"
+            >
+              未开播
+            </span>
+            <span
+              v-else-if="isAllFailed(item.channel)"
+              class="channel-status-badge channel-status-badge--danger"
+            >
+              不可用
             </span>
           </button>
         </div>
@@ -103,7 +123,7 @@
 </template>
 
 <script setup>
-import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch, watchEffect } from 'vue'
+import { computed, inject, onBeforeUnmount, onMounted, ref, watch, watchEffect } from 'vue'
 import { useScroll, useThrottleFn } from '@vueuse/core'
 import { usePlayerStore } from '../stores/player'
 import { fetchAggregatedChannels } from '../api/iptv'
@@ -111,12 +131,9 @@ import { useEpg } from '../composables/useEpg'
 import { publicAsset } from '../publicAsset'
 
 const playerStore = usePlayerStore()
-const { currentStation } = storeToRefs(playerStore)
 
 const scrollRef = inject('scrollRef')
 const searchQuery = inject('searchQuery')
-
-import { storeToRefs } from 'pinia'
 
 const allChannels = ref([])
 const allGroups = ref([])
@@ -132,13 +149,16 @@ const SORT_MODES = [
   { key: 'natural', label: 'A-Z排序' },
   { key: 'group', label: '分组排序' },
 ]
+
 function naturalSort(a, b) {
   return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' })
 }
+
 function nextSortMode() {
   const idx = SORT_MODES.findIndex(m => m.key === channelSortMode.value)
   channelSortMode.value = SORT_MODES[(idx + 1) % SORT_MODES.length].key
 }
+
 const currentSortLabel = computed(() => SORT_MODES.find(m => m.key === channelSortMode.value)?.label || '默认排序')
 
 function selectCategoryTab(tab) {
@@ -165,7 +185,6 @@ async function loadChannels() {
     if (!selectedGroup.value && !searchQuery.value.trim()) {
       allGroups.value = data.groups || []
     }
-    // 批量拉 EPG 摘要
     const keys = (data.channels || []).map(c => c.canonical_key).filter(Boolean)
     if (keys.length) {
       useEpg().batchCurrent(keys).then(m => { epgMap.value = m || {} })
@@ -186,10 +205,8 @@ const filteredChannels = computed(() => {
   return list
 })
 
-// 初始加载
 onMounted(loadChannels)
 
-// 搜索变化时重新加载
 watch(searchQuery, () => { loadChannels() })
 
 function isCurrentChannel(ch) {
@@ -198,15 +215,38 @@ function isCurrentChannel(ch) {
 }
 
 function isUntested(ch) {
-  return ch.urls.every(u => u.is_working === -1)
+  return ch.urls.every(u => {
+    const status = u.probe_status || ''
+    return status ? status === 'untested' : u.is_working === -1
+  })
 }
 
 function isAllFailed(ch) {
-  return ch.urls.every(u => u.is_working === 0)
+  return ch.urls.every(u => {
+    const status = u.probe_status || ''
+    if (status) return ['offline', 'error', 'timeout'].includes(status)
+    return u.is_working === 0
+  })
+}
+
+function isAllNotLive(ch) {
+  return ch.urls.length > 0 && ch.urls.every(u => u.probe_status === 'not_live')
+}
+
+function isUnavailable(ch) {
+  return ch.urls.length > 0 && ch.urls.every(u => {
+    const status = u.probe_status || ''
+    if (status) return ['offline', 'error', 'timeout', 'not_live'].includes(status)
+    return u.is_working === 0
+  })
 }
 
 function currentProgramTitle(ch) {
   return epgMap.value[ch.canonical_key]?.current?.title || ''
+}
+
+function cardSubtitle(ch) {
+  return currentProgramTitle(ch) || ch.group_name || ''
 }
 
 function channelCoverUrl(ch) {
@@ -257,10 +297,9 @@ function normalizeChannelLogoKey(value) {
 }
 
 async function playChannel(ch) {
-  if (isAllFailed(ch)) return
+  if (isUnavailable(ch)) return
   if (!ch.urls || !ch.urls.length) return
   const videoEl = playerStore.iptvVideoEl
-  // 仅调 play() 满足 iOS 手势，其余由 store.playIptvChannel 接管
   if (videoEl) videoEl.play().catch(() => {})
   await playerStore.playIptvChannel(ch)
 }
@@ -270,8 +309,6 @@ function pillClass(active) {
     ? 'border-black bg-black text-white dark:border-white dark:bg-white dark:text-black'
     : 'border-[var(--border)] bg-[var(--surface)] text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)]'
 }
-
-// ── 虚拟滚动 ──
 
 const gridRef = ref(null)
 const containerWidth = ref(1024)
