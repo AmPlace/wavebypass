@@ -32,15 +32,15 @@
         v-if="hasOverflow"
         type="button"
         class="inline-flex h-11 shrink-0 items-center gap-1 rounded-full border border-[var(--border)] bg-[var(--surface)] px-4 text-sm font-medium text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)]"
-        :class="expanded ? '' : 'ml-auto'"
-        :aria-expanded="expanded"
-        :aria-label="expanded ? '收起标签' : '展开全部标签'"
+        :class="expanded || collapsing ? '' : 'ml-auto'"
+        :aria-expanded="expanded || collapsing"
+        :aria-label="expanded || collapsing ? '收起标签' : '展开全部标签'"
         @click="toggle"
       >
-        {{ expanded ? '收起' : '更多' }}
+        {{ expanded || collapsing ? '收起' : '更多' }}
         <svg
           class="size-4 transition-transform duration-200"
-          :class="{ 'rotate-180': expanded }"
+          :class="{ 'rotate-180': expanded || collapsing }"
           viewBox="0 0 24 24"
           fill="none"
           aria-hidden="true"
