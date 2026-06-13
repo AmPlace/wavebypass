@@ -2,8 +2,8 @@
   <div ref="rootRef" class="tag-filter-row relative">
     <!-- 原地多行 wrap：折叠态用 max-height 限制成单行高度，展开后释放 -->
     <div
-      class="flex flex-wrap items-start gap-2 overflow-hidden transition-[max-height] duration-300 ease-out"
-      :style="{ maxHeight: expanded ? `${expandedHeight}px` : '44px' }"
+      class="flex flex-wrap items-start gap-2 overflow-hidden"
+      :style="{ maxHeight: expanded ? `${expandedHeight}px` : '44px', transition: 'max-height 260ms cubic-bezier(0.4, 0, 0.2, 1)' }"
     >
       <button
         v-for="(item, index) in displayItems"
