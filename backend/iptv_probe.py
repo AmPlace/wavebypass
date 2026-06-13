@@ -1,7 +1,6 @@
 import asyncio
 import json
 import re
-import shutil
 import time
 from typing import Any
 from urllib.parse import urljoin
@@ -10,6 +9,7 @@ import httpx
 
 from adapters import AdapterResolveError, resolve_adapter_source
 from m3u8_parser import adapter_provider, detect_source_type
+from media_tools import media_tool_bin
 
 
 STREAM_READ_BYTES = 1024 * 1024
@@ -97,6 +97,13 @@ def _headers_from_channel(ch: dict[str, Any]) -> dict[str, str]:
     if referer:
         headers["Referer"] = referer
     return headers
+
+
+def _ffmpeg_input_timeout_args(url: str, timeout_seconds: float) -> list[str]:
+    timeout_us = str(int(timeout_seconds * 1_000_000))
+    if (url or "").lower().startswith("rtsp://"):
+        return ["-timeout", timeout_us]
+    return ["-rw_timeout", timeout_us]
 
 
 def _requires_headers(headers: dict[str, str]) -> bool:
@@ -274,14 +281,14 @@ async def _kill_process(proc: asyncio.subprocess.Process | None) -> None:
 
 
 async def _probe_media_info(url: str, headers: dict[str, str]) -> dict[str, Any]:
-    ffprobe_bin = shutil.which("ffprobe")
+    ffprobe_bin = media_tool_bin("ffprobe")
     if not ffprobe_bin:
         return {"meta": {"ffprobe": False, "ffprobe_error": "ffprobe_not_found"}}
 
     args = [
         ffprobe_bin,
         "-v", "error",
-        "-rw_timeout", str(int(FFPROBE_TIMEOUT * 1_000_000)),
+        *_ffmpeg_input_timeout_args(url, FFPROBE_TIMEOUT),
         "-analyzeduration", str(FFPROBE_ANALYZE_DURATION_US),
         "-probesize", str(FFPROBE_PROBESIZE),
     ]
@@ -363,7 +370,7 @@ def _meta_value(result: dict[str, Any], key: str, default: Any = None) -> Any:
 
 
 async def _probe_with_ffmpeg(url: str, headers: dict[str, str], *, reason: str) -> dict[str, Any]:
-    ffmpeg_bin = shutil.which("ffmpeg")
+    ffmpeg_bin = media_tool_bin("ffmpeg")
     if not ffmpeg_bin:
         return _empty_result(
             probe_status="unsupported",
@@ -379,8 +386,7 @@ async def _probe_with_ffmpeg(url: str, headers: dict[str, str], *, reason: str) 
         "-nostdin",
         "-v",
         "info",
-        "-rw_timeout",
-        str(int(FFMPEG_TIMEOUT * 1_000_000)),
+        *_ffmpeg_input_timeout_args(url, FFMPEG_TIMEOUT),
         "-t",
         str(FFMPEG_SAMPLE_SECONDS),
     ]

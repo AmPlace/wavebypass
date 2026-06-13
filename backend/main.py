@@ -24,7 +24,7 @@ from fetchers import STATION_FETCHER_MAP, yunting
 import database
 from adapters import AdapterResolveError, resolve_adapter_source
 from iptv_probe import probe_channel_source
-import sys
+from media_tools import media_tool_bin
 
 
 TOKEN_REFRESH_INTERVAL_SECONDS = 18_000
@@ -380,45 +380,12 @@ RTSP_SESSION_ID_RE = re.compile(r"^[0-9a-f]{24}$")
 
 
 def _ffmpeg_bin() -> str | None:
-    configured = os.getenv("FFMPEG_BIN", "").strip()
-    if configured:
-        logger.info("ffmpeg: using FFMPEG_BIN=%s", configured)
-        return configured
-    frozen = getattr(sys, "frozen", False)
-    backend_dir = Path(sys.executable if frozen else __file__).resolve().parent
-    logger.info(
-        "ffmpeg lookup: frozen=%s exec=%s backend_dir=%s exists=%s",
-        frozen, sys.executable, backend_dir, backend_dir.exists(),
-    )
-    candidates = [
-        (backend_dir / "ffmpeg.exe", "ffmpeg.exe (sibling)"),
-        (backend_dir / "bin" / "ffmpeg.exe", "bin/ffmpeg.exe"),
-        (backend_dir / "ffmpeg" / "ffmpeg.exe", "ffmpeg/ffmpeg.exe"),
-        (backend_dir / "ffmpeg" / "bin" / "ffmpeg.exe", "ffmpeg/bin/ffmpeg.exe"),
-        (backend_dir / "ffmpeg", "ffmpeg (sibling)"),
-        (backend_dir / "bin" / "ffmpeg", "bin/ffmpeg"),
-    ]
-    for candidate, label in candidates:
-        exists = candidate.exists()
-        is_file = candidate.is_file() if exists else False
-        is_exec = os.access(str(candidate), os.X_OK) if is_file else False
-        logger.info(
-            "ffmpeg candidate: %s exists=%s is_file=%s is_exec=%s path=%s",
-            label, exists, is_file, is_exec, candidate,
-        )
-        if exists and is_file and is_exec:
-            logger.info("ffmpeg found at: %s", candidate)
-            try:
-                with open("/tmp/wf-ffmpeg-diag.txt", "a") as f:
-                    f.write(f"DIAG: found ffmpeg at {candidate}\n")
-            except: pass
-            return str(candidate)
-    system_ffmpeg = shutil.which("ffmpeg")
-    if system_ffmpeg:
-        logger.info("ffmpeg found in system PATH: %s", system_ffmpeg)
+    ffmpeg = media_tool_bin("ffmpeg")
+    if ffmpeg:
+        logger.info("ffmpeg found at: %s", ffmpeg)
     else:
-        logger.warning("ffmpeg NOT FOUND — checked all candidates in %s + PATH", backend_dir)
-    return system_ffmpeg
+        logger.warning("ffmpeg NOT FOUND")
+    return ffmpeg
 
 
 def _rtsp_session_id(target_url: str, custom_ua: str = "", compat: bool = False) -> str:
