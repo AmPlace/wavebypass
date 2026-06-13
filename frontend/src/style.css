@@ -467,8 +467,8 @@
   }
 
   .iptv-main .channel-play-state-dot--live {
-    background: #E11D25;
-    box-shadow: 0 0 0 3px rgba(225,29,37,0.10);
+    background: #22C55E;
+    box-shadow: 0 0 0 3px rgba(34,197,94,0.12);
   }
 
   .iptv-main .channel-play-state-dot--neutral {
@@ -477,13 +477,13 @@
   }
 
   .iptv-main .channel-play-state-dot--warn {
-    background: #B7791F;
-    box-shadow: 0 0 0 3px rgba(183,121,31,0.11);
+    background: #F59E0B;
+    box-shadow: 0 0 0 3px rgba(245,158,11,0.12);
   }
 
   .iptv-main .channel-play-state-dot--danger {
-    background: #6B7280;
-    box-shadow: 0 0 0 3px rgba(107,114,128,0.12);
+    background: #DC2626;
+    box-shadow: 0 0 0 3px rgba(220,38,38,0.12);
   }
 
   .default-cover-placeholder {

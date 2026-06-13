@@ -203,6 +203,14 @@ function isUnavailable(ch) {
   })
 }
 
+function isAnyPlayable(ch) {
+  return ch.urls?.some(u => {
+    const status = u.probe_status || ''
+    if (status) return status === 'online'
+    return u.is_working === 1
+  })
+}
+
 function currentProgramTitle(ch) {
   return epgMap.value[ch.canonical_key]?.current?.title || ''
 }
@@ -212,10 +220,11 @@ function cardSubtitle(ch) {
 }
 
 function channelStatusKind(ch) {
+  if (isAnyPlayable(ch)) return 'live'
   if (isAllNotLive(ch)) return 'warn'
-  if (isAllFailed(ch)) return 'danger'
   if (isUntested(ch)) return 'neutral'
-  return 'live'
+  if (isAllFailed(ch) || isUnavailable(ch)) return 'danger'
+  return 'neutral'
 }
 
 function channelStatusDotClass(ch) {
