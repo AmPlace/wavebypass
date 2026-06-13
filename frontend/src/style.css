@@ -125,6 +125,71 @@
     transform: scale(0.96);
   }
 
+  .dock-side-control {
+    display: flex;
+    width: 2.5rem;
+    height: 2.5rem;
+    align-items: center;
+    justify-content: center;
+    border-radius: 999px;
+    color: var(--text-secondary);
+    transition: background-color 180ms ease, color 180ms ease;
+  }
+
+  .dock-side-control:not(:disabled):hover {
+    background: var(--surface-hover);
+    color: var(--text-primary);
+  }
+
+  .dock-side-control:disabled {
+    opacity: 0.42;
+  }
+
+  .dock-list-btn {
+    display: inline-flex;
+    height: 2.5rem;
+    align-items: center;
+    gap: 0.5rem;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    padding: 0 0.9rem;
+    color: var(--text-primary);
+    font-size: 0.875rem;
+    font-weight: 500;
+    transition: background-color 180ms ease, border-color 180ms ease;
+  }
+
+  .dock-list-btn:hover {
+    background: var(--surface-hover);
+    border-color: var(--border-strong);
+  }
+
+  .dock-volume::-webkit-slider-thumb {
+    width: 12px;
+    height: 12px;
+    appearance: none;
+    border-radius: 999px;
+    background: var(--text-primary);
+  }
+
+  .dock-volume::-moz-range-thumb {
+    width: 12px;
+    height: 12px;
+    border: 0;
+    border-radius: 999px;
+    background: var(--text-primary);
+  }
+
+  @media (min-width: 1024px) {
+    .bottom-player-dock {
+      left: 272px;
+      right: 40px;
+      max-width: none;
+      margin-inline: 0;
+    }
+  }
+
   /* 去掉 Firefox range 轨道默认边框。 */
   input[type='range']::-moz-range-track {
     border: 0;
