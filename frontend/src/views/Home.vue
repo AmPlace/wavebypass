@@ -2,78 +2,16 @@
   <main class="radio-main min-h-screen w-full px-5 pb-32 pt-[calc(env(safe-area-inset-top)+4rem)] sm:px-8 lg:px-10 lg:pb-40 lg:pt-6">
     <header class="mb-7 space-y-7">
       <div class="space-y-3 lg:pr-[300px]">
-        <div class="relative flex min-h-11 items-center">
-        <button
-          v-show="canScrollLeft"
-          type="button"
-          class="absolute left-0 z-10 hidden size-8 shrink-0 items-center justify-center rounded-full border border-[var(--border)] bg-[var(--bg-soft)]/90 text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)] sm:flex"
-          aria-label="向左滚动"
-          @click="scrollRegionBy(-150)"
-        >
-          <svg class="size-4" viewBox="0 0 24 24" fill="none"><path d="M15 19l-7-7 7-7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        </button>
-
-        <div
-          ref="regionScrollRef"
-          class="scrollbar-hide flex items-center gap-2 overflow-x-auto sm:px-10"
-          @scroll="onRegionScroll"
-        >
-          <button
-            type="button"
-            class="h-11 shrink-0 rounded-full border px-5 text-sm font-medium transition-colors"
-            :class="pillClass(!selectedRegion)"
-            @click="selectedRegion = ''"
-          >
-            全部地区
-          </button>
-          <button
-            v-for="r in regions"
-            :key="r"
-            type="button"
-            class="h-11 shrink-0 rounded-full border px-5 text-sm font-medium transition-colors"
-            :class="pillClass(selectedRegion === r)"
-            @click="selectedRegion = selectedRegion === r ? '' : r"
-          >
-            {{ regionLabels[r] || r }}
-          </button>
-        </div>
-
-        <button
-          v-show="canScrollRight"
-          type="button"
-          class="absolute right-0 z-10 hidden size-8 shrink-0 items-center justify-center rounded-full border border-[var(--border)] bg-[var(--bg-soft)]/90 text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)] sm:flex"
-          aria-label="向右滚动"
-          @click="scrollRegionBy(150)"
-        >
-          <svg class="size-4" viewBox="0 0 24 24" fill="none"><path d="M9 5l7 7-7 7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        </button>
-
-        <div
-          v-show="canScrollRight"
-          class="pointer-events-none absolute bottom-0 right-0 top-0 w-12 bg-gradient-to-l from-[var(--bg)] to-transparent sm:hidden"
-        ></div>
-      </div>
-
-        <div class="scrollbar-hide flex max-w-full gap-2 overflow-x-auto pb-1">
-        <button
-          type="button"
-          class="h-11 shrink-0 rounded-full border px-5 text-sm font-medium transition-colors"
-          :class="pillClass(!selectedType)"
-          @click="selectedType = ''"
-        >
-          全部类型
-        </button>
-        <button
-          v-for="t in types"
-          :key="t"
-          type="button"
-          class="h-11 shrink-0 rounded-full border px-5 text-sm font-medium transition-colors"
-          :class="pillClass(selectedType === t)"
-          @click="selectedType = selectedType === t ? '' : t"
-        >
-          {{ typeLabels[t] || t }}
-        </button>
-        </div>
+        <TagFilterRow
+          :items="regionItems"
+          :is-active="(it) => it.value === selectedRegion"
+          @select="(it) => selectedRegion = it.value === selectedRegion ? '' : it.value"
+        />
+        <TagFilterRow
+          :items="typeItems"
+          :is-active="(it) => it.value === selectedType"
+          @select="(it) => selectedType = it.value === selectedType ? '' : it.value"
+        />
       </div>
 
       <div class="flex items-center justify-between gap-4">
@@ -160,10 +98,11 @@ import { storeToRefs } from 'pinia'
 import { usePlayerStore } from '../stores/player'
 import { fetchAllYuntingStations } from '../api/yunting'
 import { fetchMyradioStations } from '../api/myradio'
-import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch, watchEffect } from 'vue'
+import { computed, inject, onBeforeUnmount, onMounted, ref, watch, watchEffect } from 'vue'
 import { useScroll, useThrottleFn } from '@vueuse/core'
 import { API_BASE } from '../apiBase'
 import { publicAsset } from '../publicAsset'
+import TagFilterRow from '../components/TagFilterRow.vue'
 
 const playerStore = usePlayerStore()
 const { currentStation, isPlaying, isLoading, stationList } = storeToRefs(playerStore)
@@ -271,25 +210,6 @@ function nextSortMode() {
 }
 const currentSortLabel = computed(() => SORT_MODES.find(m => m.key === stationSortMode.value)?.label || '默认排序')
 
-const regionScrollRef = ref(null)
-const canScrollLeft = ref(false)
-const canScrollRight = ref(false)
-
-function updateScrollState() {
-  const el = regionScrollRef.value
-  if (!el) return
-  canScrollLeft.value = el.scrollLeft > 2
-  canScrollRight.value = el.scrollLeft < el.scrollWidth - el.clientWidth - 2
-}
-
-function onRegionScroll() {
-  updateScrollState()
-}
-
-function scrollRegionBy(delta) {
-  regionScrollRef.value?.scrollBy({ left: delta, behavior: 'smooth' })
-}
-
 const geoConfig = ref({ geoRestrict: false, blockedRegions: [] })
 const geoConfigLoaded = ref(false)
 
@@ -303,8 +223,6 @@ const regions = computed(() => {
   return [...set]
 })
 
-watch(regions, () => nextTick(updateScrollState))
-
 const types = computed(() => {
   const set = new Set()
   for (const s of allStations.value) {
@@ -314,6 +232,15 @@ const types = computed(() => {
   }
   return [...set]
 })
+
+const regionItems = computed(() => [
+  { value: '', label: '全部地区' },
+  ...regions.value.map((r) => ({ value: r, label: regionLabels[r] || r })),
+])
+const typeItems = computed(() => [
+  { value: '', label: '全部类型' },
+  ...types.value.map((t) => ({ value: t, label: typeLabels[t] || t })),
+])
 
 const filteredStations = ref([])
 
@@ -333,12 +260,6 @@ watchEffect(() => {
   }
   filteredStations.value = result
 })
-
-function pillClass(active) {
-  return active
-    ? 'border-black bg-black text-white dark:border-white dark:bg-white dark:text-black'
-    : 'border-[var(--border)] bg-[var(--surface)] text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)]'
-}
 
 function isCurrentStationPlaying(stationId) {
   return currentStation.value === stationId && isPlaying.value
@@ -425,8 +346,6 @@ onMounted(() => {
     }
   })
   if (gridRef.value) resizeObserver.observe(gridRef.value)
-
-  nextTick(updateScrollState)
 
   ;(async () => {
     try {

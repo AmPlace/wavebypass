@@ -1,19 +1,12 @@
 <template>
   <main class="iptv-main min-h-screen w-full px-5 pb-32 pt-[calc(env(safe-area-inset-top)+4rem)] sm:px-8 lg:px-10 lg:pb-40 lg:pt-6">
     <header class="mb-7 space-y-7">
-      <div class="flex min-h-12 items-start justify-between gap-6 lg:pr-[300px]">
-        <div class="scrollbar-hide flex max-w-full gap-2 overflow-x-auto pb-1">
-          <button
-            v-for="tab in categoryTabs"
-            :key="tab"
-            type="button"
-            class="h-11 shrink-0 rounded-full border px-5 text-sm font-medium transition-colors"
-            :class="pillClass(isSelectedCategory(tab))"
-            @click="selectCategoryTab(tab)"
-          >
-            {{ tab }}
-          </button>
-        </div>
+      <div class="lg:pr-[300px]">
+        <TagFilterRow
+          :items="categoryTabs"
+          :is-active="isSelectedCategory"
+          @select="selectCategoryTab"
+        />
       </div>
 
       <div class="flex items-center justify-between gap-4">
@@ -129,6 +122,7 @@ import { usePlayerStore } from '../stores/player'
 import { fetchAggregatedChannels } from '../api/iptv'
 import { useEpg } from '../composables/useEpg'
 import { publicAsset } from '../publicAsset'
+import TagFilterRow from '../components/TagFilterRow.vue'
 
 const playerStore = usePlayerStore()
 
@@ -302,12 +296,6 @@ async function playChannel(ch) {
   const videoEl = playerStore.iptvVideoEl
   if (videoEl) videoEl.play().catch(() => {})
   await playerStore.playIptvChannel(ch)
-}
-
-function pillClass(active) {
-  return active
-    ? 'border-black bg-black text-white dark:border-white dark:bg-white dark:text-black'
-    : 'border-[var(--border)] bg-[var(--surface)] text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)]'
 }
 
 const gridRef = ref(null)
