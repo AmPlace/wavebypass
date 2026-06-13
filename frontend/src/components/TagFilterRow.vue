@@ -67,7 +67,7 @@ const emit = defineEmits(['select'])
 const rootRef = ref(null)
 const expanded = ref(false)
 const visibleCount = ref(props.items.length)
-const expandedHeight = ref(9999)
+const expandedHeight = ref(0)
 
 function itemLabel(item) { return props.labelOf(item) }
 function itemKey(item, index) {
@@ -148,18 +148,22 @@ function measure() {
   }
 
   visibleCount.value = Math.max(1, count || props.items.length)
-}
 
-function measureExpandedHeight() {
-  // 在不可见状态下测出展开后所需高度，用于 max-height 过渡
-  const root = rootRef.value
-  if (!root) return
-  const inner = root.firstElementChild
-  if (!inner) return
-  const prevMax = inner.style.maxHeight
-  inner.style.maxHeight = 'none'
-  expandedHeight.value = inner.scrollHeight
-  inner.style.maxHeight = prevMax
+  // 同时用离屏 flex-wrap 容器量出展开后的真实高度
+  const wrapProbe = document.createElement('div')
+  wrapProbe.style.cssText = `position:absolute;visibility:hidden;pointer-events:none;left:-9999px;top:0;display:flex;flex-wrap:wrap;gap:8px;width:${totalWidth}px;`
+  const sampleBtn = (text) => {
+    const b = document.createElement('button')
+    b.className = 'h-11 shrink-0 rounded-full border px-5 text-sm font-medium'
+    b.textContent = text
+    return b
+  }
+  for (const it of props.items) {
+    wrapProbe.appendChild(sampleBtn(itemLabel(it)))
+  }
+  document.body.appendChild(wrapProbe)
+  expandedHeight.value = wrapProbe.getBoundingClientRect().height
+  document.body.removeChild(wrapProbe)
 }
 
 let resizeObserver = null
@@ -176,7 +180,6 @@ onBeforeUnmount(() => {
 })
 
 watch(() => props.items, () => nextTick(measure), { deep: false })
-watch(expanded, (v) => { if (v) nextTick(measureExpandedHeight) })
 
 function toggle() { expanded.value = !expanded.value }
 </script>
