@@ -148,6 +148,12 @@ def parse_adapter_url(target_url: str) -> AdapterRequest:
     elif scheme == "hntv":
         adapter = "hntv"
         resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
+    elif scheme == "tvb":
+        adapter = "tvb"
+        resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
+    elif scheme == "nowtv":
+        adapter = "nowtv"
+        resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
     elif scheme == "redbook":
         adapter = "redbook"
         resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
@@ -326,6 +332,8 @@ async def resolve_adapter_source(target_url: str, client: httpx.AsyncClient) -> 
 from .migu import resolve_migu
 from .hbtv import resolve_hbtv
 from .hntv import resolve_hntv
+from .tvb import resolve_tvb
+from .nowtv import resolve_nowtv
 from .jstv import resolve_jstv
 from .sdtv import resolve_sdtv
 from .sdly import resolve_sdly
@@ -384,6 +392,8 @@ _ADAPTER_REGISTRY = {
     "migu": resolve_migu,
     "hbtv": resolve_hbtv,
     "hntv": resolve_hntv,
+    "tvb": resolve_tvb,
+    "nowtv": resolve_nowtv,
     "nmtv": resolve_nmtv,
     "jstv": resolve_jstv,
     "sdtv": resolve_sdtv,
