@@ -652,6 +652,7 @@ async def probe_channel_source(ch: dict[str, Any], client: httpx.AsyncClient) ->
     declared_proxy = _truthy(ch.get("force_proxy"))
     adapter = adapter_provider(original_url)
     adapter_title = ""
+    resolved_youtube_video_id = ""
     meta: dict[str, Any] = {}
 
     if not original_url:
@@ -678,6 +679,7 @@ async def probe_channel_source(ch: dict[str, Any], client: httpx.AsyncClient) ->
             headers.update({str(k): str(v) for k, v in resolved_headers.items() if v is not None})
             adapter = str(resolved.get("adapter") or adapter)
             adapter_title = str(resolved.get("title") or resolved.get("anchor_name") or "")
+            resolved_youtube_video_id = str(resolved.get("youtube_video_id") or "").strip()
             meta.update({
                 "adapter": adapter,
                 "resolved_type": source_type,
@@ -688,7 +690,8 @@ async def probe_channel_source(ch: dict[str, Any], client: httpx.AsyncClient) ->
             })
         except AdapterResolveError as exc:
             status = "not_live" if is_adapter_not_live_error(exc.error_code) else "error"
-            return _empty_result(
+            err_vid = str(getattr(exc.__cause__, "youtube_video_id", "") or "").strip()
+            result = _empty_result(
                 probe_status=status,
                 live_status="not_live" if status == "not_live" else "error",
                 probe_method="adapter_resolve",
@@ -699,6 +702,9 @@ async def probe_channel_source(ch: dict[str, Any], client: httpx.AsyncClient) ->
                 requires_proxy_declared=declared_proxy,
                 probe_meta_json=_safe_meta({"error_code": exc.error_code, "retryable": exc.retryable}),
             )
+            if err_vid:
+                result["youtube_video_id"] = err_vid
+            return result
 
     if not url:
         return _empty_result(
@@ -775,6 +781,8 @@ async def probe_channel_source(ch: dict[str, Any], client: httpx.AsyncClient) ->
     result["proxy_required_hint"] = bool(declared_proxy or adapter or _requires_headers(headers) or lower_url.startswith(("rtsp://", "rtmp://")))
     result["adapter_provider"] = adapter
     result["adapter_title"] = adapter_title
+    if resolved_youtube_video_id:
+        result["youtube_video_id"] = resolved_youtube_video_id
     existing_meta = {}
     try:
         existing_meta = json.loads(result.get("probe_meta_json") or "{}")

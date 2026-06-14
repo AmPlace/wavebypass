@@ -649,6 +649,7 @@ async def update_channel_probe_result(ch_id: int, result: dict):
                 last_error=?,
                 adapter_provider=?,
                 adapter_title=?,
+                youtube_video_id=COALESCE(NULLIF(?, ''), youtube_video_id),
                 probe_meta_json=?
             WHERE id=?
             """,
@@ -671,6 +672,7 @@ async def update_channel_probe_result(ch_id: int, result: dict):
                 str(result.get('last_error') or ''),
                 str(result.get('adapter_provider') or ''),
                 str(result.get('adapter_title') or ''),
+                str(result.get('youtube_video_id') or ''),
                 str(result.get('probe_meta_json') or '{}'),
                 ch_id,
             ),

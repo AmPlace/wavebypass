@@ -8,6 +8,7 @@ from streamlink import Streamlink
 from streamlink.exceptions import NoPluginError, NoStreamsError, PluginError, StreamError, StreamlinkError
 
 from . import AdapterRequest, AdapterResolveError
+from m3u8_parser import parse_youtube_video_id
 
 
 _YOUTUBE_VIDEO_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{11}$")
@@ -17,6 +18,10 @@ _YOUTUBE_CHANNEL_ID_PATTERNS = (
     re.compile(r'"channelId"\s*:\s*"(UC[a-zA-Z0-9_-]{20,})"'),
     re.compile(r'<meta\s+itemprop=["\']channelId["\']\s+content=["\'](UC[a-zA-Z0-9_-]{20,})["\']', re.I),
     re.compile(r'/channel/(UC[a-zA-Z0-9_-]{20,})'),
+)
+_YOUTUBE_VIDEO_ID_PATTERNS = (
+    re.compile(r'"videoId"\s*:\s*"([a-zA-Z0-9_-]{11})"'),
+    re.compile(r'<link\s+rel=["\']canonical["\']\s+href=["\']https?://(?:www\.)?youtube\.com/watch\?v=([a-zA-Z0-9_-]{11})["\']', re.I),
 )
 YOUTUBE_STREAMLINK_TIMEOUT_SECONDS = 12.0
 
@@ -110,7 +115,8 @@ def _resolve_youtube_with_streamlink(url: str, quality: str = "best") -> dict[st
     }
 
 
-async def _resolve_channel_id_from_page(url: str, client: httpx.AsyncClient) -> str:
+async def _resolve_ids_from_page(url: str, client: httpx.AsyncClient) -> tuple[str, str]:
+    """从 YouTube 页面同时提取 channel_id 和 video_id，一次请求搞定。"""
     try:
         resp = await client.get(
             url,
@@ -123,13 +129,23 @@ async def _resolve_channel_id_from_page(url: str, client: httpx.AsyncClient) -> 
         )
         text = resp.text or ""
     except httpx.HTTPError:
-        return ""
+        return "", ""
 
+    channel_id = ""
     for pattern in _YOUTUBE_CHANNEL_ID_PATTERNS:
         match = pattern.search(text)
         if match:
-            return match.group(1)
-    return ""
+            channel_id = match.group(1)
+            break
+
+    video_id = ""
+    for pattern in _YOUTUBE_VIDEO_ID_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            video_id = match.group(1)
+            break
+
+    return channel_id, video_id
 
 
 async def resolve_youtube(request: AdapterRequest, client: httpx.AsyncClient) -> dict[str, Any]:
@@ -137,8 +153,12 @@ async def resolve_youtube(request: AdapterRequest, client: httpx.AsyncClient) ->
     quality = (request.query.get("quality") or ["best"])[0]
     explicit_channel_id = _explicit_channel_id(request.resource_id)
     page_channel_id = explicit_channel_id
+    page_video_id = ""
     if not page_channel_id and ("/live" in youtube_url or "/@" in youtube_url):
-        page_channel_id = await _resolve_channel_id_from_page(youtube_url, client)
+        page_channel_id, page_video_id = await _resolve_ids_from_page(youtube_url, client)
+    # URL 里直接带 video ID 的（watch?v=、youtu.be/、live/ID）也一并提取
+    url_video_id = parse_youtube_video_id(youtube_url)
+    effective_video_id = page_video_id or url_video_id
 
     try:
         result = await asyncio.wait_for(
@@ -146,6 +166,7 @@ async def resolve_youtube(request: AdapterRequest, client: httpx.AsyncClient) ->
             timeout=YOUTUBE_STREAMLINK_TIMEOUT_SECONDS + 2,
         )
     except asyncio.TimeoutError as exc:
+        exc.youtube_video_id = effective_video_id
         raise AdapterResolveError(
             "youtube_resolve_timeout",
             "YouTube Streamlink 解析超时，尚未拿到真实播放地址",
@@ -153,6 +174,7 @@ async def resolve_youtube(request: AdapterRequest, client: httpx.AsyncClient) ->
             retryable=True,
         ) from exc
     except NoStreamsError as exc:
+        exc.youtube_video_id = effective_video_id
         raise AdapterResolveError(
             "youtube_not_live",
             "YouTube 没有返回可播放流，可能未开播、需要登录、地区限制或需要 PO Token",
@@ -160,6 +182,7 @@ async def resolve_youtube(request: AdapterRequest, client: httpx.AsyncClient) ->
             retryable=False,
         ) from exc
     except (NoPluginError, PluginError, StreamError, StreamlinkError, OSError) as exc:
+        exc.youtube_video_id = effective_video_id
         raise AdapterResolveError(
             "youtube_resolve_failed",
             f"YouTube Streamlink 解析失败: {exc}",
@@ -181,4 +204,5 @@ async def resolve_youtube(request: AdapterRequest, client: httpx.AsyncClient) ->
         "stream_name": result.get("stream_name", "best"),
         "available_streams": result.get("available_streams", []),
         "youtube_channel_id": page_channel_id,
+        "youtube_video_id": effective_video_id,
     }
