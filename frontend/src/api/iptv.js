@@ -92,3 +92,10 @@ export async function fetchGlobalTestStatus() {
   const res = await request('/api/iptv/test-status')
   return res.json()
 }
+
+// ── adapter 直播间封面/头像（B站 / 斗鱼 / 虎牙 / 快手；其他 adapter 后端会返回空对象）──
+export async function fetchAdapterCover(targetUrl) {
+  const params = new URLSearchParams({ target_url: targetUrl })
+  const res = await request(`/api/iptv/adapter/cover?${params.toString()}`, { timeout: 8_000 })
+  return res.json()
+}

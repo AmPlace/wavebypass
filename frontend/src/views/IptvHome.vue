@@ -113,7 +113,7 @@
 import { computed, inject, onBeforeUnmount, onMounted, ref, watch, watchEffect } from 'vue'
 import { useScroll, useThrottleFn } from '@vueuse/core'
 import { usePlayerStore } from '../stores/player'
-import { fetchAggregatedChannels } from '../api/iptv'
+import { fetchAggregatedChannels, fetchAdapterCover } from '../api/iptv'
 import { useEpg } from '../composables/useEpg'
 import TagFilterRow from '../components/TagFilterRow.vue'
 
@@ -134,6 +134,53 @@ const channelSortMode = ref('original')
 const categoryTabs = computed(() => ['全部', ...allGroups.value])
 
 const YOUTUBE_THUMBNAIL_VARIANTS = ['maxresdefault', 'hq720', 'hqdefault']
+
+// adapter 直播间封面/头像懒加载。
+// 哪些 adapter 支持 cover 不在前端硬编码，由后端 /api/iptv/channels response 顶层
+// adapter_capabilities 字段提供：{ bilibili: ["cover"], douyu: ["cover"], ... }。
+// 这样后端给某个 adapter 加 ADAPTER_CAPABILITIES = {"cover": True} 后，前端不用改。
+const adapterCoverSupported = ref(new Set())
+const adapterCoverCache = ref({})    // canonical_key -> { cover_url, avatar_url }
+const adapterCoverInflight = new Map()
+const adapterCoverFailed = new Set()
+
+function adapterCoverTargetUrl(ch) {
+  // 一条聚合频道的 ch.urls 可能混着多个来源（例如 ytsl:// + huya://），
+  // 顶层 ch.adapter 由"主 url"决定，并不一定就是支持 cover 的那家，
+  // 所以这里直接扫 ch.urls，挑第一条 scheme 在能力表里的 adapter URL。
+  const urls = Array.isArray(ch?.urls) ? ch.urls : []
+  for (const item of urls) {
+    const raw = String(item?.url || '').trim()
+    const m = /^([a-z][a-z0-9+\-.]*):\/\//i.exec(raw)
+    if (!m) continue
+    const scheme = m[1].toLowerCase()
+    if (adapterCoverSupported.value.has(scheme)) return raw
+  }
+  return ''
+}
+
+function ensureAdapterCover(ch) {
+  const key = ch?.canonical_key || ''
+  if (!key) return
+  if (adapterCoverCache.value[key]) return
+  if (adapterCoverFailed.has(key)) return
+  if (adapterCoverInflight.has(key)) return
+  const targetUrl = adapterCoverTargetUrl(ch)
+  if (!targetUrl) return
+  const promise = fetchAdapterCover(targetUrl)
+    .then(payload => {
+      const cover = String(payload?.cover_url || '').trim()
+      const avatar = String(payload?.avatar_url || '').trim()
+      if (cover || avatar) {
+        adapterCoverCache.value = { ...adapterCoverCache.value, [key]: { cover_url: cover, avatar_url: avatar } }
+      } else {
+        adapterCoverFailed.add(key)
+      }
+    })
+    .catch(() => { adapterCoverFailed.add(key) })
+    .finally(() => { adapterCoverInflight.delete(key) })
+  adapterCoverInflight.set(key, promise)
+}
 
 const SORT_MODES = [
   { key: 'original', label: '默认排序' },
@@ -169,6 +216,13 @@ async function loadChannels() {
     if (!selectedGroup.value && !searchQuery.value.trim()) {
       allGroups.value = data.groups || []
     }
+    // 同步后端 adapter 能力表：仅取支持 "cover" 的 adapter 名字。
+    const caps = data.adapter_capabilities || {}
+    const next = new Set()
+    for (const [name, list] of Object.entries(caps)) {
+      if (Array.isArray(list) && list.includes('cover')) next.add(String(name).toLowerCase())
+    }
+    adapterCoverSupported.value = next
     const keys = (data.channels || []).map(c => c.canonical_key).filter(Boolean)
     if (keys.length) {
       useEpg().batchCurrent(keys).then(m => { epgMap.value = m || {} })
@@ -276,6 +330,11 @@ function channelLogoCandidates(ch) {
   const logoUrl = String(ch?.logo_url || '').trim()
   const youtubeVideoId = channelYoutubeVideoId(ch)
   const candidates = youtubeVideoId ? youtubeThumbnailUrls(youtubeVideoId) : []
+  const adapterCover = adapterCoverCache.value[ch?.canonical_key || '']
+  if (adapterCover) {
+    if (adapterCover.cover_url) candidates.push(adapterCover.cover_url)
+    if (adapterCover.avatar_url) candidates.push(adapterCover.avatar_url)
+  }
   if (logoUrl) candidates.push(logoUrl)
   const knownLogo = knownIptvLogoUrl(ch)
   if (knownLogo) candidates.push(knownLogo)
@@ -303,6 +362,9 @@ function channelLogoVisualKey(ch) {
 }
 
 function shouldShowChannelLogo(ch) {
+  // 卡片首次进入视口（虚拟列表渲染）时触发一次 adapter 封面懒加载，
+  // 失败/未开播会写入会话内黑名单，不会重复请求。
+  ensureAdapterCover(ch)
   const logo = channelLogoUrl(ch)
   if (!logo) return false
   return !failedLogoKeys.value[channelLogoFailureKey(ch)]
