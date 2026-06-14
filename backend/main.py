@@ -673,6 +673,9 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(_epg_refresh_loop())
     asyncio.create_task(_prefetch_rb())
     asyncio.create_task(_rtsp_hls_cleanup_task())
+    # logo 模板：本地兜底已在 import 时加载完成，这里启动后异步拉一次远程覆盖；
+    # 拉失败就维持本地，按用户要求不重试。后续接入设置页后再做定时刷新 / 手动刷新。
+    asyncio.create_task(refresh_logo_template_from_remote(http_client))
     # 加载 tingfm HK 电台流地址
     _load_tingfm_streams()
     yield
@@ -1587,6 +1590,7 @@ async def _epg_refresh_loop() -> None:
 # =====================================================================
 
 from m3u8_parser import parse_m3u, deduplicate_channels
+from logo_template import refresh_logo_template_from_remote
 import database as db
 import market as _market
 
@@ -1914,6 +1918,7 @@ async def _get_aggregated_iptv_channels(group: str = '', search: str = '') -> tu
 
     from m3u8_parser import adapter_provider, clean_channel_display_name, detect_source_type, normalize_channel_name, parse_youtube_channel_id, parse_youtube_video_id, _channel_alias
     from template import channel_template, normalize_group_name
+    from logo_template import logo_template
 
     merged: dict[str, dict] = {}
     for ch in raw:
@@ -1995,6 +2000,12 @@ async def _get_aggregated_iptv_channels(group: str = '', search: str = '') -> tu
         # 确保 tvg_name 不为空：优先取 display_name
         if not ch.get('tvg_name'):
             ch['tvg_name'] = ch['name']
+
+        # 用 logo 模板覆盖：命中即换成 CDN 高清版，未命中维持原 M3U logo 兜底。
+        # 见 backend/logo_template.py，模板按 canonical_key 查询，零误判、不影响去重。
+        tmpl_logo = logo_template.lookup(ch['canonical_key'])
+        if tmpl_logo:
+            ch['logo_url'] = tmpl_logo
 
     # 合并 EPG 绑定信息
     epg_maps = {}
