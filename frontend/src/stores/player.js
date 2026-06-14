@@ -33,6 +33,9 @@ export const usePlayerStore = defineStore('player', {
         return
       }
 
+      // 使旧的 playIptvChannel 异步 resolve 失效
+      ++this.iptvSelectionToken
+
       // 停止 IPTV 播放
       this.currentIptvChannel = null
       this.pendingIptvChannel = null
