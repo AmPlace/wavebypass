@@ -44,3 +44,6 @@ ffmpeg/*/ffmpeg
 ffmpeg/*/ffmpeg.exe
 ffmpeg/*/*.dylib
 ffmpeg/*/.processed
+backend/config/alias.txt.bak
+backend/config/template_draft.txt
+backend/scripts/migrate_epg_keys.py
