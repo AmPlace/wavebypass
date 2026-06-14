@@ -360,8 +360,6 @@ function channelLogoCandidates(ch) {
     if (adapterCover.avatar_url) candidates.push(adapterCover.avatar_url)
   }
   if (logoUrl) candidates.push(logoUrl)
-  const knownLogo = knownIptvLogoUrl(ch)
-  if (knownLogo) candidates.push(knownLogo)
   return Array.from(new Set(candidates))
 }
 
@@ -389,21 +387,6 @@ function advanceChannelLogoCandidate(ch) {
     return true
   }
   return false
-}
-
-function knownIptvLogoUrl(ch) {
-  const normalized = normalizeChannelLogoKey(`${ch.name || ''} ${ch.tvg_name || ''} ${ch.canonical_key || ''}`)
-  if (normalized.includes('cgtn')) return 'https://live.fanmingming.com/tv/CGTN.png'
-  const cctvMatch = normalized.match(/cctv(\d{1,2})(plus|\+)?/)
-  if (!cctvMatch) return ''
-  const suffix = cctvMatch[2] ? `${cctvMatch[1]}%2B` : cctvMatch[1]
-  return `https://live.fanmingming.com/tv/CCTV${suffix}.png`
-}
-
-function normalizeChannelLogoKey(value) {
-  return String(value || '')
-    .toLowerCase()
-    .replace(/[\s_\-－综合高清新闻纪录少儿音乐电影电视剧体育中文外语财经农业农村科教社会与法国防军事戏曲]/g, '')
 }
 
 function youtubeThumbnailUrls(videoId) {
