@@ -22,7 +22,13 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Stre
 from contextlib import asynccontextmanager
 from fetchers import STATION_FETCHER_MAP, yunting
 import database
-from adapters import AdapterResolveError, resolve_adapter_source
+from adapters import (
+    AdapterResolveError,
+    adapter_capabilities_map,
+    adapter_supports,
+    parse_adapter_url,
+    resolve_adapter_source,
+)
 from iptv_probe import probe_channel_source
 from media_tools import media_tool_bin
 
@@ -2032,7 +2038,14 @@ async def _get_aggregated_iptv_channels(group: str = '', search: str = '') -> tu
 async def aggregated_channels(group: str = '', search: str = ''):
     result, groups = await _get_aggregated_iptv_channels(group=group, search=search)
 
-    return {"channels": result, "groups": groups, "total": len(result)}
+    return {
+        "channels": result,
+        "groups": groups,
+        "total": len(result),
+        # adapter 能力表，前端据此决定要对哪些 adapter 触发 cover 懒加载等增强请求。
+        # 由各 adapter 模块顶层 ADAPTER_CAPABILITIES 自描述 + adapters/__init__.py 采集。
+        "adapter_capabilities": adapter_capabilities_map(),
+    }
 
 
 # ── 测速 ──
@@ -2433,6 +2446,275 @@ async def iptv_adapter_resolve(target_url: str = ''):
     payload = dict(resolved)
     payload["proxy_url"] = _iptv_adapter_play_path(target_url)
     return payload
+
+
+# ── adapter 直播间封面/头像 ─────────────────────────────────────────────
+# 哪些 adapter 支持 cover，由 adapter 模块自己声明 ADAPTER_CAPABILITIES = {"cover": True}，
+# 这里只做"中央实现"：轻量 metadata 抓取 + URL 缓存。失败/未声明一律返回 200 + 空字符串，
+# 让前端继续走 logo_url 兜底，避免把这条非关键路径变成报错弹窗源。
+
+_ADAPTER_COVER_SUCCESS_TTL_SECONDS = 6 * 3600  # cover URL 都是平台 CDN 长期 URL，6h 足够
+_ADAPTER_COVER_FAILURE_TTL_SECONDS = 5 * 60    # 失败/未开播短缓存，避免反复打风控接口
+_ADAPTER_COVER_HTTP_TIMEOUT = 6.0
+
+_adapter_cover_cache: dict[str, dict] = {}
+_adapter_cover_locks: dict[str, asyncio.Lock] = {}
+
+
+def _adapter_cover_empty(adapter_name: str = '') -> dict:
+    return {
+        "ok": True,
+        "adapter": adapter_name,
+        "cover_url": "",
+        "avatar_url": "",
+        "title": "",
+        "anchor_name": "",
+        "is_live": False,
+    }
+
+
+def _adapter_cover_cache_get(cache_key: str) -> dict | None:
+    item = _adapter_cover_cache.get(cache_key)
+    if not item:
+        return None
+    if float(item.get("expires_at", 0)) <= time.time():
+        _adapter_cover_cache.pop(cache_key, None)
+        return None
+    return dict(item.get("payload") or {})
+
+
+def _adapter_cover_cache_set(cache_key: str, payload: dict, ttl: int) -> None:
+    if ttl <= 0:
+        _adapter_cover_cache.pop(cache_key, None)
+        return
+    _adapter_cover_cache[cache_key] = {
+        "expires_at": time.time() + ttl,
+        "payload": dict(payload),
+    }
+
+
+async def _fetch_bilibili_cover(room_id: str) -> dict:
+    api = (
+        "https://api.live.bilibili.com/xlive/web-room/v1/index/getH5InfoByRoom"
+        f"?room_id={quote(room_id, safe='')}"
+    )
+    resp = await http_client.get(
+        api,
+        timeout=_ADAPTER_COVER_HTTP_TIMEOUT,
+        headers={
+            "User-Agent": "Mozilla/5.0",
+            "Referer": f"https://live.bilibili.com/{room_id}",
+        },
+    )
+    resp.raise_for_status()
+    data = (resp.json() or {}).get("data") or {}
+    room_info = data.get("room_info") or {}
+    base_info = ((data.get("anchor_info") or {}).get("base_info")) or {}
+    cover = str(room_info.get("cover") or room_info.get("keyframe") or "").strip()
+    avatar = str(base_info.get("face") or "").strip()
+    return {
+        "ok": True,
+        "adapter": "bilibili",
+        "cover_url": cover,
+        "avatar_url": avatar,
+        "title": str(room_info.get("title") or "").strip(),
+        "anchor_name": str(base_info.get("uname") or "").strip(),
+        "is_live": int(room_info.get("live_status") or 0) == 1,
+    }
+
+
+async def _fetch_douyu_cover(room_id: str) -> dict:
+    api = f"https://www.douyu.com/betard/{quote(room_id, safe='')}"
+    resp = await http_client.get(
+        api,
+        timeout=_ADAPTER_COVER_HTTP_TIMEOUT,
+        headers={
+            "User-Agent": "Mozilla/5.0",
+            "Referer": "https://www.douyu.com/",
+        },
+    )
+    resp.raise_for_status()
+    room = (resp.json() or {}).get("room") or {}
+    avatar_field = room.get("avatar")
+    if isinstance(avatar_field, dict):
+        avatar = str(avatar_field.get("big") or avatar_field.get("middle") or "").strip()
+    else:
+        avatar = str(avatar_field or room.get("avatar_mid") or "").strip()
+    return {
+        "ok": True,
+        "adapter": "douyu",
+        "cover_url": str(room.get("room_pic") or "").strip(),
+        "avatar_url": avatar,
+        "title": str(room.get("room_name") or "").strip(),
+        "anchor_name": str(room.get("owner_name") or "").strip(),
+        "is_live": int(room.get("show_status") or 0) == 1 and int(room.get("videoLoop") or 0) == 0,
+    }
+
+
+async def _fetch_huya_cover(room_id: str) -> dict:
+    api = (
+        "https://mp.huya.com/cache.php?m=Live&do=profileRoom&showSecret=1"
+        f"&roomid={quote(room_id, safe='')}"
+    )
+    resp = await http_client.get(
+        api,
+        timeout=_ADAPTER_COVER_HTTP_TIMEOUT,
+        headers={
+            "User-Agent": "Mozilla/5.0",
+            "Referer": "https://www.huya.com/",
+        },
+    )
+    resp.raise_for_status()
+    data = (resp.json() or {}).get("data") or {}
+    live_data = data.get("liveData") or {}
+    profile = data.get("profileInfo") or {}
+    avatar = str(live_data.get("avatar180") or profile.get("avatar180") or "").strip()
+    live_status = live_data.get("liveStatus")
+    is_live = (str(live_status).upper() == "ON") if live_status is not None else bool(live_data.get("screenshot"))
+    return {
+        "ok": True,
+        "adapter": "huya",
+        "cover_url": str(live_data.get("screenshot") or "").strip(),
+        "avatar_url": avatar,
+        "title": str(live_data.get("introduction") or "").strip(),
+        "anchor_name": str(live_data.get("nick") or profile.get("nick") or "").strip(),
+        "is_live": is_live,
+    }
+
+
+async def _fetch_kuaishou_cover(room_id: str) -> dict:
+    # 复用 kuaishou.py 同款 __INITIAL_STATE__ 解析，但只读 poster/avatar，不取 playUrls。
+    from curl_cffi.requests import AsyncSession
+
+    url = f"https://live.kuaishou.com/u/{quote(room_id, safe='')}"
+    async with AsyncSession(impersonate="chrome", timeout=_ADAPTER_COVER_HTTP_TIMEOUT) as session:
+        resp = await session.get(url)
+    if resp.status_code != 200:
+        raise RuntimeError(f"kuaishou http {resp.status_code}")
+    html = resp.text or ''
+    match = re.search(r'<script>window\.__INITIAL_STATE__=(.*?);\(function\(\)\{var s;', html)
+    if not match:
+        return _adapter_cover_empty("kuaishou")
+    raw = match.group(1)
+    blocks = re.findall(r'(\{"liveStream".*?),"gameInfo', raw)
+    if not blocks:
+        return _adapter_cover_empty("kuaishou")
+    obj = json.loads(blocks[0] + "}")
+    live_stream = obj.get("liveStream") or {}
+    author = obj.get("author") or {}
+    poster = str(live_stream.get("poster") or live_stream.get("coverUrl") or "").strip()
+    return {
+        "ok": True,
+        "adapter": "kuaishou",
+        "cover_url": poster,
+        "avatar_url": str(author.get("avatar") or author.get("headurl") or "").strip(),
+        "title": str(live_stream.get("caption") or "").strip(),
+        "anchor_name": str(author.get("name") or "").strip(),
+        "is_live": bool(live_stream),
+    }
+
+
+_ADAPTER_COVER_FETCHERS = {
+    "bilibili": _fetch_bilibili_cover,
+    "douyu": _fetch_douyu_cover,
+    "huya": _fetch_huya_cover,
+    "kuaishou": _fetch_kuaishou_cover,
+}
+
+
+@app.get("/api/iptv/adapter/cover")
+async def iptv_adapter_cover(target_url: str = ''):
+    try:
+        request = parse_adapter_url(target_url)
+    except AdapterResolveError:
+        return _adapter_cover_empty()
+
+    if not adapter_supports(request.adapter, "cover"):
+        return _adapter_cover_empty(request.adapter)
+
+    cache_key = request.raw_url
+    cached = _adapter_cover_cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    lock = _adapter_cover_locks.setdefault(cache_key, asyncio.Lock())
+    async with lock:
+        cached = _adapter_cover_cache_get(cache_key)
+        if cached is not None:
+            return cached
+
+        fetcher = _ADAPTER_COVER_FETCHERS.get(request.adapter)
+        if not fetcher:
+            payload = _adapter_cover_empty(request.adapter)
+            _adapter_cover_cache_set(cache_key, payload, _ADAPTER_COVER_FAILURE_TTL_SECONDS)
+            return payload
+        try:
+            payload = await fetcher(request.resource_id.strip("/"))
+            has_image = bool(str(payload.get("cover_url") or "").strip()) or bool(str(payload.get("avatar_url") or "").strip())
+            ttl = _ADAPTER_COVER_SUCCESS_TTL_SECONDS if has_image else _ADAPTER_COVER_FAILURE_TTL_SECONDS
+            for field in ("cover_url", "avatar_url"):
+                raw = str(payload.get(field) or "").strip()
+                if raw:
+                    payload[field] = _cover_img_proxy_url(raw)
+            _adapter_cover_cache_set(cache_key, payload, ttl)
+            return payload
+        except Exception as exc:
+            logger.info("adapter cover fetch failed adapter=%s room=%s err=%s",
+                        request.adapter, request.resource_id, exc)
+            payload = _adapter_cover_empty(request.adapter)
+            _adapter_cover_cache_set(cache_key, payload, _ADAPTER_COVER_FAILURE_TTL_SECONDS)
+            return payload
+
+
+# ── 封面图片代理（绕过 CDN Referer 防盗链）──────────────────────────────
+# 白名单：仅允许代理这些域名下的图片，防止被当作公共代理滥用。
+# 格式: {域名后缀: 需要伪造的 Referer}
+_COVER_IMG_PROXY_SOURCES = {
+    "hdslb.com": "https://www.bilibili.com",
+    "bilibili.com": "https://www.bilibili.com",
+}
+
+
+def _cover_img_proxy_url(raw_url: str) -> str:
+    """如果 raw_url 命中防盗链白名单，返回代理路径；否则原样返回。"""
+    host = (urlparse(raw_url).hostname or "").lower()
+    for suffix in _COVER_IMG_PROXY_SOURCES:
+        if host == suffix or host.endswith("." + suffix):
+            return f"/api/iptv/adapter/cover-img?url={quote(raw_url, safe='')}"
+    return raw_url
+
+
+@app.get("/api/iptv/adapter/cover-img")
+async def iptv_adapter_cover_img(url: str = ''):
+    raw_url = (url or "").strip()
+    if not raw_url:
+        raise HTTPException(status_code=400, detail="url 不能为空")
+    validate_target_url(raw_url)
+
+    host = (urlparse(raw_url).hostname or "").lower()
+    referer = ""
+    for suffix, ref in _COVER_IMG_PROXY_SOURCES.items():
+        if host == suffix or host.endswith("." + suffix):
+            referer = ref
+            break
+    if not referer:
+        raise HTTPException(status_code=403, detail="该域名不在封面代理白名单中")
+
+    try:
+        upstream = await http_client.get(
+            raw_url,
+            headers={"User-Agent": "Mozilla/5.0", "Referer": referer},
+            follow_redirects=True,
+        )
+        upstream.raise_for_status()
+    except Exception:
+        raise HTTPException(status_code=502, detail="封面图片获取失败")
+
+    return Response(
+        content=upstream.content,
+        media_type=upstream.headers.get("content-type", "image/jpeg"),
+        headers={"Cache-Control": "public, max-age=86400", "Access-Control-Allow-Origin": "*"},
+    )
 
 
 @app.get("/api/iptv/adapter/play.m3u8")
