@@ -383,7 +383,7 @@
     pointer-events: none;
   }
 
-  .iptv-main .channel-card--logo-card {
+  :is(.iptv-main, .radio-main) .channel-card--logo-card {
     --iptv-card-footer-height: 44px;
     border-color: var(--iptv-card-border);
     background:
@@ -396,11 +396,11 @@
     box-shadow: var(--iptv-card-shadow);
   }
 
-  .dark .iptv-main .channel-card--logo-card {
+  .dark :is(.iptv-main, .radio-main) .channel-card--logo-card {
     box-shadow: none;
   }
 
-  .iptv-main .channel-card--logo-card::after {
+  :is(.iptv-main, .radio-main) .channel-card--logo-card::after {
     content: "";
     position: absolute;
     z-index: 1;
@@ -413,7 +413,7 @@
     pointer-events: none;
   }
 
-  .iptv-main .channel-card__logo-card-visual {
+  :is(.iptv-main, .radio-main) .channel-card__logo-card-visual {
     bottom: var(--iptv-card-footer-height);
     background:
       linear-gradient(
@@ -431,11 +431,11 @@
       );
   }
 
-  .iptv-main .channel-card__logo-card-shade {
+  :is(.iptv-main, .radio-main) .channel-card__logo-card-shade {
     display: none;
   }
 
-  .iptv-main .channel-card__logo-stage {
+  :is(.iptv-main, .radio-main) .channel-card__logo-stage {
     position: absolute;
     left: 12%;
     right: 12%;
@@ -449,7 +449,7 @@
     pointer-events: none;
   }
 
-  .iptv-main .channel-card__logo-stage--badge {
+  :is(.iptv-main, .radio-main) .channel-card__logo-stage--badge {
     left: 14%;
     right: 14%;
     top: 14%;
@@ -463,19 +463,19 @@
     padding: clamp(4px, 3%, 8px);
   }
 
-  .dark .iptv-main .channel-card__logo-stage--badge {
+  .dark :is(.iptv-main, .radio-main) .channel-card__logo-stage--badge {
     background:
       radial-gradient(ellipse at 50% 50%, rgba(255,255,255,0.08) 0%, rgba(255,255,255,0.035) 44%, rgba(255,255,255,0) 72%);
     box-shadow: none;
   }
 
-  .iptv-main .channel-card__logo-stage--cover {
+  :is(.iptv-main, .radio-main) .channel-card__logo-stage--cover {
     inset: 0;
     border-radius: 0;
     padding: 0;
   }
 
-  .iptv-main .channel-card__center-logo {
+  :is(.iptv-main, .radio-main) .channel-card__center-logo {
     position: static;
     max-width: 74%;
     max-height: 62%;
@@ -487,7 +487,7 @@
       drop-shadow(0 1px 0 rgba(255,255,255,0.36));
   }
 
-  .iptv-main .channel-card__center-logo--badge {
+  :is(.iptv-main, .radio-main) .channel-card__center-logo--badge {
     display: block;
     width: auto;
     height: auto;
@@ -499,7 +499,7 @@
       drop-shadow(0 1px 2px rgba(15,23,42,0.20));
   }
 
-  .iptv-main .channel-card__center-logo--cover {
+  :is(.iptv-main, .radio-main) .channel-card__center-logo--cover {
     display: block;
     width: 100%;
     height: 100%;
@@ -510,22 +510,22 @@
     filter: none;
   }
 
-  .dark .iptv-main .channel-card__center-logo {
+  .dark :is(.iptv-main, .radio-main) .channel-card__center-logo {
     filter:
       drop-shadow(0 1px 1px rgba(255,255,255,0.08))
       drop-shadow(0 3px 8px rgba(0,0,0,0.38));
   }
 
-  .dark .iptv-main .channel-card__center-logo--badge {
+  .dark :is(.iptv-main, .radio-main) .channel-card__center-logo--badge {
     filter:
       drop-shadow(0 2px 5px rgba(0,0,0,0.28));
   }
 
-  .dark .iptv-main .channel-card__center-logo--cover {
+  .dark :is(.iptv-main, .radio-main) .channel-card__center-logo--cover {
     filter: none;
   }
 
-  .iptv-main .channel-card__text-logo {
+  :is(.iptv-main, .radio-main) .channel-card__text-logo {
     display: -webkit-box;
     width: min(82%, 360px);
     max-height: 100%;
@@ -546,93 +546,93 @@
     -webkit-line-clamp: 2;
   }
 
-  .dark .iptv-main .channel-card__text-logo {
+  .dark :is(.iptv-main, .radio-main) .channel-card__text-logo {
     color: rgba(248,248,250,0.94);
     text-shadow:
       0 1px 2px rgba(0,0,0,0.55),
       0 4px 12px rgba(0,0,0,0.18);
   }
 
-  .iptv-main .channel-card__text-logo--xl {
+  :is(.iptv-main, .radio-main) .channel-card__text-logo--xl {
     font-size: clamp(22px, 13cqw, 34px);
   }
 
-  .iptv-main .channel-card__text-logo--lg {
+  :is(.iptv-main, .radio-main) .channel-card__text-logo--lg {
     font-size: clamp(20px, 11cqw, 29px);
   }
 
-  .iptv-main .channel-card__text-logo--md {
+  :is(.iptv-main, .radio-main) .channel-card__text-logo--md {
     font-size: clamp(18px, 9.5cqw, 24px);
   }
 
-  .iptv-main .channel-card__text-logo--sm {
+  :is(.iptv-main, .radio-main) .channel-card__text-logo--sm {
     font-size: clamp(17px, 8cqw, 20px);
   }
 
-  .iptv-main .card-info {
+  :is(.iptv-main, .radio-main) .card-info {
     height: var(--iptv-card-footer-height);
     bottom: 0;
     align-items: center;
   }
 
-  .iptv-main .card-channel {
+  :is(.iptv-main, .radio-main) .card-channel {
     gap: 7px;
   }
 
-  .iptv-main .card-channel-name {
+  :is(.iptv-main, .radio-main) .card-channel-name {
     color: var(--iptv-card-label-primary);
     font-size: 14px;
     font-weight: 600;
   }
 
-  .iptv-main .card-program-name {
+  :is(.iptv-main, .radio-main) .card-program-name {
     max-width: 46%;
     color: var(--iptv-card-label-secondary);
     font-size: 13px;
     font-weight: 500;
   }
 
-  .iptv-main .channel-play-state-dot {
+  :is(.iptv-main, .radio-main) .channel-play-state-dot {
     width: 8px;
     height: 8px;
     flex: 0 0 auto;
     border-radius: 999px;
   }
 
-  .iptv-main .channel-play-state-dot--live {
+  :is(.iptv-main, .radio-main) .channel-play-state-dot--live {
     background: #22C55E;
     box-shadow: 0 0 0 3px rgba(34,197,94,0.12);
   }
 
-  .iptv-main .channel-play-state-dot--neutral {
+  :is(.iptv-main, .radio-main) .channel-play-state-dot--neutral {
     background: #9CA3AF;
     box-shadow: 0 0 0 3px rgba(156,163,175,0.12);
   }
 
-  .iptv-main .channel-play-state-dot--warn {
+  :is(.iptv-main, .radio-main) .channel-play-state-dot--warn {
     background: #F59E0B;
     box-shadow: 0 0 0 3px rgba(245,158,11,0.12);
   }
 
-  .iptv-main .channel-play-state-dot--danger {
+  :is(.iptv-main, .radio-main) .channel-play-state-dot--danger {
     background: #DC2626;
     box-shadow: 0 0 0 3px rgba(220,38,38,0.12);
   }
 
   @media (max-width: 768px) {
-    .iptv-main .channel-card__text-logo--xl {
+    :is(.iptv-main, .radio-main) .channel-card__text-logo--xl {
       font-size: 25px;
     }
 
-    .iptv-main .channel-card__text-logo--lg {
+    :is(.iptv-main, .radio-main) .channel-card__text-logo--lg {
       font-size: 22px;
     }
 
-    .iptv-main .channel-card__text-logo--md {
+    :is(.iptv-main, .radio-main) .channel-card__text-logo--md {
       font-size: 19px;
     }
 
-    .iptv-main .channel-card__text-logo--sm {
+    :is(.iptv-main, .radio-main) .channel-card__text-logo--sm {
       font-size: 17px;
     }
   }

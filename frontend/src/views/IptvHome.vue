@@ -115,6 +115,7 @@ import { useScroll, useThrottleFn } from '@vueuse/core'
 import { usePlayerStore } from '../stores/player'
 import { fetchAggregatedChannels, fetchAdapterCover } from '../api/iptv'
 import { useEpg } from '../composables/useEpg'
+import { useLogoVisual } from '../composables/useLogoVisual'
 import TagFilterRow from '../components/TagFilterRow.vue'
 
 const playerStore = usePlayerStore()
@@ -127,8 +128,6 @@ const allGroups = ref([])
 const selectedGroup = ref('')
 const loading = ref(false)
 const epgMap = ref({})
-const failedLogoKeys = ref({})
-const logoVisualModes = ref({})
 const logoCandidateIndexes = ref({})
 const channelSortMode = ref('original')
 const categoryTabs = computed(() => ['全部', ...allGroups.value])
@@ -143,6 +142,31 @@ const adapterCoverSupported = ref(new Set())
 const adapterCoverCache = ref({})    // canonical_key -> { cover_url, avatar_url }
 const adapterCoverInflight = new Map()
 const adapterCoverFailed = new Set()
+
+const {
+  displayName: channelDisplayName,
+  shouldShowLogo: shouldShowChannelLogo,
+  logoStageClass,
+  logoImageClass,
+  classifyLogo: classifyChannelLogo,
+  markLogoFailed: markChannelLogoFailed,
+  textLogoSizeClass,
+} = useLogoVisual({
+  getLogoUrl: channelLogoUrl,
+  getDisplayName: channelDisplayNameValue,
+  getIdentityKey: channelLogoIdentityKey,
+  getFailureKey: channelLogoCandidateKey,
+  getVisualKey: (ch) => `${channelLogoIdentityKey(ch)}|${channelLogoUrl(ch)}`,
+  onBeforeShow: ensureAdapterCover,
+  onBeforeClassify: (ch, { width, height }) => (
+    isCurrentYoutubeThumbnailCandidate(ch)
+    && width < 480
+    && height < 240
+    && advanceChannelLogoCandidate(ch)
+  ),
+  onBeforeFail: advanceChannelLogoCandidate,
+  fallbackName: '未知频道',
+})
 
 function adapterCoverTargetUrl(ch) {
   // 一条聚合频道的 ch.urls 可能混着多个来源（例如 ytsl:// + huya://），
@@ -349,68 +373,8 @@ function channelLogoCandidateKey(ch) {
   return `${channelLogoIdentityKey(ch)}|${channelLogoCandidates(ch).join('|')}`
 }
 
-function channelDisplayName(ch) {
+function channelDisplayNameValue(ch) {
   return String(ch?.name || '未知频道').trim() || '未知频道'
-}
-
-function channelLogoFailureKey(ch) {
-  return channelLogoCandidateKey(ch)
-}
-
-function channelLogoVisualKey(ch) {
-  return `${channelLogoIdentityKey(ch)}|${channelLogoUrl(ch)}`
-}
-
-function shouldShowChannelLogo(ch) {
-  // 卡片首次进入视口（虚拟列表渲染）时触发一次 adapter 封面懒加载，
-  // 失败/未开播会写入会话内黑名单，不会重复请求。
-  ensureAdapterCover(ch)
-  const logo = channelLogoUrl(ch)
-  if (!logo) return false
-  return !failedLogoKeys.value[channelLogoFailureKey(ch)]
-}
-
-function logoVisualMode(ch) {
-  return logoVisualModes.value[channelLogoVisualKey(ch)] || 'badge'
-}
-
-function logoStageClass(ch) {
-  return `channel-card__logo-stage--${logoVisualMode(ch)}`
-}
-
-function logoImageClass(ch) {
-  return `channel-card__center-logo--${logoVisualMode(ch)}`
-}
-
-function classifyChannelLogo(ch, event) {
-  const img = event?.target
-  if (!img) return
-  const width = Number(img.naturalWidth || 0)
-  const height = Number(img.naturalHeight || 0)
-  if (!width || !height) return
-
-  if (isCurrentYoutubeThumbnailCandidate(ch) && width < 480 && height < 240 && advanceChannelLogoCandidate(ch)) {
-    return
-  }
-
-  const ratio = width / height
-  const isLargeWideImage = width >= 480 && height >= 240 && ratio >= 1.55 && ratio <= 1.9
-  const mode = isLargeWideImage ? 'cover' : 'badge'
-  const key = channelLogoVisualKey(ch)
-  if (logoVisualModes.value[key] === mode) return
-  logoVisualModes.value = {
-    ...logoVisualModes.value,
-    [key]: mode,
-  }
-}
-
-function markChannelLogoFailed(ch) {
-  if (advanceChannelLogoCandidate(ch)) return
-
-  failedLogoKeys.value = {
-    ...failedLogoKeys.value,
-    [channelLogoCandidateKey(ch)]: true,
-  }
 }
 
 function advanceChannelLogoCandidate(ch) {
@@ -425,14 +389,6 @@ function advanceChannelLogoCandidate(ch) {
     return true
   }
   return false
-}
-
-function textLogoSizeClass(ch) {
-  const length = Array.from(channelDisplayName(ch)).length
-  if (length <= 4) return 'channel-card__text-logo--xl'
-  if (length <= 8) return 'channel-card__text-logo--lg'
-  if (length <= 14) return 'channel-card__text-logo--md'
-  return 'channel-card__text-logo--sm'
 }
 
 function knownIptvLogoUrl(ch) {
