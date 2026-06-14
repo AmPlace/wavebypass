@@ -1941,7 +1941,7 @@ async def _get_aggregated_iptv_channels(group: str = '', search: str = '') -> tu
         detected_source_type = detect_source_type(ch['url'])
         stored_source_type = ch.get('source_type')
         source_type = stored_source_type if stored_source_type and stored_source_type != 'hls' else detected_source_type
-        youtube_video_id = ch.get('youtube_video_id') or parse_youtube_video_id(ch['url'])
+        youtube_video_id = parse_youtube_video_id(ch['url']) or ch.get('youtube_video_id')
         youtube_channel_id = parse_youtube_channel_id(ch['url'])
         merged[key]['urls'].append({
             'url': ch['url'],
