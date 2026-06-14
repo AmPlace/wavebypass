@@ -466,12 +466,12 @@ function isCurrentYoutubeThumbnailCandidate(ch) {
 function channelYoutubeVideoId(ch) {
   const urls = Array.isArray(ch?.urls) ? ch.urls : []
   for (const item of urls) {
-    const directId = sanitizeYoutubeVideoId(item?.youtube_video_id)
-    if (directId) return directId
     const parsedId = parseYoutubeVideoId(item?.url)
     if (parsedId) return parsedId
+    const directId = sanitizeYoutubeVideoId(item?.youtube_video_id)
+    if (directId) return directId
   }
-  return ''
+  return parseYoutubeThumbnailVideoId(ch?.logo_url)
 }
 
 function sanitizeYoutubeVideoId(value) {
@@ -519,6 +519,27 @@ function parseYoutubeVideoId(url) {
     return ''
   }
   return ''
+}
+
+function parseYoutubeThumbnailVideoId(url) {
+  try {
+    const parsed = new URL(String(url || '').trim())
+    const host = parsed.hostname.toLowerCase()
+    if (
+      host !== 'i.ytimg.com'
+      && host !== 'img.youtube.com'
+      && !host.endsWith('.ytimg.com')
+      && !host.endsWith('.youtube.com')
+    ) {
+      return ''
+    }
+    const parts = parsed.pathname.split('/').filter(Boolean)
+    const viIndex = parts.findIndex(part => part === 'vi' || part === 'vi_webp')
+    if (viIndex < 0 || viIndex + 1 >= parts.length) return ''
+    return sanitizeYoutubeVideoId(parts[viIndex + 1])
+  } catch {
+    return ''
+  }
 }
 
 async function playChannel(ch) {

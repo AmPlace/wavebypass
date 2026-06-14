@@ -215,6 +215,16 @@ export const usePlayerStore = defineStore('player', {
         if (String(url || '').trim().toLowerCase().startsWith('youtube://')) return url
         return `youtube://resolve?url=${encodeURIComponent(url)}`
       }
+      const youtubeProbeAdapterUrlFor = (url) => {
+        try {
+          const parsed = new URL(url)
+          if (parsed.protocol === 'youtube:' && parsed.hostname === 'resolve') {
+            parsed.searchParams.set('probe', '1')
+            return parsed.toString()
+          }
+        } catch {}
+        return url
+      }
       const absoluteApiUrl = (url) => {
         if (!url) return ''
         return /^https?:\/\//i.test(url) ? url : `${API_BASE}${url.startsWith('/') ? url : `/${url}`}`
@@ -357,11 +367,13 @@ export const usePlayerStore = defineStore('player', {
         const originalUrl = u.original_url || url
         const fallbackProxyUrl = adapterPlayUrlFor(url)
         try {
-          const resolved = await resolveAdapterSource(url)
+          const resolved = await resolveAdapterSource(adapter === 'youtube' ? youtubeProbeAdapterUrlFor(url) : url)
           const proxyUrl = absoluteApiUrl(resolved.proxy_url) || fallbackProxyUrl
           const canDirectPlay = !resolved.requires_proxy && resolved.direct_playable !== false && resolved.url
           const keepAdapterEntry = canDirectPlay && resolved.volatile_url === true
-          if (adapter === 'youtube' && resolved.youtube_channel_id && !u.youtube_video_id && !u.youtube_channel_id) {
+          if (adapter === 'youtube' && (resolved.youtube_video_id || resolved.youtube_channel_id)) {
+            const youtubeVideoId = u.youtube_video_id || parseYoutubeVideoId(originalUrl) || resolved.youtube_video_id || ''
+            const youtubeChannelId = u.youtube_channel_id || resolved.youtube_channel_id || ''
             directUrls.push({
               ...u,
               url: originalUrl,
@@ -369,9 +381,11 @@ export const usePlayerStore = defineStore('player', {
               type: 'youtube',
               engine: 'youtube',
               source_type: 'youtube',
-              youtube_video_id: '',
-              youtube_channel_id: resolved.youtube_channel_id,
-              youtube_live_embed_url: `https://www.youtube.com/embed/live_stream?channel=${encodeURIComponent(resolved.youtube_channel_id)}&autoplay=1&playsinline=1&controls=1&rel=0`,
+              youtube_video_id: youtubeVideoId,
+              youtube_channel_id: youtubeChannelId,
+              youtube_live_embed_url: youtubeChannelId && !youtubeVideoId
+                ? `https://www.youtube.com/embed/live_stream?channel=${encodeURIComponent(youtubeChannelId)}&autoplay=1&playsinline=1&controls=1&rel=0`
+                : '',
             })
           }
           if (canDirectPlay) {
@@ -395,12 +409,11 @@ export const usePlayerStore = defineStore('player', {
               adapter,
               type: 'proxy',
               via_proxy: true,
-              source_type: resolved.source_type || 'hls',
+              source_type: resolved.source_type === 'probe_only' ? 'hls' : resolved.source_type || 'hls',
             })
           }
         } catch (e) {
           console.warn('[IPTV] adapter resolve failed:', e?.message || e)
-          if (adapter === 'youtube') continue
           proxyOnlyUrls.push({
             ...u,
             url: fallbackProxyUrl,
