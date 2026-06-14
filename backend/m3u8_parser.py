@@ -21,56 +21,44 @@ _EXTGRP_RE = re.compile(r'#EXTGRP:\s*(.+)')
 _YOUTUBE_VIDEO_ID_RE = re.compile(r'^[a-zA-Z0-9_-]{11}$')
 _YOUTUBE_CHANNEL_ID_RE = re.compile(r'^UC[a-zA-Z0-9_-]{20,}$')
 
-# 分辨率 / 编码标签，清洗频道名用
+# 分辨率 / 编码 / 通用线路标注，清洗频道名用。
+# 设计要点：
+#   - 不含 [48Kk]：它会把编号数字当分辨率删掉（GDTV8→GDTV、HUBEI4→HUBEI）
+#   - 4K/8K 用负向先行断言限定（前面不能是字母数字），避免吃 CCTV4K 的数字段
+#   - 含咪咕/高码/IPTV/总台等通用噪音（对全部频道通用，不限 CCTV）
 _STRIP_RE = re.compile(
     r'[\s]*[\[\(（【]?\s*'
-    r'(?:高清|标清|超清|超高清|[48Kk]|[1-9]\d?[Pp](?:\s*[Ii])?|'
-    r'HEVC|H\.?265|H\.?264|AVC|1080|720|4K|2K|FHD|HD|SD|UHD)'
+    r'(?:高清|标清|超清|超高清|'
+    r'[1-9]\d?[Pp](?:\s*[Ii])?|'      # 1080p, 720i
+    r'HEVC|H\.?265|H\.?264|AVC|1080|720|2K|FHD|HD|SD|UHD|'
+    r'(?<![0-9A-Za-z])4K|(?<![0-9A-Za-z])8K|'  # 4K/8K 前不能是字母数字
+    r'\d{2,3}\s*fps|'            # fps 尾数：4K25、50fps
+    r'咪咕|高码|(?<=[\u4e00-\u9fff])IPTV|总台)'
     r'\s*[\]\)）】]?'
-    r'|[\-_|/\s]+',
+    r'|[\-_|/\s]+|频道$|广播电视总台',
     re.IGNORECASE,
 )
 
-# 运营商 / 来源后缀
+# 行尾括号源标注：(备用)/(测试)/(纯净) 等。只剥明确的源标注词，
+# 不剥 (国内电影)/(外国电影) 这种内容分类。
+_SOURCE_TAG_RE = re.compile(r'[（(]\s*(?:备用|测试|纯净|原画|备用源|线路\d*|超清|高清)\s*[)）]$')
+
+# 运营商 / 来源后缀。
+# 注意：已移除 '移动'（误伤"深圳移动电视"/"移动戏曲"）、'源'（误伤地名"沂源"/"济源"）。
+# '源' 只剥行尾，靠下方 _SOURCE_SUFFIX_RE 的 '源$'。
 _PROVIDER_RE = re.compile(
-    r'(?:电信|联通|移动|广电|铁通|网通|长宽|鹏博士|官方|源|线路|备用)',
+    r'(?:电信|联通|广电|铁通|网通|长宽|鹏博士|官方|线路|备用)',
 )
 
-# 繁简映射（常用字）
-_T2S = {
-    '樂':'乐','聲':'声','網':'网','廣':'广','聯':'联','華':'华','國':'国',
-    '東':'东','電':'电','視':'视','經':'经','發':'发','動':'动','學':'学',
-    '機':'机','區':'区','車':'车','產':'产','業':'业','問':'问','開':'开',
-    '長':'长','報':'报','點':'点','號':'号','團':'团','場':'场','處':'处',
-    '間':'间','書':'书','術':'术','議':'议','記':'记','設':'设','計':'计',
-    '話':'话','題':'题','調':'调','論':'论','辦':'办','營':'营','環':'环',
-    '競':'竞','衛':'卫','實':'实','總':'总','統':'统','義':'义','資':'资',
-    '運':'运','選':'选','達':'达','進':'进','鄉':'乡','錢':'钱','鐵':'铁',
-    '門':'门','陽':'阳','雲':'云','飛':'飞','魚':'鱼','馬':'马','風':'风',
-    '齊':'齐','龍':'龙',
-}
-
-# 分组名噪音：清洗时去掉的通用后缀/前缀
-_GROUP_NOISE = re.compile(
-    r'(?:频道|频道$|-MCP$|[-_]\d+$)'  # 频道、-MCP、数字后缀
-    r'|[\[\(（【]\s*(?:高清|标清|超清|4K|HD|SD|FHD|UHD|HEVC|H\.?265|H\.?264)\s*[\]\)）】]'  # 分辨率标签
-    r'|^[\s\-_]+|[\s\-_]+$'  # 首尾空白/分隔符
-)
-
-
-def normalize_group_name(name: str) -> str:
-    """通用分组名归一化：去噪音 + 繁简转换 + 去分隔符"""
-    if not name:
-        return '其他'
-    s = name.strip()
-    s = _GROUP_NOISE.sub('', s)
-    s = ''.join(_T2S.get(c, c) for c in s)
-    s = re.sub(r'[\s\-_|/]+', '', s)
-    return s if s else '其他'
+# 繁简转换：用 zhconv 库（完整准确，替代手维护字表）
+try:
+    from zhconv import convert as _zh_convert
+except ImportError:
+    _zh_convert = None
 
 
 def _to_simplified(s: str) -> str:
-    return ''.join(_T2S.get(c, c) for c in s)
+    return _zh_convert(s, 'zh-cn') if _zh_convert else s
 
 
 def _primary_channel_key(primary: str) -> str:
@@ -102,10 +90,11 @@ def normalize_channel_name(name: str) -> str:
         known_alias = _channel_alias.alias_to_primary.get(candidate) == primary
         if primary and (primary != candidate or known_alias):
             return _primary_channel_key(primary)
-    s = stripped
+    s = _to_simplified(stripped)   # 繁简转换先行，确保后续 _STRIP_RE 能匹配繁体后缀
+    # 剥行尾括号源标注：(备用)/(测试)/(纯净)/(原画) 等，但保留 (国内电影) 这种内容分类
+    s = _SOURCE_TAG_RE.sub('', s)
     s = _STRIP_RE.sub('', s)
     s = _PROVIDER_RE.sub('', s)
-    s = _to_simplified(s)
     s = s.lower().strip()
     return s
 

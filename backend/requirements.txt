@@ -6,3 +6,4 @@ streamlink
 curl_cffi
 cryptography
 xxtea
+zhconv
