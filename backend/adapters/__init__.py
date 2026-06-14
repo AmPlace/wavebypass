@@ -446,3 +446,45 @@ _ADAPTER_REGISTRY = {
     "picarto": resolve_picarto,
     "youtube": resolve_youtube,
 }
+
+
+# ── adapter 能力声明（capability registry）────────────────────────────────
+# 各 adapter 模块顶层可定义 `ADAPTER_CAPABILITIES = {"cover": True, ...}` 来声明
+# 自己支持的可选能力。中央实现（fetch 函数 / 缓存 / 路由）仍可继续放在 main.py，
+# 这里只负责采集 + 查询，避免在多处维护硬编码白名单。
+
+import importlib as _importlib_caps
+
+
+def _collect_adapter_capabilities() -> dict[str, dict[str, bool]]:
+    out: dict[str, dict[str, bool]] = {}
+    for adapter_name in _ADAPTER_REGISTRY:
+        # 模块名约定：与 adapter 名一一对应，特殊的 "live17" 对应 17live.py。
+        module_name = "17live" if adapter_name == "live17" else adapter_name
+        try:
+            module = _importlib_caps.import_module(f".{module_name}", __package__)
+        except Exception:
+            continue
+        caps = getattr(module, "ADAPTER_CAPABILITIES", None)
+        if not isinstance(caps, dict):
+            continue
+        clean = {str(k): bool(v) for k, v in caps.items() if v}
+        if clean:
+            out[adapter_name] = clean
+    return out
+
+
+_ADAPTER_CAPABILITIES: dict[str, dict[str, bool]] = _collect_adapter_capabilities()
+
+
+def adapter_supports(adapter_name: str, capability: str) -> bool:
+    """判断某个 adapter 是否声明支持指定 capability（如 "cover"）。"""
+    return bool(_ADAPTER_CAPABILITIES.get(adapter_name, {}).get(capability))
+
+
+def adapter_capabilities_map() -> dict[str, list[str]]:
+    """返回 {adapter_name: [capability, ...]}，仅包含至少声明了一项能力的 adapter。"""
+    return {
+        name: sorted(caps.keys())
+        for name, caps in _ADAPTER_CAPABILITIES.items()
+    }

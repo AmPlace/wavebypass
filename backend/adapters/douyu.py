@@ -7,6 +7,9 @@ from streamget import DouyuLiveStream
 
 from . import AdapterRequest, AdapterResolveError
 
+
+ADAPTER_CAPABILITIES = {"cover": True}
+
 # CDN selection priority:
 # 1. Prefer douyucdn2.cn (stable)
 # 2. Avoid edgesrv.com:8443 (TLS issues)

@@ -7,6 +7,11 @@ from streamget import BilibiliLiveStream
 from . import ADAPTER_SUCCESS_TTL_SECONDS, AdapterRequest, AdapterResolveError
 
 
+# 该 adapter 自描述能力清单。中央实现（fetch 函数、缓存、路由）仍在 main.py，
+# 这里只声明"本 adapter 支持取直播间封面/头像"。
+ADAPTER_CAPABILITIES = {"cover": True}
+
+
 async def resolve_bilibili(request: AdapterRequest, client: httpx.AsyncClient) -> dict[str, Any]:
     room_id = request.resource_id.strip("/")
     if not room_id:

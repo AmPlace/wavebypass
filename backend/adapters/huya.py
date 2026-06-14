@@ -8,6 +8,9 @@ from streamlink.exceptions import NoPluginError, NoStreamsError, PluginError, St
 from . import AdapterRequest, AdapterResolveError
 
 
+ADAPTER_CAPABILITIES = {"cover": True}
+
+
 def _infer_source_type(url: str) -> str:
     lower = url.lower().split("?", 1)[0]
     if lower.endswith(".flv"):

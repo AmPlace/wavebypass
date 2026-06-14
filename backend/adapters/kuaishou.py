@@ -8,6 +8,9 @@ from curl_cffi.requests import AsyncSession
 from . import ADAPTER_SUCCESS_TTL_SECONDS, AdapterRequest, AdapterResolveError
 
 
+ADAPTER_CAPABILITIES = {"cover": True}
+
+
 async def resolve_kuaishou(request: AdapterRequest, client: httpx.AsyncClient) -> dict[str, Any]:
     room_id = request.resource_id.strip("/")
     if not room_id:
