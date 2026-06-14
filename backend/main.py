@@ -12,7 +12,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from collections.abc import AsyncIterator
 from pathlib import Path
-from urllib.parse import quote, urljoin, urlparse
+from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlparse, urlunparse
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -2366,9 +2366,35 @@ def _iptv_wide_playlist_proxy_path(target_url: str, proxy_ts: int = 0, custom_ua
     return f'/api/iptv/proxy/wide.m3u8?proxy_ts={int(proxy_ts or 0)}{ua}{ref}{ck}{nua}&target_url={quote(target_url, safe="")}'
 
 
+def _strip_youtube_probe_param(target_url: str) -> str:
+    """从 adapter target_url 里剥掉 ?probe=1 等仅用于元信息探测的参数。
+
+    YouTube probe 模式只用于前端轻量探测频道是否在播、video id 是什么；
+    一旦把带 probe 的 URL 当 proxy_url 或 play.m3u8 的 target_url 反吐回去，
+    后续 resolve 会再次走 probe 分支并返回空 url，最终把播放路径打成 502。
+    在所有面向"播放"的入口统一剥一次，是最稳的兜底。
+    """
+    raw = (target_url or '').strip()
+    if not raw:
+        return raw
+    try:
+        parsed = urlparse(raw)
+    except ValueError:
+        return raw
+    # 只对 adapter scheme 生效，普通 http(s) 直连地址不动它的 query。
+    if parsed.scheme.lower() != 'youtube' or not parsed.query:
+        return raw
+    pairs = parse_qsl(parsed.query, keep_blank_values=True)
+    cleaned = [(k, v) for k, v in pairs if k.lower() != 'probe']
+    if len(cleaned) == len(pairs):
+        return raw
+    return urlunparse(parsed._replace(query=urlencode(cleaned, doseq=True)))
+
+
 def _iptv_adapter_play_path(target_url: str) -> str:
     # TODO: V2 should prefer source_id-based adapter resolve/play paths over target_url.
-    return f'/api/iptv/adapter/play.m3u8?target_url={quote(target_url, safe="")}'
+    play_target = _strip_youtube_probe_param(target_url)
+    return f'/api/iptv/adapter/play.m3u8?target_url={quote(play_target, safe="")}'
 
 
 def _iptv_chunk_proxy_path(target_url: str, custom_ua: str = '', referer: str = '', cookie: str = '', no_ua: int = 0) -> str:
@@ -2741,6 +2767,9 @@ async def iptv_adapter_cover_img(url: str = ''):
 
 @app.get("/api/iptv/adapter/play.m3u8")
 async def iptv_adapter_play_m3u8(target_url: str = ''):
+    # 防御：客户端若误把 ?probe=1 的 target_url 喂进播放入口，会让 resolve 走
+    # probe 分支返回空 url，从而 502。这里在播放入口再剥一次。
+    target_url = _strip_youtube_probe_param(target_url)
     try:
         resolved = await resolve_adapter_source(target_url, http_client)
     except AdapterResolveError as exc:
