@@ -2321,10 +2321,12 @@ def _drop_wide_cache(cache_key: str) -> None:
     _wide_cache.pop(cache_key + '_ts', None)
 
 
-def _iptv_wide_playlist_proxy_path(target_url: str, proxy_ts: int = 0, custom_ua: str = '', referer: str = '') -> str:
+def _iptv_wide_playlist_proxy_path(target_url: str, proxy_ts: int = 0, custom_ua: str = '', referer: str = '', cookie: str = '', no_ua: int = 0) -> str:
     ua = f'&custom_ua={quote(custom_ua, safe="")}' if custom_ua else ''
     ref = f'&referer={quote(referer, safe="")}' if referer else ''
-    return f'/api/iptv/proxy/wide.m3u8?proxy_ts={int(proxy_ts or 0)}{ua}{ref}&target_url={quote(target_url, safe="")}'
+    ck = f'&cookie={quote(cookie, safe="")}' if cookie else ''
+    nua = '&no_ua=1' if no_ua else ''
+    return f'/api/iptv/proxy/wide.m3u8?proxy_ts={int(proxy_ts or 0)}{ua}{ref}{ck}{nua}&target_url={quote(target_url, safe="")}'
 
 
 def _iptv_adapter_play_path(target_url: str) -> str:
@@ -2332,10 +2334,12 @@ def _iptv_adapter_play_path(target_url: str) -> str:
     return f'/api/iptv/adapter/play.m3u8?target_url={quote(target_url, safe="")}'
 
 
-def _iptv_chunk_proxy_path(target_url: str, custom_ua: str = '', referer: str = '') -> str:
+def _iptv_chunk_proxy_path(target_url: str, custom_ua: str = '', referer: str = '', cookie: str = '', no_ua: int = 0) -> str:
     ua = f'&custom_ua={quote(custom_ua, safe="")}' if custom_ua else ''
     ref = f'&referer={quote(referer, safe="")}' if referer else ''
-    return f'/api/iptv/proxy/chunk.ts?target_url={quote(target_url, safe="")}{ua}{ref}'
+    ck = f'&cookie={quote(cookie, safe="")}' if cookie else ''
+    nua = '&no_ua=1' if no_ua else ''
+    return f'/api/iptv/proxy/chunk.ts?target_url={quote(target_url, safe="")}{ua}{ref}{ck}{nua}'
 
 
 def _should_proxy_iptv_chunk(seg_url: str, proxy_ts: int = 0) -> bool:
@@ -2343,7 +2347,7 @@ def _should_proxy_iptv_chunk(seg_url: str, proxy_ts: int = 0) -> bool:
     return bool(proxy_ts) and scheme in {"http", "https"}
 
 
-def _rewrite_hls_tag_uri(line: str, base_url: str, proxy_ts: int = 0, custom_ua: str = '', referer: str = '') -> str:
+def _rewrite_hls_tag_uri(line: str, base_url: str, proxy_ts: int = 0, custom_ua: str = '', referer: str = '', cookie: str = '', no_ua: int = 0) -> str:
     """Rewrite URI attributes in HLS tag lines (EXT-X-KEY, EXT-X-MAP, EXT-X-PART, etc.)."""
     upper = line.upper()
     has_uri_tag = False
@@ -2366,15 +2370,15 @@ def _rewrite_hls_tag_uri(line: str, base_url: str, proxy_ts: int = 0, custom_ua:
         uri_path = parsed.path.lower()
 
         if uri_path.endswith(".m3u8"):
-            return f'{m.group(1)}{_iptv_wide_playlist_proxy_path(absolute_url, proxy_ts, custom_ua, referer)}{m.group(3)}'
+            return f'{m.group(1)}{_iptv_wide_playlist_proxy_path(absolute_url, proxy_ts, custom_ua, referer, cookie, no_ua)}{m.group(3)}'
         if uri_path.endswith(_IPTV_SEGMENT_EXTENSIONS) and _should_proxy_iptv_chunk(absolute_url, proxy_ts):
-            return f'{m.group(1)}{_iptv_chunk_proxy_path(absolute_url, custom_ua, referer)}{m.group(3)}'
+            return f'{m.group(1)}{_iptv_chunk_proxy_path(absolute_url, custom_ua, referer, cookie, no_ua)}{m.group(3)}'
         return m.group(0)
 
     return _HLS_URI_RE.sub(_replace_uri, line)
 
 
-def _rewrite_iptv_wide_m3u8_text(raw_m3u8_text: str, base_url: str, proxy_ts: int = 0, custom_ua: str = '', referer: str = '') -> str:
+def _rewrite_iptv_wide_m3u8_text(raw_m3u8_text: str, base_url: str, proxy_ts: int = 0, custom_ua: str = '', referer: str = '', cookie: str = '', no_ua: int = 0) -> str:
     rewritten_lines: list[str] = []
 
     for line in raw_m3u8_text.splitlines():
@@ -2385,7 +2389,7 @@ def _rewrite_iptv_wide_m3u8_text(raw_m3u8_text: str, base_url: str, proxy_ts: in
 
         # Tag lines: rewrite URI attributes inside tags
         if stripped_line.startswith("#"):
-            rewritten_lines.append(_rewrite_hls_tag_uri(line, base_url, proxy_ts, custom_ua, referer))
+            rewritten_lines.append(_rewrite_hls_tag_uri(line, base_url, proxy_ts, custom_ua, referer, cookie, no_ua))
             continue
 
         # Standalone URL lines (segment or variant playlist)
@@ -2394,9 +2398,9 @@ def _rewrite_iptv_wide_m3u8_text(raw_m3u8_text: str, base_url: str, proxy_ts: in
         uri_path = parsed_url.path.lower()
 
         if uri_path.endswith(".m3u8"):
-            rewritten_lines.append(_iptv_wide_playlist_proxy_path(absolute_media_url, proxy_ts, custom_ua, referer))
+            rewritten_lines.append(_iptv_wide_playlist_proxy_path(absolute_media_url, proxy_ts, custom_ua, referer, cookie, no_ua))
         elif uri_path.endswith(_IPTV_SEGMENT_EXTENSIONS) and _should_proxy_iptv_chunk(absolute_media_url, proxy_ts):
-            rewritten_lines.append(_iptv_chunk_proxy_path(absolute_media_url, custom_ua, referer))
+            rewritten_lines.append(_iptv_chunk_proxy_path(absolute_media_url, custom_ua, referer, cookie, no_ua))
         else:
             rewritten_lines.append(absolute_media_url)
 
@@ -2434,10 +2438,12 @@ async def iptv_adapter_play_m3u8(target_url: str = ''):
     headers = resolved.get('headers') if isinstance(resolved.get('headers'), dict) else {}
     custom_ua = str(headers.get('User-Agent') or headers.get('user-agent') or '')
     referer = str(headers.get('Referer') or headers.get('referer') or '')
+    cookie = str(headers.get('Cookie') or headers.get('cookie') or '')
+    no_ua = 1 if headers.get('no_ua') or headers.get('No-UA') else 0
 
     if source_type == 'hls':
         validate_target_url(resolved_url)
-        return await iptv_wide_playlist(target_url=resolved_url, proxy_ts=1, custom_ua=custom_ua, referer=referer)
+        return await iptv_wide_playlist(target_url=resolved_url, proxy_ts=1, custom_ua=custom_ua, referer=referer, cookie=cookie, no_ua=no_ua)
     if source_type in {'mpegts', 'http_flv'}:
         stream_type = '&stream_type=http_flv' if source_type == 'http_flv' else ''
         ua = f'&custom_ua={quote(custom_ua, safe="")}' if custom_ua else ''
@@ -2455,7 +2461,7 @@ async def iptv_adapter_play_m3u8(target_url: str = ''):
 _HLS_META_TAGS = ("EXT-X-MAP", "EXT-X-KEY", "EXT-X-VERSION", "EXT-X-PLAYLIST-TYPE")
 
 
-def _extract_hls_meta_lines(m3u8_text: str, base_url: str, proxy_ts: int = 0, custom_ua: str = '', referer: str = '') -> list[str]:
+def _extract_hls_meta_lines(m3u8_text: str, base_url: str, proxy_ts: int = 0, custom_ua: str = '', referer: str = '', cookie: str = '', no_ua: int = 0) -> list[str]:
     """Extract metadata lines (MAP, KEY, VERSION, etc.) from m3u8 text, rewritten for proxy."""
     meta = []
     for line in m3u8_text.splitlines():
@@ -2465,16 +2471,18 @@ def _extract_hls_meta_lines(m3u8_text: str, base_url: str, proxy_ts: int = 0, cu
         upper = stripped.upper()
         for tag in _HLS_META_TAGS:
             if upper.startswith(f'#{tag}:'):
-                meta.append(_rewrite_hls_tag_uri(line, base_url, proxy_ts, custom_ua, referer))
+                meta.append(_rewrite_hls_tag_uri(line, base_url, proxy_ts, custom_ua, referer, cookie, no_ua))
                 break
     return meta
 
 
-async def _wide_refresher(cache_key: str, target_url: str, custom_ua: str = '', referer: str = ''):
+async def _wide_refresher(cache_key: str, target_url: str, custom_ua: str = '', referer: str = '', cookie: str = '', no_ua: int = 0):
     """后台任务：每 2s 拉一次上游，更新分片队列"""
-    _h = {'User-Agent': custom_ua} if custom_ua else {}
+    _h = {'User-Agent': custom_ua} if custom_ua and not no_ua else {}
     if referer:
         _h['Referer'] = referer
+    if cookie:
+        _h['Cookie'] = cookie
     while True:
         cache = _wide_cache.get(cache_key)
         last_access = _wide_cache.get(cache_key + '_ts', 0)
@@ -2513,7 +2521,7 @@ async def _wide_refresher(cache_key: str, target_url: str, custom_ua: str = '', 
                 i += 1
 
             # Extract and rewrite metadata lines (MAP, KEY, etc.)
-            meta_lines = _extract_hls_meta_lines(resp.text, playlist_base_url, proxy_ts=1, custom_ua=custom_ua, referer=referer)
+            meta_lines = _extract_hls_meta_lines(resp.text, playlist_base_url, proxy_ts=1, custom_ua=custom_ua, referer=referer, cookie=cookie, no_ua=no_ua)
 
             cache = _wide_cache.get(cache_key)
             if not cache:
@@ -2546,20 +2554,22 @@ async def release_iptv_wide_playlist(target_url: str = ''):
 
 
 @app.get("/api/iptv/proxy/wide.m3u8")
-async def iptv_wide_playlist(target_url: str = '', proxy_ts: int = 0, custom_ua: str = '', referer: str = '', compat: int = 0):
+async def iptv_wide_playlist(target_url: str = '', proxy_ts: int = 0, custom_ua: str = '', referer: str = '', compat: int = 0, cookie: str = '', no_ua: int = 0):
     if not target_url:
         raise HTTPException(status_code=400, detail="缺少 target_url")
 
     if urlparse(target_url).scheme.lower() == "rtsp":
         return await iptv_proxy_rtsp_playlist(target_url=target_url, custom_ua=custom_ua, compat=compat)
 
-    _headers = {'User-Agent': custom_ua} if custom_ua else {}
+    _headers = {'User-Agent': custom_ua} if custom_ua and not no_ua else {}
     if referer:
         _headers['Referer'] = referer
+    if cookie:
+        _headers['Cookie'] = cookie
 
     def _rewrite_ts(seg_url: str) -> str:
         if _should_proxy_iptv_chunk(seg_url, proxy_ts):
-            return _iptv_chunk_proxy_path(seg_url, custom_ua, referer)
+            return _iptv_chunk_proxy_path(seg_url, custom_ua, referer, cookie, no_ua)
         return seg_url
 
     cache_key = quote(target_url, safe='')
@@ -2602,7 +2612,7 @@ async def iptv_wide_playlist(target_url: str = '', proxy_ts: int = 0, custom_ua:
                 await asyncio.sleep(0.3)
 
         # Extract metadata lines from the last successful fetch
-        meta_lines = _extract_hls_meta_lines(resp.text, playlist_base_url, proxy_ts=proxy_ts, custom_ua=custom_ua, referer=referer) if 'resp' in dir() else []
+        meta_lines = _extract_hls_meta_lines(resp.text, playlist_base_url, proxy_ts=proxy_ts, custom_ua=custom_ua, referer=referer, cookie=cookie, no_ua=no_ua) if 'resp' in dir() else []
 
         cache = {
             'queue': queue,
@@ -2612,7 +2622,7 @@ async def iptv_wide_playlist(target_url: str = '', proxy_ts: int = 0, custom_ua:
         }
         _wide_cache[cache_key] = cache
         _wide_cache[cache_key + '_ts'] = time.time()
-        asyncio.create_task(_wide_refresher(cache_key, target_url, custom_ua, referer))
+        asyncio.create_task(_wide_refresher(cache_key, target_url, custom_ua, referer, cookie, no_ua))
 
         # 返回扩展窗口 playlist
         if queue:
@@ -2633,7 +2643,7 @@ async def iptv_wide_playlist(target_url: str = '', proxy_ts: int = 0, custom_ua:
         # 直接转发
         try:
             resp = await http_client.get(target_url, follow_redirects=True, timeout=6, headers=_headers)
-            rewritten = _rewrite_iptv_wide_m3u8_text(resp.text, str(resp.url), proxy_ts=proxy_ts, custom_ua=custom_ua, referer=referer)
+            rewritten = _rewrite_iptv_wide_m3u8_text(resp.text, str(resp.url), proxy_ts=proxy_ts, custom_ua=custom_ua, referer=referer, cookie=cookie, no_ua=no_ua)
             return Response(content=rewritten, media_type="application/x-mpegURL")
         except httpx.HTTPError as exc:
             raise HTTPException(status_code=502, detail=f"拉取失败: {exc}") from exc
@@ -2645,7 +2655,7 @@ async def iptv_wide_playlist(target_url: str = '', proxy_ts: int = 0, custom_ua:
     if not queue:
         try:
             resp = await http_client.get(target_url, follow_redirects=True, timeout=6, headers=_headers)
-            rewritten = _rewrite_iptv_wide_m3u8_text(resp.text, str(resp.url), proxy_ts=proxy_ts, custom_ua=custom_ua, referer=referer)
+            rewritten = _rewrite_iptv_wide_m3u8_text(resp.text, str(resp.url), proxy_ts=proxy_ts, custom_ua=custom_ua, referer=referer, cookie=cookie, no_ua=no_ua)
             return Response(content=rewritten, media_type="application/x-mpegURL")
         except httpx.HTTPError as exc:
             raise HTTPException(status_code=502, detail=f"拉取失败: {exc}") from exc
@@ -2911,15 +2921,22 @@ async def iptv_proxy_playlist(target_url: str = '', referer: str = '', compat: i
 
 
 @app.get("/api/iptv/proxy/chunk.ts")
-async def iptv_proxy_chunk(target_url: str = '', custom_ua: str = '', referer: str = ''):
+async def iptv_proxy_chunk(target_url: str = '', custom_ua: str = '', referer: str = '', cookie: str = '', no_ua: int = 0):
     if not target_url:
         raise HTTPException(status_code=400, detail="缺少 target_url")
 
+    _upstream_headers = {}
+    if not no_ua:
+        _upstream_headers['User-Agent'] = custom_ua or 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130.0.0.0 Safari/537.36'
+    elif custom_ua:
+        _upstream_headers['User-Agent'] = custom_ua
+    if referer:
+        _upstream_headers['Referer'] = referer
+    if cookie:
+        _upstream_headers['Cookie'] = cookie
+
     try:
-        upstream = await http_client.get(target_url, follow_redirects=True, headers={
-            'User-Agent': custom_ua or 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130.0.0.0 Safari/537.36',
-            **({'Referer': referer} if referer else {}),
-        })
+        upstream = await http_client.get(target_url, follow_redirects=True, headers=_upstream_headers)
         upstream.raise_for_status()
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"拉取分片失败: {exc}") from exc
