@@ -63,24 +63,40 @@
             @click="playerStore.switchStation(item.station.id)"
           >
             <span class="channel-card__logo-card-visual" aria-hidden="true">
-              <img
-                v-if="stationLogoUrl(item.station)"
-                class="channel-card__center-logo"
-                :src="stationLogoUrl(item.station)"
-                alt=""
-                @error="onCenterLogoError"
-              />
+              <span
+                class="channel-card__logo-stage"
+                :class="stationLogoStageClass(item.station)"
+              >
+                <img
+                  v-if="shouldShowStationLogo(item.station)"
+                  class="channel-card__center-logo"
+                  :class="stationLogoImageClass(item.station)"
+                  :src="stationLogoUrl(item.station)"
+                  alt=""
+                  loading="lazy"
+                  decoding="async"
+                  @load="classifyStationLogo(item.station, $event)"
+                  @error="markStationLogoFailed(item.station)"
+                />
+                <span
+                  v-else
+                  class="channel-card__text-logo"
+                  :class="stationTextLogoSizeClass(item.station)"
+                  :title="stationDisplayName(item.station)"
+                >
+                  {{ stationDisplayName(item.station) }}
+                </span>
+              </span>
               <span class="channel-card__logo-card-shade"></span>
             </span>
-            <span class="channel-index-badge">{{ item.index + 1 }}</span>
             <span class="card-info">
               <span class="card-channel">
-                <img
-                  class="card-logo"
-                  :class="{ 'animate-pulse': isCurrentStationLoading(item.station.id) }"
-                  :src="stationLogoUrl(item.station) || DEFAULT_LOGO_URL"
-                  :alt="`${item.station.name} logo`"
-                  @error="useDefaultLogo"
+                <span
+                  class="channel-play-state-dot"
+                  :class="stationStatusDotClass(item.station)"
+                  :title="stationStatusLabel(item.station)"
+                  :aria-label="stationStatusLabel(item.station)"
+                  role="img"
                 />
                 <span class="card-channel-name">{{ item.station.name }}</span>
               </span>
@@ -101,7 +117,7 @@ import { fetchMyradioStations } from '../api/myradio'
 import { computed, inject, onBeforeUnmount, onMounted, ref, watch, watchEffect } from 'vue'
 import { useScroll, useThrottleFn } from '@vueuse/core'
 import { API_BASE } from '../apiBase'
-import { publicAsset } from '../publicAsset'
+import { useLogoVisual } from '../composables/useLogoVisual'
 import TagFilterRow from '../components/TagFilterRow.vue'
 
 const playerStore = usePlayerStore()
@@ -112,14 +128,20 @@ const ytLoading = ref(false)
 
 const mrStations = ref([])
 const mrLoading = ref(false)
-const DEFAULT_LOGO_URL = publicAsset('/logos/default.png')
-
-function useDefaultLogo(event) {
-  const img = event?.target
-  if (!img || img.dataset.logoFallback === '1') return
-  img.dataset.logoFallback = '1'
-  img.src = DEFAULT_LOGO_URL
-}
+const {
+  displayName: stationDisplayName,
+  shouldShowLogo: shouldShowStationLogo,
+  logoStageClass: stationLogoStageClass,
+  logoImageClass: stationLogoImageClass,
+  classifyLogo: classifyStationLogo,
+  markLogoFailed: markStationLogoFailed,
+  textLogoSizeClass: stationTextLogoSizeClass,
+} = useLogoVisual({
+  getLogoUrl: stationLogoUrl,
+  getDisplayName: stationDisplayNameValue,
+  getIdentityKey: stationLogoIdentityKey,
+  fallbackName: '未知电台',
+})
 
 // EPG：初始 subtitle 从云听 API，定期 /api/yunting/epg 刷新，同步到 store 触发 MediaSession
 const epgMap = ref({})
@@ -277,8 +299,23 @@ function stationLogoUrl(station) {
   return station.logoUrl || ''
 }
 
-function onCenterLogoError(event) {
-  if (event?.currentTarget) event.currentTarget.style.display = 'none'
+function stationDisplayNameValue(station) {
+  return String(station?.name || '未知电台').trim() || '未知电台'
+}
+
+function stationLogoIdentityKey(station) {
+  return station?.id || station?.name || ''
+}
+
+function stationStatusDotClass(station) {
+  if (isCurrentStationLoading(station.id)) return 'channel-play-state-dot--warn'
+  return 'channel-play-state-dot--live'
+}
+
+function stationStatusLabel(station) {
+  if (isCurrentStationPlaying(station.id)) return '播放中'
+  if (isCurrentStationLoading(station.id)) return '加载中'
+  return '可播放'
 }
 
 const scrollRef = inject('scrollRef')
