@@ -63,14 +63,19 @@
             @click="playChannel(item.channel)"
           >
             <span class="channel-card__logo-card-visual" aria-hidden="true">
-              <span class="channel-card__logo-stage">
+              <span
+                class="channel-card__logo-stage"
+                :class="logoStageClass(item.channel)"
+              >
                 <img
                   v-if="shouldShowChannelLogo(item.channel)"
                   class="channel-card__center-logo"
+                  :class="logoImageClass(item.channel)"
                   :src="channelLogoUrl(item.channel)"
                   alt=""
                   loading="lazy"
                   decoding="async"
+                  @load="classifyChannelLogo(item.channel, $event)"
                   @error="markChannelLogoFailed(item.channel)"
                 />
                 <span
@@ -123,8 +128,12 @@ const selectedGroup = ref('')
 const loading = ref(false)
 const epgMap = ref({})
 const failedLogoKeys = ref({})
+const logoVisualModes = ref({})
+const logoCandidateIndexes = ref({})
 const channelSortMode = ref('original')
 const categoryTabs = computed(() => ['全部', ...allGroups.value])
+
+const YOUTUBE_THUMBNAIL_VARIANTS = ['maxresdefault', 'hq720', 'hqdefault']
 
 const SORT_MODES = [
   { key: 'original', label: '默认排序' },
@@ -257,7 +266,28 @@ function defaultCoverClass() {
 }
 
 function channelLogoUrl(ch) {
-  return ch.logo_url || knownIptvLogoUrl(ch) || ''
+  const candidates = channelLogoCandidates(ch)
+  if (!candidates.length) return ''
+  const index = logoCandidateIndexes.value[channelLogoCandidateKey(ch)] || 0
+  return candidates[index] || candidates[0] || ''
+}
+
+function channelLogoCandidates(ch) {
+  const logoUrl = String(ch?.logo_url || '').trim()
+  const youtubeVideoId = channelYoutubeVideoId(ch)
+  const candidates = youtubeVideoId ? youtubeThumbnailUrls(youtubeVideoId) : []
+  if (logoUrl) candidates.push(logoUrl)
+  const knownLogo = knownIptvLogoUrl(ch)
+  if (knownLogo) candidates.push(knownLogo)
+  return Array.from(new Set(candidates))
+}
+
+function channelLogoIdentityKey(ch) {
+  return ch?.canonical_key || ch?.tvg_id || ch?.tvg_name || ch?.name || ''
+}
+
+function channelLogoCandidateKey(ch) {
+  return `${channelLogoIdentityKey(ch)}|${channelLogoCandidates(ch).join('|')}`
 }
 
 function channelDisplayName(ch) {
@@ -265,7 +295,11 @@ function channelDisplayName(ch) {
 }
 
 function channelLogoFailureKey(ch) {
-  return `${ch?.canonical_key || ch?.tvg_id || ch?.tvg_name || ch?.name || ''}|${channelLogoUrl(ch)}`
+  return channelLogoCandidateKey(ch)
+}
+
+function channelLogoVisualKey(ch) {
+  return `${channelLogoIdentityKey(ch)}|${channelLogoUrl(ch)}`
 }
 
 function shouldShowChannelLogo(ch) {
@@ -274,11 +308,61 @@ function shouldShowChannelLogo(ch) {
   return !failedLogoKeys.value[channelLogoFailureKey(ch)]
 }
 
+function logoVisualMode(ch) {
+  return logoVisualModes.value[channelLogoVisualKey(ch)] || 'badge'
+}
+
+function logoStageClass(ch) {
+  return `channel-card__logo-stage--${logoVisualMode(ch)}`
+}
+
+function logoImageClass(ch) {
+  return `channel-card__center-logo--${logoVisualMode(ch)}`
+}
+
+function classifyChannelLogo(ch, event) {
+  const img = event?.target
+  if (!img) return
+  const width = Number(img.naturalWidth || 0)
+  const height = Number(img.naturalHeight || 0)
+  if (!width || !height) return
+
+  if (isCurrentYoutubeThumbnailCandidate(ch) && width < 480 && height < 240 && advanceChannelLogoCandidate(ch)) {
+    return
+  }
+
+  const ratio = width / height
+  const isLargeWideImage = width >= 480 && height >= 240 && ratio >= 1.55 && ratio <= 1.9
+  const mode = isLargeWideImage ? 'cover' : 'badge'
+  const key = channelLogoVisualKey(ch)
+  if (logoVisualModes.value[key] === mode) return
+  logoVisualModes.value = {
+    ...logoVisualModes.value,
+    [key]: mode,
+  }
+}
+
 function markChannelLogoFailed(ch) {
+  if (advanceChannelLogoCandidate(ch)) return
+
   failedLogoKeys.value = {
     ...failedLogoKeys.value,
-    [channelLogoFailureKey(ch)]: true,
+    [channelLogoCandidateKey(ch)]: true,
   }
+}
+
+function advanceChannelLogoCandidate(ch) {
+  const candidates = channelLogoCandidates(ch)
+  const key = channelLogoCandidateKey(ch)
+  const index = logoCandidateIndexes.value[key] || 0
+  if (index < candidates.length - 1) {
+    logoCandidateIndexes.value = {
+      ...logoCandidateIndexes.value,
+      [key]: index + 1,
+    }
+    return true
+  }
+  return false
 }
 
 function textLogoSizeClass(ch) {
@@ -304,6 +388,77 @@ function normalizeChannelLogoKey(value) {
     .replace(/[\s_\-－综合高清新闻纪录少儿音乐电影电视剧体育中文外语财经农业农村科教社会与法国防军事戏曲]/g, '')
 }
 
+function youtubeThumbnailUrls(videoId) {
+  if (!videoId) return []
+  return YOUTUBE_THUMBNAIL_VARIANTS.map(variant => `https://i.ytimg.com/vi/${videoId}/${variant}.jpg`)
+}
+
+function isCurrentYoutubeThumbnailCandidate(ch) {
+  const youtubeVideoId = channelYoutubeVideoId(ch)
+  if (!youtubeVideoId) return false
+  const key = channelLogoCandidateKey(ch)
+  const index = logoCandidateIndexes.value[key] || 0
+  return index < YOUTUBE_THUMBNAIL_VARIANTS.length
+}
+
+function channelYoutubeVideoId(ch) {
+  const urls = Array.isArray(ch?.urls) ? ch.urls : []
+  for (const item of urls) {
+    const directId = sanitizeYoutubeVideoId(item?.youtube_video_id)
+    if (directId) return directId
+    const parsedId = parseYoutubeVideoId(item?.url)
+    if (parsedId) return parsedId
+  }
+  return ''
+}
+
+function sanitizeYoutubeVideoId(value) {
+  const id = String(value || '').trim()
+  return /^[a-zA-Z0-9_-]{11}$/.test(id) ? id : ''
+}
+
+function parseYoutubeVideoId(url) {
+  try {
+    const value = String(url || '').trim()
+    if (!value) return ''
+    const parsed = new URL(value)
+    const host = parsed.hostname.toLowerCase()
+    const parts = parsed.protocol === 'youtube:'
+      ? [parsed.hostname, ...parsed.pathname.split('/')].filter(Boolean)
+      : parsed.pathname.split('/').filter(Boolean)
+
+    if (parsed.protocol === 'youtube:') {
+      if (parts[0] === 'resolve') {
+        return parseYoutubeVideoId(parsed.searchParams.get('url') || '')
+      }
+      if (parts.length === 1) return sanitizeYoutubeVideoId(parts[0])
+      if (parts.length >= 2 && ['live', 'embed', 'shorts'].includes(parts[0])) {
+        return sanitizeYoutubeVideoId(parts[1])
+      }
+      return ''
+    }
+
+    if (host === 'youtu.be' || host === 'www.youtu.be') {
+      return sanitizeYoutubeVideoId(parts[0])
+    }
+
+    const isYoutubeHost = host === 'youtube.com'
+      || host.endsWith('.youtube.com')
+      || host === 'youtube-nocookie.com'
+      || host.endsWith('.youtube-nocookie.com')
+    if (!isYoutubeHost) return ''
+
+    const queryVideoId = sanitizeYoutubeVideoId(parsed.searchParams.get('v'))
+    if (queryVideoId) return queryVideoId
+    if (parts.length >= 2 && ['live', 'embed', 'shorts'].includes(parts[0])) {
+      return sanitizeYoutubeVideoId(parts[1])
+    }
+  } catch {
+    return ''
+  }
+  return ''
+}
+
 async function playChannel(ch) {
   if (isUnavailable(ch)) return
   if (!ch.urls || !ch.urls.length) return
@@ -323,6 +478,7 @@ const scrollPosition = ref(0)
 watchEffect(() => { throttledScrollY(scrollY.value) })
 
 const gap = computed(() => 20)
+const cardFooterHeight = 44
 
 const columns = computed(() => {
   const w = viewportWidth.value
@@ -334,7 +490,7 @@ const columns = computed(() => {
 const rowHeight = computed(() => {
   const cols = columns.value
   const cardWidth = (containerWidth.value - gap.value * (cols - 1)) / cols
-  return cardWidth * 9 / 16
+  return cardWidth * 9 / 16 + cardFooterHeight
 })
 
 const cardHeight = computed(() => rowHeight.value)

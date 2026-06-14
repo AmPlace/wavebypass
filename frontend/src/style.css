@@ -384,7 +384,7 @@
   }
 
   .iptv-main .channel-card--logo-card {
-    --iptv-card-footer-height: clamp(34px, 22%, 48px);
+    --iptv-card-footer-height: 44px;
     border-color: var(--iptv-card-border);
     background:
       linear-gradient(
@@ -414,6 +414,7 @@
   }
 
   .iptv-main .channel-card__logo-card-visual {
+    bottom: var(--iptv-card-footer-height);
     background:
       linear-gradient(
         90deg,
@@ -439,7 +440,7 @@
     left: 12%;
     right: 12%;
     top: 12%;
-    bottom: var(--iptv-card-footer-height);
+    bottom: 12%;
     display: flex;
     align-items: center;
     justify-content: center;
