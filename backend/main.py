@@ -1906,7 +1906,7 @@ async def _get_aggregated_iptv_channels(group: str = '', search: str = '') -> tu
     # 搜索在 SQL 层过滤（性能好），分组在聚合后过滤（归一化后才准）
     raw = await db.get_aggregated_channels(group='', search=search)
 
-    from m3u8_parser import adapter_provider, clean_channel_display_name, detect_source_type, normalize_channel_name, parse_youtube_video_id, _channel_alias
+    from m3u8_parser import adapter_provider, clean_channel_display_name, detect_source_type, normalize_channel_name, parse_youtube_channel_id, parse_youtube_video_id, _channel_alias
     from template import channel_template, normalize_group_name
 
     merged: dict[str, dict] = {}
@@ -1936,6 +1936,7 @@ async def _get_aggregated_iptv_channels(group: str = '', search: str = '') -> tu
         stored_source_type = ch.get('source_type')
         source_type = stored_source_type if stored_source_type and stored_source_type != 'hls' else detected_source_type
         youtube_video_id = ch.get('youtube_video_id') or parse_youtube_video_id(ch['url'])
+        youtube_channel_id = parse_youtube_channel_id(ch['url'])
         merged[key]['urls'].append({
             'url': ch['url'],
             'is_working': ch['is_working'],
@@ -1964,6 +1965,7 @@ async def _get_aggregated_iptv_channels(group: str = '', search: str = '') -> tu
             'source_type': source_type,
             'adapter': adapter_provider(ch['url']),
             'youtube_video_id': youtube_video_id,
+            'youtube_channel_id': youtube_channel_id,
             'raw_name': ch['name'],
             'raw_tvg_id': ch.get('tvg_id', ''),
             'raw_tvg_name': ch.get('tvg_name', ''),
@@ -2393,7 +2395,12 @@ def _rewrite_iptv_wide_m3u8_text(raw_m3u8_text: str, base_url: str, proxy_ts: in
             continue
 
         # Standalone URL lines (segment or variant playlist)
-        absolute_media_url = urljoin(base_url, stripped_line)
+        try:
+            absolute_media_url = urljoin(base_url, stripped_line)
+        except ValueError:
+            logger.warning("跳过无法解析的 HLS URI: base=%s line=%s", base_url, stripped_line[:200])
+            rewritten_lines.append(line)
+            continue
         parsed_url = urlparse(absolute_media_url)
         uri_path = parsed_url.path.lower()
 
@@ -2405,6 +2412,11 @@ def _rewrite_iptv_wide_m3u8_text(raw_m3u8_text: str, base_url: str, proxy_ts: in
             rewritten_lines.append(absolute_media_url)
 
     return "\n".join(rewritten_lines)
+
+
+def _ensure_hls_playlist_text(text: str, url: str) -> None:
+    if not (text or "").lstrip().startswith("#EXTM3U"):
+        raise HTTPException(status_code=502, detail=f"上游没有返回有效 M3U8: {url}")
 
 
 def _adapter_error_response(exc: AdapterResolveError) -> JSONResponse:
@@ -2643,6 +2655,7 @@ async def iptv_wide_playlist(target_url: str = '', proxy_ts: int = 0, custom_ua:
         # 直接转发
         try:
             resp = await http_client.get(target_url, follow_redirects=True, timeout=6, headers=_headers)
+            _ensure_hls_playlist_text(resp.text, str(resp.url))
             rewritten = _rewrite_iptv_wide_m3u8_text(resp.text, str(resp.url), proxy_ts=proxy_ts, custom_ua=custom_ua, referer=referer, cookie=cookie, no_ua=no_ua)
             return Response(content=rewritten, media_type="application/x-mpegURL")
         except httpx.HTTPError as exc:
@@ -2655,6 +2668,7 @@ async def iptv_wide_playlist(target_url: str = '', proxy_ts: int = 0, custom_ua:
     if not queue:
         try:
             resp = await http_client.get(target_url, follow_redirects=True, timeout=6, headers=_headers)
+            _ensure_hls_playlist_text(resp.text, str(resp.url))
             rewritten = _rewrite_iptv_wide_m3u8_text(resp.text, str(resp.url), proxy_ts=proxy_ts, custom_ua=custom_ua, referer=referer, cookie=cookie, no_ua=no_ua)
             return Response(content=rewritten, media_type="application/x-mpegURL")
         except httpx.HTTPError as exc:

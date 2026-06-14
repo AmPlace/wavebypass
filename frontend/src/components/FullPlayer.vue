@@ -1590,7 +1590,8 @@ async function handleActiveYoutubeFailure(reason, attemptId, sourceIndex) {
 async function startYoutubeCandidate(entry, attemptId = 0, sourceIndex = -1) {
   if (!isAttemptActive(attemptId)) throw cancelledError()
   const videoId = youtubeVideoId(entry)
-  if (!videoId) throw new Error('YouTube video_id 缺失')
+  const liveEmbedUrl = youtubeLiveEmbedUrl(entry)
+  if (!videoId && !liveEmbedUrl) throw new Error('YouTube video_id 缺失')
 
   const setRuntimeStatus = (status) => {
     if (sourceIndex >= 0) setSourceRuntimeStatus(sourceIndex, status)
@@ -1606,17 +1607,38 @@ async function startYoutubeCandidate(entry, attemptId = 0, sourceIndex = -1) {
   destroyYoutubePlayer(false)
   resetIptvVideo()
 
+  if (!isAttemptActive(attemptId)) throw cancelledError()
+  if (!youtubeHostRef.value) throw new Error('YouTube 播放容器未就绪')
+
+  activeIptvEngine.value = 'youtube'
+  resetMediaAspect()
+  youtubeHostRef.value.innerHTML = ''
+  if (liveEmbedUrl && !videoId) {
+    console.log(`[START] YouTubeLive:${entry.youtube_channel_id || liveEmbedUrl}`)
+    const iframe = document.createElement('iframe')
+    iframe.src = liveEmbedUrl
+    iframe.allow = 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share'
+    iframe.allowFullscreen = true
+    iframe.referrerPolicy = 'strict-origin-when-cross-origin'
+    iframe.style.width = '100%'
+    iframe.style.height = '100%'
+    iframe.style.border = '0'
+    youtubeHostRef.value.appendChild(iframe)
+    setRuntimeStatus('playing')
+    playerStore.togglePlay(true)
+    playerStore.clearPlaybackError()
+    playerStore.setLoading(false)
+    syncIptvMediaSession('playing')
+    return
+  }
+
   const reachable = await loadYoutubeIframeApi()
   if (!isAttemptActive(attemptId)) throw cancelledError()
   if (!reachable || !window.YT?.Player) {
     setRuntimeStatus('failed')
     throw new Error('YouTube API 不可达')
   }
-  if (!youtubeHostRef.value) throw new Error('YouTube 播放容器未就绪')
 
-  activeIptvEngine.value = 'youtube'
-  resetMediaAspect()
-  youtubeHostRef.value.innerHTML = ''
   console.log(`[START] YouTube:${videoId}`)
 
   return new Promise((resolve, reject) => {
@@ -1744,13 +1766,22 @@ function playbackEngineType(type, url = '') {
   return normalized
 }
 
+function youtubeUrlParts(parsed) {
+  return parsed.protocol === 'youtube:'
+    ? [parsed.hostname, ...parsed.pathname.split('/')].filter(Boolean)
+    : parsed.pathname.split('/').filter(Boolean)
+}
+
 function parseYoutubeVideoId(url) {
   try {
     const parsed = new URL(url)
     const host = parsed.hostname.toLowerCase()
-    const parts = parsed.pathname.split('/').filter(Boolean)
+    const parts = youtubeUrlParts(parsed)
     let id = ''
-    if (host === 'youtu.be' || host === 'www.youtu.be') {
+    if (parsed.protocol === 'youtube:') {
+      if (parts.length === 1) id = parts[0] || ''
+      else if (parts.length >= 2 && ['live', 'embed', 'shorts'].includes(parts[0])) id = parts[1]
+    } else if (host === 'youtu.be' || host === 'www.youtu.be') {
       id = parts[0] || ''
     } else if (host === 'youtube.com' || host.endsWith('.youtube.com') || host === 'youtube-nocookie.com' || host.endsWith('.youtube-nocookie.com')) {
       id = parsed.searchParams.get('v') || ''
@@ -1764,9 +1795,40 @@ function parseYoutubeVideoId(url) {
   }
 }
 
+function parseYoutubeChannelId(url) {
+  try {
+    const parsed = new URL(url)
+    const host = parsed.hostname.toLowerCase()
+    const parts = youtubeUrlParts(parsed)
+    let id = ''
+    if (parsed.protocol === 'youtube:') {
+      if (/^UC[a-zA-Z0-9_-]{20,}$/.test(parts[0] || '')) id = parts[0]
+      else if (parts.length >= 2 && parts[0] === 'channel') id = parts[1]
+    } else if (host === 'youtube.com' || host.endsWith('.youtube.com') || host === 'youtube-nocookie.com' || host.endsWith('.youtube-nocookie.com')) {
+      if (parts.length >= 2 && parts[0] === 'channel') id = parts[1]
+    }
+    return /^UC[a-zA-Z0-9_-]{20,}$/.test(id) ? id : ''
+  } catch {
+    return ''
+  }
+}
+
+function isYoutubeLiveChannelUrl(url) {
+  try {
+    const parsed = new URL(url)
+    if (parsed.protocol !== 'youtube:' && !isYoutubeUrl(url)) return false
+    const parts = youtubeUrlParts(parsed)
+    return parts[parts.length - 1] === 'live'
+  } catch {
+    return false
+  }
+}
+
 function isYoutubeUrl(url) {
   try {
-    const host = new URL(url).hostname.toLowerCase()
+    const parsed = new URL(url)
+    if (parsed.protocol === 'youtube:') return true
+    const host = parsed.hostname.toLowerCase()
     return host === 'youtu.be' || host === 'www.youtu.be' || host === 'youtube.com' || host.endsWith('.youtube.com') || host === 'youtube-nocookie.com' || host.endsWith('.youtube-nocookie.com')
   } catch {
     return false
@@ -1778,7 +1840,9 @@ function sourceType(entry) {
   const url = entry?.url || ''
   const inferred = parseYoutubeVideoId(url)
     ? 'youtube'
-    : isYoutubeUrl(url)
+    : parseYoutubeChannelId(url) && isYoutubeLiveChannelUrl(url)
+      ? 'youtube'
+      : isYoutubeUrl(url)
       ? 'unsupported_youtube_url'
       : isHlsUrl(url)
         ? 'hls'
@@ -1791,6 +1855,14 @@ function sourceType(entry) {
 
 function youtubeVideoId(entry) {
   return entry?.youtube_video_id || parseYoutubeVideoId(entry?.original_url || entry?.url || '')
+}
+
+function youtubeLiveEmbedUrl(entry) {
+  if (entry?.youtube_live_embed_url) return entry.youtube_live_embed_url
+  const original = entry?.original_url || entry?.url || ''
+  const channelId = entry?.youtube_channel_id || parseYoutubeChannelId(original)
+  if (!channelId || !isYoutubeLiveChannelUrl(original)) return ''
+  return `https://www.youtube.com/embed/live_stream?channel=${encodeURIComponent(channelId)}&autoplay=1&playsinline=1&controls=1&rel=0`
 }
 
 function canUseMpegTs() {

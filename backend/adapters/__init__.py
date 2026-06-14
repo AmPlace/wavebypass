@@ -271,8 +271,8 @@ def parse_adapter_url(target_url: str) -> AdapterRequest:
     elif scheme == "picarto":
         adapter = "picarto"
         resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
-    elif scheme in {"ytsl", "youtube"}:
-        adapter = "ytsl"
+    elif scheme == "youtube":
+        adapter = "youtube"
         resource_id = f"{parsed.netloc}{parsed.path}".strip("/")
     elif scheme == "adapter":
         adapter = (parsed.netloc or "").lower().split("@")[-1].split(":")[0]
@@ -385,7 +385,7 @@ from .huamao import resolve_huamao
 from .shopee import resolve_shopee
 from .laixiu import resolve_laixiu
 from .picarto import resolve_picarto
-from .ytsl import resolve_ytsl
+from .youtube import resolve_youtube
 
 
 _ADAPTER_REGISTRY = {
@@ -444,6 +444,5 @@ _ADAPTER_REGISTRY = {
     "shopee": resolve_shopee,
     "laixiu": resolve_laixiu,
     "picarto": resolve_picarto,
-    "ytsl": resolve_ytsl,
-    "youtube": resolve_ytsl,
+    "youtube": resolve_youtube,
 }

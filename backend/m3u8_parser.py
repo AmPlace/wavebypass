@@ -13,12 +13,13 @@ _channel_alias = Alias(_ALIAS_PATH)
 # 匹配 key="value" 或 key='value' 形式的属性
 _ATTR_RE = re.compile(r'''(\w[\w-]*)=(?:"([^"]*)"|'([^']*)')''')
 
-_STREAM_URL_PREFIXES = ('http://', 'https://', 'rtmp://', 'rtsp://', 'migu://', 'hnntv://', 'nmtv://', 'gzstv://', 'sxbc://', 'xjtv://', 'jstv://', 'sdtv://', 'sdly://', 'douyin://', 'douyu://', 'huya://', 'hbtv://', 'hntv://', 'redbook://', 'tvb://', 'nowtv://', 'tiktok://', 'kuaishou://', 'bilibili://', 'yy://', 'bigo://', 'blued://', 'soop://', 'netease://', 'pandatv://', 'maoer://', 'look://', 'flextv://', 'popkontv://', 'twitcasting://', 'baidu://', 'weibo://', 'kugou://', 'twitch://', 'huajiao://', 'showroom://', 'inke://', 'acfun://', 'haixiu://', 'liveme://', 'zhihu://', 'chzzk://', 'live17://', 'langlive://', 'changliao://', 'jd://', 'faceit://', 'lianjie://', 'sixroom://', 'lehai://', 'huamao://', 'shopee://', 'laixiu://', 'picarto://', 'ytsl://', 'youtube://', 'adapter://')
+_STREAM_URL_PREFIXES = ('http://', 'https://', 'rtmp://', 'rtsp://', 'migu://', 'hnntv://', 'nmtv://', 'gzstv://', 'sxbc://', 'xjtv://', 'jstv://', 'sdtv://', 'sdly://', 'douyin://', 'douyu://', 'huya://', 'hbtv://', 'hntv://', 'redbook://', 'tvb://', 'nowtv://', 'tiktok://', 'kuaishou://', 'bilibili://', 'yy://', 'bigo://', 'blued://', 'soop://', 'netease://', 'pandatv://', 'maoer://', 'look://', 'flextv://', 'popkontv://', 'twitcasting://', 'baidu://', 'weibo://', 'kugou://', 'twitch://', 'huajiao://', 'showroom://', 'inke://', 'acfun://', 'haixiu://', 'liveme://', 'zhihu://', 'chzzk://', 'live17://', 'langlive://', 'changliao://', 'jd://', 'faceit://', 'lianjie://', 'sixroom://', 'lehai://', 'huamao://', 'shopee://', 'laixiu://', 'picarto://', 'youtube://', 'adapter://')
 
 # 简单的逐行解析用
 _EXTINF_RE = re.compile(r'#EXTINF:([^,]*),(.*)')
 _EXTGRP_RE = re.compile(r'#EXTGRP:\s*(.+)')
 _YOUTUBE_VIDEO_ID_RE = re.compile(r'^[a-zA-Z0-9_-]{11}$')
+_YOUTUBE_CHANNEL_ID_RE = re.compile(r'^UC[a-zA-Z0-9_-]{20,}$')
 
 # 分辨率 / 编码标签，清洗频道名用
 _STRIP_RE = re.compile(
@@ -174,6 +175,7 @@ def parse_m3u(text: str) -> list[dict]:
                 'source_type': detect_source_type(line),
                 'adapter': adapter_provider(line),
                 'youtube_video_id': parse_youtube_video_id(line),
+                'youtube_channel_id': parse_youtube_channel_id(line),
             }
             channels.append(ch)
             pending_extinf = None
@@ -211,6 +213,7 @@ def parse_m3u(text: str) -> list[dict]:
                 'source_type': detect_source_type(url),
                 'adapter': adapter_provider(url),
                 'youtube_video_id': parse_youtube_video_id(url),
+                'youtube_channel_id': parse_youtube_channel_id(url),
                 'logo_url': '',
                 'group_name': current_group,
                 'tvg_id': '',
@@ -218,6 +221,20 @@ def parse_m3u(text: str) -> list[dict]:
             })
 
     return channels
+
+
+def _is_youtube_host(host: str) -> bool:
+    return (
+        host in {'youtu.be', 'www.youtu.be'}
+        or host == 'youtube.com'
+        or host.endswith('.youtube.com')
+        or host == 'youtube-nocookie.com'
+        or host.endswith('.youtube-nocookie.com')
+    )
+
+
+def _youtube_scheme_parts(parsed) -> list[str]:
+    return [part for part in [parsed.netloc, *parsed.path.split('/')] if part]
 
 
 def parse_youtube_video_id(url: str) -> str:
@@ -234,9 +251,15 @@ def parse_youtube_video_id(url: str) -> str:
     path_parts = [part for part in parsed.path.split('/') if part]
     candidate = ''
 
-    if host in {'youtu.be', 'www.youtu.be'}:
+    if parsed.scheme.lower() == 'youtube':
+        scheme_parts = _youtube_scheme_parts(parsed)
+        if len(scheme_parts) == 1:
+            candidate = scheme_parts[0]
+        elif len(scheme_parts) >= 2 and scheme_parts[0] in {'live', 'embed', 'shorts'}:
+            candidate = scheme_parts[1]
+    elif host in {'youtu.be', 'www.youtu.be'}:
         candidate = path_parts[0] if path_parts else ''
-    elif host == 'youtube.com' or host.endswith('.youtube.com') or host == 'youtube-nocookie.com' or host.endswith('.youtube-nocookie.com'):
+    elif _is_youtube_host(host):
         query_video_id = parse_qs(parsed.query).get('v', [''])[0]
         if query_video_id:
             candidate = query_video_id
@@ -248,18 +271,61 @@ def parse_youtube_video_id(url: str) -> str:
     return ''
 
 
-def is_youtube_url(url: str) -> bool:
+def parse_youtube_channel_id(url: str) -> str:
+    """Extract a YouTube channel id from channel/live URLs when it is explicit."""
+    raw = (url or '').strip()
+    if not raw:
+        return ''
     try:
-        host = (urlparse((url or '').strip()).netloc or '').lower().split('@')[-1].split(':')[0]
+        parsed = urlparse(raw)
+    except ValueError:
+        return ''
+
+    scheme = parsed.scheme.lower()
+    host = (parsed.netloc or '').lower().split('@')[-1].split(':')[0]
+    parts = _youtube_scheme_parts(parsed) if scheme == 'youtube' else [part for part in parsed.path.split('/') if part]
+
+    candidate = ''
+    if scheme == 'youtube':
+        if parts and _YOUTUBE_CHANNEL_ID_RE.fullmatch(parts[0] or ''):
+            candidate = parts[0]
+        elif len(parts) >= 2 and parts[0] == 'channel':
+            candidate = parts[1]
+    elif _is_youtube_host(host):
+        if len(parts) >= 2 and parts[0] == 'channel':
+            candidate = parts[1]
+
+    if _YOUTUBE_CHANNEL_ID_RE.fullmatch(candidate or ''):
+        return candidate
+    return ''
+
+
+def is_youtube_live_channel_url(url: str) -> bool:
+    raw = (url or '').strip()
+    if not raw:
+        return False
+    try:
+        parsed = urlparse(raw)
     except ValueError:
         return False
-    return (
-        host in {'youtu.be', 'www.youtu.be'}
-        or host == 'youtube.com'
-        or host.endswith('.youtube.com')
-        or host == 'youtube-nocookie.com'
-        or host.endswith('.youtube-nocookie.com')
-    )
+
+    scheme = parsed.scheme.lower()
+    host = (parsed.netloc or '').lower().split('@')[-1].split(':')[0]
+    parts = _youtube_scheme_parts(parsed) if scheme == 'youtube' else [part for part in parsed.path.split('/') if part]
+    if scheme == 'youtube':
+        return bool(parts and parts[-1].lower() == 'live')
+    if _is_youtube_host(host):
+        return bool(parts and parts[-1].lower() == 'live')
+    return False
+
+
+def is_youtube_url(url: str) -> bool:
+    try:
+        parsed = urlparse((url or '').strip())
+        host = (parsed.netloc or '').lower().split('@')[-1].split(':')[0]
+    except ValueError:
+        return False
+    return parsed.scheme.lower() == 'youtube' or _is_youtube_host(host)
 
 
 def adapter_provider(url: str) -> str:
@@ -379,8 +445,8 @@ def adapter_provider(url: str) -> str:
         return 'laixiu'
     if scheme == 'picarto':
         return 'picarto'
-    if scheme in {'ytsl', 'youtube'}:
-        return 'ytsl'
+    if scheme == 'youtube':
+        return 'youtube'
     if scheme == 'adapter':
         return (parsed.netloc or '').lower().split('@')[-1].split(':')[0]
     return ''
@@ -388,12 +454,14 @@ def adapter_provider(url: str) -> str:
 
 def detect_source_type(url: str) -> str:
     value = (url or '').strip().lower()
-    if adapter_provider(url):
-        return 'adapter'
     if parse_youtube_video_id(url):
         return 'youtube'
     if is_youtube_url(url):
+        if parse_youtube_channel_id(url) or is_youtube_live_channel_url(url):
+            return 'youtube'
         return 'unsupported_youtube_url'
+    if adapter_provider(url):
+        return 'adapter'
     if value.startswith('rtsp://'):
         return 'rtsp'
     if '/rtp/' in value or '/udp/' in value or '%2frtp%2f' in value or '%2fudp%2f' in value:

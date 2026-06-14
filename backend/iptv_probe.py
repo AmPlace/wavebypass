@@ -4,12 +4,12 @@ import os
 import re
 import time
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import quote, urljoin
 
 import httpx
 
 from adapters import AdapterResolveError, resolve_adapter_source
-from m3u8_parser import adapter_provider, detect_source_type
+from m3u8_parser import adapter_provider, detect_source_type, is_youtube_url
 from media_tools import media_tool_bin
 
 
@@ -19,6 +19,10 @@ PLAYLIST_TIMEOUT = 8.0
 SEGMENT_TIMEOUT = 5.0
 STREAM_TIMEOUT = 8.0
 HLS_SEGMENT_SAMPLE_LIMIT = 3
+
+
+def _youtube_adapter_url(url: str) -> str:
+    return f"youtube://resolve?url={quote(url, safe='')}"
 
 
 def _env_float(name: str, default: float) -> float:
@@ -660,6 +664,11 @@ async def probe_channel_source(ch: dict[str, Any], client: httpx.AsyncClient) ->
     url = original_url
     stored_source_type = str(ch.get("source_type") or "").strip().lower()
     source_type = stored_source_type if stored_source_type and stored_source_type != "hls" else detect_source_type(url)
+    if source_type == "youtube" or (source_type == "unsupported_youtube_url" and is_youtube_url(original_url)):
+        source_type = "adapter"
+        adapter = "youtube"
+        original_url = _youtube_adapter_url(original_url)
+
     if source_type == "adapter":
         try:
             resolved = await resolve_adapter_source(original_url, client)

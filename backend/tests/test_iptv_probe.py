@@ -72,6 +72,47 @@ class IptvProbeRealtimeStreamTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["probe_status"], "online")
         self.assertEqual(result["video_codec"], "h264")
 
+    async def test_youtube_probe_resolves_before_stream_probe(self):
+        resolved_targets = []
+        probed_urls = []
+        original_resolve = iptv_probe.resolve_adapter_source
+        original_probe_hls = iptv_probe._probe_hls
+        original_enrich = iptv_probe._enrich_with_ffprobe
+
+        async def fake_resolve(target_url, client):
+            resolved_targets.append(target_url)
+            return {
+                "adapter": "youtube",
+                "source_type": "hls",
+                "url": "https://example.com/live.m3u8",
+                "headers": {},
+                "ttl": 120,
+            }
+
+        async def fake_probe_hls(client, url, headers):
+            probed_urls.append(url)
+            return _empty_result(probe_status="online", live_status="live", probe_method="http_segment")
+
+        async def fake_enrich(result, url, headers):
+            return result
+
+        iptv_probe.resolve_adapter_source = fake_resolve
+        iptv_probe._probe_hls = fake_probe_hls
+        iptv_probe._enrich_with_ffprobe = fake_enrich
+        try:
+            result = await probe_channel_source(
+                {"url": "https://www.youtube.com/live/abcDEF123_4", "source_type": "youtube"},
+                None,
+            )
+        finally:
+            iptv_probe.resolve_adapter_source = original_resolve
+            iptv_probe._probe_hls = original_probe_hls
+            iptv_probe._enrich_with_ffprobe = original_enrich
+
+        self.assertEqual(result["probe_status"], "online")
+        self.assertTrue(resolved_targets[0].startswith("youtube://resolve?url="))
+        self.assertEqual(probed_urls, ["https://example.com/live.m3u8"])
+
 
 if __name__ == "__main__":
     unittest.main()

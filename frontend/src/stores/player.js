@@ -124,13 +124,22 @@ export const usePlayerStore = defineStore('player', {
       // 构建回退队列：直连优先，代理在后
       const list = []
       const sourceUrl = (u) => String(u?.url || '').trim()
+      const youtubeParts = (url) => {
+        const parsed = new URL(url)
+        return parsed.protocol === 'youtube:'
+          ? [parsed.hostname, ...parsed.pathname.split('/')].filter(Boolean)
+          : parsed.pathname.split('/').filter(Boolean)
+      }
       const parseYoutubeVideoId = (url) => {
         try {
           const parsed = new URL(url)
           const host = parsed.hostname.toLowerCase()
-          const parts = parsed.pathname.split('/').filter(Boolean)
+          const parts = youtubeParts(url)
           let id = ''
-          if (host === 'youtu.be' || host === 'www.youtu.be') {
+          if (parsed.protocol === 'youtube:') {
+            if (parts.length === 1) id = parts[0] || ''
+            else if (parts.length >= 2 && ['live', 'embed', 'shorts'].includes(parts[0])) id = parts[1]
+          } else if (host === 'youtu.be' || host === 'www.youtu.be') {
             id = parts[0] || ''
           } else if (host === 'youtube.com' || host.endsWith('.youtube.com') || host === 'youtube-nocookie.com' || host.endsWith('.youtube-nocookie.com')) {
             id = parsed.searchParams.get('v') || ''
@@ -143,9 +152,38 @@ export const usePlayerStore = defineStore('player', {
           return ''
         }
       }
+      const parseYoutubeChannelId = (url) => {
+        try {
+          const parsed = new URL(url)
+          const host = parsed.hostname.toLowerCase()
+          const parts = youtubeParts(url)
+          let id = ''
+          if (parsed.protocol === 'youtube:') {
+            if (/^UC[a-zA-Z0-9_-]{20,}$/.test(parts[0] || '')) id = parts[0]
+            else if (parts.length >= 2 && parts[0] === 'channel') id = parts[1]
+          } else if (host === 'youtube.com' || host.endsWith('.youtube.com') || host === 'youtube-nocookie.com' || host.endsWith('.youtube-nocookie.com')) {
+            if (parts.length >= 2 && parts[0] === 'channel') id = parts[1]
+          }
+          return /^UC[a-zA-Z0-9_-]{20,}$/.test(id) ? id : ''
+        } catch {
+          return ''
+        }
+      }
+      const isYoutubeLiveChannelUrl = (url) => {
+        try {
+          const parsed = new URL(url)
+          if (parsed.protocol !== 'youtube:' && !isYoutubeUrl(url)) return false
+          const parts = youtubeParts(url)
+          return parts[parts.length - 1] === 'live'
+        } catch {
+          return false
+        }
+      }
       const isYoutubeUrl = (url) => {
         try {
-          const host = new URL(url).hostname.toLowerCase()
+          const parsed = new URL(url)
+          if (parsed.protocol === 'youtube:') return true
+          const host = parsed.hostname.toLowerCase()
           return host === 'youtu.be' || host === 'www.youtu.be' || host === 'youtube.com' || host.endsWith('.youtube.com') || host === 'youtube-nocookie.com' || host.endsWith('.youtube-nocookie.com')
         } catch {
           return false
@@ -154,8 +192,9 @@ export const usePlayerStore = defineStore('player', {
       const inferSourceType = (url) => {
         const value = String(url || '').trim().toLowerCase()
         if (parseYoutubeVideoId(url)) return 'youtube'
+        if (parseYoutubeChannelId(url) && isYoutubeLiveChannelUrl(url)) return 'youtube'
         if (isYoutubeUrl(url)) return 'unsupported_youtube_url'
-        if (value.startsWith('migu://') || value.startsWith('hnntv://') || value.startsWith('nmtv://') || value.startsWith('gzstv://') || value.startsWith('sxbc://') || value.startsWith('xjtv://') || value.startsWith('jstv://') || value.startsWith('sdtv://') || value.startsWith('sdly://') || value.startsWith('douyin://') || value.startsWith('douyu://') || value.startsWith('huya://') || value.startsWith('hbtv://') || value.startsWith('hntv://') || value.startsWith('tvb://') || value.startsWith('nowtv://') || value.startsWith('redbook://') || value.startsWith('tiktok://') || value.startsWith('kuaishou://') || value.startsWith('bilibili://') || value.startsWith('yy://') || value.startsWith('bigo://') || value.startsWith('blued://') || value.startsWith('soop://') || value.startsWith('netease://') || value.startsWith('pandatv://') || value.startsWith('maoer://') || value.startsWith('look://') || value.startsWith('flextv://') || value.startsWith('popkontv://') || value.startsWith('twitcasting://') || value.startsWith('baidu://') || value.startsWith('weibo://') || value.startsWith('kugou://') || value.startsWith('twitch://') || value.startsWith('huajiao://') || value.startsWith('showroom://') || value.startsWith('inke://') || value.startsWith('acfun://') || value.startsWith('haixiu://') || value.startsWith('liveme://') || value.startsWith('zhihu://') || value.startsWith('chzzk://') || value.startsWith('live17://') || value.startsWith('langlive://') || value.startsWith('changliao://') || value.startsWith('jd://') || value.startsWith('faceit://') || value.startsWith('lianjie://') || value.startsWith('sixroom://') || value.startsWith('lehai://') || value.startsWith('huamao://') || value.startsWith('shopee://') || value.startsWith('laixiu://') || value.startsWith('picarto://') || value.startsWith('ytsl://') || value.startsWith('youtube://') || value.startsWith('adapter://')) return 'adapter'
+        if (value.startsWith('migu://') || value.startsWith('hnntv://') || value.startsWith('nmtv://') || value.startsWith('gzstv://') || value.startsWith('sxbc://') || value.startsWith('xjtv://') || value.startsWith('jstv://') || value.startsWith('sdtv://') || value.startsWith('sdly://') || value.startsWith('douyin://') || value.startsWith('douyu://') || value.startsWith('huya://') || value.startsWith('hbtv://') || value.startsWith('hntv://') || value.startsWith('tvb://') || value.startsWith('nowtv://') || value.startsWith('redbook://') || value.startsWith('tiktok://') || value.startsWith('kuaishou://') || value.startsWith('bilibili://') || value.startsWith('yy://') || value.startsWith('bigo://') || value.startsWith('blued://') || value.startsWith('soop://') || value.startsWith('netease://') || value.startsWith('pandatv://') || value.startsWith('maoer://') || value.startsWith('look://') || value.startsWith('flextv://') || value.startsWith('popkontv://') || value.startsWith('twitcasting://') || value.startsWith('baidu://') || value.startsWith('weibo://') || value.startsWith('kugou://') || value.startsWith('twitch://') || value.startsWith('huajiao://') || value.startsWith('showroom://') || value.startsWith('inke://') || value.startsWith('acfun://') || value.startsWith('haixiu://') || value.startsWith('liveme://') || value.startsWith('zhihu://') || value.startsWith('chzzk://') || value.startsWith('live17://') || value.startsWith('langlive://') || value.startsWith('changliao://') || value.startsWith('jd://') || value.startsWith('faceit://') || value.startsWith('lianjie://') || value.startsWith('sixroom://') || value.startsWith('lehai://') || value.startsWith('huamao://') || value.startsWith('shopee://') || value.startsWith('laixiu://') || value.startsWith('picarto://') || value.startsWith('adapter://')) return 'adapter'
         if (value.startsWith('rtsp://')) return 'rtsp'
         if (/\/(?:rtp|udp)\//i.test(value) || /%2f(?:rtp|udp)%2f/i.test(value)) return 'mpegts'
         if (/\.(?:ts|m2ts|mts)(?:[?#]|$)/i.test(value)) return 'mpegts'
@@ -170,6 +209,12 @@ export const usePlayerStore = defineStore('player', {
       const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
         (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
       const adapterPlayUrlFor = (url) => `${API_BASE}/api/iptv/adapter/play.m3u8?target_url=${encodeURIComponent(url)}`
+      const youtubeAdapterUrlFor = (url) => {
+        const videoId = parseYoutubeVideoId(url)
+        if (videoId) return `youtube://${videoId}`
+        if (String(url || '').trim().toLowerCase().startsWith('youtube://')) return url
+        return `youtube://resolve?url=${encodeURIComponent(url)}`
+      }
       const absoluteApiUrl = (url) => {
         if (!url) return ''
         return /^https?:\/\//i.test(url) ? url : `${API_BASE}${url.startsWith('/') ? url : `/${url}`}`
@@ -206,7 +251,7 @@ export const usePlayerStore = defineStore('player', {
         if (value.startsWith('sdtv://')) return 'sdtv'
         if (value.startsWith('sdly://')) return 'sdly'
         if (value.startsWith('live17://')) return 'live17'
-        if (value.startsWith('youtube://') || value.startsWith('ytsl://')) return 'ytsl'
+        if (value.startsWith('youtube://')) return 'youtube'
         try {
           const parsed = new URL(url)
           return parsed.protocol === 'adapter:' ? parsed.hostname.toLowerCase() : ''
@@ -241,18 +286,40 @@ export const usePlayerStore = defineStore('player', {
         const url = sourceUrl(u)
         if (!url) continue
         const st = sourceType(u)
-        if (st === 'unsupported_youtube_url') continue
         if (st === 'youtube') {
           const youtubeVideoId = u.youtube_video_id || parseYoutubeVideoId(url)
-          if (!youtubeVideoId) continue
-          directUrls.push({
+          const youtubeChannelId = u.youtube_channel_id || parseYoutubeChannelId(url)
+          if (youtubeVideoId || youtubeChannelId) {
+            directUrls.push({
+              ...u,
+              url,
+              original_url: url,
+              type: 'youtube',
+              engine: 'youtube',
+              source_type: 'youtube',
+              youtube_video_id: youtubeVideoId,
+              youtube_channel_id: youtubeChannelId,
+              youtube_live_embed_url: youtubeChannelId && !youtubeVideoId
+                ? `https://www.youtube.com/embed/live_stream?channel=${encodeURIComponent(youtubeChannelId)}&autoplay=1&playsinline=1&controls=1&rel=0`
+                : '',
+            })
+          }
+          adapterSources.push({
             ...u,
-            url,
+            url: youtubeAdapterUrlFor(url),
             original_url: url,
-            type: 'youtube',
-            engine: 'youtube',
-            source_type: 'youtube',
-            youtube_video_id: youtubeVideoId,
+            adapter: 'youtube',
+            source_type: 'adapter',
+          })
+          continue
+        }
+        if (st === 'unsupported_youtube_url') {
+          adapterSources.push({
+            ...u,
+            url: youtubeAdapterUrlFor(url),
+            original_url: url,
+            adapter: 'youtube',
+            source_type: 'adapter',
           })
           continue
         }
@@ -287,17 +354,31 @@ export const usePlayerStore = defineStore('player', {
       for (const u of adapterSources) {
         const url = sourceUrl(u)
         const adapter = u.adapter || adapterName(url)
+        const originalUrl = u.original_url || url
         const fallbackProxyUrl = adapterPlayUrlFor(url)
         try {
           const resolved = await resolveAdapterSource(url)
           const proxyUrl = absoluteApiUrl(resolved.proxy_url) || fallbackProxyUrl
           const canDirectPlay = !resolved.requires_proxy && resolved.direct_playable !== false && resolved.url
           const keepAdapterEntry = canDirectPlay && resolved.volatile_url === true
+          if (adapter === 'youtube' && resolved.youtube_channel_id && !u.youtube_video_id && !u.youtube_channel_id) {
+            directUrls.push({
+              ...u,
+              url: originalUrl,
+              original_url: originalUrl,
+              type: 'youtube',
+              engine: 'youtube',
+              source_type: 'youtube',
+              youtube_video_id: '',
+              youtube_channel_id: resolved.youtube_channel_id,
+              youtube_live_embed_url: `https://www.youtube.com/embed/live_stream?channel=${encodeURIComponent(resolved.youtube_channel_id)}&autoplay=1&playsinline=1&controls=1&rel=0`,
+            })
+          }
           if (canDirectPlay) {
             directUrls.push({
               ...u,
               url: resolved.url,
-              original_url: url,
+              original_url: originalUrl,
               adapter,
               adapter_source_url: url,
               adapter_proxy_url: proxyUrl,
@@ -310,7 +391,7 @@ export const usePlayerStore = defineStore('player', {
             proxyOnlyUrls.push({
               ...u,
               url: proxyUrl,
-              original_url: url,
+              original_url: originalUrl,
               adapter,
               type: 'proxy',
               via_proxy: true,
@@ -319,10 +400,11 @@ export const usePlayerStore = defineStore('player', {
           }
         } catch (e) {
           console.warn('[IPTV] adapter resolve failed:', e?.message || e)
+          if (adapter === 'youtube') continue
           proxyOnlyUrls.push({
             ...u,
             url: fallbackProxyUrl,
-            original_url: url,
+            original_url: originalUrl,
             adapter,
             type: 'proxy',
             via_proxy: true,
