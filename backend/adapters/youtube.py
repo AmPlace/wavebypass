@@ -20,11 +20,11 @@ _YOUTUBE_CHANNEL_ID_PATTERNS = (
     re.compile(r'/channel/(UC[a-zA-Z0-9_-]{20,})'),
 )
 _YOUTUBE_VIDEO_ID_PATTERNS = (
-    re.compile(r'"videoId"\s*:\s*"([a-zA-Z0-9_-]{11})"'),
     re.compile(r'<link\s+rel=["\']canonical["\']\s+href=["\']https?://(?:www\.)?youtube\.com/watch\?v=([a-zA-Z0-9_-]{11})["\']', re.I),
+    re.compile(r'"videoId"\s*:\s*"([a-zA-Z0-9_-]{11})"'),
 )
 
-_YOUTUBE_IS_LIVE_RE = re.compile(r'"(?:isLive|isLiveContent)"\s*:\s*true', re.I)
+_YOUTUBE_COMMAND_VIDEO_ID_RE = re.compile(r'window\[[\'"]ytCommand[\'"]\]\s*=\s*\{.*?"watchEndpoint"\s*:\s*\{.*?"videoId"\s*:\s*"([a-zA-Z0-9_-]{11})"', re.S)
 YOUTUBE_STREAMLINK_TIMEOUT_SECONDS = 12.0
 
 
@@ -121,6 +121,16 @@ def _query_truthy(value: str) -> bool:
     return str(value or "").strip().lower() not in {"", "0", "false", "no", "off"}
 
 
+def _current_video_primary_info_text(text: str) -> str:
+    start = text.find('{"videoPrimaryInfoRenderer"')
+    if start < 0:
+        return ""
+    end = text.find('"videoSecondaryInfoRenderer"', start)
+    if end < 0:
+        end = min(len(text), start + 80_000)
+    return text[start:end]
+
+
 async def _resolve_ids_from_page(url: str, client: httpx.AsyncClient) -> tuple[str, str, bool, bool]:
     """从 YouTube 页面同时提取 channel_id、video_id、is_live，一次请求搞定。"""
     try:
@@ -146,14 +156,18 @@ async def _resolve_ids_from_page(url: str, client: httpx.AsyncClient) -> tuple[s
             channel_id = match.group(1)
             break
 
-    video_id = ""
+    command_match = _YOUTUBE_COMMAND_VIDEO_ID_RE.search(text)
+    video_id = command_match.group(1) if command_match else ""
     for pattern in _YOUTUBE_VIDEO_ID_PATTERNS:
+        if video_id:
+            break
         match = pattern.search(text)
         if match:
             video_id = match.group(1)
             break
 
-    is_live = bool(_YOUTUBE_IS_LIVE_RE.search(text))
+    primary_info = _current_video_primary_info_text(text)
+    is_live = '"isLive":true' in primary_info and "watching now" in primary_info
     return channel_id, video_id, is_live, True
 
 
@@ -167,10 +181,11 @@ async def resolve_youtube(request: AdapterRequest, client: httpx.AsyncClient) ->
     page_is_live = False
     page_checked = False
     if probe_only or (not page_channel_id and ("/live" in youtube_url or "/@" in youtube_url)):
-        page_channel_id, page_video_id, page_is_live, page_checked = await _resolve_ids_from_page(youtube_url, client)
+        parsed_channel_id, page_video_id, page_is_live, page_checked = await _resolve_ids_from_page(youtube_url, client)
+        page_channel_id = parsed_channel_id or explicit_channel_id
     # URL 里直接带 video ID 的（watch?v=、youtu.be/、live/ID）也一并提取
     url_video_id = parse_youtube_video_id(youtube_url)
-    effective_video_id = page_video_id or url_video_id
+    effective_video_id = url_video_id or page_video_id
 
     if probe_only:
         if not page_checked:

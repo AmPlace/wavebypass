@@ -160,7 +160,12 @@ class YoutubeAdapterProbeOnlyTest(unittest.IsolatedAsyncioTestCase):
             async def get(self, *args, **kwargs):
                 return type("Response", (), {
                     "status_code": 200,
-                    "text": '{"videoId":"abcDEF123_4","isLiveContent":true}',
+                    "text": (
+                        "window['ytCommand'] = {\"watchEndpoint\":{\"videoId\":\"abcDEF123_4\"}};"
+                        '{"videoPrimaryInfoRenderer":{"viewCount":{"videoViewCountRenderer":'
+                        '{"viewCount":{"runs":[{"text":"1"},{"text":" watching now"}]},"isLive":true}}},'
+                        '"videoSecondaryInfoRenderer":{}}'
+                    ),
                 })()
 
         result = await resolve_youtube(self._request(), Client())
@@ -169,6 +174,27 @@ class YoutubeAdapterProbeOnlyTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["url"], "")
         self.assertEqual(result["youtube_video_id"], "abcDEF123_4")
         self.assertTrue(result["youtube_page_is_live"])
+
+    async def test_probe_only_prefers_explicit_url_video_id(self):
+        request = parse_adapter_url(
+            "youtube://resolve?probe=1&url=https%3A%2F%2Fwww.youtube.com%2Fwatch%3Fv%3DcMgDo5cH-Lg"
+        )
+
+        class Client:
+            async def get(self, *args, **kwargs):
+                return type("Response", (), {
+                    "status_code": 200,
+                    "text": (
+                        "window['ytCommand'] = {\"watchEndpoint\":{\"videoId\":\"KvwmJIjntvw\"}};"
+                        '{"videoPrimaryInfoRenderer":{"viewCount":{"videoViewCountRenderer":'
+                        '{"viewCount":{"runs":[{"text":"1"},{"text":" watching now"}]},"isLive":true}}},'
+                        '"videoSecondaryInfoRenderer":{}}'
+                    ),
+                })()
+
+        result = await resolve_youtube(request, Client())
+
+        self.assertEqual(result["youtube_video_id"], "cMgDo5cH-Lg")
 
     async def test_probe_only_not_live_page_raises_not_live(self):
         class Client:
