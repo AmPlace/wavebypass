@@ -1912,12 +1912,26 @@ async def uninstall_market_package(package_id: str):
 
 # ── 前端聚合频道列表（跨源去重，每个频道保留所有可用链接）──
 
+def _content_category(name: str) -> str:
+    """内容分类兜底：全国频道（无省份归属）按内容词分类。"""
+    import re
+    if re.search(r'少儿|卡通|动画|动漫|宝宝|宝贝', name): return '少儿'
+    if re.search(r'电影|影院|剧场', name): return '电影'
+    if re.search(r'体育|足球|篮球|网球|高尔夫', name): return '体育'
+    if re.search(r'纪录|探索|地理', name): return '纪录'
+    if re.search(r'购物', name): return '购物'
+    if re.search(r'戏曲|梨园', name): return '戏曲'
+    if re.search(r'新闻|资讯', name): return '新闻'
+    if re.search(r'音乐|MTV', name): return '音乐'
+    return ''
+
+
 async def _get_aggregated_iptv_channels(group: str = '', search: str = '') -> tuple[list[dict], list[str]]:
     # 搜索在 SQL 层过滤（性能好），分组在聚合后过滤（归一化后才准）
     raw = await db.get_aggregated_channels(group='', search=search)
 
     from m3u8_parser import adapter_provider, clean_channel_display_name, detect_source_type, normalize_channel_name, parse_youtube_channel_id, parse_youtube_video_id, _channel_alias
-    from template import channel_template, normalize_group_name
+    from template import channel_template, normalize_group_name, detect_province
     from logo_template import logo_template
 
     merged: dict[str, dict] = {}
@@ -1931,7 +1945,23 @@ async def _get_aggregated_iptv_channels(group: str = '', search: str = '') -> tu
         primary = _channel_alias.get_primary(ch['name'])
         tmpl_cat = channel_template.match(primary) or channel_template.match(ch['name'])
         raw_grp = ch['group_name'] or '其他'
-        grp = normalize_group_name(tmpl_cat or raw_grp)
+        norm_grp = normalize_group_name(raw_grp)
+        # 分类优先级（央视>卫视>省份>内容）：
+        #   ① template 命中（CCTV5→央视、浙江卫视→卫视、金鹰卡通→少儿）
+        #   ② detect_province 频道名识别省份（比源 group 可靠：临沂新闻→山东）
+        #   ③ 源 group 有效省份（黑龙江地区→黑龙江）
+        #   ④ 内容规则兜底（少儿/电影/体育/购物/戏曲）
+        #   ⑤ 源 group 兜底
+        if tmpl_cat:
+            grp = tmpl_cat
+        else:
+            prov = detect_province(ch['name'])
+            if prov:
+                grp = prov
+            elif norm_grp not in ('地方', '其他', '超清', 'hytest', 'zgzk'):
+                grp = norm_grp
+            else:
+                grp = _content_category(ch['name']) or norm_grp
 
         if key not in merged:
             merged[key] = {
