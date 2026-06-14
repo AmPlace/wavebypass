@@ -113,6 +113,8 @@ export const usePlayerStore = defineStore('player', {
 
     async playIptvChannel(channel) {
       const selectionToken = ++this.iptvSelectionToken
+      // 停止电台播放，触发 AudioEngine destroyHls
+      this.currentStation = ''
       this.pendingIptvChannel = channel
       this.playbackError = ''
       this.isLoading = true

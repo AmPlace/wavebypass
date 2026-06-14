@@ -524,6 +524,11 @@ onMounted(() => {
 })
 
 watch(currentStation, (stationId) => {
+  if (!stationId) {
+    destroyHls()
+    resetAudioSource()
+    return
+  }
   if (playerStore.isPlaying) {
     loadStation(stationId)
   }
