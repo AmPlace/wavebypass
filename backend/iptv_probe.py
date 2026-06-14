@@ -22,7 +22,7 @@ HLS_SEGMENT_SAMPLE_LIMIT = 3
 
 
 def _youtube_adapter_url(url: str) -> str:
-    return f"youtube://resolve?url={quote(url, safe='')}"
+    return f"youtube://resolve?probe=1&url={quote(url, safe='')}"
 
 
 def _env_float(name: str, default: float) -> float:
@@ -653,6 +653,7 @@ async def probe_channel_source(ch: dict[str, Any], client: httpx.AsyncClient) ->
     adapter = adapter_provider(original_url)
     adapter_title = ""
     resolved_youtube_video_id = ""
+    resolved_youtube_page_is_live = False
     meta: dict[str, Any] = {}
 
     if not original_url:
@@ -680,6 +681,26 @@ async def probe_channel_source(ch: dict[str, Any], client: httpx.AsyncClient) ->
             adapter = str(resolved.get("adapter") or adapter)
             adapter_title = str(resolved.get("title") or resolved.get("anchor_name") or "")
             resolved_youtube_video_id = str(resolved.get("youtube_video_id") or "").strip()
+            resolved_youtube_page_is_live = bool(resolved.get("youtube_page_is_live"))
+            if source_type == "probe_only":
+                return _empty_result(
+                    probe_status="online",
+                    live_status="live",
+                    probe_method="adapter_probe_only",
+                    requires_headers=_requires_headers(headers),
+                    requires_proxy_declared=declared_proxy,
+                    proxy_required_hint=True,
+                    adapter_provider=adapter,
+                    adapter_title=adapter_title,
+                    youtube_video_id=resolved_youtube_video_id,
+                    probe_meta_json=_safe_meta({
+                        "adapter": adapter,
+                        "resolved_type": source_type,
+                        "probe_quality": "metadata_only",
+                        "youtube_page_is_live": True,
+                        "source_type": source_type,
+                    }),
+                )
             meta.update({
                 "adapter": adapter,
                 "resolved_type": source_type,
@@ -690,7 +711,11 @@ async def probe_channel_source(ch: dict[str, Any], client: httpx.AsyncClient) ->
             })
         except AdapterResolveError as exc:
             status = "not_live" if is_adapter_not_live_error(exc.error_code) else "error"
-            err_vid = str(getattr(exc.__cause__, "youtube_video_id", "") or "").strip()
+            cause = exc.__cause__ or exc
+            err_vid = str(getattr(cause, "youtube_video_id", "") or getattr(exc, "youtube_video_id", "") or "").strip()
+            # 页面说在播 → 不管 adapter 报什么，一律当 error（可重试）
+            if getattr(cause, "youtube_page_is_live", False) or getattr(exc, "youtube_page_is_live", False):
+                status = "error"
             result = _empty_result(
                 probe_status=status,
                 live_status="not_live" if status == "not_live" else "error",
@@ -775,6 +800,10 @@ async def probe_channel_source(ch: dict[str, Any], client: httpx.AsyncClient) ->
         _merge_meta(result, {"probe_quality": _meta_value(result, "probe_quality", "http")})
     elif result.get("probe_status") in {"offline", "error", "timeout"}:
         _merge_meta(result, {"probe_quality": "failed"})
+    # 页面确认在播 → offline 升级为 error（可重试），避免误判"未开播"
+    if resolved_youtube_page_is_live and result.get("probe_status") == "offline":
+        result["probe_status"] = "error"
+        result["last_error"] = result.get("last_error") or "youtube_page_live_but_stream_unreachable"
 
     result["requires_headers"] = _requires_headers(headers)
     result["requires_proxy_declared"] = declared_proxy

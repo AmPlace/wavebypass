@@ -2167,12 +2167,31 @@ async def test_subscription(sub_id: int):
     return {"total": len(channels)}
 
 
+def _speed_test_semaphore_for_channel(
+    ch: dict,
+    semaphores: dict[str, asyncio.Semaphore],
+    default_sem: asyncio.Semaphore,
+    adapter_limits: dict[str, int],
+) -> asyncio.Semaphore:
+    from m3u8_parser import adapter_provider as _ap, is_youtube_url as _is_yt
+
+    url = ch.get("url", "")
+    name = "youtube" if _is_yt(url) else _ap(url)
+    limit = adapter_limits.get(name)
+    if limit is None:
+        return default_sem
+    return semaphores.setdefault(name, asyncio.Semaphore(limit))
+
+
 async def _run_speed_test_sub(sub_id: int, channels: list[dict], cancel_event: asyncio.Event):
-    semaphore = asyncio.Semaphore(10)
+    adapter_limits: dict[str, int] = {"youtube": 1}
+    semaphores: dict[str, asyncio.Semaphore] = {}
+    default_sem = asyncio.Semaphore(10)
+
     tasks: list[asyncio.Task] = []
 
     async def _limited_test(ch):
-        async with semaphore:
+        async with _speed_test_semaphore_for_channel(ch, semaphores, default_sem, adapter_limits):
             if cancel_event.is_set():
                 return ch, {"probe_status": "untested", "latency_ms": 0, "last_error": "cancelled"}
             try:
@@ -2229,11 +2248,14 @@ async def _run_speed_test_sub(sub_id: int, channels: list[dict], cancel_event: a
 
 
 async def _run_speed_test_global(channels: list[dict], cancel_event: asyncio.Event):
-    semaphore = asyncio.Semaphore(10)
+    adapter_limits: dict[str, int] = {"youtube": 1}
+    semaphores: dict[str, asyncio.Semaphore] = {}
+    default_sem = asyncio.Semaphore(10)
+
     tasks: list[asyncio.Task] = []
 
     async def _limited_test(ch):
-        async with semaphore:
+        async with _speed_test_semaphore_for_channel(ch, semaphores, default_sem, adapter_limits):
             if cancel_event.is_set():
                 return ch, {"probe_status": "untested", "latency_ms": 0, "last_error": "cancelled"}
             try:

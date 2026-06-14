@@ -1,5 +1,7 @@
 import unittest
 
+from adapters import AdapterResolveError, parse_adapter_url
+from adapters.youtube import resolve_youtube
 import iptv_probe
 from iptv_probe import (
     _empty_result,
@@ -110,8 +112,86 @@ class IptvProbeRealtimeStreamTest(unittest.IsolatedAsyncioTestCase):
             iptv_probe._enrich_with_ffprobe = original_enrich
 
         self.assertEqual(result["probe_status"], "online")
-        self.assertTrue(resolved_targets[0].startswith("youtube://resolve?url="))
+        self.assertTrue(resolved_targets[0].startswith("youtube://resolve?probe=1&url="))
         self.assertEqual(probed_urls, ["https://example.com/live.m3u8"])
+
+    async def test_youtube_probe_only_counts_online_without_stream_probe(self):
+        original_resolve = iptv_probe.resolve_adapter_source
+        original_probe_hls = iptv_probe._probe_hls
+
+        async def fake_resolve(target_url, client):
+            return {
+                "adapter": "youtube",
+                "source_type": "probe_only",
+                "url": "",
+                "headers": {},
+                "youtube_video_id": "abcDEF123_4",
+                "youtube_page_is_live": True,
+            }
+
+        async def fail_probe_hls(client, url, headers):
+            raise AssertionError("probe_only must not read the YouTube stream")
+
+        iptv_probe.resolve_adapter_source = fake_resolve
+        iptv_probe._probe_hls = fail_probe_hls
+        try:
+            result = await probe_channel_source(
+                {"url": "https://www.youtube.com/live/abcDEF123_4", "source_type": "youtube"},
+                None,
+            )
+        finally:
+            iptv_probe.resolve_adapter_source = original_resolve
+            iptv_probe._probe_hls = original_probe_hls
+
+        self.assertEqual(result["probe_status"], "online")
+        self.assertEqual(result["live_status"], "live")
+        self.assertEqual(result["probe_method"], "adapter_probe_only")
+        self.assertEqual(result["youtube_video_id"], "abcDEF123_4")
+
+
+class YoutubeAdapterProbeOnlyTest(unittest.IsolatedAsyncioTestCase):
+    def _request(self):
+        return parse_adapter_url(
+            "youtube://resolve?probe=1&url=https%3A%2F%2Fwww.youtube.com%2Flive%2FabcDEF123_4"
+        )
+
+    async def test_probe_only_live_page_returns_metadata_only(self):
+        class Client:
+            async def get(self, *args, **kwargs):
+                return type("Response", (), {
+                    "status_code": 200,
+                    "text": '{"videoId":"abcDEF123_4","isLiveContent":true}',
+                })()
+
+        result = await resolve_youtube(self._request(), Client())
+
+        self.assertEqual(result["source_type"], "probe_only")
+        self.assertEqual(result["url"], "")
+        self.assertEqual(result["youtube_video_id"], "abcDEF123_4")
+        self.assertTrue(result["youtube_page_is_live"])
+
+    async def test_probe_only_not_live_page_raises_not_live(self):
+        class Client:
+            async def get(self, *args, **kwargs):
+                return type("Response", (), {"status_code": 200, "text": "<html></html>"})()
+
+        with self.assertRaises(AdapterResolveError) as ctx:
+            await resolve_youtube(self._request(), Client())
+
+        self.assertEqual(ctx.exception.error_code, "youtube_not_live")
+        self.assertFalse(ctx.exception.retryable)
+        self.assertEqual(ctx.exception.youtube_video_id, "abcDEF123_4")
+
+    async def test_probe_only_unreachable_page_is_retryable_error(self):
+        class Client:
+            async def get(self, *args, **kwargs):
+                return type("Response", (), {"status_code": 403, "text": ""})()
+
+        with self.assertRaises(AdapterResolveError) as ctx:
+            await resolve_youtube(self._request(), Client())
+
+        self.assertEqual(ctx.exception.error_code, "youtube_page_unreachable")
+        self.assertTrue(ctx.exception.retryable)
 
 
 if __name__ == "__main__":

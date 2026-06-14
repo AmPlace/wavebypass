@@ -23,6 +23,8 @@ _YOUTUBE_VIDEO_ID_PATTERNS = (
     re.compile(r'"videoId"\s*:\s*"([a-zA-Z0-9_-]{11})"'),
     re.compile(r'<link\s+rel=["\']canonical["\']\s+href=["\']https?://(?:www\.)?youtube\.com/watch\?v=([a-zA-Z0-9_-]{11})["\']', re.I),
 )
+
+_YOUTUBE_IS_LIVE_RE = re.compile(r'"(?:isLive|isLiveContent)"\s*:\s*true', re.I)
 YOUTUBE_STREAMLINK_TIMEOUT_SECONDS = 12.0
 
 
@@ -115,8 +117,12 @@ def _resolve_youtube_with_streamlink(url: str, quality: str = "best") -> dict[st
     }
 
 
-async def _resolve_ids_from_page(url: str, client: httpx.AsyncClient) -> tuple[str, str]:
-    """从 YouTube 页面同时提取 channel_id 和 video_id，一次请求搞定。"""
+def _query_truthy(value: str) -> bool:
+    return str(value or "").strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+async def _resolve_ids_from_page(url: str, client: httpx.AsyncClient) -> tuple[str, str, bool, bool]:
+    """从 YouTube 页面同时提取 channel_id、video_id、is_live，一次请求搞定。"""
     try:
         resp = await client.get(
             url,
@@ -127,9 +133,11 @@ async def _resolve_ids_from_page(url: str, client: httpx.AsyncClient) -> tuple[s
                 "Accept-Language": "en-US,en;q=0.9",
             },
         )
+        if resp.status_code >= 400:
+            return "", "", False, False
         text = resp.text or ""
     except httpx.HTTPError:
-        return "", ""
+        return "", "", False, False
 
     channel_id = ""
     for pattern in _YOUTUBE_CHANNEL_ID_PATTERNS:
@@ -145,20 +153,63 @@ async def _resolve_ids_from_page(url: str, client: httpx.AsyncClient) -> tuple[s
             video_id = match.group(1)
             break
 
-    return channel_id, video_id
+    is_live = bool(_YOUTUBE_IS_LIVE_RE.search(text))
+    return channel_id, video_id, is_live, True
 
 
 async def resolve_youtube(request: AdapterRequest, client: httpx.AsyncClient) -> dict[str, Any]:
     youtube_url = _build_youtube_url(request)
     quality = (request.query.get("quality") or ["best"])[0]
+    probe_only = _query_truthy((request.query.get("probe") or [""])[0])
     explicit_channel_id = _explicit_channel_id(request.resource_id)
     page_channel_id = explicit_channel_id
     page_video_id = ""
-    if not page_channel_id and ("/live" in youtube_url or "/@" in youtube_url):
-        page_channel_id, page_video_id = await _resolve_ids_from_page(youtube_url, client)
+    page_is_live = False
+    page_checked = False
+    if probe_only or (not page_channel_id and ("/live" in youtube_url or "/@" in youtube_url)):
+        page_channel_id, page_video_id, page_is_live, page_checked = await _resolve_ids_from_page(youtube_url, client)
     # URL 里直接带 video ID 的（watch?v=、youtu.be/、live/ID）也一并提取
     url_video_id = parse_youtube_video_id(youtube_url)
     effective_video_id = page_video_id or url_video_id
+
+    if probe_only:
+        if not page_checked:
+            exc = AdapterResolveError(
+                "youtube_page_unreachable",
+                "YouTube 页面无法访问，未进行流测速",
+                status_code=502,
+                retryable=True,
+            )
+            exc.youtube_video_id = effective_video_id
+            exc.youtube_page_is_live = False
+            raise exc
+        if not page_is_live:
+            exc = AdapterResolveError(
+                "youtube_not_live",
+                "YouTube 页面未显示直播中",
+                status_code=502,
+                retryable=False,
+            )
+            exc.youtube_video_id = effective_video_id
+            exc.youtube_page_is_live = False
+            raise exc
+        return {
+            "ok": True,
+            "adapter": "youtube",
+            "source_type": "probe_only",
+            "url": "",
+            "direct_playable": False,
+            "requires_proxy": True,
+            "headers": {},
+            "ttl": 120,
+            "expires_at": None,
+            "warnings": ["probe_only"],
+            "stream_name": "best",
+            "available_streams": [],
+            "youtube_channel_id": page_channel_id,
+            "youtube_video_id": effective_video_id,
+            "youtube_page_is_live": True,
+        }
 
     try:
         result = await asyncio.wait_for(
@@ -167,6 +218,7 @@ async def resolve_youtube(request: AdapterRequest, client: httpx.AsyncClient) ->
         )
     except asyncio.TimeoutError as exc:
         exc.youtube_video_id = effective_video_id
+        exc.youtube_page_is_live = page_is_live
         raise AdapterResolveError(
             "youtube_resolve_timeout",
             "YouTube Streamlink 解析超时，尚未拿到真实播放地址",
@@ -175,14 +227,25 @@ async def resolve_youtube(request: AdapterRequest, client: httpx.AsyncClient) ->
         ) from exc
     except NoStreamsError as exc:
         exc.youtube_video_id = effective_video_id
+        exc.youtube_page_is_live = page_is_live
+        err_msg = str(exc).upper()
+        # LOGIN_REQUIRED / Sign in / PO Token → 风控，不是真没播
+        if any(kw in err_msg for kw in ("LOGIN_REQUIRED", "SIGN IN", "PO TOKEN", "BOT")):
+            raise AdapterResolveError(
+                "youtube_resolve_failed",
+                f"YouTube 风控: {exc}",
+                status_code=502,
+                retryable=True,
+            ) from exc
         raise AdapterResolveError(
             "youtube_not_live",
-            "YouTube 没有返回可播放流，可能未开播、需要登录、地区限制或需要 PO Token",
+            "YouTube 没有返回可播放流，可能未开播",
             status_code=502,
             retryable=False,
         ) from exc
     except (NoPluginError, PluginError, StreamError, StreamlinkError, OSError) as exc:
         exc.youtube_video_id = effective_video_id
+        exc.youtube_page_is_live = page_is_live
         raise AdapterResolveError(
             "youtube_resolve_failed",
             f"YouTube Streamlink 解析失败: {exc}",
@@ -205,4 +268,5 @@ async def resolve_youtube(request: AdapterRequest, client: httpx.AsyncClient) ->
         "available_streams": result.get("available_streams", []),
         "youtube_channel_id": page_channel_id,
         "youtube_video_id": effective_video_id,
+        "youtube_page_is_live": page_is_live,
     }
