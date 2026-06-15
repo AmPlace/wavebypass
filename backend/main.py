@@ -3648,7 +3648,45 @@ def _m3u_attrs_for_channel(channel: dict, include_epg: bool, include_logo: bool)
     return ' '.join(attrs)
 
 
-def _subscription_urls_for_channel(channel: dict, mode: str, request: Request, healthy_only: bool, include_rtsp: bool) -> list[str]:
+def _format_m3u_options(source: dict | None) -> list[str]:
+    """为单条原始 url 生成 EXTVLCOPT/KODIPROP/WAVEFLOW 行。
+
+    Referer / Custom UA 双写：EXTVLCOPT 给 VLC，KODIPROP:stream_headers 给 Kodi。
+    KODIPROP 值要 url-encode，EXTVLCOPT 是裸值。
+    """
+    if not source:
+        return []
+    ref = str(source.get('referer') or '').strip()
+    ua = str(source.get('custom_ua') or '').strip()
+    force_proxy = bool(source.get('force_proxy'))
+    out: list[str] = []
+    if ref:
+        out.append(f'#EXTVLCOPT:http-referrer={ref}')
+    if ua:
+        out.append(f'#EXTVLCOPT:http-user-agent={ua}')
+    # KODIPROP stream_headers 把所有 header 拼成 url-encoded form
+    if ref or ua:
+        kodi_parts = []
+        if ref:
+            kodi_parts.append(f'Referer={quote(ref, safe="")}')
+        if ua:
+            kodi_parts.append(f'User-Agent={quote(ua, safe="")}')
+        out.append(f'#KODIPROP:inputstream.adaptive.stream_headers={"&".join(kodi_parts)}')
+    if force_proxy:
+        out.append('#WAVEFLOW:requires_proxy=1')
+    return out
+
+
+def _subscription_urls_for_channel(
+    channel: dict, mode: str, request: Request, healthy_only: bool, include_rtsp: bool
+) -> list[tuple[str, dict | None]]:
+    """返回 [(url, source_for_options), ...]。
+
+    source_for_options 不为 None 时，表示这条 url 是裸的原始流地址，
+    导出 m3u 时需要附加 EXTVLCOPT/KODIPROP/WAVEFLOW（让 VLC/Kodi 直连也能播）。
+    为 None 时，表示这条 url 已经是 proxy/adapter/smart 包装地址，
+    所有 header / proxy 语义已经编码到 url 内部，不需要也不能再附加注解。
+    """
     sources = _sorted_sources([
         source for source in channel.get('urls', [])
         if _is_supported_export_source(source, healthy_only=healthy_only)
@@ -3656,36 +3694,39 @@ def _subscription_urls_for_channel(channel: dict, mode: str, request: Request, h
 
     if mode == 'smart':
         if sources:
-            return [_absolute_api_url(request, f'/api/iptv/smart/{quote(channel["canonical_key"], safe="")}.m3u8')]
+            return [(_absolute_api_url(request, f'/api/iptv/smart/{quote(channel["canonical_key"], safe="")}.m3u8'), None)]
         return []
 
     if mode == 'direct':
-        return [
-            source['url'] for source in sources
-            if _source_type(source) != 'adapter'
-            and (include_rtsp or _source_type(source) != 'rtsp')
-            and not source.get('force_proxy')
-            and not source.get('custom_ua')
-            and not source.get('referer')
-            and not source.get('proxy_required_hint')
-        ]
+        out: list[tuple[str, dict | None]] = []
+        for source in sources:
+            if _source_type(source) == 'adapter':
+                continue
+            if not include_rtsp and _source_type(source) == 'rtsp':
+                continue
+            # direct 模式下保留 referer/custom_ua 的源——它们靠 EXTVLCOPT 直连
+            if source.get('force_proxy') or source.get('proxy_required_hint'):
+                continue
+            out.append((source['url'], source))
+        return out
 
     if mode == 'proxy':
-        return [_iptv_proxy_url_for_source(source, request) for source in sources]
+        return [(_iptv_proxy_url_for_source(source, request), None) for source in sources]
 
     direct_sources = []
     proxy_only_sources = []
     for source in sources:
         source_type = _source_type(source)
-        if source_type in {'adapter', 'rtsp'} or source.get('force_proxy') or source.get('custom_ua') or source.get('referer') or source.get('proxy_required_hint'):
+        if source_type in {'adapter', 'rtsp'} or source.get('force_proxy') or source.get('proxy_required_hint'):
             proxy_only_sources.append(source)
         else:
             direct_sources.append(source)
 
-    urls = [source['url'] for source in direct_sources]
-    urls.extend(_iptv_proxy_url_for_source(source, request) for source in direct_sources)
-    urls.extend(_iptv_proxy_url_for_source(source, request) for source in proxy_only_sources)
-    return urls
+    out: list[tuple[str, dict | None]] = []
+    out.extend((source['url'], source) for source in direct_sources)
+    out.extend((_iptv_proxy_url_for_source(source, request), None) for source in direct_sources)
+    out.extend((_iptv_proxy_url_for_source(source, request), None) for source in proxy_only_sources)
+    return out
 
 
 @app.get("/api/iptv/subscription.m3u")
@@ -3719,8 +3760,9 @@ async def export_iptv_subscription(
         if not urls:
             continue
         attrs = _m3u_attrs_for_channel(channel, include_epg=epg, include_logo=logo)
-        for url in urls:
+        for url, source_opts in urls:
             lines.append(f'#EXTINF:-1 {attrs},{channel["name"]}')
+            lines.extend(_format_m3u_options(source_opts))
             lines.append(url)
             exported += 1
 

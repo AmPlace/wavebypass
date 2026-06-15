@@ -13,11 +13,103 @@ _channel_alias = Alias(_ALIAS_PATH)
 # 匹配 key="value" 或 key='value' 形式的属性
 _ATTR_RE = re.compile(r'''(\w[\w-]*)=(?:"([^"]*)"|'([^']*)')''')
 
-_STREAM_URL_PREFIXES = ('http://', 'https://', 'rtmp://', 'rtsp://', 'migu://', 'hnntv://', 'nmtv://', 'gzstv://', 'sxbc://', 'xjtv://', 'jstv://', 'sdtv://', 'sdly://', 'douyin://', 'douyu://', 'huya://', 'hbtv://', 'hntv://', 'redbook://', 'tvb://', 'nowtv://', 'tiktok://', 'kuaishou://', 'bilibili://', 'yy://', 'bigo://', 'blued://', 'soop://', 'netease://', 'pandatv://', 'maoer://', 'look://', 'flextv://', 'popkontv://', 'twitcasting://', 'baidu://', 'weibo://', 'kugou://', 'twitch://', 'huajiao://', 'showroom://', 'inke://', 'acfun://', 'haixiu://', 'liveme://', 'zhihu://', 'chzzk://', 'live17://', 'langlive://', 'changliao://', 'jd://', 'faceit://', 'lianjie://', 'sixroom://', 'lehai://', 'huamao://', 'shopee://', 'laixiu://', 'picarto://', 'youtube://', 'fjtv://', 'ptbtv://', 'nd0593tv://', 'qukan://', 'woniu://', 'adapter://')
+_STREAM_URL_PREFIXES = (
+    'http://', 'https://', 'rtmp://', 'rtsp://',
+    'migu://', 'hnntv://', 'nmtv://', 'gzstv://', 'sxbc://', 'xjtv://',
+    'jstv://', 'sdtv://', 'sdly://', 'douyin://', 'douyu://', 'huya://',
+    'hbtv://', 'hntv://', 'redbook://', 'tvb://', 'nowtv://', 'tiktok://',
+    'kuaishou://', 'bilibili://', 'yy://', 'bigo://', 'blued://', 'soop://',
+    'netease://', 'pandatv://', 'maoer://', 'look://', 'flextv://',
+    'popkontv://', 'twitcasting://', 'baidu://', 'weibo://', 'kugou://',
+    'twitch://', 'huajiao://', 'showroom://', 'inke://', 'acfun://',
+    'haixiu://', 'liveme://', 'zhihu://', 'chzzk://', 'live17://',
+    'langlive://', 'changliao://', 'jd://', 'faceit://', 'lianjie://',
+    'sixroom://', 'lehai://', 'huamao://', 'shopee://', 'laixiu://',
+    'picarto://', 'youtube://', 'adapter://',
+    # 大陆电视台 adapter（2026-06 新增；与 backend/adapters/__init__.py 对齐）
+    'fjtv://', 'ptbtv://', 'nd0593tv://', 'qukan://', 'woniu://',
+)
 
 # 简单的逐行解析用
 _EXTINF_RE = re.compile(r'#EXTINF:([^,]*),(.*)')
 _EXTGRP_RE = re.compile(r'#EXTGRP:\s*(.+)')
+_EXTVLCOPT_RE = re.compile(r'#EXTVLCOPT:\s*([\w\-]+)\s*=\s*(.*)')
+_KODIPROP_RE = re.compile(r'#KODIPROP:\s*([\w.\-]+)\s*=\s*(.*)')
+_WAVEFLOW_RE = re.compile(r'#WAVEFLOW:\s*(.+)')
+
+
+def _strip_header_value(v: str) -> str:
+    """去除 HTTP header 值里的 CR/LF/控制字符，防止 header 注入。"""
+    if not v:
+        return ''
+    return re.sub(r'[\r\n\x00-\x1f]', '', v).strip()
+
+
+def _parse_extvlcopt(line: str) -> dict:
+    """#EXTVLCOPT:http-referrer=URL 解析为 {'referer': URL} / {'custom_ua': UA}.
+    EXTVLCOPT 的值是裸字符串，不做 url-decode。"""
+    m = _EXTVLCOPT_RE.match(line)
+    if not m:
+        return {}
+    key = m.group(1).strip().lower()
+    val = _strip_header_value(m.group(2))
+    if not val:
+        return {}
+    if key in ('http-referrer', 'http-referer'):
+        return {'referer': val}
+    if key == 'http-user-agent':
+        return {'custom_ua': val}
+    return {}
+
+
+def _parse_kodiprop(line: str) -> dict:
+    """#KODIPROP:inputstream.adaptive.stream_headers=Referer=...&User-Agent=...
+    值是 url-encoded form，需要 parse_qs 解析。"""
+    from urllib.parse import parse_qs
+    m = _KODIPROP_RE.match(line)
+    if not m:
+        return {}
+    key = m.group(1).strip().lower()
+    val = m.group(2).strip()
+    if key not in (
+        'inputstream.adaptive.stream_headers',
+        'inputstream.adaptive.common_headers',
+    ):
+        return {}
+    out: dict = {}
+    qs = parse_qs(val, keep_blank_values=False)
+    for hk, hvs in qs.items():
+        hk_low = hk.strip().lower()
+        hv = _strip_header_value(hvs[-1] if hvs else '')
+        if not hv:
+            continue
+        if hk_low == 'referer':
+            out['referer'] = hv
+        elif hk_low == 'user-agent':
+            out['custom_ua'] = hv
+    return out
+
+
+_TRUTHY = {'1', 'true', 'yes', 'on'}
+
+
+def _parse_waveflow(line: str) -> dict:
+    """#WAVEFLOW:requires_proxy=1 等业务字段。语法：key=val 用空格或 ; 分隔多个。"""
+    m = _WAVEFLOW_RE.match(line)
+    if not m:
+        return {}
+    body = m.group(1).strip()
+    out: dict = {}
+    for token in re.split(r'[\s;]+', body):
+        if '=' not in token:
+            continue
+        k, _, v = token.partition('=')
+        k = k.strip().lower()
+        v = _strip_header_value(v)
+        if k == 'requires_proxy' and v.lower() in _TRUTHY:
+            out['force_proxy'] = 1
+    return out
+
 _YOUTUBE_VIDEO_ID_RE = re.compile(r'^[a-zA-Z0-9_-]{11}$')
 _YOUTUBE_CHANNEL_ID_RE = re.compile(r'^UC[a-zA-Z0-9_-]{20,}$')
 
@@ -168,6 +260,21 @@ def parse_m3u(text: str) -> list[dict]:
             }
             channels.append(ch)
             pending_extinf = None
+            i += 1
+            continue
+
+        if line.startswith('#EXTVLCOPT:') and pending_extinf is not None:
+            pending_extinf.update(_parse_extvlcopt(line))
+            i += 1
+            continue
+
+        if line.startswith('#KODIPROP:') and pending_extinf is not None:
+            pending_extinf.update(_parse_kodiprop(line))
+            i += 1
+            continue
+
+        if line.startswith('#WAVEFLOW:') and pending_extinf is not None:
+            pending_extinf.update(_parse_waveflow(line))
             i += 1
             continue
 
