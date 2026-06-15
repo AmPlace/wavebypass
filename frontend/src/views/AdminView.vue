@@ -305,6 +305,9 @@ import {
   testAllChannels, testAllGlobal, fetchGlobalTestStatus, cancelTest,
 } from '../api/iptv'
 import { API_BASE } from '../apiBase'
+import { useToastStore } from '../stores/toast'
+
+const toastStore = useToastStore()
 
 const subscriptions = ref([])
 const loading = ref(false)
@@ -400,12 +403,19 @@ async function handleAdd() {
 }
 
 async function handleDelete(sub) {
-  if (!confirm(`确定删除「${sub.title}」？`)) return
+  const ok = await toastStore.askConfirm({
+    message: `确定删除「${sub.title}」？`,
+    confirmText: '删除',
+    danger: true,
+  })
+  if (!ok) return
   try {
     await deleteSubscription(sub.id)
     await loadSubscriptions()
+    toastStore.success('已删除')
   } catch (e) {
     console.error('删除失败:', e)
+    toastStore.error('删除失败: ' + e.message)
   }
 }
 
@@ -414,7 +424,7 @@ async function handleRefresh(sub) {
     await refreshSubscription(sub.id)
     await loadSubscriptions()
   } catch (e) {
-    alert(`刷新失败: ${e.message}`)
+    toastStore.error(`刷新失败: ${e.message}`)
   }
 }
 
@@ -425,10 +435,12 @@ async function handleRefreshAll() {
     const result = await refreshAllSubscriptions()
     await loadSubscriptions()
     if (result.failed) {
-      alert(`已刷新 ${result.updated || 0} 个订阅，${result.failed} 个失败`)
+      toastStore.warning(`已刷新 ${result.updated || 0} 个订阅，${result.failed} 个失败`)
+    } else {
+      toastStore.success(`已刷新 ${result.updated || 0} 个订阅`)
     }
   } catch (e) {
-    alert(`全部刷新失败: ${e.message}`)
+    toastStore.error(`全部刷新失败: ${e.message}`)
   } finally {
     refreshRunning.value = false
   }
@@ -436,7 +448,7 @@ async function handleRefreshAll() {
 
 async function handleTestSub(sub) {
   if (testRunning.value) {
-    alert('已有测速任务正在进行中')
+    toastStore.warning('已有测速任务正在进行中')
     return
   }
   try {
@@ -445,13 +457,13 @@ async function handleTestSub(sub) {
     testProgress.value = emptyTestProgress(data.total || 0)
     testTimer = setInterval(pollTestStatus, 1000)
   } catch (e) {
-    alert(`测速失败: ${e.message}`)
+    toastStore.error(`测速失败: ${e.message}`)
   }
 }
 
 async function handleTestAll() {
   if (testRunning.value) {
-    alert('已有测速任务正在进行中')
+    toastStore.warning('已有测速任务正在进行中')
     return
   }
   try {
@@ -460,7 +472,7 @@ async function handleTestAll() {
     testProgress.value = emptyTestProgress(res.total || 0)
     testTimer = setInterval(pollTestStatus, 1000)
   } catch (e) {
-    alert(`启动测速失败: ${e.message}`)
+    toastStore.error(`启动测速失败: ${e.message}`)
   }
 }
 
@@ -469,7 +481,7 @@ async function handleCancelTest() {
     await cancelTest()
     testProgress.value = { ...testProgress.value, cancelled: true, phase: 'cancelled' }
   } catch (e) {
-    alert(`取消测速失败: ${e.message}`)
+    toastStore.error(`取消测速失败: ${e.message}`)
     return
   }
   testRunning.value = false

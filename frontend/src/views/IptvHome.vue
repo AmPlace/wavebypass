@@ -113,12 +113,14 @@
 import { computed, inject, onBeforeUnmount, onMounted, ref, watch, watchEffect } from 'vue'
 import { useScroll, useThrottleFn } from '@vueuse/core'
 import { usePlayerStore } from '../stores/player'
+import { useToastStore } from '../stores/toast'
 import { fetchAggregatedChannels, fetchAdapterCover } from '../api/iptv'
 import { useEpg } from '../composables/useEpg'
 import { useLogoVisual } from '../composables/useLogoVisual'
 import TagFilterRow from '../components/TagFilterRow.vue'
 
 const playerStore = usePlayerStore()
+const toastStore = useToastStore()
 
 const scrollRef = inject('scrollRef')
 const searchQuery = inject('searchQuery')
@@ -296,9 +298,11 @@ function isAllNotLive(ch) {
 }
 
 function isUnavailable(ch) {
+  // 只禁"全失败"。not_live 是临时状态（上次测速时没开播≠现在没开播），
+  // 放开可点：点了照常播放，同时 toast 提示用户上次结果。
   return ch.urls.length > 0 && ch.urls.every(u => {
     const status = u.probe_status || ''
-    if (status) return ['offline', 'error', 'timeout', 'not_live'].includes(status)
+    if (status) return ['offline', 'error', 'timeout'].includes(status)
     return u.is_working === 0
   })
 }
@@ -484,6 +488,11 @@ function parseYoutubeThumbnailVideoId(url) {
 async function playChannel(ch) {
   if (isUnavailable(ch)) return
   if (!ch.urls || !ch.urls.length) return
+  // not_live 放开可点：上次测速时没开播，不代表现在没播。照样尝试播放，
+  // 但给用户一个轻提示，避免"点了没反应"的困惑。不阻塞、不 return。
+  if (isAllNotLive(ch)) {
+    toastStore.info('该频道上次检测未开播，正在尝试播放')
+  }
   const videoEl = playerStore.iptvVideoEl
   if (videoEl) videoEl.play().catch(() => {})
   await playerStore.playIptvChannel(ch)

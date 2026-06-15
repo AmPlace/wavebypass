@@ -169,6 +169,8 @@
     <AudioEngine />
 
     <FullPlayer />
+
+    <ToastHost />
   </div>
 </template>
 
@@ -180,6 +182,7 @@ import { usePlayerStore } from './stores/player'
 import BottomPlayer from './components/BottomPlayer.vue'
 import AudioEngine from './components/AudioEngine.vue'
 import FullPlayer from './components/FullPlayer.vue'
+import ToastHost from './components/ToastHost.vue'
 
 const THEME_STORAGE_KEY = 'wavebypass-theme'
 const isDark = ref(false)
