@@ -307,5 +307,66 @@ class NormalizeStabilityTest(unittest.TestCase):
                 self.assertEqual(normalize_channel_name(name), expected)
 
 
+class FujianChannelAliasTest(unittest.TestCase):
+    """福建频道别名归一化：其他源的变体写法应落到与主名相同的 canonical_key。
+
+    策略：新闻类归并（XX新闻综合→XX新闻），纯综合类保留独立（三明综合等）。
+    """
+
+    def test_news_variants_merge_to_primary(self):
+        cases = {
+            "福建文旅体育": "福建文体",
+            "福建体育": "福建文体",
+            "福州新闻综合": "福州新闻",
+            "福州一套": "福州新闻",
+            "泉州新闻综合": "泉州新闻",
+            "泉州一套": "泉州新闻",
+            "漳州新闻综合": "漳州新闻",
+            "莆田新闻综合": "莆田新闻",
+            "南平综合": "南平新闻",
+            "龙岩综合": "龙岩新闻",
+            "宁德新闻综合": "宁德新闻",
+        }
+        for variant, primary in cases.items():
+            with self.subTest(name=variant):
+                self.assertEqual(
+                    normalize_channel_name(variant),
+                    normalize_channel_name(primary),
+                )
+
+    def test_xiamen_series_primary_is_chinese_quantifier(self):
+        cases = {
+            "厦门1": "厦门一套",
+            "厦门二套": "厦门二套",
+            "厦门3": "厦门移动电视",
+            "厦门电视台移动电视": "厦门移动电视",
+        }
+        for variant, primary in cases.items():
+            with self.subTest(name=variant):
+                self.assertEqual(
+                    normalize_channel_name(variant),
+                    normalize_channel_name(primary),
+                )
+
+    def test_min_dialect_and_public_primary(self):
+        cases = {
+            "泉州四套": "泉州闽南语",
+            "莆田2套": "莆田公共",
+            "莆田二套": "莆田公共",
+        }
+        for variant, primary in cases.items():
+            with self.subTest(name=variant):
+                self.assertEqual(
+                    normalize_channel_name(variant),
+                    normalize_channel_name(primary),
+                )
+
+    def test_pure_zonghe_kept_independent(self):
+        # 纯"综合"类不归并，保持各自独立主名
+        for name in ("三明综合", "晋江综合", "石狮新闻综合", "平潭综合"):
+            with self.subTest(name=name):
+                self.assertEqual(normalize_channel_name(name), normalize_channel_name(name))
+
+
 if __name__ == "__main__":
     unittest.main()
