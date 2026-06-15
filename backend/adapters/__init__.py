@@ -271,6 +271,21 @@ def parse_adapter_url(target_url: str) -> AdapterRequest:
     elif scheme == "picarto":
         adapter = "picarto"
         resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
+    elif scheme == "fjtv":
+        adapter = "fjtv"
+        resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
+    elif scheme == "ptbtv":
+        adapter = "ptbtv"
+        resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
+    elif scheme == "nd0593tv":
+        adapter = "nd0593tv"
+        resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
+    elif scheme == "qukan":
+        adapter = "qukan"
+        resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
+    elif scheme == "woniu":
+        adapter = "woniu"
+        resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
     elif scheme == "youtube":
         adapter = "youtube"
         resource_id = f"{parsed.netloc}{parsed.path}".strip("/")
@@ -386,6 +401,11 @@ from .shopee import resolve_shopee
 from .laixiu import resolve_laixiu
 from .picarto import resolve_picarto
 from .youtube import resolve_youtube
+from .fjtv import resolve_fjtv
+from .ptbtv import resolve_ptbtv
+from .nd0593tv import resolve_nd0593tv
+from .qukan import resolve_qukan
+from .woniu import resolve_woniu
 
 
 _ADAPTER_REGISTRY = {
@@ -445,6 +465,11 @@ _ADAPTER_REGISTRY = {
     "laixiu": resolve_laixiu,
     "picarto": resolve_picarto,
     "youtube": resolve_youtube,
+    "fjtv": resolve_fjtv,
+    "ptbtv": resolve_ptbtv,
+    "nd0593tv": resolve_nd0593tv,
+    "qukan": resolve_qukan,
+    "woniu": resolve_woniu,
 }
 
 

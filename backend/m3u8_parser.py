@@ -13,7 +13,7 @@ _channel_alias = Alias(_ALIAS_PATH)
 # 匹配 key="value" 或 key='value' 形式的属性
 _ATTR_RE = re.compile(r'''(\w[\w-]*)=(?:"([^"]*)"|'([^']*)')''')
 
-_STREAM_URL_PREFIXES = ('http://', 'https://', 'rtmp://', 'rtsp://', 'migu://', 'hnntv://', 'nmtv://', 'gzstv://', 'sxbc://', 'xjtv://', 'jstv://', 'sdtv://', 'sdly://', 'douyin://', 'douyu://', 'huya://', 'hbtv://', 'hntv://', 'redbook://', 'tvb://', 'nowtv://', 'tiktok://', 'kuaishou://', 'bilibili://', 'yy://', 'bigo://', 'blued://', 'soop://', 'netease://', 'pandatv://', 'maoer://', 'look://', 'flextv://', 'popkontv://', 'twitcasting://', 'baidu://', 'weibo://', 'kugou://', 'twitch://', 'huajiao://', 'showroom://', 'inke://', 'acfun://', 'haixiu://', 'liveme://', 'zhihu://', 'chzzk://', 'live17://', 'langlive://', 'changliao://', 'jd://', 'faceit://', 'lianjie://', 'sixroom://', 'lehai://', 'huamao://', 'shopee://', 'laixiu://', 'picarto://', 'youtube://', 'adapter://')
+_STREAM_URL_PREFIXES = ('http://', 'https://', 'rtmp://', 'rtsp://', 'migu://', 'hnntv://', 'nmtv://', 'gzstv://', 'sxbc://', 'xjtv://', 'jstv://', 'sdtv://', 'sdly://', 'douyin://', 'douyu://', 'huya://', 'hbtv://', 'hntv://', 'redbook://', 'tvb://', 'nowtv://', 'tiktok://', 'kuaishou://', 'bilibili://', 'yy://', 'bigo://', 'blued://', 'soop://', 'netease://', 'pandatv://', 'maoer://', 'look://', 'flextv://', 'popkontv://', 'twitcasting://', 'baidu://', 'weibo://', 'kugou://', 'twitch://', 'huajiao://', 'showroom://', 'inke://', 'acfun://', 'haixiu://', 'liveme://', 'zhihu://', 'chzzk://', 'live17://', 'langlive://', 'changliao://', 'jd://', 'faceit://', 'lianjie://', 'sixroom://', 'lehai://', 'huamao://', 'shopee://', 'laixiu://', 'picarto://', 'youtube://', 'fjtv://', 'ptbtv://', 'nd0593tv://', 'qukan://', 'woniu://', 'adapter://')
 
 # 简单的逐行解析用
 _EXTINF_RE = re.compile(r'#EXTINF:([^,]*),(.*)')
@@ -434,6 +434,16 @@ def adapter_provider(url: str) -> str:
         return 'laixiu'
     if scheme == 'picarto':
         return 'picarto'
+    if scheme == 'fjtv':
+        return 'fjtv'
+    if scheme == 'ptbtv':
+        return 'ptbtv'
+    if scheme == 'nd0593tv':
+        return 'nd0593tv'
+    if scheme == 'qukan':
+        return 'qukan'
+    if scheme == 'woniu':
+        return 'woniu'
     if scheme == 'youtube':
         return 'youtube'
     if scheme == 'adapter':

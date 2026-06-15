@@ -1,6 +1,21 @@
 import { defineStore } from 'pinia'
 import { API_BASE } from '../apiBase'
 
+const ADAPTER_SCHEMES = [
+  'youtube',
+  'migu', 'hnntv', 'nmtv', 'gzstv', 'sxbc', 'xjtv', 'jstv', 'sdtv', 'sdly',
+  'douyin', 'douyu', 'huya', 'hbtv', 'hntv', 'tvb', 'nowtv',
+  'redbook', 'tiktok', 'kuaishou', 'bilibili', 'yy', 'bigo', 'blued', 'soop',
+  'netease', 'pandatv', 'maoer', 'look', 'flextv', 'popkontv', 'twitcasting',
+  'baidu', 'weibo', 'kugou', 'twitch', 'huajiao', 'showroom', 'inke', 'acfun',
+  'haixiu', 'liveme', 'zhihu', 'chzzk', 'live17', 'langlive', 'changliao',
+  'jd', 'faceit', 'lianjie', 'sixroom', 'lehai', 'huamao', 'shopee', 'laixiu', 'picarto',
+  // 大陆电视台 adapter（2026-06 新增）
+  'fjtv', 'ptbtv', 'nd0593tv', 'qukan', 'woniu',
+  // 通用前缀，必须放最后让具体 scheme 优先匹配
+  'adapter',
+]
+
 export const usePlayerStore = defineStore('player', {
   state: () => ({
     isPlaying: false,
@@ -199,7 +214,7 @@ export const usePlayerStore = defineStore('player', {
         if (parseYoutubeVideoId(url)) return 'youtube'
         if (parseYoutubeChannelId(url) && isYoutubeLiveChannelUrl(url)) return 'youtube'
         if (isYoutubeUrl(url)) return 'unsupported_youtube_url'
-        if (value.startsWith('migu://') || value.startsWith('hnntv://') || value.startsWith('nmtv://') || value.startsWith('gzstv://') || value.startsWith('sxbc://') || value.startsWith('xjtv://') || value.startsWith('jstv://') || value.startsWith('sdtv://') || value.startsWith('sdly://') || value.startsWith('douyin://') || value.startsWith('douyu://') || value.startsWith('huya://') || value.startsWith('hbtv://') || value.startsWith('hntv://') || value.startsWith('tvb://') || value.startsWith('nowtv://') || value.startsWith('redbook://') || value.startsWith('tiktok://') || value.startsWith('kuaishou://') || value.startsWith('bilibili://') || value.startsWith('yy://') || value.startsWith('bigo://') || value.startsWith('blued://') || value.startsWith('soop://') || value.startsWith('netease://') || value.startsWith('pandatv://') || value.startsWith('maoer://') || value.startsWith('look://') || value.startsWith('flextv://') || value.startsWith('popkontv://') || value.startsWith('twitcasting://') || value.startsWith('baidu://') || value.startsWith('weibo://') || value.startsWith('kugou://') || value.startsWith('twitch://') || value.startsWith('huajiao://') || value.startsWith('showroom://') || value.startsWith('inke://') || value.startsWith('acfun://') || value.startsWith('haixiu://') || value.startsWith('liveme://') || value.startsWith('zhihu://') || value.startsWith('chzzk://') || value.startsWith('live17://') || value.startsWith('langlive://') || value.startsWith('changliao://') || value.startsWith('jd://') || value.startsWith('faceit://') || value.startsWith('lianjie://') || value.startsWith('sixroom://') || value.startsWith('lehai://') || value.startsWith('huamao://') || value.startsWith('shopee://') || value.startsWith('laixiu://') || value.startsWith('picarto://') || value.startsWith('adapter://')) return 'adapter'
+        if (ADAPTER_SCHEMES.some(scheme => value.startsWith(`${scheme}://`))) return 'adapter'
         if (value.startsWith('rtsp://')) return 'rtsp'
         if (/\/(?:rtp|udp)\//i.test(value) || /%2f(?:rtp|udp)%2f/i.test(value)) return 'mpegts'
         if (/\.(?:ts|m2ts|mts)(?:[?#]|$)/i.test(value)) return 'mpegts'
@@ -252,21 +267,10 @@ export const usePlayerStore = defineStore('player', {
       }
       const adapterName = (url) => {
         const value = String(url || '').trim().toLowerCase()
-        if (value.startsWith('migu://')) return 'migu'
-        if (value.startsWith('hnntv://')) return 'hnntv'
-        if (value.startsWith('nmtv://')) return 'nmtv'
-        if (value.startsWith('gzstv://')) return 'gzstv'
-        if (value.startsWith('sxbc://')) return 'sxbc'
-        if (value.startsWith('xjtv://')) return 'xjtv'
-        if (value.startsWith('hbtv://')) return 'hbtv'
-        if (value.startsWith('hntv://')) return 'hntv'
-        if (value.startsWith('tvb://')) return 'tvb'
-        if (value.startsWith('nowtv://')) return 'nowtv'
-        if (value.startsWith('jstv://')) return 'jstv'
-        if (value.startsWith('sdtv://')) return 'sdtv'
-        if (value.startsWith('sdly://')) return 'sdly'
-        if (value.startsWith('live17://')) return 'live17'
-        if (value.startsWith('youtube://')) return 'youtube'
+        for (const scheme of ADAPTER_SCHEMES) {
+          if (scheme === 'adapter') continue  // 'adapter://name/...' 走下面的 hostname 解析
+          if (value.startsWith(`${scheme}://`)) return scheme
+        }
         try {
           const parsed = new URL(url)
           return parsed.protocol === 'adapter:' ? parsed.hostname.toLowerCase() : ''
