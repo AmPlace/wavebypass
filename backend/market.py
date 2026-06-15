@@ -885,10 +885,14 @@ def _normalize_source(
     channel_source: dict,
     source_defaults: dict,
     source_index: int,
+    channel_overrides: dict | None = None,
 ) -> tuple[dict | None, str | None]:
     if isinstance(source, str):
         source = {"url": source}
-    merged = _merge_source_defaults(source_defaults, source)
+    # merge 顺序（左 → 右，后者覆盖前者）：
+    #   包级 source_defaults  <  源级 source  <  频道级 channel_overrides
+    # 频道级最高，符合"频道配置压过源/包"的语义。
+    merged = _merge_source_defaults(source_defaults, source, channel_overrides)
     url = str(merged.get("url") or "").strip()
     source_type = _source_type_for(merged)
     headers = _source_headers(merged)
@@ -967,20 +971,24 @@ async def _channels_from_playlist(source: dict, package: dict) -> tuple[list[dic
     channels = parse_m3u(text)
     warnings = [f"已解析动态订阅: {final_url}"]
     for ch in channels:
-        # parse_m3u 解出的 referer/custom_ua/force_proxy 来自 #EXTVLCOPT/
-        # #KODIPROP/#WAVEFLOW，需要塞进 sources[0] 让 _normalize_source 能读到
-        # （它走 merged.headers + merged.requires_proxy 这条路径）。
-        src_headers: dict[str, str] = {}
+        # m3u 里 #EXTVLCOPT/#KODIPROP/#WAVEFLOW 描述的是"这个频道整体的播放
+        # 要求"——属于频道级，因此写到 channel.defaults.source；优先级
+        # build_preview 里高于 sources[i]（源级）。
+        ch_overrides_headers: dict[str, str] = {}
         if ch.get("referer"):
-            src_headers["Referer"] = str(ch["referer"])
+            ch_overrides_headers["Referer"] = str(ch["referer"])
         if ch.get("custom_ua"):
-            src_headers["User-Agent"] = str(ch["custom_ua"])
-        source_entry: dict = {"url": ch.get("url", "")}
-        if src_headers:
-            source_entry["headers"] = src_headers
+            ch_overrides_headers["User-Agent"] = str(ch["custom_ua"])
+        ch_overrides: dict = {}
+        if ch_overrides_headers:
+            ch_overrides["headers"] = ch_overrides_headers
         if ch.get("force_proxy"):
-            source_entry["requires_proxy"] = True
-        ch.setdefault("sources", [source_entry])
+            ch_overrides["requires_proxy"] = True
+        if ch_overrides:
+            existing = (ch.get("defaults") or {}).get("source") or {}
+            ch.setdefault("defaults", {})["source"] = {**existing, **ch_overrides,
+                "headers": {**existing.get("headers", {}), **ch_overrides.get("headers", {})}}
+        ch.setdefault("sources", [{"url": ch.get("url", "")}])
     return channels, warnings
 
 
@@ -1013,7 +1021,9 @@ async def build_preview(package_id: str) -> dict:
         )
         for raw_channel in channels:
             channel = _merge_dict(channel_defaults, raw_channel)
-            channel_source_defaults = _merge_source_defaults(source_defaults, (channel.get("defaults") or {}).get("source"))
+            # channel.defaults.source 是\u300c频道级\u300d配置，最高优先；
+            # source_defaults 只承载\u300c包级 + channel_source 级\u300d的默认。
+            channel_overrides = (channel.get("defaults") or {}).get("source") or {}
             raw_sources = channel.get("sources")
             if not raw_sources and channel.get("url"):
                 raw_sources = [{"url": channel.get("url"), "source_type": channel.get("source_type")}]
@@ -1023,8 +1033,9 @@ async def build_preview(package_id: str) -> dict:
                     raw_source,
                     package,
                     channel_source,
-                    channel_source_defaults,
+                    source_defaults,
                     source_index,
+                    channel_overrides=channel_overrides,
                 )
                 if entry:
                     entries.append(entry)
