@@ -39,6 +39,8 @@ CREATE TABLE IF NOT EXISTS channels (
     source_type     TEXT DEFAULT 'hls',
     youtube_video_id TEXT DEFAULT '',
     referer         TEXT DEFAULT '',
+    custom_ua       TEXT DEFAULT '',
+    force_proxy     INTEGER DEFAULT 0,
     probe_status    TEXT DEFAULT 'untested',
     live_status     TEXT DEFAULT 'unknown',
     probe_method    TEXT DEFAULT '',
@@ -165,6 +167,8 @@ async def initialize():
             ('source_type', 'TEXT', "'hls'"),
             ('youtube_video_id', 'TEXT', "''"),
             ('referer', 'TEXT', "''"),
+            ('custom_ua', 'TEXT', "''"),
+            ('force_proxy', 'INTEGER', '0'),
             ('probe_status', 'TEXT', "'untested'"),
             ('live_status', 'TEXT', "'unknown'"),
             ('probe_method', 'TEXT', "''"),
@@ -311,9 +315,9 @@ async def add_channels_bulk(sub_id: int, channels: list[dict]):
         conn.executemany(
             "INSERT INTO channels("
             "subscription_id, name, url, logo_url, group_name, tvg_id, tvg_name, "
-            "is_working, probe_status, live_status, source_type, youtube_video_id, referer, "
+            "is_working, probe_status, live_status, source_type, youtube_video_id, referer, custom_ua, force_proxy, "
             "market_package_id, market_source_id, market_channel_id, market_source_item_id"
-            ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 (
                     sub_id,
@@ -329,6 +333,8 @@ async def add_channels_bulk(sub_id: int, channels: list[dict]):
                     ch.get('source_type', 'hls'),
                     ch.get('youtube_video_id', ''),
                     ch.get('referer', ''),
+                    ch.get('custom_ua', ''),
+                    1 if ch.get('force_proxy') else 0,
                     ch.get('market_package_id', ''),
                     ch.get('market_source_id', ''),
                     ch.get('market_channel_id', ''),
@@ -346,21 +352,41 @@ async def add_channels_bulk(sub_id: int, channels: list[dict]):
     await asyncio.to_thread(_add)
 
 
+def _apply_sub_fallbacks(rows: list[dict]) -> list[dict]:
+    """频道级 custom_ua/force_proxy 为空时，用订阅级 sub_custom_ua/sub_force_proxy 兜底。"""
+    for row in rows:
+        if not (row.get('custom_ua') or '').strip():
+            row['custom_ua'] = row.get('sub_custom_ua', '') or ''
+        # force_proxy：channels.force_proxy=1 优先；否则取订阅级
+        if not int(row.get('force_proxy') or 0):
+            row['force_proxy'] = int(row.get('sub_force_proxy') or 0)
+    return rows
+
+
 async def get_channels(sub_id: int, group: str = '', search: str = '') -> list[dict]:
+    """读频道列表；custom_ua/force_proxy 频道级优先，回退到订阅级。"""
     def _get():
         conn = _connect()
-        query = "SELECT * FROM channels WHERE subscription_id=?"
+        # 同名列 sqlite3.Row → dict 会去重，所以订阅级用 sub_* 别名，
+        # 在 Python 侧做"频道级空 → 用订阅级"的回退。
+        query = (
+            "SELECT c.*, "
+            "s.custom_ua AS sub_custom_ua, "
+            "s.force_proxy AS sub_force_proxy "
+            "FROM channels c JOIN subscriptions s ON c.subscription_id=s.id "
+            "WHERE c.subscription_id=?"
+        )
         params: list = [sub_id]
         if group:
-            query += " AND group_name=?"
+            query += " AND c.group_name=?"
             params.append(group)
         if search:
-            query += " AND name LIKE ?"
+            query += " AND c.name LIKE ?"
             params.append(f"%{search}%")
-        query += " ORDER BY id"
+        query += " ORDER BY c.id"
         rows = conn.execute(query, params).fetchall()
         conn.close()
-        return [dict(r) for r in rows]
+        return _apply_sub_fallbacks([dict(r) for r in rows])
     return await asyncio.to_thread(_get)
 
 
@@ -381,7 +407,9 @@ async def get_aggregated_channels(group: str = '', search: str = '') -> list[dic
     def _get():
         conn = _connect()
         query = """
-            SELECT c.*, s.title as sub_title, s.custom_ua, s.force_proxy
+            SELECT c.*, s.title as sub_title,
+                   s.custom_ua AS sub_custom_ua,
+                   s.force_proxy AS sub_force_proxy
             FROM channels c
             JOIN subscriptions s ON c.subscription_id = s.id
         """
@@ -398,7 +426,7 @@ async def get_aggregated_channels(group: str = '', search: str = '') -> list[dic
         query += " ORDER BY c.name, c.is_working DESC, c.latency_ms ASC"
         rows = conn.execute(query, params).fetchall()
         conn.close()
-        return [dict(r) for r in rows]
+        return _apply_sub_fallbacks([dict(r) for r in rows])
     return await asyncio.to_thread(_get)
 
 
