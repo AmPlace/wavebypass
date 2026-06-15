@@ -967,7 +967,20 @@ async def _channels_from_playlist(source: dict, package: dict) -> tuple[list[dic
     channels = parse_m3u(text)
     warnings = [f"已解析动态订阅: {final_url}"]
     for ch in channels:
-        ch.setdefault("sources", [{"url": ch.get("url", "")}])
+        # parse_m3u 解出的 referer/custom_ua/force_proxy 来自 #EXTVLCOPT/
+        # #KODIPROP/#WAVEFLOW，需要塞进 sources[0] 让 _normalize_source 能读到
+        # （它走 merged.headers + merged.requires_proxy 这条路径）。
+        src_headers: dict[str, str] = {}
+        if ch.get("referer"):
+            src_headers["Referer"] = str(ch["referer"])
+        if ch.get("custom_ua"):
+            src_headers["User-Agent"] = str(ch["custom_ua"])
+        source_entry: dict = {"url": ch.get("url", "")}
+        if src_headers:
+            source_entry["headers"] = src_headers
+        if ch.get("force_proxy"):
+            source_entry["requires_proxy"] = True
+        ch.setdefault("sources", [source_entry])
     return channels, warnings
 
 
