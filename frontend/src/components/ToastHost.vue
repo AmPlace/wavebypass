@@ -32,7 +32,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
   <!-- toast 容器：顶部居中 -->
   <Teleport to="body">
     <div
-      class="pointer-events-none fixed left-1/2 top-5 z-[100] flex max-w-[calc(100vw-2rem)] -translate-x-1/2 flex-col items-center gap-2.5"
+      class="pointer-events-none fixed left-1/2 top-5 z-[150] flex max-w-[calc(100vw-2rem)] -translate-x-1/2 flex-col items-center gap-2.5"
       aria-live="polite"
     >
       <TransitionGroup name="wf-toast">
@@ -67,7 +67,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
     <Transition name="wf-confirm">
       <div
         v-if="confirm"
-        class="fixed inset-0 z-[101] flex items-center justify-center bg-neutral-950/35 px-4 py-8 backdrop-blur-md"
+        class="fixed inset-0 z-[160] flex items-center justify-center bg-neutral-950/35 px-4 py-8 backdrop-blur-md"
         @click.self="store.dismissConfirm()"
       >
         <section
