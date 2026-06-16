@@ -27,6 +27,7 @@ geo-limit.md
 1.md
 *.md
 !docs/market-schema.md
+!docs/security-refactor-audit.md
 proud-wibbling-goblet.md
 tools/
 *.db
