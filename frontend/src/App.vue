@@ -213,7 +213,7 @@ const primaryNavItems = computed(() => [
   { label: '回看', icon: 'clock', route: '/iptv', active: false },
 ])
 const secondaryNavItems = computed(() => [
-  { label: '订阅源', icon: 'layers', route: '/market', active: route.path === '/market' },
+  { label: 'Market', icon: 'layers', route: '/market', active: route.path === '/market' },
   { label: '设置', icon: 'settings', route: '/admin', active: route.path === '/admin' },
   { label: '关于', icon: 'info', route: '', active: false },
 ])

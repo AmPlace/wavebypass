@@ -39,6 +39,17 @@
     --iptv-card-label-secondary: rgba(16,20,24,0.48);
     --sidebar-w: 232px;
     --sidebar-w-collapsed: 72px;
+    --page-gutter: clamp(16px, 2vw, 32px);
+    --page-top: calc(env(safe-area-inset-top) + 4rem);
+    --page-bottom: calc(env(safe-area-inset-bottom) + 8rem);
+    --page-bottom-lg: calc(env(safe-area-inset-bottom) + 10rem);
+    --card-radius: 16px;
+    --card-padding: 18px;
+    --card-gap: 14px;
+    --control-height: 38px;
+    --chip-height: 44px;
+    --drawer-width: 440px;
+    --player-safe-bottom: 10rem;
   }
 
   .dark {
