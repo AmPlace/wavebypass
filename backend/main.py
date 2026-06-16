@@ -31,6 +31,7 @@ from adapters import (
 )
 from iptv_probe import probe_channel_source
 from media_tools import media_tool_bin
+from ssrf_guard import UnsafeTargetError, assert_safe_target_url, assert_safe_host_ips
 
 
 TOKEN_REFRESH_INTERVAL_SECONDS = 18_000
