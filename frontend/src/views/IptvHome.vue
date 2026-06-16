@@ -145,11 +145,9 @@ const YOUTUBE_THUMBNAIL_VARIANTS = ['maxresdefault', 'hq720', 'hqdefault']
 const adapterCoverSupported = ref(new Set())
 const adapterCoverCache = ref({})    // canonical_key -> { cover_url, avatar_url }
 
-// 封面请求包装函数：传入 coverLoader
+// 封面请求包装函数：signal 贯穿到 fetch
 async function _fetchCoverForKey(key, signal) {
-  const res = await fetchAdapterCover(key)
-  if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
-  return res
+  return fetchAdapterCover(key, { signal })
 }
 
 function triggerCoverForChannel(ch) {
@@ -188,43 +186,6 @@ const {
   onBeforeFail: advanceChannelLogoCandidate,
   fallbackName: '未知频道',
 })
-
-function adapterCoverTargetUrl(ch) {
-  // 一条聚合频道的 ch.urls 可能混着多个来源（例如 ytsl:// + huya://），
-  // 顶层 ch.adapter 由"主 url"决定，并不一定就是支持 cover 的那家，
-  // 所以这里直接扫 ch.urls，挑第一条 scheme 在能力表里的 adapter URL。
-  const urls = Array.isArray(ch?.urls) ? ch.urls : []
-  for (const item of urls) {
-    const raw = String(item?.url || '').trim()
-    const m = /^([a-z][a-z0-9+\-.]*):\/\//i.exec(raw)
-    if (!m) continue
-    const scheme = m[1].toLowerCase()
-    if (adapterCoverSupported.value.has(scheme)) return raw
-  }
-  return ''
-}
-
-function ensureAdapterCover(ch) {
-  const key = ch?.canonical_key || ''
-  if (!key) return
-  if (adapterCoverCache.value[key]) return
-  if (adapterCoverFailed.has(key)) return
-  if (adapterCoverInflight.has(key)) return
-  // 直接传 canonical_key，不再查 targetUrl
-  const promise = fetchAdapterCover(key)
-    .then(payload => {
-      const cover = String(payload?.cover_url || '').trim()
-      const avatar = String(payload?.avatar_url || '').trim()
-      if (cover || avatar) {
-        adapterCoverCache.value = { ...adapterCoverCache.value, [key]: { cover_url: cover, avatar_url: avatar } }
-      } else {
-        adapterCoverFailed.add(key)
-      }
-    })
-    .catch(() => { adapterCoverFailed.add(key) })
-    .finally(() => { adapterCoverInflight.delete(key) })
-  adapterCoverInflight.set(key, promise)
-}
 
 const SORT_MODES = [
   { key: 'original', label: '默认排序' },
@@ -284,6 +245,7 @@ async function loadChannels() {
 // ── IntersectionObserver：仅加载视口附近频道的封面 ──
 let _coverObserver = null
 let _coverObservedKeys = new Set()
+let _observeTimer = null
 
 function _setupCoverObserver() {
   if (_coverObserver) _coverObserver.disconnect()
@@ -317,6 +279,14 @@ function _observeVisibleCards() {
   }
 }
 
+function _scheduleObserveCards() {
+  if (_observeTimer) return
+  _observeTimer = setTimeout(() => {
+    _observeTimer = null
+    _observeVisibleCards()
+  }, 200)  // 滚动期间最多每 200ms 扫描一次
+}
+
 onMounted(() => {
   _setupCoverObserver()
 })
@@ -327,6 +297,10 @@ onUnmounted(() => {
     _coverObserver = null
   }
   _coverObservedKeys.clear()
+  if (_observeTimer) {
+    clearTimeout(_observeTimer)
+    _observeTimer = null
+  }
 })
 
 const filteredChannels = computed(() => {
@@ -577,6 +551,9 @@ const { y: scrollY } = useScroll(scrollRef)
 const throttledScrollY = useThrottleFn((val) => { scrollPosition.value = val }, 16)
 const scrollPosition = ref(0)
 watchEffect(() => { throttledScrollY(scrollY.value) })
+
+// 滚动时虚拟列表渲染新卡片 → 重新 observe（IntersectionObserver）
+watch(scrollPosition, () => { _scheduleObserveCards() })
 
 const gap = computed(() => 20)
 const cardFooterHeight = 44
