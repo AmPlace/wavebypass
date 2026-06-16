@@ -16,7 +16,7 @@ from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlparse, urlunpa
 from zoneinfo import ZoneInfo
 
 import httpx
-from fastapi import FastAPI, HTTPException, Query, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from contextlib import asynccontextmanager
@@ -32,6 +32,14 @@ from adapters import (
 from iptv_probe import probe_channel_source
 from media_tools import media_tool_bin
 from ssrf_guard import UnsafeTargetError, assert_safe_target_url, assert_safe_host_ips
+from core.config import get_settings
+from core.settings_service import get_effective_settings
+from routers.auth import router as auth_router
+from routers.media_credentials import router as media_credentials_router
+from routers.media_proxy import router as media_proxy_router
+from routers.settings import router as settings_router
+from routers.setup import router as setup_router
+from security.dependencies import require_admin, require_browse_access, require_media_access, resolve_media_access
 
 
 TOKEN_REFRESH_INTERVAL_SECONDS = 18_000
@@ -204,41 +212,10 @@ def get_cached_m3u8_text(cache_key: str) -> str | None:
     return None
 
 
-def rewrite_m3u8_text(raw_m3u8_text: str, real_m3u8_url: str, station_id: str) -> str:
-
-    rewritten_lines: list[str] = []
-
-    for line in raw_m3u8_text.splitlines():
-        stripped_line = line.strip()
-
-        if not stripped_line or stripped_line.startswith("#"):
-            rewritten_lines.append(line)
-            continue
-
-        parsed_uri = urlparse(stripped_line)
-
-        uri_path = parsed_uri.path.lower()
-
-        absolute_media_url = urljoin(real_m3u8_url, stripped_line)
-
-        encoded_target_url = quote(absolute_media_url, safe="")
-
-        if uri_path.endswith(".m3u8"):
-            proxy_playlist_url = f"/api/{station_id}/playlist.m3u8?target_url={encoded_target_url}"
-            rewritten_lines.append(proxy_playlist_url)
-            continue
-
-        # 非媒体切片资源原样保留，避免误改其他 HLS 标签
-        SEGMENT_EXTENSIONS = (".ts", ".aac", ".mp3", ".mp4", ".fmp4", ".m4s")
-        if not uri_path.endswith(SEGMENT_EXTENSIONS):
-            rewritten_lines.append(line)
-            continue
-
-        proxy_ts_url = f"/api/{station_id}/chunk.ts?target_url={encoded_target_url}"
-
-        rewritten_lines.append(proxy_ts_url)
-
-    return "\n".join(rewritten_lines) + "\n"
+# NOTE: 旧 ``rewrite_m3u8_text`` 已被 ``core.m3u8_rewriter.rewrite_m3u8`` 取代，
+# 通过 signed handle 屏蔽上游 URL，并把 access_token 透传到子 playlist/分片。
+# 旧的 ``/api/{station_id}/playlist.m3u8?target_url=...`` 公共入口已删除，
+# 客户端统一使用 ``/api/media/channel/{station_id}/playlist.m3u8``。
 
 
 async def refresh_station_stream_url(station_id: str) -> str:
@@ -573,7 +550,7 @@ async def _ensure_rtsp_hls_session(target_url: str, custom_ua: str = "", compat:
         "-hls_delete_threshold", str(RTSP_HLS_DELETE_THRESHOLD),
         "-hls_flags", hls_flags,
         "-hls_segment_filename", str(session_dir / "seg_%05d.ts"),
-        "-hls_base_url", f"/api/iptv/proxy/rtsp/segments/{session_id}/",
+        "-hls_base_url", f"/api/media/proxy/rtsp-segments/{session_id}/",
         str(playlist_path),
     ]
 
@@ -689,6 +666,9 @@ app = FastAPI(
     description="用于聚合电台 m3u8 与 ts 切片代理的后端服务。",
     version="0.1.0",
     lifespan=lifespan, 
+    docs_url=None if get_settings().production else "/docs",
+    redoc_url=None if get_settings().production else "/redoc",
+    openapi_url=None if get_settings().production else "/openapi.json",
 )
 #跨域
 app.add_middleware(
@@ -698,6 +678,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(setup_router)
+app.include_router(auth_router)
+app.include_router(media_credentials_router)
+app.include_router(media_proxy_router)
+app.include_router(settings_router)
 
 
 @app.get("/health")
@@ -730,18 +716,26 @@ async def fetch_real_m3u8_text(real_m3u8_url: str, station_id: str) -> httpx.Res
 @app.get("/api/config")
 async def get_config(request: Request) -> dict:
     """返回前端需要的运行时配置（地域限制信息）"""
+    settings = await get_effective_settings()
+    base = {
+        "mode": settings.mode,
+        "anonymousBrowse": settings.anonymous_browse,
+        "anonymousPlayback": settings.anonymous_playback,
+        "production": settings.production,
+    }
     if not GEO_RESTRICT:
-        return {"geoRestrict": False}
+        return {**base, "geoRestrict": False}
     country = request.headers.get("cf-ipcountry", "").upper()
     if country and country != "CN":
-        return {"geoRestrict": False}
+        return {**base, "geoRestrict": False}
     return {
+        **base,
         "geoRestrict": True,
         "blockedRegions": sorted(GEO_BLOCKED_REGIONS),
     }
 
 
-@app.get("/api/stations")
+@app.get("/api/stations", dependencies=[Depends(require_browse_access)])
 async def get_stations(request: Request) -> Response:
     """返回静态电台列表，根据地域限制过滤。前端启动时调用替代本地 stations.js。"""
 
@@ -761,161 +755,13 @@ async def get_stations(request: Request) -> Response:
     )
 
 
-@app.get("/api/{station_id}/playlist.m3u8")
-async def get_station_playlist(
-    station_id: str,
-    target_url: str | None = Query(default=None, min_length=1),
-    request: Request = None,
-) -> Response:
-    if request and _is_geo_blocked(station_id, request):
-        raise HTTPException(status_code=403, detail="该电台因地域限制不可用。")
-
-    if station_id in DIRECT_STREAM_STATIONS:
-        raise HTTPException(status_code=400, detail="该电台是直连音频流，请使用 /api/{station_id}/stream。")
-
-    real_m3u8_url = target_url or CURRENT_STREAMS.get(station_id)
-
-    if real_m3u8_url is None:
-        raise HTTPException(status_code=503, detail="该电台播放地址尚未准备好，请稍后重试。")
-
-    validate_target_url(real_m3u8_url)
+# 旧 ``/api/{station_id}/playlist.m3u8`` / ``/api/{station_id}/{m3u8_name}.m3u8`` /
+# ``/api/{station_id}/chunk.ts`` / ``/api/proxy/stream`` 公共入口已被
+# ``/api/media/channel/{key}/playlist.m3u8`` + signed-handle 子路由统一取代，
+# 不再注册以避免裸 ``target_url`` / ``url`` 形式的 SSRF 入口残留。
 
 
-    cache_key = f"{station_id}:{real_m3u8_url}"
-
-
-    cached_text = get_cached_m3u8_text(cache_key)
-    if cached_text is not None:
-        return Response(content=cached_text, media_type="application/vnd.apple.mpegurl")
-
-    cache_lock = get_m3u8_cache_lock(cache_key)
-
-    async with cache_lock:
-        cached_text = get_cached_m3u8_text(cache_key)
-        if cached_text is not None:
-            return Response(content=cached_text, media_type="application/vnd.apple.mpegurl")
-
-        try:
-            real_response = await fetch_real_m3u8_text(real_m3u8_url, station_id)
-
-            if target_url is None and real_response.status_code in TOKEN_REFRESH_HTTP_STATUS_CODES:
-                logger.warning(
-                    "电台 %s 顶层 m3u8 返回 %s，准备刷新 token 后重试一次",
-                    station_id,
-                    real_response.status_code,
-                )
-
-                real_m3u8_url = await refresh_station_stream_url(station_id)
-
-                cache_key = f"{station_id}:{real_m3u8_url}"
-
-                real_response = await fetch_real_m3u8_text(real_m3u8_url, station_id)
-
-            real_response.raise_for_status()
-        except httpx.HTTPError as exc:
-            logger.exception("电台 %s 真实 m3u8 拉取失败：%s", station_id, exc)
-            raise HTTPException(status_code=502, detail="真实 m3u8 拉取失败。") from exc
-
-        rewritten_m3u8_text = rewrite_m3u8_text(real_response.text, real_m3u8_url, station_id)
-
-        M3U8_CACHE[cache_key] = {
-            "text": rewritten_m3u8_text,
-            "timestamp": time.time(),
-        }
-
-        return Response(content=rewritten_m3u8_text, media_type="application/vnd.apple.mpegurl")
-
-
-@app.get("/api/{station_id}/{m3u8_name}.m3u8")
-async def get_relative_child_playlist(station_id: str, m3u8_name: str, request: Request) -> Response:
-    if _is_geo_blocked(station_id, request):
-        raise HTTPException(status_code=403, detail="该电台因地域限制不可用。")
-
-    base_m3u8_url = CURRENT_STREAMS.get(station_id)
-
-    if base_m3u8_url is None:
-        raise HTTPException(status_code=503, detail="该电台播放地址尚未准备好，请稍后重试。")
-
-    query_string = request.url.query
-
-    relative_m3u8_path = f"{m3u8_name}.m3u8"
-
-    if query_string:
-        relative_m3u8_path = f"{relative_m3u8_path}?{query_string}"
-
-    child_m3u8_url = urljoin(base_m3u8_url, relative_m3u8_path)
-
-    return await get_station_playlist(station_id=station_id, target_url=child_m3u8_url)
-
-
-@app.get("/api/{station_id}/chunk.ts")
-async def proxy_ts_chunk(
-    station_id: str,
-    target_url: str = Query(..., min_length=1),
-    request: Request = None,
-) -> StreamingResponse:
-    if request and _is_geo_blocked(station_id, request):
-        raise HTTPException(status_code=403, detail="该电台因地域限制不可用。")
-
-    validate_target_url(target_url)
-
-    upstream_headers = get_cdn_headers_for_station(station_id)
-
-    upstream_response: httpx.Response | None = None
-
-    try:
-        upstream_response = await http_client.get(target_url, follow_redirects=True, headers=upstream_headers)
-
-        upstream_response.raise_for_status()
-    except httpx.HTTPError as exc:
-        if upstream_response is not None:
-            await upstream_response.aclose()
-        logger.exception("电台 %s ts 切片代理失败：%s", station_id, exc)
-        raise HTTPException(status_code=502, detail="真实 ts 切片拉取失败。") from exc
-
-    async def stream_ts_bytes() -> AsyncIterator[bytes]:
-        """逐块读取真实 ts 响应并转发给前端。"""
-        try:
-            # 每次最多读取 64KB，在吞吐和内存之间取得平衡
-            async for chunk in upstream_response.aiter_bytes(chunk_size=64 * 1024):
-                if chunk:
-                    yield chunk
-        finally:
-            await upstream_response.aclose()
-
-    # StreamingResponse 会消费上面的异步生成器，实现边下边传
-    return StreamingResponse(
-        stream_ts_bytes(), 
-        media_type="video/MP2T",
-        headers={
-            "Access-Control-Allow-Origin": "*",
-            "Cache-Control": "no-cache", # 避免前端缓存旧切片
-        }
-    )
-
-@app.get("/api/proxy/stream")
-async def proxy_stream(url: str = Query(...)) -> StreamingResponse:
-
-    if not url.startswith(("http://", "https://")):
-        raise HTTPException(status_code=400, detail="仅支持 http/https 地址。")
-
-    parsed = urlparse(url)
-    referer = f"{parsed.scheme}://{parsed.netloc}/"
-    headers = {**CDN_REQUEST_HEADERS, "Referer": referer}
-
-    async def _stream():
-        try:
-            async with httpx.AsyncClient(verify=False, follow_redirects=True) as client:
-                async with client.stream("GET", url, headers=headers, timeout=HTTP_TIMEOUT) as resp:
-                    resp.raise_for_status()
-                    async for chunk in resp.aiter_bytes(8192):
-                        yield chunk
-        except Exception:
-            return
-
-    return StreamingResponse(_stream(), media_type="audio/mpeg")
-
-@app.get("/api/{station_id}/stream")
+@app.get("/api/{station_id}/stream", dependencies=[Depends(require_media_access)])
 async def proxy_direct_audio_stream(station_id: str, request: Request) -> StreamingResponse:
     if request and _is_geo_blocked(station_id, request):
         raise HTTPException(status_code=403, detail="该电台因地域限制不可用。")
@@ -1051,7 +897,7 @@ async def _myradio_refresh_task() -> None:
         await asyncio.sleep(MYRADIO_CACHE_TTL)
 
 
-@app.get("/api/myradio/all")
+@app.get("/api/myradio/all", dependencies=[Depends(require_browse_access)])
 async def get_myradio_all(request: Request) -> Response:
 
     stations = [
@@ -1066,7 +912,7 @@ async def get_myradio_all(request: Request) -> Response:
     )
 
 
-@app.get("/api/yunting/stations/{province_code}")
+@app.get("/api/yunting/stations/{province_code}", dependencies=[Depends(require_browse_access)])
 async def proxy_yunting_stations(province_code: str) -> Response:
     cached = YUNTING_CACHE.get(province_code)
     if cached and time.time() - cached["ts"] < YUNTING_CACHE_TTL:
@@ -1109,7 +955,7 @@ async def proxy_yunting_stations(province_code: str) -> Response:
     return Response(content=stations_json, media_type="application/json")
 
 
-@app.get("/api/yunting/all")
+@app.get("/api/yunting/all", dependencies=[Depends(require_browse_access)])
 async def proxy_yunting_all() -> Response:
     
 
@@ -1155,7 +1001,7 @@ async def proxy_yunting_all() -> Response:
     )
 
 
-@app.get("/api/yunting/epg")
+@app.get("/api/yunting/epg", dependencies=[Depends(require_browse_access)])
 async def yunting_epg() -> Response:
     
     now = time.time()
@@ -1419,7 +1265,7 @@ def _collect_all_urls(station_id: str, name: str = "") -> list[str]:
     return urls
 
 
-@app.get("/api/{station_id}/all-urls")
+@app.get("/api/{station_id}/all-urls", dependencies=[Depends(require_media_access)])
 async def get_all_urls(station_id: str, name: str = "", request: Request = None) -> Response:
 
     if request and _is_geo_blocked(station_id, request):
@@ -1444,7 +1290,7 @@ async def _head_check(url: str) -> tuple[str, float]:
     return (url, float("inf"))
 
 
-@app.get("/api/{station_id}/reachable-urls")
+@app.get("/api/{station_id}/reachable-urls", dependencies=[Depends(require_media_access)])
 async def get_reachable_urls(station_id: str, name: str = "", request: Request = None) -> Response:
     
 
@@ -1473,7 +1319,7 @@ async def get_reachable_urls(station_id: str, name: str = "", request: Request =
 
 
 
-@app.get("/api/{station_id}/stream-url")
+@app.get("/api/{station_id}/stream-url", dependencies=[Depends(require_media_access)])
 async def get_stream_url(station_id: str, name: str = "", request: Request = None) -> Response:
 
     
@@ -1536,7 +1382,7 @@ RB_CACHE: dict[str, dict] = {}
 RB_CACHE_TTL = 6 * 3600
 
 
-@app.get("/api/radio-browser/stations/{country_code}")
+@app.get("/api/radio-browser/stations/{country_code}", dependencies=[Depends(require_browse_access)])
 async def proxy_radio_browser(country_code: str) -> Response:
 
     cached = RB_CACHE.get(country_code)
@@ -1595,7 +1441,7 @@ from logo_template import refresh_logo_template_from_remote
 import database as db
 import market as _market
 
-@app.post("/api/iptv/subscriptions")
+@app.post("/api/admin/subscriptions", dependencies=[Depends(require_admin)])
 async def add_subscription(request: Request):
     body = await request.json()
     url = (body.get('url') or '').strip()
@@ -1640,12 +1486,12 @@ async def add_subscription(request: Request):
     return {"id": sub_id, "title": title, "url": url, "channel_count": len(channels)}
 
 
-@app.get("/api/iptv/subscriptions")
+@app.get("/api/admin/subscriptions", dependencies=[Depends(require_admin)])
 async def list_subscriptions():
     return await db.get_subscriptions()
 
 
-@app.get("/api/iptv/subscriptions/{sub_id}")
+@app.get("/api/admin/subscriptions/{sub_id}", dependencies=[Depends(require_admin)])
 async def get_subscription(sub_id: int):
     sub = await db.get_subscription(sub_id)
     if not sub:
@@ -1653,7 +1499,7 @@ async def get_subscription(sub_id: int):
     return sub
 
 
-@app.delete("/api/iptv/subscriptions/{sub_id}")
+@app.delete("/api/admin/subscriptions/{sub_id}", dependencies=[Depends(require_admin)])
 async def delete_subscription(sub_id: int):
     sub = await db.get_subscription(sub_id)
     if not sub:
@@ -1690,7 +1536,7 @@ async def _refresh_market_subscription(sub: dict) -> dict:
     return result
 
 
-@app.post("/api/iptv/subscriptions/{sub_id}/refresh")
+@app.post("/api/admin/subscriptions/{sub_id}/refresh", dependencies=[Depends(require_admin)])
 async def refresh_subscription(sub_id: int):
     sub = await db.get_subscription(sub_id)
     if not sub:
@@ -1700,7 +1546,7 @@ async def refresh_subscription(sub_id: int):
     return await _refresh_regular_subscription(sub)
 
 
-@app.post("/api/iptv/subscriptions/refresh-all")
+@app.post("/api/admin/subscriptions/refresh-all", dependencies=[Depends(require_admin)])
 async def refresh_all_subscriptions():
     subs = await db.get_subscriptions()
     results = []
@@ -1732,7 +1578,7 @@ async def refresh_all_subscriptions():
 
 # ── 频道 ──
 
-@app.get("/api/iptv/subscriptions/{sub_id}/channels")
+@app.get("/api/admin/subscriptions/{sub_id}/channels", dependencies=[Depends(require_admin)])
 async def list_channels(sub_id: int, group: str = '', search: str = ''):
     sub = await db.get_subscription(sub_id)
     if not sub:
@@ -1752,7 +1598,7 @@ def _market_http_error(exc: Exception):
     raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@app.get("/api/market")
+@app.get("/api/admin/market", dependencies=[Depends(require_admin)])
 async def get_market_summary():
     try:
         await _market.ensure_market_loaded()
@@ -1761,7 +1607,7 @@ async def get_market_summary():
         _market_http_error(exc)
 
 
-@app.post("/api/market/refresh")
+@app.post("/api/admin/market/refresh", dependencies=[Depends(require_admin)])
 async def refresh_market(request: Request):
     try:
         body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
@@ -1775,7 +1621,7 @@ async def refresh_market(request: Request):
         _market_http_error(exc)
 
 
-@app.get("/api/market/sources")
+@app.get("/api/admin/market/sources", dependencies=[Depends(require_admin)])
 async def list_market_sources():
     try:
         return {"sources": await _market.list_sources()}
@@ -1783,7 +1629,7 @@ async def list_market_sources():
         _market_http_error(exc)
 
 
-@app.post("/api/market/sources")
+@app.post("/api/admin/market/sources", dependencies=[Depends(require_admin)])
 async def create_market_source(request: Request):
     try:
         body = await request.json()
@@ -1798,7 +1644,7 @@ async def create_market_source(request: Request):
         _market_http_error(exc)
 
 
-@app.put("/api/market/sources/{source_id}")
+@app.put("/api/admin/market/sources/{source_id}", dependencies=[Depends(require_admin)])
 async def update_market_source(source_id: int, request: Request):
     try:
         body = await request.json()
@@ -1807,7 +1653,7 @@ async def update_market_source(source_id: int, request: Request):
         _market_http_error(exc)
 
 
-@app.delete("/api/market/sources/{source_id}")
+@app.delete("/api/admin/market/sources/{source_id}", dependencies=[Depends(require_admin)])
 async def delete_market_source(source_id: int):
     try:
         return await _market.delete_source(source_id)
@@ -1815,7 +1661,7 @@ async def delete_market_source(source_id: int):
         _market_http_error(exc)
 
 
-@app.get("/api/market/packages")
+@app.get("/api/admin/market/packages", dependencies=[Depends(require_admin)])
 async def list_market_packages(
     search: str = '',
     region: str = '',
@@ -1842,7 +1688,7 @@ async def list_market_packages(
         _market_http_error(exc)
 
 
-@app.get("/api/market/packages/{package_id}")
+@app.get("/api/admin/market/packages/{package_id}", dependencies=[Depends(require_admin)])
 async def get_market_package(package_id: str):
     try:
         return await _market.get_package(package_id)
@@ -1850,7 +1696,7 @@ async def get_market_package(package_id: str):
         _market_http_error(exc)
 
 
-@app.post("/api/market/packages/{package_id}/preview")
+@app.post("/api/admin/market/packages/{package_id}/preview", dependencies=[Depends(require_admin)])
 async def preview_market_package(package_id: str):
     try:
         return await _market.build_preview(package_id)
@@ -1858,7 +1704,7 @@ async def preview_market_package(package_id: str):
         _market_http_error(exc)
 
 
-@app.post("/api/market/packages/{package_id}/import")
+@app.post("/api/admin/market/packages/{package_id}/import", dependencies=[Depends(require_admin)])
 async def import_market_package(package_id: str, request: Request):
     try:
         body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
@@ -1872,7 +1718,7 @@ async def import_market_package(package_id: str, request: Request):
         _market_http_error(exc)
 
 
-@app.post("/api/market/packages/{package_id}/update")
+@app.post("/api/admin/market/packages/{package_id}/update", dependencies=[Depends(require_admin)])
 async def update_market_package(package_id: str):
     try:
         return await _market.update_installed_package(package_id)
@@ -1880,7 +1726,7 @@ async def update_market_package(package_id: str):
         _market_http_error(exc)
 
 
-@app.patch("/api/market/packages/{package_id}/install")
+@app.patch("/api/admin/market/packages/{package_id}/install", dependencies=[Depends(require_admin)])
 async def update_market_install(package_id: str, request: Request):
     try:
         body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
@@ -1892,7 +1738,7 @@ async def update_market_install(package_id: str, request: Request):
         _market_http_error(exc)
 
 
-@app.post("/api/market/updates/run")
+@app.post("/api/admin/market/updates/run", dependencies=[Depends(require_admin)])
 async def run_market_updates(request: Request):
     try:
         body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
@@ -1903,7 +1749,7 @@ async def run_market_updates(request: Request):
         _market_http_error(exc)
 
 
-@app.delete("/api/market/packages/{package_id}/install")
+@app.delete("/api/admin/market/packages/{package_id}/install", dependencies=[Depends(require_admin)])
 async def uninstall_market_package(package_id: str):
     try:
         return await _market.uninstall_package(package_id)
@@ -2076,7 +1922,7 @@ async def _get_aggregated_iptv_channels(group: str = '', search: str = '') -> tu
     return result, groups
 
 
-@app.get("/api/iptv/channels")
+@app.get("/api/iptv/channels", dependencies=[Depends(require_browse_access)])
 async def aggregated_channels(group: str = '', search: str = ''):
     result, groups = await _get_aggregated_iptv_channels(group=group, search=search)
 
@@ -2152,7 +1998,7 @@ def _probe_status_to_bucket(status: str) -> str:
     return "failed"
 
 
-@app.post("/api/iptv/test-all")
+@app.post("/api/admin/probes/test-all", dependencies=[Depends(require_admin)])
 async def test_all_subscriptions():
     """测速所有订阅源的所有频道"""
     subs = await db.get_subscriptions()
@@ -2183,7 +2029,7 @@ async def test_all_subscriptions():
     return {"total": total}
 
 
-@app.post("/api/iptv/subscriptions/{sub_id}/test-all")
+@app.post("/api/admin/subscriptions/{sub_id}/test-all", dependencies=[Depends(require_admin)])
 async def test_subscription(sub_id: int):
     """测速单个订阅源的所有频道"""
     sub = await db.get_subscription(sub_id)
@@ -2362,7 +2208,7 @@ async def _run_speed_test_global(channels: list[dict], cancel_event: asyncio.Eve
         await _finish_speed_test()
 
 
-@app.post("/api/iptv/test-cancel")
+@app.post("/api/admin/probes/test-cancel", dependencies=[Depends(require_admin)])
 async def cancel_speed_test():
     async with _speed_test_lock:
         if not _speed_test_running:
@@ -2374,12 +2220,12 @@ async def cancel_speed_test():
         return {"cancelled": True, "running": True}
 
 
-@app.get("/api/iptv/test-status")
+@app.get("/api/admin/probes/test-status", dependencies=[Depends(require_admin)])
 async def global_test_status():
     return _global_test_progress or _empty_test_progress()
 
 
-@app.get("/api/iptv/subscriptions/{sub_id}/test-status")
+@app.get("/api/admin/subscriptions/{sub_id}/test-status", dependencies=[Depends(require_admin)])
 async def test_status(sub_id: int):
     return _test_progress.get(sub_id, _empty_test_progress())
 
@@ -2400,21 +2246,12 @@ def _drop_wide_cache(cache_key: str) -> None:
     _wide_cache.pop(cache_key + '_ts', None)
 
 
-def _iptv_wide_playlist_proxy_path(target_url: str, proxy_ts: int = 0, custom_ua: str = '', referer: str = '', cookie: str = '', no_ua: int = 0) -> str:
-    ua = f'&custom_ua={quote(custom_ua, safe="")}' if custom_ua else ''
-    ref = f'&referer={quote(referer, safe="")}' if referer else ''
-    ck = f'&cookie={quote(cookie, safe="")}' if cookie else ''
-    nua = '&no_ua=1' if no_ua else ''
-    return f'/api/iptv/proxy/wide.m3u8?proxy_ts={int(proxy_ts or 0)}{ua}{ref}{ck}{nua}&target_url={quote(target_url, safe="")}'
-
-
 def _strip_youtube_probe_param(target_url: str) -> str:
     """从 adapter target_url 里剥掉 ?probe=1 等仅用于元信息探测的参数。
 
     YouTube probe 模式只用于前端轻量探测频道是否在播、video id 是什么；
-    一旦把带 probe 的 URL 当 proxy_url 或 play.m3u8 的 target_url 反吐回去，
+    一旦把带 probe 的 URL 当 proxy_url 反吐回去，
     后续 resolve 会再次走 probe 分支并返回空 url，最终把播放路径打成 502。
-    在所有面向"播放"的入口统一剥一次，是最稳的兜底。
     """
     raw = (target_url or '').strip()
     if not raw:
@@ -2423,7 +2260,7 @@ def _strip_youtube_probe_param(target_url: str) -> str:
         parsed = urlparse(raw)
     except ValueError:
         return raw
-    # 只对 adapter scheme 生效，普通 http(s) 直连地址不动它的 query。
+    # 只对 adapter scheme 生效
     if parsed.scheme.lower() != 'youtube' or not parsed.query:
         return raw
     pairs = parse_qsl(parsed.query, keep_blank_values=True)
@@ -2431,90 +2268,6 @@ def _strip_youtube_probe_param(target_url: str) -> str:
     if len(cleaned) == len(pairs):
         return raw
     return urlunparse(parsed._replace(query=urlencode(cleaned, doseq=True)))
-
-
-def _iptv_adapter_play_path(target_url: str) -> str:
-    # TODO: V2 should prefer source_id-based adapter resolve/play paths over target_url.
-    play_target = _strip_youtube_probe_param(target_url)
-    return f'/api/iptv/adapter/play.m3u8?target_url={quote(play_target, safe="")}'
-
-
-def _iptv_chunk_proxy_path(target_url: str, custom_ua: str = '', referer: str = '', cookie: str = '', no_ua: int = 0) -> str:
-    ua = f'&custom_ua={quote(custom_ua, safe="")}' if custom_ua else ''
-    ref = f'&referer={quote(referer, safe="")}' if referer else ''
-    ck = f'&cookie={quote(cookie, safe="")}' if cookie else ''
-    nua = '&no_ua=1' if no_ua else ''
-    return f'/api/iptv/proxy/chunk.ts?target_url={quote(target_url, safe="")}{ua}{ref}{ck}{nua}'
-
-
-def _should_proxy_iptv_chunk(seg_url: str, proxy_ts: int = 0) -> bool:
-    scheme = urlparse(seg_url).scheme.lower()
-    return bool(proxy_ts) and scheme in {"http", "https"}
-
-
-def _rewrite_hls_tag_uri(line: str, base_url: str, proxy_ts: int = 0, custom_ua: str = '', referer: str = '', cookie: str = '', no_ua: int = 0) -> str:
-    """Rewrite URI attributes in HLS tag lines (EXT-X-KEY, EXT-X-MAP, EXT-X-PART, etc.)."""
-    upper = line.upper()
-    has_uri_tag = False
-    for tag in _HLS_URI_TAGS:
-        if f"#{tag}:" in upper:
-            has_uri_tag = True
-            break
-    if not has_uri_tag:
-        return line
-
-    def _replace_uri(m):
-        uri = m.group(2)
-        # Skip special schemes: data:, skd:, urn:, etc.
-        scheme = urlparse(uri).scheme.lower()
-        if scheme and scheme not in ("http", "https"):
-            return m.group(0)
-
-        absolute_url = urljoin(base_url, uri)
-        parsed = urlparse(absolute_url)
-        uri_path = parsed.path.lower()
-
-        if uri_path.endswith(".m3u8"):
-            return f'{m.group(1)}{_iptv_wide_playlist_proxy_path(absolute_url, proxy_ts, custom_ua, referer, cookie, no_ua)}{m.group(3)}'
-        if uri_path.endswith(_IPTV_SEGMENT_EXTENSIONS) and _should_proxy_iptv_chunk(absolute_url, proxy_ts):
-            return f'{m.group(1)}{_iptv_chunk_proxy_path(absolute_url, custom_ua, referer, cookie, no_ua)}{m.group(3)}'
-        return m.group(0)
-
-    return _HLS_URI_RE.sub(_replace_uri, line)
-
-
-def _rewrite_iptv_wide_m3u8_text(raw_m3u8_text: str, base_url: str, proxy_ts: int = 0, custom_ua: str = '', referer: str = '', cookie: str = '', no_ua: int = 0) -> str:
-    rewritten_lines: list[str] = []
-
-    for line in raw_m3u8_text.splitlines():
-        stripped_line = line.strip()
-        if not stripped_line:
-            rewritten_lines.append(line)
-            continue
-
-        # Tag lines: rewrite URI attributes inside tags
-        if stripped_line.startswith("#"):
-            rewritten_lines.append(_rewrite_hls_tag_uri(line, base_url, proxy_ts, custom_ua, referer, cookie, no_ua))
-            continue
-
-        # Standalone URL lines (segment or variant playlist)
-        try:
-            absolute_media_url = urljoin(base_url, stripped_line)
-        except ValueError:
-            logger.warning("跳过无法解析的 HLS URI: base=%s line=%s", base_url, stripped_line[:200])
-            rewritten_lines.append(line)
-            continue
-        parsed_url = urlparse(absolute_media_url)
-        uri_path = parsed_url.path.lower()
-
-        if uri_path.endswith(".m3u8"):
-            rewritten_lines.append(_iptv_wide_playlist_proxy_path(absolute_media_url, proxy_ts, custom_ua, referer, cookie, no_ua))
-        elif uri_path.endswith(_IPTV_SEGMENT_EXTENSIONS) and _should_proxy_iptv_chunk(absolute_media_url, proxy_ts):
-            rewritten_lines.append(_iptv_chunk_proxy_path(absolute_media_url, custom_ua, referer, cookie, no_ua))
-        else:
-            rewritten_lines.append(absolute_media_url)
-
-    return "\n".join(rewritten_lines)
 
 
 def _ensure_hls_playlist_text(text: str, url: str) -> None:
@@ -2526,16 +2279,109 @@ def _adapter_error_response(exc: AdapterResolveError) -> JSONResponse:
     return JSONResponse(status_code=exc.status_code, content=exc.to_payload())
 
 
-@app.get("/api/iptv/adapter/resolve")
-async def iptv_adapter_resolve(target_url: str = ''):
-    try:
-        resolved = await resolve_adapter_source(target_url, http_client)
-    except AdapterResolveError as exc:
-        return _adapter_error_response(exc)
+def _should_proxy_iptv_chunk(seg_url: str, proxy_ts: int = 0) -> bool:
+    scheme = urlparse(seg_url).scheme.lower()
+    return bool(proxy_ts) and scheme in {"http", "https"}
 
-    payload = dict(resolved)
-    payload["proxy_url"] = _iptv_adapter_play_path(target_url)
-    return payload
+
+def _make_handle_path(*, kind: str, upstream_url: str, ctx_id: str, src_id: str, src_label: str, access_token: str = "") -> str:
+    """统一封装 signed handle URL 生成。
+
+    ctx_id / src_id / src_label 来自调用方所处的请求上下文（rewriter / wide refresher）。
+    access_token 仅在调用方持有 Media Credential 时透传。
+    """
+    from security.proxy_handles import issue_handle as _issue
+    handle = _issue(
+        kind=kind,
+        url=upstream_url,
+        src=src_label,
+        src_id=src_id,
+        ctx=ctx_id,
+    )
+    suffix = ""
+    if access_token:
+        suffix = f"?access_token={quote(access_token, safe='')}"
+    return f"/api/media/proxy/{kind}/{handle}{suffix}"
+
+
+def _iptv_chunk_handle_path(seg_url: str, ctx_id: str, src_id: str, src_label: str, access_token: str = "") -> str:
+    return _make_handle_path(
+        kind="chunk",
+        upstream_url=seg_url,
+        ctx_id=ctx_id,
+        src_id=src_id,
+        src_label=src_label,
+        access_token=access_token,
+    )
+
+
+def _iptv_playlist_handle_path(playlist_url: str, ctx_id: str, src_id: str, src_label: str, access_token: str = "") -> str:
+    return _make_handle_path(
+        kind="playlist",
+        upstream_url=playlist_url,
+        ctx_id=ctx_id,
+        src_id=src_id,
+        src_label=src_label,
+        access_token=access_token,
+    )
+
+
+def _rewrite_hls_tag_uri(line: str, base_url: str, ctx_id: str, src_id: str, src_label: str, *, access_token: str = "", proxy_ts: int = 1) -> str:
+    """重写 HLS 标签行内的 ``URI="..."``。"""
+    upper = line.upper()
+    if not any(f"#{tag}:" in upper for tag in _HLS_URI_TAGS):
+        return line
+
+    def _replace_uri(m):
+        uri = m.group(2)
+        scheme = urlparse(uri).scheme.lower()
+        if scheme and scheme not in ("http", "https"):
+            return m.group(0)
+
+        absolute_url = urljoin(base_url, uri)
+        parsed = urlparse(absolute_url)
+        uri_path = parsed.path.lower()
+
+        if uri_path.endswith(".m3u8"):
+            return f'{m.group(1)}{_iptv_playlist_handle_path(absolute_url, ctx_id, src_id, src_label, access_token)}{m.group(3)}'
+        if uri_path.endswith(_IPTV_SEGMENT_EXTENSIONS) and _should_proxy_iptv_chunk(absolute_url, proxy_ts):
+            return f'{m.group(1)}{_iptv_chunk_handle_path(absolute_url, ctx_id, src_id, src_label, access_token)}{m.group(3)}'
+        return m.group(0)
+
+    return _HLS_URI_RE.sub(_replace_uri, line)
+
+
+def _rewrite_iptv_wide_m3u8_text(raw_m3u8_text: str, base_url: str, ctx_id: str, src_id: str, src_label: str, *, access_token: str = "", proxy_ts: int = 1) -> str:
+    rewritten_lines: list[str] = []
+    for line in raw_m3u8_text.splitlines():
+        stripped_line = line.strip()
+        if not stripped_line:
+            rewritten_lines.append(line)
+            continue
+        if stripped_line.startswith("#"):
+            rewritten_lines.append(_rewrite_hls_tag_uri(line, base_url, ctx_id, src_id, src_label, access_token=access_token, proxy_ts=proxy_ts))
+            continue
+        try:
+            absolute_media_url = urljoin(base_url, stripped_line)
+        except ValueError:
+            logger.warning("跳过无法解析的 HLS URI: base=%s line=%s", base_url, stripped_line[:200])
+            rewritten_lines.append(line)
+            continue
+        parsed_url = urlparse(absolute_media_url)
+        uri_path = parsed_url.path.lower()
+        if uri_path.endswith(".m3u8"):
+            rewritten_lines.append(_iptv_playlist_handle_path(absolute_media_url, ctx_id, src_id, src_label, access_token))
+        elif uri_path.endswith(_IPTV_SEGMENT_EXTENSIONS) and _should_proxy_iptv_chunk(absolute_media_url, proxy_ts):
+            rewritten_lines.append(_iptv_chunk_handle_path(absolute_media_url, ctx_id, src_id, src_label, access_token))
+        else:
+            rewritten_lines.append(absolute_media_url)
+    return "\n".join(rewritten_lines)
+
+
+# 旧 ``/api/iptv/adapter/resolve`` / ``/api/iptv/adapter/play.m3u8`` 已被
+# ``/api/media/channel/{key}/playlist.m3u8`` 取代：
+# 入口完全基于稳定 channel canonical_key，后端内部完成 adapter resolve →
+# ProxyContext 注入 → signed handle → 重写。前端不再传 adapter URL。
 
 
 # ── adapter 直播间封面/头像 ─────────────────────────────────────────────
@@ -2712,10 +2558,37 @@ _ADAPTER_COVER_FETCHERS = {
 }
 
 
-@app.get("/api/iptv/adapter/cover")
-async def iptv_adapter_cover(target_url: str = ''):
+# ── 封面图片代理（绕过 CDN Referer 防盗链）──────────────────────────────
+# 白名单：仅允许代理这些域名下的图片，防止被当作公共代理滥用。
+# 格式: {域名后缀: 需要伪造的 Referer}
+_COVER_IMG_PROXY_SOURCES = {
+    "hdslb.com": "https://www.bilibili.com",
+    "bilibili.com": "https://www.bilibili.com",
+}
+
+
+def _cover_img_referer_for(raw_url: str) -> str:
+    """命中白名单返回需要伪造的 Referer；否则返回空串。"""
+    host = (urlparse(raw_url).hostname or "").lower()
+    for suffix, ref in _COVER_IMG_PROXY_SOURCES.items():
+        if host == suffix or host.endswith("." + suffix):
+            return ref
+    return ""
+
+
+def _cover_img_proxy_url(raw_url: str) -> str:
+    """如果 raw_url 命中防盗链白名单，返回 image handle 路径；否则原样返回。"""
+    if not _cover_img_referer_for(raw_url):
+        return raw_url
+    from security.proxy_handles import issue_handle as _issue
+    handle = _issue(kind="image", url=raw_url, src="adapter:cover")
+    return f"/api/media/proxy/image/{handle}"
+
+
+async def fetch_adapter_cover_payload(adapter_url: str) -> dict:
+    """供 /api/media/channel/{key}/cover 调用。返回封面 payload。"""
     try:
-        request = parse_adapter_url(target_url)
+        request = parse_adapter_url(adapter_url)
     except AdapterResolveError:
         return _adapter_cover_empty()
 
@@ -2756,100 +2629,15 @@ async def iptv_adapter_cover(target_url: str = ''):
             return payload
 
 
-# ── 封面图片代理（绕过 CDN Referer 防盗链）──────────────────────────────
-# 白名单：仅允许代理这些域名下的图片，防止被当作公共代理滥用。
-# 格式: {域名后缀: 需要伪造的 Referer}
-_COVER_IMG_PROXY_SOURCES = {
-    "hdslb.com": "https://www.bilibili.com",
-    "bilibili.com": "https://www.bilibili.com",
-}
-
-
-def _cover_img_proxy_url(raw_url: str) -> str:
-    """如果 raw_url 命中防盗链白名单，返回代理路径；否则原样返回。"""
-    host = (urlparse(raw_url).hostname or "").lower()
-    for suffix in _COVER_IMG_PROXY_SOURCES:
-        if host == suffix or host.endswith("." + suffix):
-            return f"/api/iptv/adapter/cover-img?url={quote(raw_url, safe='')}"
-    return raw_url
-
-
-@app.get("/api/iptv/adapter/cover-img")
-async def iptv_adapter_cover_img(url: str = ''):
-    raw_url = (url or "").strip()
-    if not raw_url:
-        raise HTTPException(status_code=400, detail="url 不能为空")
-    validate_target_url(raw_url)
-
-    host = (urlparse(raw_url).hostname or "").lower()
-    referer = ""
-    for suffix, ref in _COVER_IMG_PROXY_SOURCES.items():
-        if host == suffix or host.endswith("." + suffix):
-            referer = ref
-            break
-    if not referer:
-        raise HTTPException(status_code=403, detail="该域名不在封面代理白名单中")
-
-    try:
-        upstream = await http_client.get(
-            raw_url,
-            headers={"User-Agent": "Mozilla/5.0", "Referer": referer},
-            follow_redirects=True,
-        )
-        upstream.raise_for_status()
-    except Exception:
-        raise HTTPException(status_code=502, detail="封面图片获取失败")
-
-    return Response(
-        content=upstream.content,
-        media_type=upstream.headers.get("content-type", "image/jpeg"),
-        headers={"Cache-Control": "public, max-age=86400", "Access-Control-Allow-Origin": "*"},
-    )
-
-
-@app.get("/api/iptv/adapter/play.m3u8")
-async def iptv_adapter_play_m3u8(target_url: str = ''):
-    # 防御：客户端若误把 ?probe=1 的 target_url 喂进播放入口，会让 resolve 走
-    # probe 分支返回空 url，从而 502。这里在播放入口再剥一次。
-    target_url = _strip_youtube_probe_param(target_url)
-    try:
-        resolved = await resolve_adapter_source(target_url, http_client)
-    except AdapterResolveError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.to_payload()) from exc
-
-    resolved_url = str(resolved.get('url') or '').strip()
-    if not resolved_url:
-        raise HTTPException(status_code=502, detail="adapter 未返回播放地址")
-
-    source_type = str(resolved.get('source_type') or 'hls').strip().lower()
-    headers = resolved.get('headers') if isinstance(resolved.get('headers'), dict) else {}
-    custom_ua = str(headers.get('User-Agent') or headers.get('user-agent') or '')
-    referer = str(headers.get('Referer') or headers.get('referer') or '')
-    cookie = str(headers.get('Cookie') or headers.get('cookie') or '')
-    no_ua = 1 if headers.get('no_ua') or headers.get('No-UA') else 0
-
-    if source_type == 'hls':
-        validate_target_url(resolved_url)
-        return await iptv_wide_playlist(target_url=resolved_url, proxy_ts=1, custom_ua=custom_ua, referer=referer, cookie=cookie, no_ua=no_ua)
-    if source_type in {'mpegts', 'http_flv'}:
-        stream_type = '&stream_type=http_flv' if source_type == 'http_flv' else ''
-        ua = f'&custom_ua={quote(custom_ua, safe="")}' if custom_ua else ''
-        ref = f'&referer={quote(referer, safe="")}' if referer else ''
-        return RedirectResponse(
-            f'/api/iptv/proxy/stream?target_url={quote(resolved_url, safe="")}{ua}{ref}{stream_type}',
-            status_code=307,
-        )
-    if source_type == 'rtsp':
-        return await iptv_proxy_rtsp_playlist(target_url=resolved_url, custom_ua=custom_ua, compat=0)
-
-    raise HTTPException(status_code=502, detail=f"adapter 返回了暂不支持的流类型: {source_type}")
+# 旧 /api/iptv/adapter/cover / cover-img 入口已删除：
+# 封面元数据走 /api/media/channel/{key}/cover；封面图片走 image handle。
 
 
 _HLS_META_TAGS = ("EXT-X-MAP", "EXT-X-KEY", "EXT-X-VERSION", "EXT-X-PLAYLIST-TYPE")
 
 
-def _extract_hls_meta_lines(m3u8_text: str, base_url: str, proxy_ts: int = 0, custom_ua: str = '', referer: str = '', cookie: str = '', no_ua: int = 0) -> list[str]:
-    """Extract metadata lines (MAP, KEY, VERSION, etc.) from m3u8 text, rewritten for proxy."""
+def _extract_hls_meta_lines(m3u8_text: str, base_url: str, ctx_id: str, src_id: str, src_label: str, *, access_token: str = "", proxy_ts: int = 1) -> list[str]:
+    """Extract metadata lines (MAP, KEY, VERSION, etc.) from m3u8 text, rewritten as signed-handle URLs."""
     meta = []
     for line in m3u8_text.splitlines():
         stripped = line.strip()
@@ -2858,18 +2646,30 @@ def _extract_hls_meta_lines(m3u8_text: str, base_url: str, proxy_ts: int = 0, cu
         upper = stripped.upper()
         for tag in _HLS_META_TAGS:
             if upper.startswith(f'#{tag}:'):
-                meta.append(_rewrite_hls_tag_uri(line, base_url, proxy_ts, custom_ua, referer, cookie, no_ua))
+                meta.append(_rewrite_hls_tag_uri(line, base_url, ctx_id, src_id, src_label, access_token=access_token, proxy_ts=proxy_ts))
                 break
     return meta
 
 
-async def _wide_refresher(cache_key: str, target_url: str, custom_ua: str = '', referer: str = '', cookie: str = '', no_ua: int = 0):
-    """后台任务：每 2s 拉一次上游，更新分片队列"""
-    _h = {'User-Agent': custom_ua} if custom_ua and not no_ua else {}
-    if referer:
-        _h['Referer'] = referer
-    if cookie:
-        _h['Cookie'] = cookie
+async def _wide_refresher(cache_key: str, target_url: str, ctx_id: str, src_id: str, src_label: str):
+    """后台任务：每 2s 拉一次上游，更新分片队列。
+
+    上游 header 由 ProxyContext (按 ctx_id 索引) 提供；access_token 在生成
+    response 阶段由 wide_playlist 调用方按需注入，refresher 不持有该 token。
+    """
+    from security.proxy_context import get_registry as _get_registry
+    ctx = _get_registry().get(ctx_id) if ctx_id else None
+    _h: dict[str, str] = {}
+    if ctx:
+        if ctx.no_ua:
+            if ctx.custom_ua:
+                _h['User-Agent'] = ctx.custom_ua
+        elif ctx.custom_ua:
+            _h['User-Agent'] = ctx.custom_ua
+        if ctx.referer:
+            _h['Referer'] = ctx.referer
+        if ctx.cookie:
+            _h['Cookie'] = ctx.cookie
     while True:
         cache = _wide_cache.get(cache_key)
         last_access = _wide_cache.get(cache_key + '_ts', 0)
@@ -2877,7 +2677,7 @@ async def _wide_refresher(cache_key: str, target_url: str, custom_ua: str = '', 
             return
         if time.time() - last_access > _WIDE_TTL:
             _drop_wide_cache(cache_key)
-            logger.info("IPTV wide playlist 后台刷新停止: idle %.0fs url=%s", time.time() - last_access, target_url)
+            logger.info("IPTV wide playlist 后台刷新停止: idle %.0fs key=%s", time.time() - last_access, cache_key)
             return
 
         try:
@@ -2886,7 +2686,6 @@ async def _wide_refresher(cache_key: str, target_url: str, custom_ua: str = '', 
             playlist_base_url = str(resp.url)
             lines = resp.text.splitlines()
 
-            # 解析 EXTINF + URL 对，同时追踪 MEDIA-SEQUENCE
             segments = []
             target_duration = 6
             media_seq = 0
@@ -2907,8 +2706,10 @@ async def _wide_refresher(cache_key: str, target_url: str, custom_ua: str = '', 
                     i += 1
                 i += 1
 
-            # Extract and rewrite metadata lines (MAP, KEY, etc.)
-            meta_lines = _extract_hls_meta_lines(resp.text, playlist_base_url, proxy_ts=1, custom_ua=custom_ua, referer=referer, cookie=cookie, no_ua=no_ua)
+            # Extract and rewrite metadata lines (MAP, KEY, etc.) — refresher 不带 access_token，
+            # 重写后的 meta 由响应阶段按需附加；此处生成的 path 不含 access_token，
+            # 调用方在写入 cache 后由响应阶段做一次覆盖（细节：response 阶段重新跑 _rewrite_meta_with_token）。
+            meta_lines = _extract_hls_meta_lines(resp.text, playlist_base_url, ctx_id, src_id, src_label, proxy_ts=1)
 
             cache = _wide_cache.get(cache_key)
             if not cache:
@@ -2916,6 +2717,8 @@ async def _wide_refresher(cache_key: str, target_url: str, custom_ua: str = '', 
             cache['target_duration'] = target_duration
             if meta_lines:
                 cache['meta'] = meta_lines
+            cache['base_url'] = playlist_base_url
+            cache['raw_meta_text'] = resp.text  # 缓存原文，响应阶段按 token 重写
             seen = cache.get('seen', set())
             for seg in segments:
                 if seg['url'] not in seen:
@@ -2929,50 +2732,78 @@ async def _wide_refresher(cache_key: str, target_url: str, custom_ua: str = '', 
         await asyncio.sleep(2)
 
 
-@app.post("/api/iptv/proxy/wide/release")
-async def release_iptv_wide_playlist(target_url: str = ''):
-    if not target_url:
-        raise HTTPException(status_code=400, detail="缺少 target_url")
-
-    cache_key = quote(target_url, safe='')
+def release_iptv_wide_playlist_by_key(cache_key: str) -> bool:
+    """供 router 调用的稳定 cache_key 释放接口。"""
+    if not cache_key:
+        return False
     released = cache_key in _wide_cache or cache_key + '_ts' in _wide_cache
     _drop_wide_cache(cache_key)
-    return {"released": released}
+    return released
 
 
-@app.get("/api/iptv/proxy/wide.m3u8")
-async def iptv_wide_playlist(target_url: str = '', proxy_ts: int = 0, custom_ua: str = '', referer: str = '', compat: int = 0, cookie: str = '', no_ua: int = 0):
-    if not target_url:
-        raise HTTPException(status_code=400, detail="缺少 target_url")
+def _wide_cache_key_for(upstream_url: str, ctx_id: str) -> str:
+    """稳定 cache key：上游 URL + ctx_id。
 
-    if urlparse(target_url).scheme.lower() == "rtsp":
-        return await iptv_proxy_rtsp_playlist(target_url=target_url, custom_ua=custom_ua, compat=compat)
+    不使用 signed handle 当 cache key（每次签发都不同），避免缓存反复失效。
+    """
+    base = quote(upstream_url, safe='')
+    return f"{base}#{ctx_id}" if ctx_id else base
 
-    _headers = {'User-Agent': custom_ua} if custom_ua and not no_ua else {}
-    if referer:
-        _headers['Referer'] = referer
-    if cookie:
-        _headers['Cookie'] = cookie
+
+async def serve_iptv_wide_playlist_by_source(
+    *,
+    upstream_url: str,
+    ctx_id: str,
+    src_label: str,
+    canonical_key: str,
+    access,
+):
+    """供 ``routers/media_proxy.py`` 调用：按上游 URL + ctx_id 拉播放列表。
+
+    内部维护稳定 cache_key + 后台刷新任务。重写产物使用 signed handle，
+    并按 ``access`` 是否来自 Media Credential 决定是否透传 access_token。
+    """
+    from security.proxy_context import get_registry as _get_registry
+
+    if urlparse(upstream_url).scheme.lower() not in ("http", "https"):
+        raise HTTPException(status_code=400, detail="上游 scheme 不被允许")
+
+    ctx = _get_registry().get(ctx_id) if ctx_id else None
+    _headers: dict[str, str] = {}
+    if ctx:
+        if ctx.no_ua:
+            if ctx.custom_ua:
+                _headers['User-Agent'] = ctx.custom_ua
+        elif ctx.custom_ua:
+            _headers['User-Agent'] = ctx.custom_ua
+        if ctx.referer:
+            _headers['Referer'] = ctx.referer
+        if ctx.cookie:
+            _headers['Cookie'] = ctx.cookie
+
+    access_token = access.propagated_access_token or "" if access else ""
+    src_id = f"channel:{canonical_key}"
+    cache_key = _wide_cache_key_for(upstream_url, ctx_id)
 
     def _rewrite_ts(seg_url: str) -> str:
-        if _should_proxy_iptv_chunk(seg_url, proxy_ts):
-            return _iptv_chunk_proxy_path(seg_url, custom_ua, referer, cookie, no_ua)
+        if _should_proxy_iptv_chunk(seg_url, 1):
+            return _iptv_chunk_handle_path(seg_url, ctx_id, src_id, src_label, access_token)
         return seg_url
 
-    cache_key = quote(target_url, safe='')
     if cache_key not in _wide_cache:
-        # 首次：快速连拉积累分片
         from collections import deque
         queue = deque(maxlen=_WIDE_WINDOW)
         seen = set()
         target_dur = 6
 
-        playlist_base_url = target_url
+        playlist_base_url = upstream_url
+        last_text = ""
         for attempt in range(4):
             try:
-                resp = await http_client.get(target_url, follow_redirects=True, timeout=6, headers=_headers)
+                resp = await http_client.get(upstream_url, follow_redirects=True, timeout=6, headers=_headers)
                 resp.raise_for_status()
                 playlist_base_url = str(resp.url)
+                last_text = resp.text
                 lines = resp.text.splitlines()
                 media_seq = 0
                 i = 0
@@ -2998,71 +2829,74 @@ async def iptv_wide_playlist(target_url: str = '', proxy_ts: int = 0, custom_ua:
             if attempt < 3:
                 await asyncio.sleep(0.3)
 
-        # Extract metadata lines from the last successful fetch
-        meta_lines = _extract_hls_meta_lines(resp.text, playlist_base_url, proxy_ts=proxy_ts, custom_ua=custom_ua, referer=referer, cookie=cookie, no_ua=no_ua) if 'resp' in dir() else []
+        meta_lines = _extract_hls_meta_lines(last_text, playlist_base_url, ctx_id, src_id, src_label, access_token=access_token, proxy_ts=1) if last_text else []
 
         cache = {
             'queue': queue,
             'seen': seen,
             'target_duration': target_dur,
             'meta': meta_lines,
+            'base_url': playlist_base_url,
+            'raw_meta_text': last_text,
         }
         _wide_cache[cache_key] = cache
         _wide_cache[cache_key + '_ts'] = time.time()
-        asyncio.create_task(_wide_refresher(cache_key, target_url, custom_ua, referer, cookie, no_ua))
+        asyncio.create_task(_wide_refresher(cache_key, upstream_url, ctx_id, src_id, src_label))
 
-        # 返回扩展窗口 playlist
         if queue:
-            lines = [
+            out_lines = [
                 '#EXTM3U', '#EXT-X-VERSION:3',
                 f'#EXT-X-TARGETDURATION:{target_dur}',
                 f'#EXT-X-MEDIA-SEQUENCE:{queue[0]["seq"]}',
             ]
-            for m in cache.get('meta', []):
+            for m in meta_lines:
                 if not m.upper().startswith('#EXT-X-VERSION:'):
-                    lines.append(m)
+                    out_lines.append(m)
             for seg in queue:
-                lines.append(f'#EXTINF:{seg["dur"]},')
-                lines.append(_rewrite_ts(seg['url']))
-            content = '\n'.join(lines)
+                out_lines.append(f'#EXTINF:{seg["dur"]},')
+                out_lines.append(_rewrite_ts(seg['url']))
+            content = '\n'.join(out_lines)
             return Response(content=content, media_type="application/x-mpegURL",
                 headers={'Cache-Control': 'no-cache, no-store, must-revalidate'})
-        # 直接转发
+        # 没拿到 segment（可能是 master playlist），直接重写转发
         try:
-            resp = await http_client.get(target_url, follow_redirects=True, timeout=6, headers=_headers)
+            resp = await http_client.get(upstream_url, follow_redirects=True, timeout=6, headers=_headers)
             _ensure_hls_playlist_text(resp.text, str(resp.url))
-            rewritten = _rewrite_iptv_wide_m3u8_text(resp.text, str(resp.url), proxy_ts=proxy_ts, custom_ua=custom_ua, referer=referer, cookie=cookie, no_ua=no_ua)
+            rewritten = _rewrite_iptv_wide_m3u8_text(resp.text, str(resp.url), ctx_id, src_id, src_label, access_token=access_token, proxy_ts=1)
             return Response(content=rewritten, media_type="application/x-mpegURL")
         except httpx.HTTPError as exc:
             raise HTTPException(status_code=502, detail=f"拉取失败: {exc}") from exc
 
-    # 已存在缓存：返回扩展 playlist
+    # 命中缓存：返回扩展窗口 playlist。重写时根据当前请求的 access_token 重生成（meta + chunk）
     _wide_cache[cache_key + '_ts'] = time.time()
     cache = _wide_cache[cache_key]
     queue = cache['queue']
     if not queue:
         try:
-            resp = await http_client.get(target_url, follow_redirects=True, timeout=6, headers=_headers)
+            resp = await http_client.get(upstream_url, follow_redirects=True, timeout=6, headers=_headers)
             _ensure_hls_playlist_text(resp.text, str(resp.url))
-            rewritten = _rewrite_iptv_wide_m3u8_text(resp.text, str(resp.url), proxy_ts=proxy_ts, custom_ua=custom_ua, referer=referer, cookie=cookie, no_ua=no_ua)
+            rewritten = _rewrite_iptv_wide_m3u8_text(resp.text, str(resp.url), ctx_id, src_id, src_label, access_token=access_token, proxy_ts=1)
             return Response(content=rewritten, media_type="application/x-mpegURL")
         except httpx.HTTPError as exc:
             raise HTTPException(status_code=502, detail=f"拉取失败: {exc}") from exc
 
     target_dur = cache.get('target_duration', 6)
-    lines = [
+    base_url = cache.get('base_url') or upstream_url
+    raw_meta_text = cache.get('raw_meta_text') or ""
+    meta_lines = _extract_hls_meta_lines(raw_meta_text, base_url, ctx_id, src_id, src_label, access_token=access_token, proxy_ts=1) if raw_meta_text else []
+    out_lines = [
         '#EXTM3U',
         '#EXT-X-VERSION:3',
         f'#EXT-X-TARGETDURATION:{target_dur}',
         f'#EXT-X-MEDIA-SEQUENCE:{queue[0]["seq"]}',
     ]
-    for m in cache.get('meta', []):
+    for m in meta_lines:
         if not m.upper().startswith('#EXT-X-VERSION:'):
-            lines.append(m)
+            out_lines.append(m)
     for seg in queue:
-        lines.append(f'#EXTINF:{seg["dur"]},')
-        lines.append(_rewrite_ts(seg['url']))
-    content = '\n'.join(lines)
+        out_lines.append(f'#EXTINF:{seg["dur"]},')
+        out_lines.append(_rewrite_ts(seg['url']))
+    content = '\n'.join(out_lines)
     return Response(
         content=content,
         media_type="application/x-mpegURL",
@@ -3070,15 +2904,23 @@ async def iptv_wide_playlist(target_url: str = '', proxy_ts: int = 0, custom_ua:
     )
 
 
-# ── 旧代理（不变）──
+# ── RTSP 代理内部入口（公共路由由 routers/media_proxy.py 提供）──
 
-@app.get("/api/iptv/proxy/rtsp.m3u8")
-async def iptv_proxy_rtsp_playlist(target_url: str = '', custom_ua: str = '', compat: int = 0):
+
+async def serve_rtsp_playlist_response(
+    *,
+    target_url: str,
+    custom_ua: str = "",
+    compat: bool = False,
+) -> FileResponse:
+    """供 media_proxy router 调用的 RTSP 内部入口。
+
+    handle payload 已通过 SSRF 校验，此处不再做 URL 校验。
+    """
     if not target_url:
         raise HTTPException(status_code=400, detail="缺少 target_url")
-
     try:
-        session_id, playlist_path = await _ensure_rtsp_hls_session(target_url, custom_ua, compat=bool(compat))
+        session_id, playlist_path = await _ensure_rtsp_hls_session(target_url, custom_ua, compat=compat)
     except HTTPException:
         raise
     except Exception as exc:
@@ -3095,8 +2937,9 @@ async def iptv_proxy_rtsp_playlist(target_url: str = '', custom_ua: str = '', co
     )
 
 
-@app.get("/api/iptv/proxy/rtsp/segments/{session_id}/{filename}")
-async def iptv_proxy_rtsp_segment(session_id: str, filename: str):
+@app.get("/api/media/proxy/rtsp-segments/{session_id}/{filename}", dependencies=[Depends(require_media_access)])
+async def media_proxy_rtsp_segment(session_id: str, filename: str):
+    """RTSP→HLS 本地分片（不签 handle，由 session_id 鉴权）。"""
     if not re.fullmatch(r"[0-9a-f]{24}", session_id) or not RTSP_SEGMENT_RE.fullmatch(filename):
         raise HTTPException(status_code=400, detail="无效的分片地址")
 
@@ -3114,19 +2957,26 @@ async def iptv_proxy_rtsp_segment(session_id: str, filename: str):
     )
 
 
-@app.get("/api/iptv/proxy/stream")
-async def iptv_proxy_stream(request: Request, target_url: str = '', custom_ua: str = '', referer: str = '', stream_type: str = ''):
-    if not target_url:
-        raise HTTPException(status_code=400, detail="缺少 target_url")
+async def serve_iptv_proxy_stream_response(
+    *,
+    request: Request,
+    target_url: str,
+    upstream_headers: dict[str, str],
+    stream_type: str = "",
+) -> StreamingResponse:
+    """供 media_proxy router 调用的 MPEG-TS/FLV 流代理。
 
-    validate_target_url(target_url)
+    handle payload 已通过 SSRF 校验，reconnect 内部直接使用上游 URL。
+    """
     parsed = urlparse(target_url)
-    upstream_headers = {
-        'User-Agent': custom_ua or CDN_REQUEST_HEADERS['User-Agent'],
-        'Accept': '*/*',
-        'Connection': 'keep-alive',
-        'Referer': referer or f'{parsed.scheme}://{parsed.netloc}/',
+    headers = {
+        "User-Agent": upstream_headers.get("User-Agent", CDN_REQUEST_HEADERS["User-Agent"]),
+        "Accept": "*/*",
+        "Connection": "keep-alive",
+        "Referer": upstream_headers.get("Referer", f"{parsed.scheme}://{parsed.netloc}/"),
     }
+    if upstream_headers.get("Cookie"):
+        headers["Cookie"] = upstream_headers["Cookie"]
 
     stream_timeout = httpx.Timeout(None, connect=10.0, read=IPTV_STREAM_READ_TIMEOUT_SECONDS)
     stream_client = httpx.AsyncClient(
@@ -3136,7 +2986,7 @@ async def iptv_proxy_stream(request: Request, target_url: str = '', custom_ua: s
     )
 
     async def open_upstream() -> httpx.Response:
-        req = stream_client.build_request("GET", target_url, headers=upstream_headers)
+        req = stream_client.build_request("GET", target_url, headers=headers)
         response: httpx.Response | None = None
         try:
             response = await stream_client.send(req, stream=True)
@@ -3273,7 +3123,7 @@ async def iptv_proxy_stream(request: Request, target_url: str = '', custom_ua: s
         finally:
             await stream_client.aclose()
 
-    stream_kind = (stream_type or '').strip().lower()
+    stream_kind = (stream_type or "").strip().lower()
     media_type = "video/x-flv" if stream_kind == "http_flv" else "video/MP2T"
 
     return StreamingResponse(
@@ -3286,65 +3136,10 @@ async def iptv_proxy_stream(request: Request, target_url: str = '', custom_ua: s
     )
 
 
-@app.get("/api/iptv/proxy/playlist.m3u8")
-async def iptv_proxy_playlist(target_url: str = '', referer: str = '', compat: int = 0):
-    if not target_url:
-        raise HTTPException(status_code=400, detail="缺少 target_url")
-
-    if urlparse(target_url).scheme.lower() == "rtsp":
-        return await iptv_proxy_rtsp_playlist(target_url=target_url, compat=compat)
-
-    try:
-        headers = {'Referer': referer} if referer else None
-        resp = await http_client.get(target_url, follow_redirects=True, timeout=8, headers=headers)
-        resp.raise_for_status()
-    except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"拉取 M3U8 失败: {exc}") from exc
-
-    rewritten = rewrite_m3u8_text(resp.text, target_url, 'iptv')
-    return Response(
-        content=rewritten,
-        media_type="application/x-mpegURL",
-        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
-    )
-
-
-@app.get("/api/iptv/proxy/chunk.ts")
-async def iptv_proxy_chunk(target_url: str = '', custom_ua: str = '', referer: str = '', cookie: str = '', no_ua: int = 0):
-    if not target_url:
-        raise HTTPException(status_code=400, detail="缺少 target_url")
-
-    _upstream_headers = {}
-    if not no_ua:
-        _upstream_headers['User-Agent'] = custom_ua or 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130.0.0.0 Safari/537.36'
-    elif custom_ua:
-        _upstream_headers['User-Agent'] = custom_ua
-    if referer:
-        _upstream_headers['Referer'] = referer
-    if cookie:
-        _upstream_headers['Cookie'] = cookie
-
-    try:
-        upstream = await http_client.get(target_url, follow_redirects=True, headers=_upstream_headers)
-        upstream.raise_for_status()
-    except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"拉取分片失败: {exc}") from exc
-
-    # Forward upstream Content-Type, fallback by extension
-    content_type = upstream.headers.get('content-type', '')
-    if not content_type or content_type == 'application/octet-stream':
-        ext = urlparse(target_url).path.rsplit('.', 1)[-1].lower() if '.' in urlparse(target_url).path else ''
-        content_type = {
-            'ts': 'video/MP2T',
-            'm4s': 'video/mp4',
-            'mp4': 'video/mp4',
-            'fmp4': 'video/mp4',
-            'm4v': 'video/mp4',
-            'aac': 'audio/aac',
-            'mp3': 'audio/mpeg',
-        }.get(ext, 'application/octet-stream')
-
-    return Response(content=upstream.content, media_type=content_type)
+def config_rtsp_proxy_enabled() -> bool:
+    """供 media_proxy router 同步查询当前 RTSP 策略。"""
+    from core.settings_service import get_effective_settings_sync
+    return get_effective_settings_sync().enable_rtsp_proxy
 
 
 # ── EPG ──
@@ -3352,7 +3147,7 @@ async def iptv_proxy_chunk(target_url: str = '', custom_ua: str = '', referer: s
 import epg as _epg
 
 
-@app.post("/api/iptv/epg/sources")
+@app.post("/api/admin/epg/sources", dependencies=[Depends(require_admin)])
 async def add_epg_source(request: Request):
     body = await request.json()
     url = (body.get('url') or '').strip()
@@ -3366,18 +3161,18 @@ async def add_epg_source(request: Request):
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-@app.get("/api/iptv/epg/sources")
+@app.get("/api/admin/epg/sources", dependencies=[Depends(require_admin)])
 async def list_epg_sources():
     return await db.get_epg_sources()
 
 
-@app.delete("/api/iptv/epg/sources/{source_id}")
+@app.delete("/api/admin/epg/sources/{source_id}", dependencies=[Depends(require_admin)])
 async def delete_epg_source(source_id: int):
     await db.delete_epg_source(source_id)
     return {"ok": True}
 
 
-@app.post("/api/iptv/epg/refresh")
+@app.post("/api/admin/epg/refresh", dependencies=[Depends(require_admin)])
 async def refresh_epg():
     asyncio.create_task(_epg.refresh_epg_sources(http_client))
     return {"ok": True}
@@ -3443,7 +3238,7 @@ def _epg_nearest_date(requested_date: str, available_dates: list[str]) -> str:
     )
 
 
-@app.get("/api/iptv/epg/programs/{canonical_key}")
+@app.get("/api/iptv/epg/programs/{canonical_key}", dependencies=[Depends(require_browse_access)])
 async def get_epg_programs(canonical_key: str, date: str = '', tz: str = ''):
     em = await db.get_channel_epg_map(canonical_key)
     if not em or not em.get('epg_channel_id'):
@@ -3516,7 +3311,7 @@ async def get_epg_programs(canonical_key: str, date: str = '', tz: str = ''):
     }
 
 
-@app.post("/api/iptv/epg/batch-current")
+@app.post("/api/iptv/epg/batch-current", dependencies=[Depends(require_browse_access)])
 async def batch_current_programs(request: Request):
     body = await request.json()
     keys = body.get('canonical_keys', [])
@@ -3525,7 +3320,7 @@ async def batch_current_programs(request: Request):
     return await db.batch_get_current_programs(keys)
 
 
-@app.put("/api/iptv/epg/bind/{canonical_key}")
+@app.put("/api/admin/epg/bind/{canonical_key}", dependencies=[Depends(require_admin)])
 async def bind_epg_channel(canonical_key: str, request: Request):
     body = await request.json()
     await db.upsert_channel_epg_map(
@@ -3541,7 +3336,7 @@ async def bind_epg_channel(canonical_key: str, request: Request):
     return {"ok": True}
 
 
-@app.delete("/api/iptv/epg/bind/{canonical_key}")
+@app.delete("/api/admin/epg/bind/{canonical_key}", dependencies=[Depends(require_admin)])
 async def unbind_epg_channel(canonical_key: str):
     await db.upsert_channel_epg_map(
         canonical_key,
@@ -3555,7 +3350,7 @@ async def unbind_epg_channel(canonical_key: str):
     return {"ok": True}
 
 
-@app.get("/api/iptv/epg/match-status")
+@app.get("/api/iptv/epg/match-status", dependencies=[Depends(require_browse_access)])
 async def epg_match_status():
     maps = await db.get_all_channel_epg_maps()
     return [{"canonical_key": m['canonical_key'], "status": m['match_status'], "epg_channel_id": m.get('epg_channel_id', ''), "confidence": m.get('confidence', 0)} for m in maps]
@@ -3614,24 +3409,37 @@ def _absolute_api_url(request: Request, path: str) -> str:
 
 
 def _iptv_proxy_path_for_source(source: dict) -> str:
-    url = str(source.get('url') or '').strip()
-    custom_ua = str(source.get('custom_ua') or '').strip()
-    referer = str(source.get('referer') or '').strip()
-    ua = f'&custom_ua={quote(custom_ua, safe="")}' if custom_ua else ''
-    ref = f'&referer={quote(referer, safe="")}' if referer else ''
-    source_type = _source_type(source)
-    if source_type == 'adapter':
-        return _iptv_adapter_play_path(url)
-    if source_type == 'rtsp':
-        return f'/api/iptv/proxy/rtsp.m3u8?target_url={quote(url, safe="")}{ua}'
-    if source_type in {'mpegts', 'http_flv'}:
-        stream_type = '&stream_type=http_flv' if source_type == 'http_flv' else ''
-        return f'/api/iptv/proxy/stream?target_url={quote(url, safe="")}{ua}{ref}{stream_type}'
-    return f'/api/iptv/proxy/wide.m3u8?proxy_ts=1{ua}{ref}&target_url={quote(url, safe="")}'
+    """用于 M3U 导出：按 source 的 canonical_key 生成 media API 入口。
+
+    不再把 ``target_url=`` / Header 明文编入 query。
+    导出的 .m3u 中每条频道地址都是：
+
+        /api/media/channel/{canonical_key}/playlist.m3u8
+
+    外部播放器通过 ``?access_token=wbm_...`` 传递 Media Credential。
+    canonical_key 从频道聚合表中取，source dict 上没有该字段时回退到
+    旧 ``source['url']`` 产生一个 channel-key-hash 的中间入口（极少触发）。
+    """
+    canonical_key = str(source.get('canonical_key') or '')
+    if not canonical_key:
+        # 极少数 source 脱离了聚合上下文（不到一轮）；回退到按 url hash 的入口
+        import hashlib
+        canonical_key = "src_" + hashlib.sha256(
+            str(source.get('url') or '').encode()
+        ).hexdigest()[:20]
+    return f"/api/media/channel/{quote(canonical_key, safe='')}/playlist.m3u8"
 
 
-def _iptv_proxy_url_for_source(source: dict, request: Request) -> str:
-    return _absolute_api_url(request, _iptv_proxy_path_for_source(source))
+def _iptv_proxy_url_for_source(source: dict, request: Request, *, access: object | None = None) -> str:
+    """对外 URL + 可选 Media Credential 附加。
+
+    ``access`` 应为 ``MediaAccessContext``（仅在确认为 credential 时透传 token）。
+    """
+    base = _absolute_api_url(request, _iptv_proxy_path_for_source(source))
+    token = getattr(access, 'propagated_access_token', None) or ""
+    if not token:
+        return base
+    return f"{base}?access_token={quote(token, safe='')}"
 
 
 def _m3u_attrs_for_channel(channel: dict, include_epg: bool, include_logo: bool) -> str:
@@ -3679,7 +3487,7 @@ def _format_m3u_options(source: dict | None) -> list[str]:
 
 
 def _subscription_urls_for_channel(
-    channel: dict, mode: str, request: Request, healthy_only: bool, include_rtsp: bool
+    channel: dict, mode: str, request: Request, healthy_only: bool, include_rtsp: bool, *, access: object = None
 ) -> list[tuple[str, dict | None]]:
     """返回 [(url, source_for_options), ...]。
 
@@ -3712,7 +3520,7 @@ def _subscription_urls_for_channel(
         return out
 
     if mode == 'proxy':
-        return [(_iptv_proxy_url_for_source(source, request), None) for source in sources]
+        return [(_iptv_proxy_url_for_source(source, request, access=access), None) for source in sources]
 
     direct_sources = []
     proxy_only_sources = []
@@ -3725,8 +3533,8 @@ def _subscription_urls_for_channel(
 
     out: list[tuple[str, dict | None]] = []
     out.extend((source['url'], source) for source in direct_sources)
-    out.extend((_iptv_proxy_url_for_source(source, request), None) for source in direct_sources)
-    out.extend((_iptv_proxy_url_for_source(source, request), None) for source in proxy_only_sources)
+    out.extend((_iptv_proxy_url_for_source(source, request, access=access), None) for source in direct_sources)
+    out.extend((_iptv_proxy_url_for_source(source, request, access=access), None) for source in proxy_only_sources)
     return out
 
 
@@ -3739,6 +3547,7 @@ async def export_iptv_subscription(
     include_epg: bool = True,
     include_logo: bool = True,
     groups: str = '',
+    access: object = Depends(resolve_media_access),
 ):
     mode = (mode or 'hybrid').strip().lower()
     if mode not in IPTV_SUBSCRIPTION_MODES:
@@ -3757,7 +3566,7 @@ async def export_iptv_subscription(
     lines = ["#EXTM3U"]
     exported = 0
     for channel in channels:
-        urls = _subscription_urls_for_channel(channel, mode, request, healthy, rtsp)
+        urls = _subscription_urls_for_channel(channel, mode, request, healthy, rtsp, access=access)
         if not urls:
             continue
         attrs = _m3u_attrs_for_channel(channel, include_epg=epg, include_logo=logo)
@@ -3778,7 +3587,7 @@ async def export_iptv_subscription(
     )
 
 
-@app.get("/api/iptv/smart/{canonical_key}.m3u8")
+@app.get("/api/iptv/smart/{canonical_key}.m3u8", dependencies=[Depends(require_media_access)])
 async def iptv_smart_playlist(canonical_key: str, request: Request):
     channels, _groups = await _get_aggregated_iptv_channels()
     channel = next((ch for ch in channels if ch.get('canonical_key') == canonical_key), None)
@@ -3791,23 +3600,23 @@ async def iptv_smart_playlist(canonical_key: str, request: Request):
     ])
     for source in sources:
         source_type = _source_type(source)
+        # 把 canonical_key 注入 source dict，让 _iptv_proxy_path_for_source 能匹配
+        source_with_key = {**source, "canonical_key": canonical_key}
         try:
             if source_type == 'rtsp':
-                return await iptv_proxy_rtsp_playlist(
+                return await serve_rtsp_playlist_response(
                     target_url=source['url'],
                     custom_ua=source.get('custom_ua', ''),
-                    compat=0,
+                    compat=False,
                 )
             if source_type in {'mpegts', 'http_flv'}:
-                return RedirectResponse(_iptv_proxy_url_for_source(source, request), status_code=307)
+                return RedirectResponse(_iptv_proxy_url_for_source(source_with_key, request), status_code=307)
             if source_type == 'adapter':
-                return RedirectResponse(_iptv_proxy_url_for_source(source, request), status_code=307)
-            return await iptv_wide_playlist(
-                target_url=source['url'],
-                proxy_ts=1,
-                custom_ua=source.get('custom_ua', ''),
-                referer=source.get('referer', ''),
-                compat=0,
+                return RedirectResponse(_iptv_proxy_url_for_source(source_with_key, request), status_code=307)
+            # HLS: 直接通过 channel 入口渲染
+            return RedirectResponse(
+                f"/api/media/channel/{quote(canonical_key, safe='')}/playlist.m3u8",
+                status_code=307,
             )
         except HTTPException:
             continue
