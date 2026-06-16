@@ -1,14 +1,30 @@
 import asyncio
 import sqlite3
 import os
+import json
 from datetime import datetime, timezone
 
-DB_PATH = os.environ.get('WAVEFLOW_DB_PATH', os.path.join(os.path.dirname(__file__), 'data', 'waveflow.db'))
+DB_PATH_RAW = (
+    os.environ.get('WAVEFLOW_DB_PATH')
+    or os.path.join(os.path.dirname(__file__), 'data', 'waveflow.db')
+)
+# 转为 file: URI（允许 :memory: 多连接共享，以及正常路径）
+if DB_PATH_RAW == ":memory:":
+    DB_PATH = "file:waveflow?mode=memory&cache=shared"
+else:
+    DB_PATH = DB_PATH_RAW
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS app_settings (
+    key        TEXT PRIMARY KEY,
+    value_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    updated_by INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS subscriptions (
@@ -137,11 +153,53 @@ CREATE TABLE IF NOT EXISTS market_sources (
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS users (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    username      TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    role          TEXT NOT NULL DEFAULT 'admin',
+    created_at    TEXT NOT NULL,
+    updated_at    TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_hash   TEXT NOT NULL UNIQUE,
+    user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at   TEXT NOT NULL,
+    expires_at   TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    revoked_at   TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token_hash);
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+
+CREATE TABLE IF NOT EXISTS media_credentials (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_hash   TEXT NOT NULL UNIQUE,
+    name         TEXT NOT NULL,
+    scopes_json  TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    expires_at   TEXT DEFAULT '',
+    last_used_at TEXT DEFAULT '',
+    revoked_at   TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_media_credentials_token ON media_credentials(token_hash);
+
+-- 应用级密钥（用途隔离的对称根密钥）。
+-- 仅持久化「无法从环境变量提供」时自动生成的回退值。
+-- 不通过普通 app_settings 暴露，不允许通过设置面板修改。
+CREATE TABLE IF NOT EXISTS app_secrets (
+    name       TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 """
 
 
 def _connect() -> sqlite3.Connection:
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
@@ -228,6 +286,46 @@ async def set_setting(key: str, value: str):
     def _set():
         conn = _connect()
         conn.execute("INSERT OR REPLACE INTO settings(key, value) VALUES(?, ?)", (key, value))
+        conn.commit()
+        conn.close()
+    await asyncio.to_thread(_set)
+
+
+async def get_app_settings() -> dict:
+    def _get():
+        conn = _connect()
+        try:
+            rows = conn.execute("SELECT key, value_json FROM app_settings").fetchall()
+        except sqlite3.OperationalError:
+            conn.close()
+            return {}
+        conn.close()
+        result = {}
+        for row in rows:
+            try:
+                result[row['key']] = json.loads(row['value_json'])
+            except json.JSONDecodeError:
+                continue
+        return result
+    return await asyncio.to_thread(_get)
+
+
+async def set_app_settings(values: dict, updated_by: int | None = None) -> None:
+    def _set():
+        conn = _connect()
+        now = datetime.now(timezone.utc).isoformat()
+        for key, value in values.items():
+            conn.execute(
+                """
+                INSERT INTO app_settings(key, value_json, updated_at, updated_by)
+                VALUES(?, ?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value_json=excluded.value_json,
+                    updated_at=excluded.updated_at,
+                    updated_by=excluded.updated_by
+                """,
+                (key, json.dumps(value, ensure_ascii=False), now, updated_by),
+            )
         conn.commit()
         conn.close()
     await asyncio.to_thread(_set)
