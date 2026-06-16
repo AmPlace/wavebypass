@@ -85,6 +85,43 @@
 
     <p v-if="addError" class="mb-4 text-xs text-red-500">{{ addError }}</p>
 
+    <section
+      class="mb-6 rounded-2xl border border-black/5 bg-white/80 p-4 shadow-sm backdrop-blur-xl dark:border-white/10 dark:bg-neutral-800/50">
+      <div class="mb-4 flex items-center justify-between gap-3">
+        <h2 class="text-sm font-semibold text-neutral-800 dark:text-neutral-200">安全设置</h2>
+        <button type="button"
+          class="rounded-lg bg-neutral-100 px-2.5 py-1 text-xs text-neutral-600 transition-colors hover:bg-neutral-200 disabled:opacity-50 dark:bg-neutral-700 dark:text-neutral-300 dark:hover:bg-neutral-600"
+          :disabled="securitySaving || !securityLoaded" @click="saveSecuritySettings">
+          {{ securitySaving ? '保存中' : '保存' }}
+        </button>
+      </div>
+
+      <div class="grid gap-3 sm:grid-cols-2">
+        <label v-for="item in securityToggleItems" :key="item.key"
+          class="flex items-center justify-between gap-3 rounded-xl border border-neutral-200 bg-white/60 px-3 py-2.5 text-sm dark:border-neutral-700 dark:bg-neutral-900/40">
+          <span class="min-w-0">
+            <span class="block font-medium text-neutral-700 dark:text-neutral-200">{{ item.label }}</span>
+            <span v-if="isSecurityForced(item.key)" class="mt-0.5 block text-xs text-neutral-400">环境变量锁定</span>
+          </span>
+          <input v-model="securityDraft[item.key]" type="checkbox"
+            class="size-4 rounded accent-neutral-950 disabled:opacity-40 dark:accent-white"
+            :disabled="!securityLoaded || isSecurityForced(item.key)" />
+        </label>
+      </div>
+
+      <div class="mt-3 grid gap-3 sm:grid-cols-2">
+        <label v-for="item in securityNumberItems" :key="item.key"
+          class="block rounded-xl border border-neutral-200 bg-white/60 px-3 py-2.5 text-sm dark:border-neutral-700 dark:bg-neutral-900/40">
+          <span class="mb-1 block font-medium text-neutral-700 dark:text-neutral-200">{{ item.label }}</span>
+          <input v-model.number="securityDraft[item.key]" type="number" :min="item.min" :max="item.max"
+            class="w-full rounded-lg border border-neutral-200 bg-white px-3 py-1.5 text-sm text-neutral-700 outline-none focus:border-neutral-400 disabled:opacity-40 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-200"
+            :disabled="!securityLoaded || isSecurityForced(item.key)" />
+        </label>
+      </div>
+
+      <p v-if="securityError" class="mt-3 text-xs text-red-500">{{ securityError }}</p>
+    </section>
+
     <!-- 订阅列表 -->
     <div class="space-y-3">
       <div v-for="sub in subscriptions" :key="sub.id"
@@ -304,10 +341,13 @@ import {
   fetchSubscriptions, addSubscription, deleteSubscription, refreshSubscription, refreshAllSubscriptions,
   testAllChannels, testAllGlobal, fetchGlobalTestStatus, cancelTest,
 } from '../api/iptv'
+import { fetchSecuritySettings, updateSecuritySettings } from '../api/settings'
 import { API_BASE } from '../apiBase'
+import { useAuthStore } from '../stores/auth'
 import { useToastStore } from '../stores/toast'
 
 const toastStore = useToastStore()
+const authStore = useAuthStore()
 
 const subscriptions = ref([])
 const loading = ref(false)
@@ -341,6 +381,28 @@ const exportOptions = ref({
   includeLogo: true,
   groups: '',
 })
+const securityLoaded = ref(false)
+const securitySaving = ref(false)
+const securityError = ref('')
+const securityForced = ref(new Set())
+const securityDraft = ref({
+  anonymous_browse: true,
+  anonymous_playback: true,
+  allow_private: false,
+  allow_loopback: true,
+  session_max_age_days: 14,
+  media_credential_default_ttl_days: 90,
+})
+const securityToggleItems = [
+  { key: 'anonymous_browse', label: '匿名浏览' },
+  { key: 'anonymous_playback', label: '匿名播放' },
+  { key: 'allow_private', label: '允许私有地址源' },
+  { key: 'allow_loopback', label: '允许回环地址源' },
+]
+const securityNumberItems = [
+  { key: 'session_max_age_days', label: '登录有效天数', min: 1, max: 365 },
+  { key: 'media_credential_default_ttl_days', label: '播放凭证有效天数', min: 1, max: 3650 },
+]
 
 const exportModes = [
   {
@@ -383,6 +445,55 @@ async function loadSubscriptions() {
     console.error('加载订阅失败:', e)
   }
   loading.value = false
+}
+
+function applySecuritySettings(data) {
+  const settings = data?.settings || {}
+  securityForced.value = new Set(data?.forced || [])
+  securityDraft.value = {
+    ...securityDraft.value,
+    ...settings,
+  }
+  if (settings.anonymous_browse !== undefined) {
+    authStore.setup.anonymousBrowse = Boolean(settings.anonymous_browse)
+  }
+  if (settings.anonymous_playback !== undefined) {
+    authStore.setup.anonymousPlayback = Boolean(settings.anonymous_playback)
+  }
+  securityLoaded.value = true
+}
+
+function isSecurityForced(key) {
+  return securityForced.value.has(key)
+}
+
+async function loadSecuritySettings() {
+  securityError.value = ''
+  try {
+    applySecuritySettings(await fetchSecuritySettings())
+  } catch (e) {
+    securityError.value = e?.message || '安全设置加载失败'
+  }
+}
+
+async function saveSecuritySettings() {
+  if (!securityLoaded.value || securitySaving.value) return
+  securitySaving.value = true
+  securityError.value = ''
+  const payload = {}
+  for (const item of [...securityToggleItems, ...securityNumberItems]) {
+    if (!isSecurityForced(item.key)) {
+      payload[item.key] = securityDraft.value[item.key]
+    }
+  }
+  try {
+    applySecuritySettings(await updateSecuritySettings(payload))
+    toastStore.success('安全设置已保存')
+  } catch (e) {
+    securityError.value = e?.message || '安全设置保存失败'
+  } finally {
+    securitySaving.value = false
+  }
 }
 
 async function handleAdd() {
@@ -570,6 +681,7 @@ async function copySubscriptionUrl(mode) {
 
 onMounted(() => {
   loadSubscriptions()
+  loadSecuritySettings()
 })
 
 onBeforeUnmount(() => {
