@@ -2,9 +2,10 @@ services:
   backend:
     image: ghcr.io/amplace/waveflow-backend:latest
     container_name: waveflow-backend
-    ports:
-      - "8000:8000"
+    expose:
+      - "8000"
     environment:
+      WAVEFLOW_MODE: ${WAVEFLOW_MODE:-nas}
       HITFM_COOKIE: ${HITFM_COOKIE:-}
       GEO_RESTRICT: ${GEO_RESTRICT:-}
       GEO_BLOCKED_REGIONS: ${GEO_BLOCKED_REGIONS:-TW}
@@ -21,7 +22,7 @@ services:
     depends_on:
       - backend
     ports:
-      - "127.0.0.1:80:80"
+      - "${WAVEFLOW_PORT:-8080}:80"
     networks:
       - waveflow-net
     restart: unless-stopped
