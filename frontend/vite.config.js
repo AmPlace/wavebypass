@@ -14,8 +14,8 @@ export default defineConfig(({ mode }) => {
         registerType: 'autoUpdate',
         includeAssets: ['logos/*.png'],
         manifest: {
-          name: 'WaveBypass Radio',
-          short_name: 'WaveBypass',
+          name: 'WaveFlow Radio',
+          short_name: 'WaveFlow',
           description: '极简电台聚合播放器',
           theme_color: '#f8f8f7',
           background_color: '#f8f8f7',
