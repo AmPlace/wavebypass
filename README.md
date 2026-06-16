@@ -1,11 +1,11 @@
 <div align="center">
 
-# 📻 WaveBypass
-[![Demo](https://img.shields.io/badge/Demo-在线体验-blue?style=flat-square)](https://fm.bgm.gs) ![Stars](https://img.shields.io/github/stars/amplace/wavebypass?style=flat-square) ![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=flat-square&logo=FastAPI&logoColor=white) ![Docker](https://img.shields.io/badge/Docker-2496ED?style=flat-square&logo=docker&logoColor=white) [![License](https://img.shields.io/github/license/amplace/wavebypass)](./LICENSE)
+# 📻 WaveFlow
+[![Demo](https://img.shields.io/badge/Demo-在线体验-blue?style=flat-square)](https://fm.bgm.gs) ![Stars](https://img.shields.io/github/stars/amplace/waveflow?style=flat-square) ![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=flat-square&logo=FastAPI&logoColor=white) ![Docker](https://img.shields.io/badge/Docker-2496ED?style=flat-square&logo=docker&logoColor=white) [![License](https://img.shields.io/github/license/amplace/waveflow)](./LICENSE)
 
 **跨地区网络电台聚合网关与现代化 Web 播放器**
 
-WaveBypass 是一个流媒体聚合平台，它通过后端的智能测速与代理，结合前端的响应式 UI，让你在一个页面内流畅收听并管理来自不同国家和地区的优质电台源
+WaveFlow 是一个流媒体聚合平台，它通过后端的智能测速与代理，结合前端的响应式 UI，让你在一个页面内流畅收听并管理来自不同国家和地区的优质电台源
 </div>
 
 
@@ -71,32 +71,32 @@ docker compose up -d
 #### 1. 创建网络
 
 ```bash
-docker network create wavebypass-net
+docker network create waveflow-net
 ```
 
 #### 2. 启动后端
 
 ```bash
 docker run -d \
-  --name wavebypass-backend \
-  --network wavebypass-net \
+  --name waveflow-backend \
+  --network waveflow-net \
   -p 8000:8000 \
   -e HITFM_COOKIE="" \
   -e GEO_RESTRICT="0" \
   -e GEO_BLOCKED_REGIONS="" \
   --restart unless-stopped \
-  ghcr.io/amplace/wavebypass-backend:latest
+  ghcr.io/amplace/waveflow-backend:latest
 ```
 
 #### 3. 启动前端
 
 ```bash
 docker run -d \
-  --name wavebypass-frontend \
-  --network wavebypass-net \
+  --name waveflow-frontend \
+  --network waveflow-net \
   -p 80:80 \
   --restart unless-stopped \
-  ghcr.io/amplace/wavebypass-frontend:latest
+  ghcr.io/amplace/waveflow-frontend:latest
 ```
 
 </details>
@@ -109,9 +109,9 @@ docker run -d \
 #### 1. 后端
 
 ```bash
-git clone https://github.com/amplace/wavebypass.git
+git clone https://github.com/amplace/waveflow.git
 
-cd wavebypass/backend
+cd waveflow/backend
 
 pip install -r requirements.txt
 

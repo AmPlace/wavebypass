@@ -35,11 +35,11 @@ jobs:
         with:
           context: ./backend
           push: true
-          tags: ghcr.io/${{ env.OWNER_LC }}/wavebypass-backend:latest
+          tags: ghcr.io/${{ env.OWNER_LC }}/waveflow-backend:latest
 
       - name: 5. 构建并推送【前端】镜像
         uses: docker/build-push-action@v5
         with:
           context: ./frontend
           push: true
-          tags: ghcr.io/${{ env.OWNER_LC }}/wavebypass-frontend:latest
+          tags: ghcr.io/${{ env.OWNER_LC }}/waveflow-frontend:latest
