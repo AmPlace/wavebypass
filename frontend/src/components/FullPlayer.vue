@@ -730,7 +730,7 @@ function setFullPlayerChromeOpen(open) {
   if (open) {
     syncFullPlayerTheme()
   } else {
-    window.__wavebypassSyncThemeChrome?.()
+    window.__waveflowSyncThemeChrome?.()
   }
 }
 
@@ -1284,7 +1284,7 @@ function releaseWideProxyUrl(url) {
   }
 }
 
-const HLS_ABR_PATCH_KEY = '__wavebypassAbrNullGuard'
+const HLS_ABR_PATCH_KEY = '__waveflowAbrNullGuard'
 
 function patchHlsAbrNullGuard(hls) {
   const abr = hls?.abrController
@@ -1320,13 +1320,13 @@ function clearHlsInternalTimers(hls) {
 
 function trackHlsSource(hls, url) {
   patchHlsAbrNullGuard(hls)
-  if (hls && url) hls.__wavebypassSourceUrl = url
+  if (hls && url) hls.__waveflowSourceUrl = url
 }
 
 function releaseTrackedHls(hls) {
   clearRuntimeHandlerCleanup(hls)
   clearHlsInternalTimers(hls)
-  releaseWideProxyUrl(hls?.__wavebypassSourceUrl)
+  releaseWideProxyUrl(hls?.__waveflowSourceUrl)
 }
 
 function destroyIptvHls() {
@@ -1442,7 +1442,7 @@ async function resumeSoftPausedIptv(reason = 'resume') {
     clearStallRecoveryTimer()
     const sourceIndex = playerStore.iptvUrlIndex
     const entry = playerStore.iptvUrls[sourceIndex]
-    const sourceUrl = entry?.url || iptvHlsRef.value?.__wavebypassSourceUrl || ''
+    const sourceUrl = entry?.url || iptvHlsRef.value?.__waveflowSourceUrl || ''
     const usingProxy = Boolean(entry?.via_proxy)
 
     try {
@@ -1554,11 +1554,11 @@ async function loadYoutubeIframeApi(timeoutMs = 3000) {
 
     const timer = setTimeout(() => finish(Boolean(window.YT?.Player)), timeoutMs)
 
-    if (!document.querySelector('script[data-wavebypass-youtube-api="1"]')) {
+    if (!document.querySelector('script[data-waveflow-youtube-api="1"]')) {
       const script = document.createElement('script')
       script.src = 'https://www.youtube.com/iframe_api'
       script.async = true
-      script.dataset.wavebypassYoutubeApi = '1'
+      script.dataset.waveflowYoutubeApi = '1'
       script.onerror = () => {
         script.remove()
         finish(false)
@@ -2185,7 +2185,7 @@ async function switchIptvSource(index) {
 }
 
 function clearRuntimeHandlerCleanup(target) {
-  const cleanup = target?.__wavebypassRuntimeCleanup
+  const cleanup = target?.__waveflowRuntimeCleanup
   if (!cleanup) return
   try {
     cleanup()
@@ -2207,7 +2207,7 @@ function attachRuntimeHlsErrorHandlers(hls, sourceUrl, usingProxy, attemptId, so
   const cleanup = () => {
     hls.off(Hls.Events.FRAG_LOADED, onFragLoaded)
     hls.off(Hls.Events.ERROR, onError)
-    if (hls.__wavebypassRuntimeCleanup === cleanup) hls.__wavebypassRuntimeCleanup = null
+    if (hls.__waveflowRuntimeCleanup === cleanup) hls.__waveflowRuntimeCleanup = null
   }
 
   const switchToFallback = async (reason) => {
@@ -2241,7 +2241,7 @@ function attachRuntimeHlsErrorHandlers(hls, sourceUrl, usingProxy, attemptId, so
 
   hls.on(Hls.Events.FRAG_LOADED, onFragLoaded)
   hls.on(Hls.Events.ERROR, onError)
-  hls.__wavebypassRuntimeCleanup = cleanup
+  hls.__waveflowRuntimeCleanup = cleanup
 }
 
 function attachRuntimeMpegtsErrorHandlers(player, sourceUrl, usingProxy, attemptId, sourceIndex = -1) {
@@ -2263,7 +2263,7 @@ function attachRuntimeMpegtsErrorHandlers(player, sourceUrl, usingProxy, attempt
     clearCompleteWatchTimer()
     player.off(mpegts.Events.ERROR, onError)
     player.off(mpegts.Events.LOADING_COMPLETE, onComplete)
-    if (player.__wavebypassRuntimeCleanup === cleanup) player.__wavebypassRuntimeCleanup = null
+    if (player.__waveflowRuntimeCleanup === cleanup) player.__waveflowRuntimeCleanup = null
   }
 
   const switchToFallback = async (reason) => {
@@ -2348,7 +2348,7 @@ function attachRuntimeMpegtsErrorHandlers(player, sourceUrl, usingProxy, attempt
 
   player.on(mpegts.Events.ERROR, onError)
   player.on(mpegts.Events.LOADING_COMPLETE, onComplete)
-  player.__wavebypassRuntimeCleanup = cleanup
+  player.__waveflowRuntimeCleanup = cleanup
 }
 
 async function tryPlayIptv(url, usingProxy = false, customUa = '', attemptId = 0, sourceIndex = -1, playbackSourceType = '', options = {}) {
@@ -3905,7 +3905,7 @@ onMounted(() => {
   themeObserver = new MutationObserver(syncFullPlayerTheme)
   themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] })
   themeObserver.observe(document.body, { attributes: true, attributeFilter: ['class'] })
-  window.addEventListener('wavebypass-theme-chrome-sync', handleThemeChromeSync)
+  window.addEventListener('waveflow-theme-chrome-sync', handleThemeChromeSync)
   document.addEventListener('click', closeSourceMenu)
   window.addEventListener('resize', updateSourceMenuPosition)
   window.addEventListener('resize', scheduleMediaFrameSizeUpdate)
@@ -3927,7 +3927,7 @@ onBeforeUnmount(() => {
   mediaLayoutObserver = null
   themeObserver?.disconnect()
   themeObserver = null
-  window.removeEventListener('wavebypass-theme-chrome-sync', handleThemeChromeSync)
+  window.removeEventListener('waveflow-theme-chrome-sync', handleThemeChromeSync)
   document.removeEventListener('click', closeSourceMenu)
   window.removeEventListener('resize', updateSourceMenuPosition)
   window.removeEventListener('resize', scheduleMediaFrameSizeUpdate)

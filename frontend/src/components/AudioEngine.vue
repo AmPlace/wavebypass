@@ -36,7 +36,7 @@ function updateSystemMediaSession(stationId) {
     try {
       navigator.mediaSession.metadata = new MediaMetadata({
         title: meta.name || '未知频率',
-        artist: meta.subtitle || 'WaveBypass Radio',
+        artist: meta.subtitle || 'WaveFlow Radio',
         album: 'Live Stream',
         artwork: [{ src: finalLogo, sizes: '512x512', type: 'image/png' }],
       })

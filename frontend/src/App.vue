@@ -184,7 +184,7 @@ import AudioEngine from './components/AudioEngine.vue'
 import FullPlayer from './components/FullPlayer.vue'
 import ToastHost from './components/ToastHost.vue'
 
-const THEME_STORAGE_KEY = 'wavebypass-theme'
+const THEME_STORAGE_KEY = 'waveflow-theme'
 const isDark = ref(false)
 let mediaQuery = null
 
@@ -196,7 +196,7 @@ const { activeMode } = storeToRefs(playerStore)
 const router = useRouter()
 const route = useRoute()
 const hasDesktopShell = computed(() => true)
-const SIDEBAR_STORAGE_KEY = 'wavebypass-sidebar-collapsed'
+const SIDEBAR_STORAGE_KEY = 'waveflow-sidebar-collapsed'
 const sidebarCollapsed = ref(window.localStorage.getItem(SIDEBAR_STORAGE_KEY) === '1')
 const justActivatedLabel = ref('')
 watch(sidebarCollapsed, (value) => {
@@ -275,7 +275,7 @@ function updateThemeColor(isDarkMode = document.documentElement.classList.contai
 
   document.documentElement.style.setProperty('background-color', themeColor, 'important')
   document.documentElement.style.setProperty('color-scheme', colorScheme, 'important')
-  document.documentElement.style.setProperty('--wavebypass-page-bg', themeColor, 'important')
+  document.documentElement.style.setProperty('--waveflow-page-bg', themeColor, 'important')
   if (document.body) {
     document.body.style.setProperty('background-color', themeColor, 'important')
     document.body.style.setProperty('color-scheme', colorScheme, 'important')
@@ -284,12 +284,12 @@ function updateThemeColor(isDarkMode = document.documentElement.classList.contai
   appEl?.style.setProperty('background-color', themeColor, 'important')
   appEl?.style.setProperty('color-scheme', colorScheme, 'important')
 
-  window.dispatchEvent(new CustomEvent('wavebypass-theme-chrome-sync', {
+  window.dispatchEvent(new CustomEvent('waveflow-theme-chrome-sync', {
     detail: { isDarkMode, themeColor, refreshChrome, source },
   }))
 }
 
-window.__wavebypassSyncThemeChrome = updateThemeColor
+window.__waveflowSyncThemeChrome = updateThemeColor
 
 function applyTheme(source = 'applyTheme', options = {}) {
   const savedTheme = window.localStorage.getItem(THEME_STORAGE_KEY)
