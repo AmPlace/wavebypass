@@ -5,6 +5,7 @@
     :class="{ 'desktop-shell': hasDesktopShell, 'sidebar-collapsed': sidebarCollapsed }"
   >
     <aside
+      v-if="showAppShell"
       class="app-sidebar fixed bottom-0 left-0 top-0 z-40 hidden border-r border-[var(--border)] bg-[var(--sidebar-bg)] px-3 py-6 backdrop-blur-[10px] backdrop-saturate-110 lg:flex lg:flex-col"
     >
       <div class="sidebar-header relative mb-8 h-10">
@@ -79,7 +80,7 @@
       </nav>
     </aside>
 
-    <div class="fixed inset-x-0 top-0 z-50 bg-[var(--bg)] lg:hidden">
+    <div v-if="showAppShell" class="fixed inset-x-0 top-0 z-50 bg-[var(--bg)] lg:hidden">
       <div class="h-[env(safe-area-inset-top)]"></div>
       <div class="flex h-12 items-center justify-between px-4 sm:px-6">
         <div class="flex items-center rounded-full border border-[var(--border)] bg-[var(--bg-soft)]/70 p-0.5 text-xs font-medium shadow-sm shadow-black/[0.04] backdrop-blur-xl">
@@ -121,7 +122,7 @@
       </div>
     </div>
 
-    <div class="fixed right-10 top-6 z-30 hidden items-center gap-3 lg:flex">
+    <div v-if="showAppShell" class="fixed right-10 top-6 z-30 hidden items-center gap-3 lg:flex">
       <div
         class="flex h-11 items-center overflow-hidden rounded-full border border-[var(--border)] bg-[var(--surface)] text-[var(--text-secondary)] backdrop-blur-[12px] backdrop-saturate-110 transition-all duration-300 ease-out"
         :class="searchExpanded ? 'w-[260px] px-1' : 'w-11 px-0'"
@@ -164,11 +165,11 @@
       <router-view />
     </div>
 
-    <BottomPlayer />
+    <BottomPlayer v-if="showAppShell" />
 
-    <AudioEngine />
+    <AudioEngine v-if="showAppShell" />
 
-    <FullPlayer />
+    <FullPlayer v-if="showAppShell" />
 
     <ToastHost />
   </div>
@@ -195,7 +196,8 @@ const playerStore = usePlayerStore()
 const { activeMode } = storeToRefs(playerStore)
 const router = useRouter()
 const route = useRoute()
-const hasDesktopShell = computed(() => true)
+const showAppShell = computed(() => !route.meta.authPage)
+const hasDesktopShell = computed(() => showAppShell.value)
 const SIDEBAR_STORAGE_KEY = 'waveflow-sidebar-collapsed'
 const sidebarCollapsed = ref(window.localStorage.getItem(SIDEBAR_STORAGE_KEY) === '1')
 const justActivatedLabel = ref('')
