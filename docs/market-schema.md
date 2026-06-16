@@ -16,6 +16,12 @@ Market data is configuration only. WaveFlow does not download or execute third-p
   "schema_version": 1,
   "market_version": "2026.05.28",
   "updated_at": "2026-05-28T00:00:00+08:00",
+  "tag_definitions": {
+    "央视": { "priority": 100, "tone": "red", "emphasized": true, "aliases": ["CCTV", "CGTN"] },
+    "体育": { "priority": 90,  "tone": "blue", "emphasized": true, "aliases": ["sports", "sport", "赛事"] },
+    "电影": { "priority": 80,  "tone": "orange", "emphasized": true, "aliases": ["movie", "film"] },
+    "少儿": { "priority": 70,  "tone": "neutral", "emphasized": false, "aliases": ["kids", "children"] }
+  },
   "packages": [
     {
       "id": "japantv-public",
@@ -25,6 +31,9 @@ Market data is configuration only. WaveFlow does not download or execute third-p
       "version": "2026.05.28",
       "updated_at": "2026-05-28T00:00:00+08:00",
       "manifest_url": "packages/japantv-public/manifest.json",
+      "display": {
+        "badge": { "text": "JP", "tone": "sky" }
+      },
       "region": {
         "country": "JP",
         "province": null,
@@ -81,9 +90,65 @@ Recommended package fields:
 | `categories`, `tags` | Category filters and fuzzy discovery. |
 | `status`, `source_origin`, `source_policy`, `risk_level` | Source quality and risk hints. |
 | `importable`, `previewable`, `supported_in_v1`, `unsupported_reason` | V1 support status. |
-| `requires_proxy`, `requires_resolver`, `requires_cookie`, `requires_referer`, `requires_custom_ua` | Dependency badges. |
+| `requires_proxy`, `requires_resolver`, `requires_cookie`, `requires_referer`, `requires_custom_ua` | Capability hints. WaveFlow auto-routes `requires_proxy` packages through the backend proxy and resolves URLs by scheme automatically — these flags do not require user-side configuration. |
+| `display.badge.{text,tone}` | Optional explicit badge override. `text` ≤ 3 chars, no HTML/SVG/CSS. `tone` ∈ `neutral, rose, sky, emerald, orange, violet`. Invalid values fall back to the auto badge. |
 | `channel_count`, `source_count` | Package scale hints. |
 | `health`, `compatibility`, `contributors` | Optional richer details. |
+
+### Root-level `tag_definitions` (optional)
+
+A Market source may publish a controlled set of tag display rules at the root of `market.json`. They apply only to packages from that source; a third-party source cannot override another source's tags.
+
+| Field | Type | Constraints |
+| --- | --- | --- |
+| `priority` | integer | Clamped to `0..100`. Higher = more prominent. |
+| `tone` | enum | One of `neutral, red, blue, orange, green, violet`. |
+| `emphasized` | boolean | `false` forces a neutral tag chip even if `tone` is set. |
+| `aliases` | string[] | Each alias is normalized to the same label. Up to 16 aliases, each ≤ 32 chars. |
+
+#### `tag_definitions_mode` (optional, root-level)
+
+Choose how `tag_definitions` interact with the WaveFlow built-in defaults.
+
+| Mode | Behaviour |
+| --- | --- |
+| `inherit` (default) | Source `tag_definitions` are layered **on top of** the built-in `DEFAULT_TAG_RULES`. Tags not declared by the source still inherit built-in `priority`, `tone`, `emphasized`, and aliases. Substring matching against rule names is allowed (so `体育新闻` still inherits the `体育` rule), preserving historical display behaviour. |
+| `replace` | Only the rules declared in this source apply. Matching is **strict**: a tag must exactly equal a declared rule name (or one of its declared `aliases`). Substring containment is **not** considered, so declaring `体育` will not pull in `体育新闻` / `地方体育频道`. Tags that do not match any declaration render with neutral styling, get `priority = 0`, and keep their original order from the package's `categories` / `tags` arrays. Built-in aliases are not consulted, so an English alias never maps onto a built-in Chinese label. |
+
+Missing, non-string, or unknown values silently fall back to `inherit`. The mode is presentation-only — it never affects import, preview, capability flags, or security checks.
+
+#### Default behaviour (no configuration)
+
+Equivalent to:
+
+```json
+{ "tag_definitions_mode": "inherit" }
+```
+
+So even if a source ships **no** `tag_definitions` block, well-known tags such as `央视`, `体育`, `电影`, `少儿`, `卫视`, `新闻` still receive their built-in priority and accent colour. This is intentional, not a leak — sources that want a clean slate must set `tag_definitions_mode: "replace"` explicitly.
+
+#### Fully source-defined
+
+```json
+{
+  "tag_definitions_mode": "replace",
+  "tag_definitions": {
+    "体育": { "priority": 100, "tone": "blue", "emphasized": true }
+  }
+}
+```
+
+Anything not in this block — including built-in well-known tags — has `priority = 0`, no tone, and is rendered as a neutral chip. Items with equal priority preserve their package-level original order via stable sort.
+
+Resolution order on the client (`inherit` mode):
+`per-source tag_definitions` → built-in WaveFlow defaults → neutral fallback.
+
+Resolution order in `replace` mode:
+`per-source tag_definitions` → neutral fallback (no built-in lookup, no built-in alias mapping).
+
+Invalid rules are silently dropped without failing the whole source.
+
+Resolver behaviour is decided by the playback URL scheme at runtime; `tag_definitions` and `display.badge` only affect presentation.
 
 Do not put these execution fields in `market.json`:
 

@@ -280,7 +280,7 @@ async def list_sources() -> list[dict]:
 
 def _source_public(source: dict | None) -> dict:
     source = source or {}
-    return {
+    out = {
         "id": source.get("id"),
         "source_key": source.get("source_key", ""),
         "name": source.get("name", ""),
@@ -292,6 +292,15 @@ def _source_public(source: dict | None) -> dict:
         "last_status": source.get("last_status", ""),
         "last_error": source.get("last_error", ""),
     }
+    # tag_definitions / tag_definitions_mode 来自 market.json 根级，由
+    # _load_source_packages 在 source 字典中临时注入；DB 行不会有这些字段。
+    raw_mode = source.get("tag_definitions_mode") if isinstance(source, dict) else None
+    if isinstance(raw_mode, str) and raw_mode:
+        out["tag_definitions_mode"] = raw_mode
+    raw_defs = source.get("tag_definitions") if isinstance(source, dict) else None
+    if isinstance(raw_defs, dict) and raw_defs:
+        out["tag_definitions"] = raw_defs
+    return out
 
 
 def _package_source_id(source: dict, package_id: str) -> str:
@@ -349,6 +358,117 @@ async def delete_source(source_id: int) -> dict:
     return {"ok": True}
 
 
+# ── 受控的展示协议字段 ────────────────────────────────────────────────
+# Market 源只能向前端提供受控的展示建议（徽章文字 / 色调、Tag 优先级 / 色调 / 别名）。
+# 不允许任何 HTML、SVG、CSS class、自由色值；非法值一律忽略并回落到前端 fallback。
+
+BADGE_TONES = {"neutral", "rose", "sky", "emerald", "orange", "violet"}
+TAG_TONES = {"neutral", "red", "blue", "orange", "green", "violet"}
+TAG_DEFINITIONS_MODES = {"inherit", "replace"}
+DEFAULT_TAG_DEFINITIONS_MODE = "inherit"
+TAG_DEFS_MAX_ENTRIES = 256
+TAG_DEFS_MAX_ALIASES = 16
+TAG_LABEL_MAX_LEN = 32
+TAG_ALIAS_MAX_LEN = 32
+BADGE_TEXT_MAX_GRAPHEMES = 3
+
+
+def _safe_text(value, *, max_chars: int) -> str:
+    if not isinstance(value, str):
+        return ""
+    cleaned = value.strip()
+    if not cleaned:
+        return ""
+    # 拒绝 HTML / SVG / 标签 / 控制字符。
+    if "<" in cleaned or ">" in cleaned:
+        return ""
+    if any(ord(ch) < 0x20 for ch in cleaned):
+        return ""
+    if len(cleaned) > max_chars:
+        cleaned = cleaned[:max_chars]
+    return cleaned
+
+
+def _normalize_display(value) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, Any] = {}
+    badge_raw = value.get("badge")
+    if isinstance(badge_raw, dict):
+        text = _safe_text(badge_raw.get("text"), max_chars=BADGE_TEXT_MAX_GRAPHEMES * 4)
+        # 简单按字符数（非 grapheme cluster；CJK 全角 + emoji 边界由长度上限近似处理）。
+        if text:
+            text = text[:BADGE_TEXT_MAX_GRAPHEMES] if len(text) > BADGE_TEXT_MAX_GRAPHEMES else text
+        tone = badge_raw.get("tone")
+        tone = tone if tone in BADGE_TONES else ""
+        badge: dict[str, Any] = {}
+        if text:
+            badge["text"] = text
+        if tone:
+            badge["tone"] = tone
+        if badge:
+            out["badge"] = badge
+    return out
+
+
+def _normalize_tag_definitions_mode(value) -> str:
+    """规整化 market.json 根级 tag_definitions_mode。
+
+    inherit  —— 当前 Market 源 tag_definitions 叠加在 WaveFlow 内置 DEFAULT_TAG_RULES 之上（默认）。
+    replace  —— 仅使用当前 Market 源显式声明的 tag_definitions；未声明的标签按中性默认。
+
+    缺失 / 非字符串 / 非法值一律回退到 inherit；该字段不参与播放、能力或安全判断。
+    """
+    if isinstance(value, str) and value in TAG_DEFINITIONS_MODES:
+        return value
+    return DEFAULT_TAG_DEFINITIONS_MODE
+
+
+def _normalize_tag_definitions(value) -> dict:
+    """规整化 market.json 根级 tag_definitions：受控枚举 + 数量/长度上限。
+    非法字段静默丢弃，保证一个坏配置不会让整个 source 加载失败。
+    """
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for raw_label, raw_rule in list(value.items())[:TAG_DEFS_MAX_ENTRIES]:
+        label = _safe_text(raw_label, max_chars=TAG_LABEL_MAX_LEN)
+        if not label or not isinstance(raw_rule, dict):
+            continue
+        rule: dict[str, Any] = {}
+        # priority 限制 0–100。
+        prio = raw_rule.get("priority")
+        if isinstance(prio, bool):
+            prio_val = None
+        elif isinstance(prio, (int, float)):
+            prio_val = max(0, min(100, int(prio)))
+        else:
+            prio_val = None
+        if prio_val is not None:
+            rule["priority"] = prio_val
+        # tone 受控枚举。
+        tone = raw_rule.get("tone")
+        if tone in TAG_TONES:
+            rule["tone"] = tone
+        # emphasized 必须显式 boolean。
+        emp = raw_rule.get("emphasized")
+        if isinstance(emp, bool):
+            rule["emphasized"] = emp
+        # aliases 数组限长。
+        aliases_raw = raw_rule.get("aliases")
+        if isinstance(aliases_raw, list):
+            aliases: list[str] = []
+            for alias in aliases_raw[:TAG_DEFS_MAX_ALIASES]:
+                cleaned = _safe_text(alias, max_chars=TAG_ALIAS_MAX_LEN)
+                if cleaned:
+                    aliases.append(cleaned)
+            if aliases:
+                rule["aliases"] = aliases
+        if rule:
+            out[label] = rule
+    return out
+
+
 def _normalize_package(raw: dict, *, manifest_url: str = "", market_url: str = "", schema_warnings: list[str] | None = None) -> dict:
     package = deepcopy(raw or {})
     package.setdefault("schema_version", SCHEMA_VERSION)
@@ -377,6 +497,7 @@ def _normalize_package(raw: dict, *, manifest_url: str = "", market_url: str = "
     package.setdefault("manifest_url", manifest_url)
     package.setdefault("market_url", market_url)
     package.setdefault("schema_warnings", [])
+    package["display"] = _normalize_display(package.get("display"))
     if schema_warnings:
         package["schema_warnings"] = list(dict.fromkeys([*package.get("schema_warnings", []), *schema_warnings]))
 
@@ -457,6 +578,19 @@ async def _load_source_packages(source: dict) -> tuple[dict, list[dict]]:
     if market.get("schema_version", SCHEMA_VERSION) != SCHEMA_VERSION:
         raise MarketError("不支持的 Market schema_version", 400)
 
+    # 根级 tag_definitions / tag_definitions_mode：来自当前 Market 源的展示规则。
+    # 先做受控规整，再以浅拷贝注入到这个 source 字典里，让后续 _attach_source /
+    # _source_public 能把它们原样带到响应中。注入不会污染 DB 行
+    # （外层 source 是 list_market_sources 返回的浅拷贝）。
+    tag_definitions = _normalize_tag_definitions(market.get("tag_definitions"))
+    tag_definitions_mode = _normalize_tag_definitions_mode(market.get("tag_definitions_mode"))
+    market["tag_definitions"] = tag_definitions
+    market["tag_definitions_mode"] = tag_definitions_mode
+    source_with_defs = dict(source)
+    source_with_defs["tag_definitions_mode"] = tag_definitions_mode
+    if tag_definitions:
+        source_with_defs["tag_definitions"] = tag_definitions
+
     packages = []
     for item in market.get("packages", []):
         try:
@@ -465,7 +599,7 @@ async def _load_source_packages(source: dict) -> tuple[dict, list[dict]]:
             index_warnings = _schema_warnings(item, index=True)
             loaded = _normalize_package(item, market_url=final_url, schema_warnings=index_warnings)
             loaded["_manifest_loaded"] = not bool(loaded.get("manifest_url"))
-            packages.append(_attach_source(loaded, source, raw_id or loaded.get("id")))
+            packages.append(_attach_source(loaded, source_with_defs, raw_id or loaded.get("id")))
         except Exception as exc:
             fallback_id = str(item.get("id") or f"invalid-{len(packages) + 1}") if isinstance(item, dict) else f"invalid-{len(packages) + 1}"
             broken = _normalize_package(
@@ -478,10 +612,10 @@ async def _load_source_packages(source: dict) -> tuple[dict, list[dict]]:
             broken["previewable"] = False
             broken["importable"] = False
             broken["unsupported_reason"] = f"索引校验失败: {exc}"
-            packages.append(_attach_source(broken, source, fallback_id))
+            packages.append(_attach_source(broken, source_with_defs, fallback_id))
     for package in packages:
         package["_allow_private_fetch"] = allow_private
-    market["_source"] = _source_public({**source, "url": final_url})
+    market["_source"] = _source_public({**source_with_defs, "url": final_url})
     return market, packages
 
 
@@ -710,8 +844,8 @@ def _package_card(package: dict) -> dict:
         "requires_cookie", "requires_referer", "requires_custom_ua", "channel_count",
         "source_count", "health", "compatibility", "contributors", "importable",
         "previewable", "supported_in_v1", "unsupported_reason", "schema_warnings",
-        "manifest_url", "market_url", "market_source", "installed", "installed_version",
-        "auto_update", "update_available",
+        "manifest_url", "market_url", "market_source", "display", "installed",
+        "installed_version", "auto_update", "update_available",
     ]
     return {key: deepcopy(package.get(key)) for key in keys if key in package}
 
