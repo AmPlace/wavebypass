@@ -3,7 +3,7 @@ import sqlite3
 import os
 from datetime import datetime, timezone
 
-DB_PATH = os.environ.get('WAVEBYPASS_DB_PATH', os.path.join(os.path.dirname(__file__), 'data', 'wavebypass.db'))
+DB_PATH = os.environ.get('WAVEFLOW_DB_PATH', os.path.join(os.path.dirname(__file__), 'data', 'waveflow.db'))
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS settings (

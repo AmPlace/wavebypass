@@ -170,7 +170,7 @@ M3U8_CACHE: dict[str, dict[str, str | float]] = {}
 M3U8_CACHE_LOCKS: dict[str, asyncio.Lock] = {}
 
 
-logger = logging.getLogger("wavebypass")
+logger = logging.getLogger("waveflow")
 
 
 
@@ -385,7 +385,7 @@ async def _yunting_refresh_task() -> None:
         await asyncio.sleep(YUNTING_REFRESH_INTERVAL)
 
 
-RTSP_HLS_ROOT = Path(os.getenv("RTSP_HLS_ROOT") or (Path(tempfile.gettempdir()) / "wavebypass_rtsp_hls"))
+RTSP_HLS_ROOT = Path(os.getenv("RTSP_HLS_ROOT") or (Path(tempfile.gettempdir()) / "waveflow_rtsp_hls"))
 RTSP_HLS_SESSIONS: dict[str, dict] = {}
 RTSP_HLS_IDLE_TTL = 90
 RTSP_HLS_START_TIMEOUT = 18
@@ -685,7 +685,7 @@ async def lifespan(app: FastAPI):
     await yunting_client.aclose()
 
 app = FastAPI(
-    title="WaveBypass",
+    title="WaveFlow",
     description="用于聚合电台 m3u8 与 ts 切片代理的后端服务。",
     version="0.1.0",
     lifespan=lifespan, 

@@ -11,14 +11,14 @@ class ChannelOptionsPersistTest(unittest.TestCase):
 
     def setUp(self):
         self._tmpdir = tempfile.TemporaryDirectory()
-        os.environ["WAVEBYPASS_DB_PATH"] = os.path.join(self._tmpdir.name, "t.db")
+        os.environ["WAVEFLOW_DB_PATH"] = os.path.join(self._tmpdir.name, "t.db")
         # database 模块顶层读 _DB_PATH，需要按需 reload
         for mod in list(sys.modules):
             if mod == "database":
                 del sys.modules[mod]
 
     def tearDown(self):
-        os.environ.pop("WAVEBYPASS_DB_PATH", None)
+        os.environ.pop("WAVEFLOW_DB_PATH", None)
         self._tmpdir.cleanup()
         for mod in list(sys.modules):
             if mod == "database":

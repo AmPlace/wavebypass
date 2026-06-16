@@ -3,7 +3,7 @@
 设计要点：
 - 「硬黑名单」段（云元数据/链路本地/unspecified）永远挡，无论 ALLOW_PRIVATE 如何设置。
   这些地址没有任何合法流媒体用途，是公共代理探测元数据偷凭证的核心目标。
-- RFC1918 私网段由 WAVEBYPASS_ALLOW_PRIVATE 控制（默认放行），匹配 IPTV 内网源场景
+- RFC1918 私网段由 WAVEFLOW_ALLOW_PRIVATE 控制（默认放行），匹配 IPTV 内网源场景
   （RTSP 摄像头、自建 IPTV 网关、组播）。
 - DNS 解析后再判断 IP（防 DNS rebinding：攻击者用首次解析返回公网、二次解析返回内网的域名绕过）。
 """
@@ -26,7 +26,7 @@ _HARD_BLOCKED_NETWORKS = (
 )
 
 # 是否允许访问 RFC1918 私网/回环等地址。默认 1=允许（内网自用无感知）。
-ALLOW_PRIVATE = os.getenv("WAVEBYPASS_ALLOW_PRIVATE", "1").strip().lower() in {"1", "true", "yes", "on"}
+ALLOW_PRIVATE = os.getenv("WAVEFLOW_ALLOW_PRIVATE", "1").strip().lower() in {"1", "true", "yes", "on"}
 
 
 class UnsafeTargetError(ValueError):

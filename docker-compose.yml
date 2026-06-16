@@ -1,7 +1,7 @@
 services:
   backend:
-    image: ghcr.io/amplace/wavebypass-backend:latest
-    container_name: wavebypass-backend
+    image: ghcr.io/amplace/waveflow-backend:latest
+    container_name: waveflow-backend
     ports:
       - "8000:8000"
     environment:
@@ -9,26 +9,26 @@ services:
       GEO_RESTRICT: ${GEO_RESTRICT:-}
       GEO_BLOCKED_REGIONS: ${GEO_BLOCKED_REGIONS:-TW}
     volumes:
-      - wavebypass-data:/app/data
+      - waveflow-data:/app/data
     networks:
-      - wavebypass-net
+      - waveflow-net
     restart: unless-stopped
 
   # 前端服务
   frontend:
-    image: ghcr.io/amplace/wavebypass-frontend:latest
-    container_name: wavebypass-frontend
+    image: ghcr.io/amplace/waveflow-frontend:latest
+    container_name: waveflow-frontend
     depends_on:
       - backend
     ports:
       - "127.0.0.1:80:80"
     networks:
-      - wavebypass-net
+      - waveflow-net
     restart: unless-stopped
 
 networks:
-  wavebypass-net:
+  waveflow-net:
     driver: bridge
 
 volumes:
-  wavebypass-data:
+  waveflow-data:

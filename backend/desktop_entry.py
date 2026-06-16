@@ -13,8 +13,8 @@ def main():
     if args.data_dir:
         os.makedirs(args.data_dir, exist_ok=True)
         os.environ.setdefault(
-            "WAVEBYPASS_DB_PATH",
-            os.path.join(args.data_dir, "wavebypass.db"),
+            "WAVEFLOW_DB_PATH",
+            os.path.join(args.data_dir, "waveflow.db"),
         )
         os.environ.setdefault(
             "RTSP_HLS_ROOT",

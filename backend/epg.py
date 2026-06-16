@@ -15,7 +15,7 @@ import httpx
 from m3u8_parser import normalize_channel_name, _to_simplified, _channel_alias
 from alias import format_name
 
-logger = logging.getLogger("wavebypass.epg")
+logger = logging.getLogger("waveflow.epg")
 
 # 内置默认 EPG 源
 DEFAULT_EPG_SOURCES = [

@@ -10,7 +10,7 @@ import httpx
 
 from . import AdapterRequest, AdapterResolveError
 
-logger = logging.getLogger("wavebypass.adapters.woniu")
+logger = logging.getLogger("waveflow.adapters.woniu")
 
 # 蜗牛视频 / 湖南有线 直播 token 化接口。
 #
@@ -60,7 +60,7 @@ _TTL_SKEW = int(os.getenv("WONIU_TTL_SKEW", "600"))  # 提前 10 分钟过期，
 
 
 # 频道映射表（80+）。
-# key 是 wavebypass adapter 的 channel_key（M3U 里直接写数字 channel_id 也可以，
+# key 是 WaveFlow adapter 的 channel_key（M3U 里直接写数字 channel_id 也可以，
 # resolve_woniu 找不到 key 时会把纯数字当成 channel_id 直接用）。
 # value: {"name": str, "channel_id": str}
 WONIU_CHANNELS: dict[str, dict[str, str]] = {

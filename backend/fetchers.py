@@ -11,7 +11,7 @@ import httpx
 
 StationFetcher = Callable[[], Awaitable[str]]
 
-logger = logging.getLogger("wavebypass.fetchers")
+logger = logging.getLogger("waveflow.fetchers")
 
 
 import os
