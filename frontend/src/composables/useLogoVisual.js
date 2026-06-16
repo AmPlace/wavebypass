@@ -30,7 +30,8 @@ export function useLogoVisual(options = {}) {
   }
 
   function shouldShowLogo(item) {
-    options.onBeforeShow?.(item)
+    // onBeforeShow 已迁移到 IntersectionObserver（coverLoader.js），
+    // 不在渲染路径中触发网络请求
     const url = logoUrl(item)
     if (!url) return false
     return !failedLogoKeys.value[logoFailureKey(item)]

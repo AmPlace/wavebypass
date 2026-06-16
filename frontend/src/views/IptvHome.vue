@@ -58,6 +58,7 @@
             :aria-label="`播放 ${item.channel.name}`"
             :style="{ height: `${cardHeight}px` }"
             :disabled="isUnavailable(item.channel)"
+            :data-canonical-key="item.channel.canonical_key"
             class="channel-card group relative overflow-hidden rounded-[18px] border border-[var(--border)] bg-[var(--card-bg)] text-left outline-none transition duration-200 ease-out hover:-translate-y-0.5 hover:border-[var(--border-strong)] disabled:cursor-not-allowed disabled:opacity-45"
             :class="[defaultCoverClass(item.channel), { 'channel-card-current': isCurrentChannel(item.channel) }]"
             @click="playChannel(item.channel)"
@@ -110,13 +111,14 @@
 </template>
 
 <script setup>
-import { computed, inject, onBeforeUnmount, onMounted, ref, watch, watchEffect } from 'vue'
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, onUnmounted, ref, watch, watchEffect } from 'vue'
 import { useScroll, useThrottleFn } from '@vueuse/core'
 import { usePlayerStore } from '../stores/player'
 import { useToastStore } from '../stores/toast'
 import { fetchAggregatedChannels, fetchAdapterCover } from '../api/iptv'
 import { useEpg } from '../composables/useEpg'
 import { useLogoVisual } from '../composables/useLogoVisual'
+import { loadCover, abortPendingCoverRequests } from '../composables/coverLoader'
 import TagFilterRow from '../components/TagFilterRow.vue'
 
 const playerStore = usePlayerStore()
@@ -142,8 +144,25 @@ const YOUTUBE_THUMBNAIL_VARIANTS = ['maxresdefault', 'hq720', 'hqdefault']
 // 这样后端给某个 adapter 加 ADAPTER_CAPABILITIES = {"cover": True} 后，前端不用改。
 const adapterCoverSupported = ref(new Set())
 const adapterCoverCache = ref({})    // canonical_key -> { cover_url, avatar_url }
-const adapterCoverInflight = new Map()
-const adapterCoverFailed = new Set()
+
+// 封面请求包装函数：传入 coverLoader
+async function _fetchCoverForKey(key, signal) {
+  const res = await fetchAdapterCover(key)
+  if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+  return res
+}
+
+function triggerCoverForChannel(ch) {
+  const key = ch?.canonical_key || ''
+  if (!key) return
+  // 已经在缓存中
+  if (adapterCoverCache.value[key]) return
+  loadCover(key, _fetchCoverForKey).then(entry => {
+    if (entry?.cover_url || entry?.avatar_url) {
+      adapterCoverCache.value = { ...adapterCoverCache.value, [key]: entry }
+    }
+  }).catch(() => {})
+}
 
 const {
   displayName: channelDisplayName,
@@ -159,7 +178,7 @@ const {
   getIdentityKey: channelLogoIdentityKey,
   getFailureKey: channelLogoCandidateKey,
   getVisualKey: (ch) => `${channelLogoIdentityKey(ch)}|${channelLogoUrl(ch)}`,
-  onBeforeShow: ensureAdapterCover,
+  // onBeforeShow: cover 加载已迁移到 IntersectionObserver（coverLoader）
   onBeforeClassify: (ch, { width, height }) => (
     isCurrentYoutubeThumbnailCandidate(ch)
     && width < 480
@@ -191,9 +210,8 @@ function ensureAdapterCover(ch) {
   if (adapterCoverCache.value[key]) return
   if (adapterCoverFailed.has(key)) return
   if (adapterCoverInflight.has(key)) return
-  const targetUrl = adapterCoverTargetUrl(ch)
-  if (!targetUrl) return
-  const promise = fetchAdapterCover(targetUrl)
+  // 直接传 canonical_key，不再查 targetUrl
+  const promise = fetchAdapterCover(key)
     .then(payload => {
       const cover = String(payload?.cover_url || '').trim()
       const avatar = String(payload?.avatar_url || '').trim()
@@ -226,6 +244,7 @@ function nextSortMode() {
 const currentSortLabel = computed(() => SORT_MODES.find(m => m.key === channelSortMode.value)?.label || '默认排序')
 
 function selectCategoryTab(tab) {
+  abortPendingCoverRequests()
   selectedGroup.value = tab === '全部' ? '' : tab
   loadChannels()
 }
@@ -253,11 +272,62 @@ async function loadChannels() {
     if (keys.length) {
       useEpg().batchCurrent(keys).then(m => { epgMap.value = m || {} })
     }
+    // 延迟触发封面加载：等 DOM 更新后，IntersectionObserver 开始观察可见卡片
+    await nextTick()
+    _observeVisibleCards()
   } catch (e) {
     console.error('加载频道失败:', e)
   }
   loading.value = false
 }
+
+// ── IntersectionObserver：仅加载视口附近频道的封面 ──
+let _coverObserver = null
+let _coverObservedKeys = new Set()
+
+function _setupCoverObserver() {
+  if (_coverObserver) _coverObserver.disconnect()
+  _coverObserver = new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        if (entry.isIntersecting) {
+          const key = entry.target.dataset.canonicalKey
+          if (key) {
+            _coverObserver.unobserve(entry.target)
+            _coverObservedKeys.delete(key)
+            triggerCoverForChannel({ canonical_key: key })
+          }
+        }
+      }
+    },
+    { rootMargin: '300px' }  // 提前 300px 加载
+  )
+}
+
+function _observeVisibleCards() {
+  if (!_coverObserver) _setupCoverObserver()
+  // 查找所有已渲染但未观察的 channel card 元素
+  const cards = document.querySelectorAll('.channel-card[data-canonical-key]')
+  for (const card of cards) {
+    const key = card.dataset.canonicalKey
+    if (key && !_coverObservedKeys.has(key)) {
+      _coverObservedKeys.add(key)
+      _coverObserver.observe(card)
+    }
+  }
+}
+
+onMounted(() => {
+  _setupCoverObserver()
+})
+
+onUnmounted(() => {
+  if (_coverObserver) {
+    _coverObserver.disconnect()
+    _coverObserver = null
+  }
+  _coverObservedKeys.clear()
+})
 
 const filteredChannels = computed(() => {
   const list = allChannels.value.slice()
