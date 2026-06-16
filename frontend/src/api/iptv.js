@@ -1,29 +1,12 @@
-import { API_BASE } from '../apiBase'
-
-async function request(url, options = {}) {
-  const ctrl = new AbortController()
-  const timer = setTimeout(() => ctrl.abort(), options.timeout || 15_000)
-  try {
-    const res = await fetch(`${API_BASE}${url}`, { signal: ctrl.signal, ...options })
-    clearTimeout(timer)
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}))
-      throw new Error(err.detail || `HTTP ${res.status}`)
-    }
-    return res
-  } catch (e) {
-    clearTimeout(timer)
-    throw e
-  }
-}
+import { apiRequest as request } from './client'
 
 export async function fetchSubscriptions() {
-  const res = await request('/api/iptv/subscriptions')
+  const res = await request('/api/admin/subscriptions')
   return res.json()
 }
 
 export async function addSubscription(url, title = '', custom_ua = '', force_proxy = false) {
-  const res = await request('/api/iptv/subscriptions', {
+  const res = await request('/api/admin/subscriptions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ url, title, custom_ua, force_proxy }),
@@ -32,16 +15,16 @@ export async function addSubscription(url, title = '', custom_ua = '', force_pro
 }
 
 export async function deleteSubscription(id) {
-  await request(`/api/iptv/subscriptions/${id}`, { method: 'DELETE' })
+  await request(`/api/admin/subscriptions/${id}`, { method: 'DELETE' })
 }
 
 export async function refreshSubscription(id) {
-  const res = await request(`/api/iptv/subscriptions/${id}/refresh`, { method: 'POST' })
+  const res = await request(`/api/admin/subscriptions/${id}/refresh`, { method: 'POST' })
   return res.json()
 }
 
 export async function refreshAllSubscriptions() {
-  const res = await request('/api/iptv/subscriptions/refresh-all', {
+  const res = await request('/api/admin/subscriptions/refresh-all', {
     method: 'POST',
     timeout: 120_000,
   })
@@ -53,22 +36,22 @@ export async function fetchChannels(subId, { group = '', search = '' } = {}) {
   if (group) params.set('group', group)
   if (search) params.set('search', search)
   const qs = params.toString()
-  const res = await request(`/api/iptv/subscriptions/${subId}/channels${qs ? '?' + qs : ''}`)
+  const res = await request(`/api/admin/subscriptions/${subId}/channels${qs ? '?' + qs : ''}`)
   return res.json()
 }
 
 export async function testAllChannels(subId) {
-  const res = await request(`/api/iptv/subscriptions/${subId}/test-all`, { method: 'POST' })
+  const res = await request(`/api/admin/subscriptions/${subId}/test-all`, { method: 'POST' })
   return res.json()
 }
 
 export async function cancelTest() {
-  const res = await request('/api/iptv/test-cancel', { method: 'POST' })
+  const res = await request('/api/admin/probes/test-cancel', { method: 'POST' })
   return res.json()
 }
 
 export async function fetchTestStatus(subId) {
-  const res = await request(`/api/iptv/subscriptions/${subId}/test-status`)
+  const res = await request(`/api/admin/subscriptions/${subId}/test-status`)
   return res.json()
 }
 
@@ -84,18 +67,20 @@ export async function fetchAggregatedChannels({ group = '', search = '' } = {}) 
 }
 
 export async function testAllGlobal() {
-  const res = await request('/api/iptv/test-all', { method: 'POST' })
+  const res = await request('/api/admin/probes/test-all', { method: 'POST' })
   return res.json()
 }
 
 export async function fetchGlobalTestStatus() {
-  const res = await request('/api/iptv/test-status')
+  const res = await request('/api/admin/probes/test-status')
   return res.json()
 }
 
 // ── adapter 直播间封面/头像（B站 / 斗鱼 / 虎牙 / 快手；其他 adapter 后端会返回空对象）──
-export async function fetchAdapterCover(targetUrl) {
-  const params = new URLSearchParams({ target_url: targetUrl })
-  const res = await request(`/api/iptv/adapter/cover?${params.toString()}`, { timeout: 8_000 })
+// 封面入口已迁移到 channel canonical_key：
+//   GET /api/media/channel/{canonical_key}/cover
+export async function fetchAdapterCover(canonicalKey) {
+  if (!canonicalKey) return { ok: true, cover_url: '', avatar_url: '', title: '', is_live: false }
+  const res = await request(`/api/media/channel/${encodeURIComponent(canonicalKey)}/cover`, { timeout: 8_000 })
   return res.json()
 }
