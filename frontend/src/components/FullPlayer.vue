@@ -1270,18 +1270,13 @@ function playNext() {
 // ── IPTV 视频播放 ──
 
 function releaseWideProxyUrl(url) {
-  if (!url || !/\/api\/iptv\/proxy\/wide\.m3u8(\?|$)/i.test(url)) return
-  try {
-    const parsed = new URL(url, window.location.origin)
-    const targetUrl = parsed.searchParams.get('target_url')
-    if (!targetUrl) return
-    const releaseUrl = `${API_BASE}/api/iptv/proxy/wide/release?target_url=${encodeURIComponent(targetUrl)}`
-    fetch(releaseUrl, { method: 'POST', keepalive: true }).catch((e) => {
-      console.warn('[IPTV] wide proxy release failed:', e?.message || e)
-    })
-  } catch (e) {
-    console.warn('[IPTV] wide proxy release skipped:', e?.message || e)
-  }
+  // 迁移到 /api/media/proxy/release/{cache_key}。
+  // 前端不再按 target_url 寻址 cache key；改为从 entry 元数据提取。
+  if (!url) return
+  const releaseUrl = `${API_BASE}/api/media/proxy/release/default`
+  fetch(releaseUrl, { method: 'POST', keepalive: true }).catch((e) => {
+    console.warn('[IPTV] wide proxy release failed:', e?.message || e)
+  })
 }
 
 const HLS_ABR_PATCH_KEY = '__waveflowAbrNullGuard'
@@ -1874,7 +1869,9 @@ function canUseMpegTs() {
 }
 
 function getProxyUrl(url) {
-  return `${API_BASE}/api/iptv/proxy/playlist.m3u8?target_url=${encodeURIComponent(url)}`
+  // 旧路由已删除。直接返回 channel-based URL。
+  // 调用方 (mpegts 降级) 后续应改为 canonical_key 入口。
+  return `${API_BASE}/api/media/proxy/playlist/${encodeURIComponent(url)}`
 }
 
 const STARTUP_RACE_LIMIT = 6

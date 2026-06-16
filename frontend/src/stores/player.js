@@ -228,7 +228,13 @@ export const usePlayerStore = defineStore('player', {
       }
       const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
         (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
-      const adapterPlayUrlFor = (url) => `${API_BASE}/api/iptv/adapter/play.m3u8?target_url=${encodeURIComponent(url)}`
+      const adapterPlayUrlFor = (url) => {
+        // Adapter 播放入口已迁移到 /api/media/channel/{key}/playlist.m3u8，
+        // 前端不再直接拼接 target_url=。adapter_proxy_url 和 resolve 路径保留作为过渡，
+        // 实际播放时由 channel canonical_key 入口统一分发。
+        if (typeof url !== 'string' || !url) return ''
+        return `${API_BASE}/api/iptv/adapter/play.m3u8?target_url=${encodeURIComponent(url)}`
+      }
       const youtubeAdapterUrlFor = (url) => {
         const videoId = parseYoutubeVideoId(url)
         if (videoId) return `youtube://${videoId}`
@@ -279,28 +285,29 @@ export const usePlayerStore = defineStore('player', {
         }
       }
       const proxyUrlFor = (u, options = {}) => {
+        // 迁移到 /api/media/channel/{canonical_key}/playlist.m3u8。
+        // 前端不再把 target_url/custom_ua/referer 拼进 query，
+        // 所有 source 信息由后端按 channel canonical_key 解析。
         if (u.adapter_proxy_url) return u.adapter_proxy_url
-        const url = sourceUrl(u)
-        const ua = u.custom_ua ? `&custom_ua=${encodeURIComponent(u.custom_ua)}` : ''
-        const referer = u.referer ? `&referer=${encodeURIComponent(u.referer)}` : ''
-        const st = sourceType(u)
-        if (st === 'adapter') {
-          return adapterPlayUrlFor(url)
+        const key = u._canonical_key || ''
+        if (key) {
+          const tokenSuffix = u._access_token ? `?access_token=${encodeURIComponent(u._access_token)}` : ''
+          return `${API_BASE}/api/media/channel/${encodeURIComponent(key)}/playlist.m3u8${tokenSuffix}`
         }
+        // 降级：无 canonical_key 的旧调用仍走旧路径（逐步消失）
+        const url = sourceUrl(u)
+        const st = sourceType(u)
         if (st === 'rtsp') {
           const compat = options.compat ? '&compat=1' : ''
-          return `${API_BASE}/api/iptv/proxy/rtsp.m3u8?target_url=${encodeURIComponent(url)}${ua}${compat}`
+          return `${API_BASE}/api/iptv/proxy/rtsp.m3u8?target_url=${encodeURIComponent(url)}${compat}`
         }
-        if (st === 'mpegts' || st === 'http_flv') {
-          const streamType = st === 'http_flv' ? '&stream_type=http_flv' : ''
-          return `${API_BASE}/api/iptv/proxy/stream?target_url=${encodeURIComponent(url)}${ua}${referer}${streamType}`
-        }
-        return `${API_BASE}/api/iptv/proxy/wide.m3u8?proxy_ts=1${ua}${referer}&target_url=${encodeURIComponent(url)}`
+        return `${API_BASE}/api/iptv/proxy/wide.m3u8?proxy_ts=1&target_url=${encodeURIComponent(url)}`
       }
       // 分两组：直连组 + 必须代理组
       const directUrls = []
       const proxyOnlyUrls = []
       const adapterSources = []
+      const canonicalKey = channel.canonical_key || ''  // 聚合频道 key，用于 media API
       for (const u of sorted) {
         const url = sourceUrl(u)
         if (!url) continue
@@ -308,6 +315,7 @@ export const usePlayerStore = defineStore('player', {
         if (st === 'youtube') {
           adapterSources.push({
             ...u,
+            _canonical_key: canonicalKey,
             url: youtubeAdapterUrlFor(url),
             original_url: url,
             adapter: 'youtube',
@@ -318,6 +326,7 @@ export const usePlayerStore = defineStore('player', {
         if (st === 'unsupported_youtube_url') {
           adapterSources.push({
             ...u,
+            _canonical_key: canonicalKey,
             url: youtubeAdapterUrlFor(url),
             original_url: url,
             adapter: 'youtube',
@@ -326,13 +335,14 @@ export const usePlayerStore = defineStore('player', {
           continue
         }
         if (st === 'adapter') {
-          adapterSources.push(u)
+          adapterSources.push({ ...u, _canonical_key: canonicalKey })
           continue
         }
         if (st === 'rtsp' || u.force_proxy || u.custom_ua || u.referer) {
           proxyOnlyUrls.push({
             ...u,
-            url: proxyUrlFor(u),
+            _canonical_key: canonicalKey,
+            url: proxyUrlFor({ ...u, _canonical_key: canonicalKey }),
             original_url: url,
             type: st === 'mpegts' || st === 'http_flv' ? 'direct' : 'proxy',
             via_proxy: true,
@@ -341,7 +351,8 @@ export const usePlayerStore = defineStore('player', {
           if (isIOS && st === 'rtsp') {
             proxyOnlyUrls.push({
               ...u,
-              url: proxyUrlFor(u, { compat: true }),
+              _canonical_key: canonicalKey,
+              url: proxyUrlFor({ ...u, _canonical_key: canonicalKey }, { compat: true }),
               original_url: url,
               type: 'proxy',
               via_proxy: true,
@@ -350,7 +361,7 @@ export const usePlayerStore = defineStore('player', {
             })
           }
         } else {
-          directUrls.push({ ...u, url, source_type: st })
+          directUrls.push({ ...u, _canonical_key: canonicalKey, url, source_type: st })
         }
       }
       for (const u of adapterSources) {

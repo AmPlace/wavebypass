@@ -277,15 +277,16 @@ async function tryFallbackUrls() {
   if (winner) _directProbeWinner = winner
 
   if (!winner && _directProbeWinner) {
-    const proxyUrl = `${API_BASE}/api/proxy/stream?url=${encodeURIComponent(_directProbeWinner.origUrl)}`
+    const proxyUrl = `${API_BASE}/api/media/channel/${encodeURIComponent(_fallbackStationId)}/playlist.m3u8`
     console.log(`[回退] 直连播放失败，直接中转源 #${_directProbeWinner.index + 1}...`)
     winner = { url: proxyUrl, origUrl: _directProbeWinner.origUrl, index: _directProbeWinner.index, type: 'proxy' }
   }
 
   if (!winner) {
-    const proxyUrls = urls.map((u) => `${API_BASE}/api/proxy/stream?url=${encodeURIComponent(u)}`)
-    console.log(`[回退] 直连全败，并发中转探测 ${proxyUrls.length} 个源...`)
-    winner = await probeParallel(proxyUrls, stationId, 'proxy')
+    // 没有更多回退：走频道入口（后端自动选源）
+    const fallbackUrl = `${API_BASE}/api/media/channel/${encodeURIComponent(stationId)}/playlist.m3u8`
+    console.log(`[回退] 直连全败，fallback 到 channel 入口...`)
+    winner = await probeParallel([fallbackUrl], stationId, 'proxy')
   }
 
   if (!winner) {
@@ -353,7 +354,7 @@ async function fetchAllUrls(stationId) {
 function loadStation(stationId) {
   if (!audioRef.value || !stationId) return
 
-  const playlistUrl = `${API_BASE}/api/${stationId}/playlist.m3u8`
+  const playlistUrl = `${API_BASE}/api/media/channel/${encodeURIComponent(stationId)}/playlist.m3u8`
 
   destroyHls()
   resetAudioSource()
