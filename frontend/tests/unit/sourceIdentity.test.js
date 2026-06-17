@@ -2,11 +2,23 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  adapterNameFromUrl,
   buildChannelProxyUrl,
   extractSourceIdFromUrl,
+  isAdapterSchemeUrl,
+  isDynamicAdapterProxyPlaylistEntry,
   sourceRaceKey,
   sourceTransport,
 } from '../../src/utils/sourceIdentity.js'
+
+const isChannelProxyPlaylistUrl = (url) => {
+  try {
+    const parsed = new URL(url, 'http://waveflow.local')
+    return /\/api\/media\/channel\/.+\/playlist\.m3u8$/i.test(parsed.pathname)
+  } catch {
+    return false
+  }
+}
 
 test('direct and proxy entries keep the same logical source_id', () => {
   const direct = { source_id: 'src_same', type: 'direct', url: 'https://up.example/live.m3u8' }
@@ -66,4 +78,61 @@ test('proxy request does not contain upstream URL or token', () => {
   assert.equal(requestUrl.includes(encodeURIComponent(upstream)), false)
   assert.equal(requestUrl.includes(upstream), false)
   assert.equal(requestUrl.includes('token=secret'), false)
+})
+
+test('http and https URLs are not adapter schemes', () => {
+  assert.equal(isAdapterSchemeUrl('https://cdn.example/live.m3u8'), false)
+  assert.equal(isAdapterSchemeUrl('http://cdn.example/live.m3u8'), false)
+})
+
+test('known adapter schemes are recognized by the shared source helper', () => {
+  assert.equal(isAdapterSchemeUrl('huya://31421'), true)
+  assert.equal(isAdapterSchemeUrl('adapter://huya/31421'), true)
+  assert.equal(adapterNameFromUrl('huya://31421'), 'huya')
+  assert.equal(adapterNameFromUrl('adapter://huya/31421'), 'huya')
+})
+
+test('ordinary channel proxy fallback with empty adapter is not dynamic adapter proxy', () => {
+  const entry = {
+    source_id: 'src_hls',
+    type: 'proxy',
+    via_proxy: true,
+    adapter: '',
+    original_url: 'https://cdn.example/live.m3u8',
+    url: buildChannelProxyUrl({ apiBase: '', channelKey: '普通频道', sourceId: 'src_hls' }),
+  }
+
+  assert.equal(isDynamicAdapterProxyPlaylistEntry(entry, isChannelProxyPlaylistUrl), false)
+})
+
+test('direct and proxy queue entries classify through shared adapter helpers without ReferenceError', () => {
+  const direct = {
+    source_id: 'src_hls',
+    type: 'direct',
+    original_url: 'https://cdn.example/live.m3u8',
+    url: 'https://cdn.example/live.m3u8',
+  }
+  const ordinaryProxy = {
+    ...direct,
+    type: 'proxy',
+    via_proxy: true,
+    url: buildChannelProxyUrl({ apiBase: '', channelKey: '普通频道', sourceId: 'src_hls' }),
+  }
+  const adapterProxyWithoutAdapterField = {
+    source_id: 'src_huya',
+    type: 'proxy',
+    via_proxy: true,
+    original_url: 'huya://31421',
+    url: buildChannelProxyUrl({ apiBase: '', channelKey: '虎牙', sourceId: 'src_huya' }),
+  }
+  const adapterProxyWithAdapterField = {
+    ...adapterProxyWithoutAdapterField,
+    adapter: 'huya',
+    original_url: 'https://resolved.example/live.m3u8',
+  }
+
+  assert.equal(isDynamicAdapterProxyPlaylistEntry(direct, isChannelProxyPlaylistUrl), false)
+  assert.equal(isDynamicAdapterProxyPlaylistEntry(ordinaryProxy, isChannelProxyPlaylistUrl), false)
+  assert.equal(isDynamicAdapterProxyPlaylistEntry(adapterProxyWithoutAdapterField, isChannelProxyPlaylistUrl), true)
+  assert.equal(isDynamicAdapterProxyPlaylistEntry(adapterProxyWithAdapterField, isChannelProxyPlaylistUrl), true)
 })

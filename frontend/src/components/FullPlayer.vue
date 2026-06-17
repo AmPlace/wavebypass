@@ -440,7 +440,12 @@ import { fetchAggregatedChannels } from '../api/iptv'
 import { useEpg } from '../composables/useEpg'
 import { API_BASE } from '../apiBase'
 import { publicAsset } from '../publicAsset'
-import { sourceRaceKey, sourceTransport, extractSourceIdFromUrl } from '../utils/sourceIdentity'
+import {
+  extractSourceIdFromUrl,
+  isDynamicAdapterProxyPlaylistEntry,
+  sourceRaceKey,
+  sourceTransport,
+} from '../utils/sourceIdentity'
 
 const playerStore = usePlayerStore()
 const { isPlayerExpanded, currentStation, isPlaying, isLoading, volume, stationMap, stationList } = storeToRefs(playerStore)
@@ -1766,17 +1771,8 @@ function isChannelProxyPlaylistUrl(url) {
   }
 }
 
-function isAdapterSchemeUrl(url) {
-  const value = String(url || '').trim().toLowerCase()
-  return ADAPTER_SCHEMES.some(scheme => value.startsWith(`${scheme}://`))
-}
-
 function isDynamicAdapterProxyPlaylist(entry) {
-  return Boolean(
-    isProxyLikeEntry(entry)
-    && isChannelProxyPlaylistUrl(entry?.url || '')
-    && (entry?.adapter || isAdapterSchemeUrl(entry?.original_url || entry?.url || '')),
-  )
+  return isDynamicAdapterProxyPlaylistEntry(entry, isChannelProxyPlaylistUrl)
 }
 
 function sourceTypeFromProxyRedirect(url) {

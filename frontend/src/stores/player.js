@@ -1,21 +1,6 @@
 import { defineStore } from 'pinia'
 import { API_BASE } from '../apiBase.js'
-import { buildChannelProxyUrl } from '../utils/sourceIdentity.js'
-
-const ADAPTER_SCHEMES = [
-  'youtube',
-  'migu', 'hnntv', 'nmtv', 'gzstv', 'sxbc', 'xjtv', 'jstv', 'sdtv', 'sdly',
-  'douyin', 'douyu', 'huya', 'hbtv', 'hntv', 'tvb', 'nowtv',
-  'redbook', 'tiktok', 'kuaishou', 'bilibili', 'yy', 'bigo', 'blued', 'soop',
-  'netease', 'pandatv', 'maoer', 'look', 'flextv', 'popkontv', 'twitcasting',
-  'baidu', 'weibo', 'kugou', 'twitch', 'huajiao', 'showroom', 'inke', 'acfun',
-  'haixiu', 'liveme', 'zhihu', 'chzzk', 'live17', 'langlive', 'changliao',
-  'jd', 'faceit', 'lianjie', 'sixroom', 'lehai', 'huamao', 'shopee', 'laixiu', 'picarto',
-  // 大陆电视台 adapter（2026-06 新增）
-  'fjtv', 'ptbtv', 'nd0593tv', 'qukan', 'woniu',
-  // 通用前缀，必须放最后让具体 scheme 优先匹配
-  'adapter',
-]
+import { adapterNameFromUrl, buildChannelProxyUrl, isAdapterSchemeUrl } from '../utils/sourceIdentity.js'
 
 export const usePlayerStore = defineStore('player', {
   state: () => ({
@@ -222,7 +207,7 @@ export const usePlayerStore = defineStore('player', {
         if (parseYoutubeVideoId(url)) return 'youtube'
         if (parseYoutubeChannelId(url) && isYoutubeLiveChannelUrl(url)) return 'youtube'
         if (isYoutubeUrl(url)) return 'unsupported_youtube_url'
-        if (ADAPTER_SCHEMES.some(scheme => value.startsWith(`${scheme}://`))) return 'adapter'
+        if (isAdapterSchemeUrl(url)) return 'adapter'
         if (value.startsWith('rtsp://')) return 'rtsp'
         if (/\/(?:rtp|udp)\//i.test(value) || /%2f(?:rtp|udp)%2f/i.test(value)) return 'mpegts'
         if (/\.(?:ts|m2ts|mts)(?:[?#]|$)/i.test(value)) return 'mpegts'
@@ -233,19 +218,6 @@ export const usePlayerStore = defineStore('player', {
         const inferred = inferSourceType(sourceUrl(u))
         const declared = String(u?.source_type || '').trim().toLowerCase()
         return declared && declared !== 'hls' ? declared : inferred
-      }
-      const adapterName = (url) => {
-        const value = String(url || '').trim().toLowerCase()
-        for (const scheme of ADAPTER_SCHEMES) {
-          if (scheme === 'adapter') continue  // 'adapter://name/...' 走下面的 hostname 解析
-          if (value.startsWith(`${scheme}://`)) return scheme
-        }
-        try {
-          const parsed = new URL(url)
-          return parsed.protocol === 'adapter:' ? parsed.hostname.toLowerCase() : ''
-        } catch {
-          return ''
-        }
       }
       const proxyUrlFor = (u, options = {}) => {
         return buildChannelProxyUrl({
@@ -337,7 +309,7 @@ export const usePlayerStore = defineStore('player', {
       }
       for (const u of adapterSources) {
         const url = sourceUrl(u)
-        const adapter = u.adapter || adapterName(url)
+        const adapter = u.adapter || adapterNameFromUrl(url)
         const originalUrl = u.original_url || url
         const fallbackProxyUrl = proxyUrlFor(u)
         if (adapter === 'youtube') {
