@@ -434,6 +434,7 @@
 import { computed, ref, watch, onBeforeUnmount, onMounted, nextTick } from 'vue'
 import { storeToRefs } from 'pinia'
 import mpegts from 'mpegts.js'
+import Hls from 'hls.js'
 import { usePlayerStore } from '../stores/player'
 import { fetchAggregatedChannels } from '../api/iptv'
 import { useEpg } from '../composables/useEpg'
@@ -1874,20 +1875,33 @@ function getProxyUrl(url) {
   return `${API_BASE}/api/media/proxy/playlist/${encodeURIComponent(url)}`
 }
 
+// 设置面板候选：起播并发数。建议未来高级设置暴露为 1-12，默认 6。
 const STARTUP_RACE_LIMIT = 6
 const MPEGTS_EOF_RECONNECT_DELAY_MS = 300
 const MPEGTS_ERROR_RECONNECT_DELAY_MS = 1200
 const MPEGTS_RECONNECT_WINDOW_MS = 60_000
 const MPEGTS_RECONNECT_LIMIT = 3
 const RECOVERY_LOADING_DELAY_MS = 400
-const RECOVERY_SOFT_RECOVER_MS = 2500
-const RECOVERY_HARD_RELOAD_MS = 4000
+// stall 检测阈值：直通模式下上游单 segment 时长可达 10-11s，hls.js 自身的
+// bufferStalled 自愈需要等下一个 segment（5-8s）。把硬阈值放宽，否则刚 stall
+// 就被强制 recover/reload 反而打断 hls.js 自愈，触发周期性卡顿。
+const RECOVERY_SOFT_RECOVER_MS = 6000
+const RECOVERY_HARD_RELOAD_MS = 12000
 const RECOVERY_CURRENT_RETRY_LIMIT = 2
 const RECOVERY_CURRENT_TTL_MS = 4000
 const RECOVERY_FALLBACK_TTL_MS = 5000
 const RECOVERY_RETRY_DELAYS_MS = [300, 800]
 const RECOVERY_PROGRESS_WATCH_INTERVAL_MS = 750
 const PAUSE_GRACE_RELEASE_MS = 30_000
+// 设置面板候选：直连起播超过该时长仍无真实赢家时，启动代理兜底组。
+// 建议未来高级设置暴露为 0-8000ms；0 表示 direct/proxy 同时抢跑。
+const HEDGED_PROXY_DELAY_MS = 2500
+// 设置面板候选：临时失败源跳过时长，仅内存态，不写数据库。
+// 建议未来高级设置暴露为 0-300s；0 表示不记录临时 loser。
+const RACE_LOSER_TTL_MS = 45_000
+// 不建议开放：HLS 真胜出确认窗口属于状态机安全参数，避免用户调回误判。
+const RACE_HLS_CONFIRM_MS = 700
+const RACE_HLS_CONFIRM_RETRY_MS = 500
 
 let _playAttemptId = 0
 let _recoverySeq = 0
@@ -1897,7 +1911,8 @@ let _pauseGraceSeq = 0
 let _softPausedAt = 0
 let _softPauseReleased = false
 let _softResumePromise = null
-let _racedLosers = new Set()
+// URL -> expireAt。只做本轮/短期启动避让；频道切换和手动选源会清空或删除。
+let _racedLosers = new Map()
 let _mpegtsRecoveries = new Map()
 let _cleanupActiveRace = null
 let _cancelCurrentStartup = null
@@ -1915,6 +1930,15 @@ function isAttemptActive(attemptId) {
 
 function cancelledError() {
   return new Error('cancelled')
+}
+
+function isAutoplayBlockedError(error) {
+  const name = String(error?.name || '')
+  const message = String(error?.message || error || '')
+  return name === 'NotAllowedError'
+    || /user didn't interact/i.test(message)
+    || /play\(\) failed/i.test(message)
+    || /notallowed/i.test(message)
 }
 
 function wait(ms) {
@@ -2097,7 +2121,7 @@ async function recoverIptvPlayback(reason = 'stalled', options = {}) {
     }
 
     if (currentEntry?.url && (currentEntry.type === 'proxy' || currentEntry.via_proxy)) {
-      _racedLosers.add(currentEntry.url)
+      markRaceLoser(currentEntry.url)
     }
 
     if (!allowFallbackRace || !isRecoveryActive(seq)) return false
@@ -2152,7 +2176,7 @@ async function switchIptvSource(index) {
   sourceMenuOpen.value = false
 
   const entry = playerStore.iptvUrls[index]
-  if (entry?.url) _racedLosers.delete(entry.url)
+  if (entry?.url) clearRaceLoser(entry.url)
 
   const attemptId = ++_playAttemptId
   if (!(await setIptvUrlIndexForAttempt(index, attemptId))) return
@@ -2168,7 +2192,7 @@ async function switchIptvSource(index) {
     } catch (e) {
       if (!isAttemptActive(attemptId)) return
       setSourceRuntimeStatus(index, 'failed')
-      if (entry?.url) _racedLosers.add(entry.url)
+      if (entry?.url) markRaceLoser(entry.url)
       console.warn('[IPTV] 手动切换代理源失败:', e?.message)
       if (await fallbackToNextIptvUrl(attemptId)) {
         return await playCurrentIptvUrl(attemptId)
@@ -2194,8 +2218,20 @@ function clearRuntimeHandlerCleanup(target) {
 function attachRuntimeHlsErrorHandlers(hls, sourceUrl, usingProxy, attemptId, sourceIndex = -1) {
   clearRuntimeHandlerCleanup(hls)
   let fragFail = 0
+  let levelLoadFail = 0
+  let stallRecovery = 0
+  // fatal NETWORK_ERROR 我们让 hls.js 自己 startLoad 一次再观察；如果它一直
+  // 收 fatal，就需要切源，而不是死循环 startLoad。这里维护独立计数。
+  let fatalNetworkRecover = 0
+  let fatalMediaRecover = 0
+  const fatalNetworkThreshold = usingProxy ? 4 : 3
+  const fatalMediaThreshold = 2
   let switching = false
-  const threshold = usingProxy ? 2 : 3
+  // 提高代理源容忍度：单次 frag 失败几乎一定能由 hls.js 自带重试在下一段恢复。
+  // 之前 threshold=2 经常因为一次 502/网络抖动就把整个播放栈 destroy。
+  const fragThreshold = usingProxy ? 4 : 3
+  const levelThreshold = usingProxy ? 4 : 3
+  const stallThreshold = 3
   const setRuntimeStatus = (status) => {
     if (sourceIndex >= 0) setSourceRuntimeStatus(sourceIndex, status)
     else setSourceRuntimeStatusByUrl(sourceUrl, status)
@@ -2221,19 +2257,102 @@ function attachRuntimeHlsErrorHandlers(hls, sourceUrl, usingProxy, attemptId, so
 
   const onFragLoaded = () => {
     fragFail = 0
+    levelLoadFail = 0
+    stallRecovery = 0
+    fatalNetworkRecover = 0
+    fatalMediaRecover = 0
   }
 
   const onError = (_, data) => {
     if (!isAttemptActive(attemptId)) return
-    console.log(`[ERR:runtime] ${data.details} fatal:${data.fatal} type:${data.type}`)
-    if (!data.fatal && data.details === Hls.ErrorDetails.FRAG_LOAD_ERROR) {
-      fragFail++
-      if (fragFail >= threshold) switchToFallback(data.details)
+    const details = data.details
+    const fatal = !!data.fatal
+    const type = data.type
+    // 调试日志：保持单行结构化，便于 grep；不打印 URL 与 token。
+    console.log(
+      `[ERR:runtime] details=${details} fatal=${fatal} type=${type}` +
+      ` http=${data.response?.code ?? '-'} fragSn=${data.frag?.sn ?? '-'}` +
+      ` level=${data.level ?? '-'} fragFail=${fragFail} levelFail=${levelLoadFail}`
+    )
+
+    // ── 非 fatal 错误：让 hls.js 自带的内部重试先工作，仅累计计数 ────────────
+    if (!fatal) {
+      if (
+        details === Hls.ErrorDetails.FRAG_LOAD_ERROR ||
+        details === Hls.ErrorDetails.FRAG_LOAD_TIMEOUT ||
+        details === Hls.ErrorDetails.KEY_LOAD_ERROR ||
+        details === Hls.ErrorDetails.KEY_LOAD_TIMEOUT
+      ) {
+        fragFail++
+        if (fragFail >= fragThreshold) switchToFallback(details)
+        return
+      }
+      if (
+        details === Hls.ErrorDetails.LEVEL_LOAD_ERROR ||
+        details === Hls.ErrorDetails.LEVEL_LOAD_TIMEOUT ||
+        details === Hls.ErrorDetails.MANIFEST_LOAD_ERROR ||
+        details === Hls.ErrorDetails.MANIFEST_LOAD_TIMEOUT
+      ) {
+        levelLoadFail++
+        if (levelLoadFail >= levelThreshold) switchToFallback(details)
+        return
+      }
+      if (details === Hls.ErrorDetails.LEVEL_PARSING_ERROR) {
+        // playlist 中混入坏内容（HTML/空 body）。攒几次再切，因为偶发刷新失败
+        // 后端会临时返回 503/502；hls.js 会自动重试 root playlist。
+        levelLoadFail++
+        if (levelLoadFail >= levelThreshold) switchToFallback(details)
+        return
+      }
+      if (
+        details === Hls.ErrorDetails.BUFFER_STALLED_ERROR ||
+        details === Hls.ErrorDetails.BUFFER_NUDGE_ON_STALL
+      ) {
+        // hls.js 自己会做小幅 currentTime nudge，这里不做副作用，只计数。
+        stallRecovery++
+        if (stallRecovery >= stallThreshold) switchToFallback(details)
+        return
+      }
+      // 其它非 fatal 错误：忽略，交给 hls.js 内部重试。
       return
     }
-    if (data.fatal || data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-      switchToFallback(data.details || data.type)
+
+    // ── fatal 错误：先尝试 hls.js 内部恢复，再决定是否切源 ──────────────────
+    // LEVEL_PARSING_ERROR 即便被标 fatal，本质是 playlist 内容问题，不是网络
+    // 问题。继续 startLoad 不会修复，必须按 parsing 路径计数 + 切源。
+    if (details === Hls.ErrorDetails.LEVEL_PARSING_ERROR) {
+      levelLoadFail++
+      if (levelLoadFail >= levelThreshold) switchToFallback(details)
+      return
     }
+    if (type === Hls.ErrorTypes.NETWORK_ERROR) {
+      // 永久 503/404 时不能死循环 startLoad —— 计数并在阈值后切源。
+      fatalNetworkRecover++
+      if (fatalNetworkRecover >= fatalNetworkThreshold) {
+        switchToFallback(details || type)
+        return
+      }
+      try {
+        hls.startLoad?.()
+      } catch (e) {
+        switchToFallback(details || type)
+      }
+      return
+    }
+    if (type === Hls.ErrorTypes.MEDIA_ERROR) {
+      fatalMediaRecover++
+      if (fatalMediaRecover >= fatalMediaThreshold) {
+        switchToFallback(details || type)
+        return
+      }
+      try {
+        hls.recoverMediaError?.()
+      } catch (e) {
+        switchToFallback(details || type)
+      }
+      return
+    }
+    switchToFallback(details || type)
   }
 
   hls.on(Hls.Events.FRAG_LOADED, onFragLoaded)
@@ -2554,17 +2673,25 @@ async function tryPlayIptv(url, usingProxy = false, customUa = '', attemptId = 0
     if (canUseHls()) {
       const hlsConfig = {
         enableWorker: true, lowLatencyMode: false, liveDurationInfinity: true,
-        liveSyncDuration: 20, liveMaxLatencyDuration: 55, liveSyncOnStallIncrease: 2,
-        maxLiveSyncPlaybackRate: 1, nudgeOffset: 0.1, nudgeMaxRetry: 3,
-        maxBufferLength: 30, maxBufferHole: 0.5,
+        // 直通模式（WIDE_ENABLED=False）下，前端拿到的是上游原始滑动窗口，常见
+        // 6 segments * 10s ≈ 60s。liveSyncDuration 必须明显小于窗口才能留出
+        // 安全 buffer 余量；让 hls.js 从靠近 edge 的位置起播，但同时通过
+        // maxLiveSyncPlaybackRate 允许轻微加速追赶 live edge。
+        liveSyncDurationCount: 3, liveMaxLatencyDurationCount: 6,
+        liveSyncOnStallIncrease: 1,
+        maxLiveSyncPlaybackRate: 1.2, nudgeOffset: 0.1, nudgeMaxRetry: 5,
+        // maxBufferHole 保持 hls.js 默认 0.5：只跨过亚秒级浮点抖动，不跨真实缺段，
+        // 避免在稳定源上误跳真实内容。maxFragLookUpTolerance 放宽片段对齐查找容忍。
+        maxBufferLength: 30, maxBufferHole: 0.5, maxFragLookUpTolerance: 1,
+        highBufferWatchdogPeriod: 3,
       }
       if (isIOS) {
         Object.assign(hlsConfig, {
-          liveSyncDuration: 30,
-          liveMaxLatencyDuration: 90,
+          liveSyncDurationCount: 4,
+          liveMaxLatencyDurationCount: 8,
           maxBufferLength: 60,
           maxMaxBufferLength: 90,
-          liveSyncOnStallIncrease: 5,
+          liveSyncOnStallIncrease: 2,
         })
       }
       if (customUa) hlsConfig.xhrSetup = (xhr) => { xhr.setRequestHeader('User-Agent', customUa) }
@@ -2619,27 +2746,88 @@ async function tryPlayIptv(url, usingProxy = false, customUa = '', attemptId = 0
   })
 }
 
-function startupRaceEntries(urls, startIndex) {
-  const racers = []
-  const hlsProbeSupported = canUseHls()
-  const mpegtsProbeSupported = canUseMpegTs()
-  const isProxyLike = (entry) => entry?.type === 'proxy' || entry?.via_proxy
-  const currentIsProxyLike = isProxyLike(urls[startIndex])
-  for (let i = startIndex; i < urls.length && racers.length < STARTUP_RACE_LIMIT; i++) {
-    const entry = urls[i]
-    if (!entry?.url) continue
-    if (isProxyLike(entry) !== currentIsProxyLike) continue
-    if (isProxyLike(entry) && _racedLosers.has(entry.url)) continue
-    const st = sourceType(entry)
-    if (st === 'hls' && hlsProbeSupported) {
-      racers.push({ entry, index: i, kind: 'hls' })
-      continue
-    }
-    if (isMpegTsEngineType(st) && mpegtsProbeSupported) {
-      racers.push({ entry, index: i, kind: st })
-    }
+function pruneRaceLosers(now = Date.now()) {
+  for (const [url, expireAt] of _racedLosers.entries()) {
+    if (!expireAt || expireAt <= now) _racedLosers.delete(url)
   }
-  return racers
+}
+
+function isRaceLoser(url) {
+  if (!url) return false
+  const expireAt = _racedLosers.get(url)
+  if (!expireAt) return false
+  if (expireAt <= Date.now()) {
+    _racedLosers.delete(url)
+    return false
+  }
+  return true
+}
+
+function markRaceLoser(url) {
+  if (!url) return
+  _racedLosers.set(url, Date.now() + RACE_LOSER_TTL_MS)
+}
+
+function clearRaceLoser(url) {
+  if (!url) return
+  _racedLosers.delete(url)
+}
+
+function resetRacedLosers() { _racedLosers.clear() }
+
+function isProxyLikeEntry(entry) {
+  return entry?.type === 'proxy' || Boolean(entry?.via_proxy)
+}
+
+function raceHealthRank(entry) {
+  const status = String(entry?.probe_status || '').toLowerCase()
+  const working = Number(entry?.is_working)
+  if (working === 1 || status === 'online') return 0
+  if (status === 'not_live') return 3
+  if (working === 0 || ['timeout', 'error', 'offline'].includes(status)) return 2
+  return 1
+}
+
+function raceLatencyRank(entry) {
+  const latency = Number(entry?.latency_ms)
+  return Number.isFinite(latency) && latency > 0 ? latency : Number.POSITIVE_INFINITY
+}
+
+function raceCandidateKind(entry) {
+  if (!entry?.url || entry.disabled === true) return ''
+  const st = sourceType(entry)
+  if (st === 'unsupported_youtube_url' || st === 'youtube') return ''
+  if (st === 'hls' && canUseHls()) return 'hls'
+  if (isMpegTsEngineType(st) && canUseMpegTs()) return st
+  return ''
+}
+
+function sortedRaceCandidates(urls, startIndex, proxyLike) {
+  pruneRaceLosers()
+  return urls
+    .map((entry, index) => ({ entry, index, kind: raceCandidateKind(entry) }))
+    .filter(({ entry, index, kind }) => {
+      if (index < startIndex || !kind) return false
+      if (isProxyLikeEntry(entry) !== proxyLike) return false
+      if (isRaceLoser(entry.url)) return false
+      return true
+    })
+    .sort((a, b) => {
+      const healthDelta = raceHealthRank(a.entry) - raceHealthRank(b.entry)
+      if (healthDelta) return healthDelta
+      const latencyDelta = raceLatencyRank(a.entry) - raceLatencyRank(b.entry)
+      if (latencyDelta) return latencyDelta
+      return a.index - b.index
+    })
+    .slice(0, STARTUP_RACE_LIMIT)
+}
+
+function collectDirectRacers(urls, startIndex = 0) {
+  return sortedRaceCandidates(urls, startIndex, false)
+}
+
+function collectProxyRacers(urls, startIndex = 0) {
+  return sortedRaceCandidates(urls, startIndex, true)
 }
 
 async function playCurrentIptvUrl(attemptId = 0, options = {}) {
@@ -2668,9 +2856,10 @@ async function playCurrentIptvUrl(attemptId = 0, options = {}) {
     markAllIptvSourcesUnavailable(attemptId)
     return
   }
-  const startupRacers = allowStartupRace && st !== 'youtube' ? startupRaceEntries(urls, idx) : []
-  if (startupRacers.length > 1) {
-    const raced = await raceStartupSources(startupRacers, attemptId, {
+  const directRacers = allowStartupRace && st !== 'youtube' ? collectDirectRacers(urls, idx) : []
+  const proxyRacers = allowStartupRace && st !== 'youtube' ? collectProxyRacers(urls, idx) : []
+  if (directRacers.length + proxyRacers.length > 1) {
+    const raced = await runHedgedRace(directRacers, proxyRacers, attemptId, {
       timeoutMs: options.raceTimeoutMs,
       playCurrentOptions: options,
     })
@@ -2684,17 +2873,25 @@ async function playCurrentIptvUrl(attemptId = 0, options = {}) {
     if (st === 'youtube') {
       await startYoutubeCandidate(entry, attemptId, idx)
     } else {
-      await tryPlayIptv(entry.url, Boolean(entry.via_proxy), entry.custom_ua || '', attemptId, idx, st, {
+      await tryPlayIptv(entry.url, isProxyLikeEntry(entry), entry.custom_ua || '', attemptId, idx, st, {
         startupTimeoutMs: options.startupTimeoutMs,
         preserveFrame: options.preserveFrame,
       })
     }
     if (!isAttemptActive(attemptId)) return
     setSourceRuntimeStatus(idx, 'playing')
+    clearRaceLoser(entry.url)
     playerStore.clearPlaybackError()
     playerStore.setLoading(false)
   } catch (e) {
     if (!isAttemptActive(attemptId)) return
+    if (isAutoplayBlockedError(e)) {
+      setSourceRuntimeStatus(idx, 'trying')
+      playerStore.setPlaybackError('浏览器阻止自动播放，请点击播放按钮继续。')
+      playerStore.setLoading(false)
+      playerStore.togglePlay(false)
+      return
+    }
     setSourceRuntimeStatus(idx, 'failed')
     console.warn('[IPTV] 失败:', e?.message)
     if (allowCurrentRetry && isMpegTsEngineType(st) && allowStartupRace === false) {
@@ -2744,50 +2941,72 @@ async function playCurrentIptvUrl(attemptId = 0, options = {}) {
   }
 }
 
-function resetRacedLosers() { _racedLosers.clear() }
+function probeBufferAhead(video) {
+  if (!video?.buffered?.length) return 0
+  const current = video.currentTime || 0
+  for (let i = 0; i < video.buffered.length; i += 1) {
+    const start = video.buffered.start(i)
+    const end = video.buffered.end(i)
+    if (current >= start && current <= end) return Math.max(0, end - current)
+    if (current < start) return Math.max(0, end - start)
+  }
+  return 0
+}
 
-async function raceStartupSources(candidates, attemptId = 0, options = {}) {
+function hlsProbeHasRealProgress(video, snapshotTime) {
+  return Boolean(
+    video?.buffered?.length > 0
+    && probeBufferAhead(video) > 0.3
+    && video.readyState >= 2
+    && (video.currentTime || 0) - snapshotTime > 0.1,
+  )
+}
+
+async function runHedgedRace(directRacers, proxyRacers, attemptId = 0, options = {}) {
   if (!isAttemptActive(attemptId)) return
   const playCurrentOptions = options.playCurrentOptions || {}
+  const directUrlSet = new Set(directRacers.map(({ entry }) => entry?.url).filter(Boolean))
+  const stage2ProxyRacers = proxyRacers.filter(({ entry }) => entry?.url && !directUrlSet.has(entry.url))
+  const allCandidates = [...directRacers, ...stage2ProxyRacers]
+  if (allCandidates.length < 2) return false
+
   cancelCurrentStartup()
   cancelActiveProxyRace()
   destroyIptvEngines()
   resetIptvVideo()
   playerStore.setLoading(true)
 
-  const fresh = candidates.filter(({ entry, kind }) => {
-    if (!entry?.url) return false
-    if ((entry.type === 'proxy' || entry.via_proxy) && _racedLosers.has(entry.url)) return false
-    if (kind === 'hls') return canUseHls()
-    if (isMpegTsEngineType(kind)) return canUseMpegTs()
-    return false
-  })
-
-  if (fresh.length < 2) return false
-
-  console.log(`[RACE:startup] ${fresh.length} 个播放源并发探测`)
-  fresh.forEach(({ entry }) => setSourceRuntimeStatusByEntry(entry, 'trying'))
+  console.log(`[RACE:hedged] direct=${directRacers.length} proxy=${stage2ProxyRacers.length} delay=${HEDGED_PROXY_DELAY_MS}ms`)
 
   let failCount = 0
   let raceTimer = null
+  let proxyTimer = null
   let settled = false
   const racers = []
-
-  const isProxyLike = (entry) => entry?.type === 'proxy' || entry?.via_proxy
 
   const cleanupRacer = (racer) => {
     if (!racer || racer.cleaned) return
     racer.cleaned = true
+    for (const timer of racer.timers || []) clearTimeout(timer)
+    if (racer.interval) clearInterval(racer.interval)
+    for (const cleanup of racer.cleanups || []) {
+      try { cleanup() } catch {}
+    }
     try {
       if (racer.kind === 'hls') {
+        racer.engine.stopLoad?.()
+        racer.engine.detachMedia?.()
         releaseWideProxyUrl(racer.entry?.url)
         racer.engine.destroy()
+      } else if (isMpegTsEngineType(racer.kind)) {
+        racer.engine.unload?.()
+        racer.engine.detachMediaElement?.()
+        racer.engine.destroy()
       }
-      else if (isMpegTsEngineType(racer.kind)) racer.engine.destroy()
     } catch (e) {
       const message = e?.message || ''
       if (!message.includes('removeAllListeners')) {
-        console.warn('[RACE:startup] cleanup failed:', e)
+        console.warn('[RACE:hedged] cleanup failed:', e)
       }
     }
     if (racer.video.parentNode) racer.video.remove()
@@ -2798,6 +3017,7 @@ async function raceStartupSources(candidates, attemptId = 0, options = {}) {
       if (settled) return
       settled = true
       clearTimeout(raceTimer)
+      clearTimeout(proxyTimer)
       for (const racer of racers) {
         if (value && racer !== value.racer) {
           const racerIndex = playerStore.iptvUrls.indexOf(racer.entry)
@@ -2815,99 +3035,181 @@ async function raceStartupSources(candidates, attemptId = 0, options = {}) {
       if (settled || racer.cleaned || racer.failed) return
       racer.failed = true
       failCount++
-      if (isProxyLike(racer.entry)) _racedLosers.add(racer.entry.url)
+      markRaceLoser(racer.entry?.url)
       setSourceRuntimeStatusByEntry(racer.entry, 'failed')
       cleanupRacer(racer)
-      if (failCount >= fresh.length) finish(null)
+      if (failCount >= allCandidates.length) finish(null)
     }
 
     const winRacer = (racer, label) => {
       if (!isAttemptActive(attemptId)) { finish(null); return }
       if (settled || racer.cleaned || racer.failed) return
-      console.log(`[RACE:startup] ${label} 胜出: ${racer.entry.url.slice(0, 50)}`)
+      console.log(`[RACE:hedged] ${label} 胜出: ${racer.entry.url.slice(0, 50)}`)
       setSourceRuntimeStatusByEntry(racer.entry, 'trying')
       finish({ racer, entry: racer.entry, index: racer.index })
+    }
+
+    const armHlsConfirmation = (racer, label) => {
+      if (settled || racer.cleaned || racer.failed || racer.confirming) return
+      racer.confirming = true
+      try { racer.video.play()?.catch?.(() => {}) } catch {}
+      const snapshotTime = racer.video.currentTime || 0
+      const firstTimer = setTimeout(() => {
+        if (settled || racer.cleaned || racer.failed) return
+        if (hlsProbeHasRealProgress(racer.video, snapshotTime)) {
+          winRacer(racer, label)
+          return
+        }
+        const retryTimer = setTimeout(() => {
+          if (settled || racer.cleaned || racer.failed) return
+          if (hlsProbeHasRealProgress(racer.video, snapshotTime)) winRacer(racer, label)
+          else failRacer(racer)
+        }, RACE_HLS_CONFIRM_RETRY_MS)
+        racer.timers.push(retryTimer)
+      }, RACE_HLS_CONFIRM_MS)
+      racer.timers.push(firstTimer)
     }
 
     const cancelRace = () => finish(null)
     _cleanupActiveRace = cancelRace
 
     raceTimer = setTimeout(() => {
-      for (const racer of racers) {
-        if (!racer.cleaned && !racer.failed) {
-          if (isProxyLike(racer.entry)) _racedLosers.add(racer.entry.url)
-          setSourceRuntimeStatusByEntry(racer.entry, 'failed')
-        }
+      for (const { entry } of allCandidates) {
+        markRaceLoser(entry?.url)
+        setSourceRuntimeStatusByEntry(entry, 'failed')
       }
       finish(null)
     }, options.timeoutMs ?? 12_000)
 
-    fresh.forEach(({ entry, index, kind }, i) => {
-      const probeVideo = document.createElement('video')
-      probeVideo.muted = true
-      probeVideo.playsInline = true
-      probeVideo.style.display = 'none'
-      document.body.appendChild(probeVideo)
+    const startRacers = (candidates, phaseLabel) => {
+      if (settled || !candidates.length) return
+      candidates.forEach(({ entry }) => setSourceRuntimeStatusByEntry(entry, 'trying'))
+      candidates.forEach(({ entry, index, kind }, i) => {
+        const probeVideo = document.createElement('video')
+        probeVideo.muted = true
+        probeVideo.playsInline = true
+        probeVideo.autoplay = true
+        probeVideo.style.display = 'none'
+        document.body.appendChild(probeVideo)
 
-      if (kind === 'hls') {
-        const hlsConfig = { enableWorker: false, maxBufferLength: 1, maxMaxBufferLength: 2 }
-        if (entry.custom_ua) hlsConfig.xhrSetup = (xhr) => { xhr.setRequestHeader('User-Agent', entry.custom_ua) }
-        const hls = new Hls(hlsConfig)
-        trackHlsSource(hls, entry.url)
-        const racer = { engine: hls, video: probeVideo, entry, index, kind, cleaned: false, failed: false, fragFail: 0 }
-        racers.push(racer)
+        if (kind === 'hls') {
+          const hlsConfig = { enableWorker: false, maxBufferLength: 1, maxMaxBufferLength: 2 }
+          if (entry.custom_ua) hlsConfig.xhrSetup = (xhr) => { xhr.setRequestHeader('User-Agent', entry.custom_ua) }
+          const hls = new Hls(hlsConfig)
+          trackHlsSource(hls, entry.url)
+          const racer = { engine: hls, video: probeVideo, entry, index, kind, cleaned: false, failed: false, fragFail: 0, timers: [], cleanups: [] }
+          racers.push(racer)
 
-        hls.on(Hls.Events.FRAG_LOADED, () => winRacer(racer, `#${i} HLS`))
-        hls.on(Hls.Events.ERROR, (_, d) => {
-          if (!isAttemptActive(attemptId)) { finish(null); return }
-          if (settled || racer.cleaned || racer.failed) return
-          if (!d.fatal && d.details === Hls.ErrorDetails.FRAG_LOAD_ERROR) racer.fragFail++
-          if (d.fatal || d.type === Hls.ErrorTypes.NETWORK_ERROR || racer.fragFail >= 2) {
-            failRacer(racer)
+          const label = `${phaseLabel}#${i} HLS`
+          const onMediaAttached = () => {
+            try { probeVideo.play()?.catch?.(() => {}) } catch {}
           }
-        })
-        hls.loadSource(entry.url)
-        hls.attachMedia(probeVideo)
-        return
-      }
+          const onFragBuffered = () => {
+            clearTimeout(racer.fragLoadedFallbackTimer)
+            armHlsConfirmation(racer, label)
+          }
+          const onFragLoaded = () => {
+            if (racer.confirming || racer.fragLoadedFallbackTimer) return
+            racer.fragLoadedFallbackTimer = setTimeout(() => {
+              racer.fragLoadedFallbackTimer = null
+              armHlsConfirmation(racer, label)
+            }, 250)
+            racer.timers.push(racer.fragLoadedFallbackTimer)
+          }
+          const onError = (_, d) => {
+            if (!isAttemptActive(attemptId)) { finish(null); return }
+            if (settled || racer.cleaned || racer.failed) return
+            if (!d.fatal && d.details === Hls.ErrorDetails.FRAG_LOAD_ERROR) racer.fragFail++
+            if (d.fatal || d.type === Hls.ErrorTypes.NETWORK_ERROR || racer.fragFail >= 2) {
+              failRacer(racer)
+            }
+          }
+          hls.on(Hls.Events.MEDIA_ATTACHED, onMediaAttached)
+          hls.on(Hls.Events.FRAG_BUFFERED, onFragBuffered)
+          hls.on(Hls.Events.FRAG_LOADED, onFragLoaded)
+          hls.on(Hls.Events.ERROR, onError)
+          racer.cleanups.push(() => hls.off(Hls.Events.MEDIA_ATTACHED, onMediaAttached))
+          racer.cleanups.push(() => hls.off(Hls.Events.FRAG_BUFFERED, onFragBuffered))
+          racer.cleanups.push(() => hls.off(Hls.Events.FRAG_LOADED, onFragLoaded))
+          racer.cleanups.push(() => hls.off(Hls.Events.ERROR, onError))
+          hls.loadSource(entry.url)
+          hls.attachMedia(probeVideo)
+          return
+        }
 
-      const player = mpegts.createPlayer({
-        type: mpegtsPlayerType(kind, entry.url),
-        isLive: true,
-        cors: true,
-        url: entry.url,
-      }, {
-        enableWorker: true,
-        lazyLoad: false,
-        liveBufferLatencyChasing: true,
-        statisticsInfoReportInterval: 1000,
+        const player = mpegts.createPlayer({
+          type: mpegtsPlayerType(kind, entry.url),
+          isLive: true,
+          cors: true,
+          url: entry.url,
+        }, {
+          enableWorker: true,
+          lazyLoad: false,
+          liveBufferLatencyChasing: true,
+          statisticsInfoReportInterval: 1000,
+        })
+        const racer = { engine: player, video: probeVideo, entry, index, kind, cleaned: false, failed: false, timers: [], cleanups: [], lastDecodedFrames: 0 }
+        racers.push(racer)
+        const label = `${phaseLabel}#${i} ${kind === 'http_flv' ? 'HTTP-FLV' : 'MPEG-TS'}`
+        const timeSnapshot = probeVideo.currentTime || 0
+        const onMediaInfo = () => {
+          try { probeVideo.play()?.catch?.(() => {}) } catch {}
+        }
+        const onStats = (stats) => {
+          const decodedFrames = Number(stats?.decodedFrames || 0)
+          if (decodedFrames > racer.lastDecodedFrames) {
+            winRacer(racer, label)
+            return
+          }
+          racer.lastDecodedFrames = Math.max(racer.lastDecodedFrames, decodedFrames)
+        }
+        const onError = () => failRacer(racer)
+        const onVideoLoaded = () => {
+          try { probeVideo.play()?.catch?.(() => {}) } catch {}
+        }
+        const onVideoError = () => failRacer(racer)
+        player.on(mpegts.Events.MEDIA_INFO, onMediaInfo)
+        player.on(mpegts.Events.STATISTICS_INFO, onStats)
+        player.on(mpegts.Events.ERROR, onError)
+        racer.cleanups.push(() => player.off(mpegts.Events.MEDIA_INFO, onMediaInfo))
+        racer.cleanups.push(() => player.off(mpegts.Events.STATISTICS_INFO, onStats))
+        racer.cleanups.push(() => player.off(mpegts.Events.ERROR, onError))
+        probeVideo.addEventListener('loadedmetadata', onVideoLoaded)
+        probeVideo.addEventListener('canplay', onVideoLoaded)
+        probeVideo.addEventListener('error', onVideoError)
+        racer.cleanups.push(() => probeVideo.removeEventListener('loadedmetadata', onVideoLoaded))
+        racer.cleanups.push(() => probeVideo.removeEventListener('canplay', onVideoLoaded))
+        racer.cleanups.push(() => probeVideo.removeEventListener('error', onVideoError))
+        racer.interval = setInterval(() => {
+          if (!settled && !racer.cleaned && !racer.failed && (probeVideo.currentTime || 0) - timeSnapshot > 0.1) {
+            winRacer(racer, label)
+          }
+        }, 500)
+        try {
+          player.attachMediaElement(probeVideo)
+          player.load()
+          try { probeVideo.play()?.catch?.(() => {}) } catch {}
+        } catch {
+          failRacer(racer)
+        }
       })
-      const racer = { engine: player, video: probeVideo, entry, index, kind, cleaned: false, failed: false }
-      racers.push(racer)
-      const onWin = () => winRacer(racer, `#${i} ${kind === 'http_flv' ? 'HTTP-FLV' : 'MPEG-TS'}`)
-      const onStats = (stats) => {
-        if ((stats?.decodedFrames || 0) > 0) onWin()
+    }
+
+    if (directRacers.length) {
+      startRacers(directRacers, 'direct')
+      if (stage2ProxyRacers.length) {
+        proxyTimer = setTimeout(() => startRacers(stage2ProxyRacers, 'proxy'), HEDGED_PROXY_DELAY_MS)
       }
-      player.on(mpegts.Events.MEDIA_INFO, onWin)
-      player.on(mpegts.Events.STATISTICS_INFO, onStats)
-      player.on(mpegts.Events.ERROR, () => failRacer(racer))
-      probeVideo.addEventListener('loadedmetadata', onWin)
-      probeVideo.addEventListener('canplay', onWin)
-      probeVideo.addEventListener('error', () => failRacer(racer))
-      try {
-        player.attachMediaElement(probeVideo)
-        player.load()
-      } catch {
-        failRacer(racer)
-      }
-    })
+    } else {
+      startRacers(stage2ProxyRacers, 'proxy')
+    }
   })
 
   if (!isAttemptActive(attemptId)) return
 
   if (!result) {
-    console.warn('[RACE:startup] 本轮播放源探测全部失败')
-    const lastRacedIndex = Math.max(...fresh.map(({ index }) => index))
+    console.warn('[RACE:hedged] 本轮播放源探测全部失败')
+    const lastRacedIndex = Math.max(...allCandidates.map(({ index }) => index))
     if (lastRacedIndex >= 0) await setIptvUrlIndexForAttempt(lastRacedIndex, attemptId)
     if (await fallbackToNextIptvUrl(attemptId)) {
       return await playCurrentIptvUrl(attemptId, playCurrentOptions)
@@ -2920,19 +3222,20 @@ async function raceStartupSources(candidates, attemptId = 0, options = {}) {
   if (!(await setIptvUrlIndexForAttempt(winnerIndex, attemptId))) return
 
   try {
-    await tryPlayIptv(winnerEntry.url, Boolean(winnerEntry.via_proxy), winnerEntry.custom_ua || '', attemptId, winnerIndex, sourceType(winnerEntry), {
+    await tryPlayIptv(winnerEntry.url, isProxyLikeEntry(winnerEntry), winnerEntry.custom_ua || '', attemptId, winnerIndex, sourceType(winnerEntry), {
       startupTimeoutMs: playCurrentOptions.startupTimeoutMs,
       preserveFrame: playCurrentOptions.preserveFrame,
     })
     if (!isAttemptActive(attemptId)) return
     setSourceRuntimeStatus(winnerIndex, 'playing')
+    clearRaceLoser(winnerEntry.url)
     playerStore.clearPlaybackError()
     playerStore.setLoading(false)
   } catch (e) {
     if (!isAttemptActive(attemptId)) return
-    if (isProxyLike(winnerEntry)) _racedLosers.add(winnerEntry.url)
+    markRaceLoser(winnerEntry.url)
     setSourceRuntimeStatus(winnerIndex, 'failed')
-    console.warn('[RACE:startup] 胜出源正式起播失败:', e?.message)
+    console.warn('[RACE:hedged] 胜出源正式起播失败:', e?.message)
     if (await fallbackToNextIptvUrl(attemptId)) {
       return await playCurrentIptvUrl(attemptId, playCurrentOptions)
     }
@@ -3134,7 +3437,7 @@ async function raceProxySources(entries, attemptId = 0) {
   resetIptvVideo()
   playerStore.setLoading(true)
 
-  const fresh = entries.filter(e => sourceType(e) !== 'youtube' && sourceType(e) !== 'unsupported_youtube_url' && !_racedLosers.has(e.url))
+  const fresh = entries.filter(e => sourceType(e) !== 'youtube' && sourceType(e) !== 'unsupported_youtube_url' && !isRaceLoser(e.url))
   if (!fresh.length) {
     if (await fallbackToNextIptvUrl(attemptId)) {
       return await playCurrentIptvUrl(attemptId)
@@ -3155,7 +3458,7 @@ async function raceProxySources(entries, attemptId = 0) {
       playerStore.setLoading(false)
     } catch (e) {
       if (!isAttemptActive(attemptId)) return
-      _racedLosers.add(entry.url)
+      markRaceLoser(entry.url)
       console.warn('[IPTV] 原生代理源失败:', e?.message)
       if (await fallbackToNextIptvUrl(attemptId)) {
         return await playCurrentIptvUrl(attemptId)
@@ -3207,7 +3510,7 @@ async function raceProxySources(entries, attemptId = 0) {
 
     raceTimer = setTimeout(() => {
       for (const entry of fresh) {
-        _racedLosers.add(entry.url)
+        markRaceLoser(entry.url)
         setSourceRuntimeStatusByEntry(entry, 'failed')
       }
       finish(null)
@@ -3244,7 +3547,7 @@ async function raceProxySources(entries, attemptId = 0) {
         }
         if (d.fatal || d.type === Hls.ErrorTypes.NETWORK_ERROR || racer.fragFail >= 2) {
           failCount++
-          _racedLosers.add(entry.url)
+          markRaceLoser(entry.url)
           setSourceRuntimeStatusByEntry(entry, 'failed')
           cleanupRacer(racer)
           if (failCount >= fresh.length) finish(null)
@@ -3332,7 +3635,7 @@ async function raceProxySources(entries, attemptId = 0) {
       return
     }
     console.warn('[RACE] 胜出代理接管失败:', e?.message)
-    _racedLosers.add(winnerEntry.url)
+    markRaceLoser(winnerEntry.url)
     setSourceRuntimeStatusByEntry(winnerEntry, 'failed')
     releaseWideProxyUrl(winnerEntry.url)
     winnerHls.destroy()
@@ -3434,7 +3737,11 @@ function seekNearLiveEdge(v) {
   if (!Number.isFinite(liveEdge)) return false
   if (liveEdge - v.currentTime < 8) return false
 
-  v.currentTime = Math.max(rangeStart, liveEdge - 2)
+  // 跳的目标余量按 seekable window 自适应：长窗口（≥30s）保留 12s（约 1 段安全垫），
+  // 短窗口（如 yxfy 15s）只能保留窗口的 ~1/3，避免直接跳到窗口起点又触发 stall。
+  const windowSize = liveEdge - rangeStart
+  const offsetFromEdge = Math.max(4, Math.min(12, windowSize / 3))
+  v.currentTime = Math.max(rangeStart + 1, liveEdge - offsetFromEdge)
   return true
 }
 
@@ -3608,10 +3915,13 @@ function startPlaybackProgressWatch(v = iptvVideoRef.value) {
       playerStore.setLoading(true)
     }
 
-    if (bufferAhead > 0 && bufferAhead < 0.6 && liveLatency > 9 && now - _lastBufferNudgeTime > 8000) {
+    // 禁用主动 seek-nudge：seekToStableLivePoint 会在 currentTime 附近留下空洞，
+    // 让 hls.js 误判为缺段循环跳；交给 hls.js 自带的 nudgeOffset/nudgeMaxRetry 处理。
+    // 仅在 latency 真的远超窗口（>20s）+ buffer 完全空（<0.2s）才介入。
+    if (bufferAhead < 0.2 && liveLatency > 20 && now - _lastBufferNudgeTime > 15000) {
       _lastBufferNudgeTime = now
       if (seekToStableLivePoint(v, 8)) {
-        console.warn('[IPTV] 前方缓冲过低，提前跳过可能卡顿点', {
+        console.warn('[IPTV] 严重落后 live edge，强制对齐', {
           bufferAhead,
           liveLatency,
           currentTime,
@@ -3663,10 +3973,13 @@ function startVideoFrameWatch(v = iptvVideoRef.value) {
     const bufferAhead = getForwardBuffer(v)
     const liveLatency = getLiveLatency(v)
 
-    if (bufferAhead > 0 && bufferAhead < 0.6 && liveLatency > 9 && now - _lastBufferNudgeTime > 8000) {
+    // 禁用主动 seek-nudge：seekToStableLivePoint 会在 currentTime 附近留下空洞，
+    // 让 hls.js 误判为缺段循环跳；交给 hls.js 自带的 nudgeOffset/nudgeMaxRetry 处理。
+    // 仅在 latency 真的远超窗口（>20s）+ buffer 完全空（<0.2s）才介入。
+    if (bufferAhead < 0.2 && liveLatency > 20 && now - _lastBufferNudgeTime > 15000) {
       _lastBufferNudgeTime = now
       if (seekToStableLivePoint(v, 8)) {
-        console.warn('[IPTV] 前方缓冲过低，提前跳过可能卡顿点', {
+        console.warn('[IPTV] 严重落后 live edge，强制对齐', {
           bufferAhead,
           liveLatency,
           currentTime,

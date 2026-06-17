@@ -6,6 +6,7 @@
 <script setup>
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
+import Hls from 'hls.js'
 import { usePlayerStore } from '../stores/player'
 import { API_BASE } from '../apiBase'
 import { publicAsset } from '../publicAsset'
@@ -26,6 +27,10 @@ function getDirectUrl(stationId) {
 
 function hasDirectUrl(stationId) {
   return Boolean(getDirectUrl(stationId))
+}
+
+function channelStreamUrl(stationId) {
+  return `${API_BASE}/api/media/channel/${encodeURIComponent(stationId)}/stream`
 }
 
 function updateSystemMediaSession(stationId) {
@@ -111,9 +116,9 @@ function fallbackToProxyStream(stationId) {
     return
   }
 
-  // 确定中转地址：优先用 directStreamStationMap 的自定义地址，否则用通用 /api/{id}/live
+  // 确定中转地址：优先用 directStreamStationMap 的自定义地址，否则用统一 signed stream 入口
   const streamConfig = directStreamStationMap[stationId]
-  const proxyUrl = streamConfig?.proxyUrl || `${API_BASE}/api/${stationId}/live`
+  const proxyUrl = streamConfig?.proxyUrl || channelStreamUrl(stationId)
 
   directStreamMode.value = 'proxy'
   playerStore.setPlaybackError('直连失败，正在自动切换后端中转。')
@@ -277,14 +282,14 @@ async function tryFallbackUrls() {
   if (winner) _directProbeWinner = winner
 
   if (!winner && _directProbeWinner) {
-    const proxyUrl = `${API_BASE}/api/media/channel/${encodeURIComponent(_fallbackStationId)}/playlist.m3u8`
+    const proxyUrl = channelStreamUrl(_fallbackStationId)
     console.log(`[回退] 直连播放失败，直接中转源 #${_directProbeWinner.index + 1}...`)
     winner = { url: proxyUrl, origUrl: _directProbeWinner.origUrl, index: _directProbeWinner.index, type: 'proxy' }
   }
 
   if (!winner) {
     // 没有更多回退：走频道入口（后端自动选源）
-    const fallbackUrl = `${API_BASE}/api/media/channel/${encodeURIComponent(stationId)}/playlist.m3u8`
+    const fallbackUrl = channelStreamUrl(stationId)
     console.log(`[回退] 直连全败，fallback 到 channel 入口...`)
     winner = await probeParallel([fallbackUrl], stationId, 'proxy')
   }
@@ -510,7 +515,7 @@ function loadStation(stationId) {
     return
   }
 
-  console.warn('当前浏览器不支持 HLS 播放，或 hls.js CDN 尚未加载完成。')
+  console.warn('当前浏览器不支持 HLS 播放，或 hls.js 尚未加载完成。')
   playerStore.setPlaybackError('当前浏览器不支持 HLS 播放。')
   playerStore.togglePlay(false)
 }
