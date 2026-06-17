@@ -87,6 +87,28 @@ class StaleGraceTest(unittest.TestCase):
         self.assertEqual(main._wide_refresh_interval_for(60), main._WIDE_REFRESH_INTERVAL_MAX)
 
 
+class PlaylistCacheKeyTest(unittest.TestCase):
+    def test_thin_cache_key_uses_source_revision_scope(self):
+        url_a = "https://cdn.example/live/index.m3u8?token=a"
+        url_b = "https://cdn.example/live/index.m3u8?token=b"
+
+        self.assertEqual(main._thin_cache_key(url_a, "src:rev1"), main._thin_cache_key(url_b, "src:rev1"))
+        self.assertNotEqual(main._thin_cache_key(url_a, "src:rev1"), main._thin_cache_key(url_a, "src:rev2"))
+
+    def test_wide_cache_key_uses_source_revision_scope(self):
+        url_a = "https://cdn.example/live/index.m3u8?token=a"
+        url_b = "https://cdn.example/live/index.m3u8?token=b"
+
+        self.assertEqual(
+            main._wide_cache_key_for(url_a, "ctx", source_id="src_a", source_revision="rev1"),
+            main._wide_cache_key_for(url_b, "ctx", source_id="src_a", source_revision="rev1"),
+        )
+        self.assertNotEqual(
+            main._wide_cache_key_for(url_a, "ctx", source_id="src_a", source_revision="rev1"),
+            main._wide_cache_key_for(url_a, "ctx", source_id="src_a", source_revision="rev2"),
+        )
+
+
 class _FakeUpstreamPlaylist:
     """模拟一个会循环复用 0.ts/1.ts/.../4.ts 的 IPTV 上游。"""
 
@@ -135,11 +157,14 @@ class WidePlaylistSegmentInjectionTest(unittest.TestCase):
             # 用的是不解析的 .example 主机，临时把 main 上绑的 assert_safe_target_url
             # 替换成 noop 即可（主流程的 SSRF 行为有专门的 test_ssrf_guard /
             # test_media_proxy_chunk 覆盖）。
-            async def _noop(*a, **kw):
+            ssrf_checked = []
+
+            async def _record_ssrf(url, *a, **kw):
+                ssrf_checked.append(url)
                 return None
 
             real_ssrf = main.assert_safe_target_url
-            main.assert_safe_target_url = _noop
+            main.assert_safe_target_url = _record_ssrf
             try:
                 with mock.patch.object(main.http_client, "get", side_effect=fake.get):
                     resp = await main.serve_iptv_wide_playlist_by_source(
@@ -147,14 +172,16 @@ class WidePlaylistSegmentInjectionTest(unittest.TestCase):
                         ctx_id="",
                         src_label="channel:demo",
                         canonical_key="demo",
+                        source_id="src_demo",
                         access=access,
                     )
                     body = resp.body.decode("utf-8")
             finally:
                 main.assert_safe_target_url = real_ssrf
-            return body
+            return body, ssrf_checked
 
-        body = asyncio.run(go())
+        body, ssrf_checked = asyncio.run(go())
+        self.assertEqual(ssrf_checked[:1], ["https://up.example/live.m3u8"])
         # 解析重写后的 segment 行
         seg_lines = [
             line for line in body.splitlines()
@@ -167,6 +194,7 @@ class WidePlaylistSegmentInjectionTest(unittest.TestCase):
         for line in seg_lines:
             handle = line.rsplit("/", 1)[-1].split("?", 1)[0]
             payload = proxy_handles.decode_for_kind(handle, "chunk")
+            self.assertEqual(payload.src_id, "src_demo")
             self.assertIn(".ts", payload.url)
             self.assertIn("wf_seq=", payload.url)
 

@@ -42,7 +42,8 @@ class ProxyContext:
     no_ua: bool = False
     upstream_url: str = ""
     source_type: str = ""    # adapter 解析得出，hls/mpegts/http_flv/rtsp...
-    source_id: str = ""      # canonical_key 或 channel_id；调试 + 风控用
+    source_id: str = ""      # source_id；调试 + 风控用
+    source_revision: str = ""  # 当前源配置指纹；仅用于缓存/ctx 失效
     expires_at: float = 0.0
     extras: dict = field(default_factory=dict)
 
@@ -78,7 +79,7 @@ class ProxyContextRegistry:
         """根据 ctx 的可识别字段算一个稳定 fingerprint。
 
         只覆盖会影响上游请求语义的字段（UA/Referer/Cookie/no_ua/upstream_url/
-        source_type/source_id）。``expires_at`` / ``extras`` 不参与，否则永远不命中。
+        source_type/source_id/source_revision）。``expires_at`` / ``extras`` 不参与，否则永远不命中。
         """
         h = hashlib.sha256()
         for v in (
@@ -89,6 +90,7 @@ class ProxyContextRegistry:
             ctx.upstream_url or "",
             ctx.source_type or "",
             ctx.source_id or "",
+            ctx.source_revision or "",
         ):
             h.update(v.encode("utf-8", errors="replace"))
             h.update(b"\x1f")  # 字段分隔符，避免拼接歧义

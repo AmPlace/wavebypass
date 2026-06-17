@@ -54,6 +54,7 @@ from security.proxy_handles import (
     decode_for_kind,
     issue_cached_handle,
 )
+from security.source_ids import source_id_for, source_revision_for
 from ssrf_guard import UnsafeTargetError, assert_safe_target_url
 
 
@@ -265,11 +266,101 @@ def _safe_decode(handle: str, *, expected_kind: str) -> "decoded":
 # ── 频道入口（稳定 ID）──────────────────────────────────────────────────
 
 
+async def _find_iptv_channel_source(
+    canonical_key: str,
+    source_id: str,
+) -> tuple[dict, dict]:
+    import main as _m
+
+    channels, _groups = await _m._get_aggregated_iptv_channels()
+    channel = next((ch for ch in channels if ch.get("canonical_key") == canonical_key), None)
+    if not channel:
+        raise HTTPException(status_code=404, detail="频道不存在")
+
+    all_sources = list(channel.get("urls", []) or [])
+    for source in all_sources:
+        if not source.get("source_id"):
+            source["source_id"] = source_id_for(source)
+
+    requested_source_id = str(source_id or "").strip()
+    if not requested_source_id:
+        raise HTTPException(status_code=400, detail="source_id 不能为空")
+
+    source = next((s for s in all_sources if str(s.get("source_id") or "") == requested_source_id), None)
+    if not source:
+        raise HTTPException(status_code=404, detail="播放源不存在")
+    if not _is_truthy(source.get("enabled", True)) or source.get("disabled") is True:
+        raise HTTPException(status_code=403, detail="播放源已禁用")
+    if not _playback_source_supported(_m, source):
+        raise HTTPException(status_code=404, detail="播放源类型不支持")
+    return channel, source
+
+
+@router.get("/api/media/channel/{channel_key}/resolve")
+async def media_channel_source_resolve(
+    channel_key: str,
+    request: Request,
+    source_id: str = Query(..., description="Adapter source selector; must match a source in this channel"),
+    access: MediaAccessContext = Depends(resolve_media_access),
+):
+    """安全版 adapter resolve。
+
+    只接受当前频道内的 ``source_id``，不接受任意 target_url。用于前端恢复旧的
+    adapter direct 候选语义：adapter 返回 direct_playable 且未 requires_proxy 时，
+    前端可直连 resolved URL；proxy fallback 仍使用 source_id 频道入口。
+    """
+    import main as _m
+
+    _channel, source = await _find_iptv_channel_source(channel_key, source_id)
+    source_type = _m._source_type(source)
+    if source_type not in {"adapter", "youtube", "unsupported_youtube_url"}:
+        raise HTTPException(status_code=404, detail="播放源不是 adapter")
+
+    raw_url = str(source.get("url") or "").strip()
+    adapter_url = raw_url
+    if source_type in {"youtube", "unsupported_youtube_url"}:
+        adapter_url = raw_url if raw_url.lower().startswith("youtube://") else f"youtube://resolve?url={quote(raw_url, safe='')}"
+
+    try:
+        resolved = await _m.resolve_adapter_source(adapter_url, _m.http_client)
+    except _m.AdapterResolveError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.to_payload()) from exc
+
+    resolved_url = str(resolved.get("url") or "").strip()
+    if resolved_url:
+        try:
+            await assert_safe_target_url(resolved_url, allowed_schemes={"http", "https", "rtsp"})
+        except UnsafeTargetError as exc:
+            logger.info("adapter resolve SSRF reject: %s", exc)
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+    source_ref = str(source.get("source_id") or source_id_for(source))
+    proxy_path = f"/api/media/channel/{quote(channel_key, safe='')}/playlist.m3u8?source_id={quote(source_ref, safe='')}"
+    if access.propagated_access_token:
+        proxy_path += f"&access_token={quote(access.propagated_access_token, safe='')}"
+
+    return {
+        "ok": True,
+        "source_id": source_ref,
+        "source_revision": source_revision_for(source),
+        "adapter": resolved.get("adapter") or source.get("adapter") or "",
+        "url": resolved_url,
+        "source_type": str(resolved.get("source_type") or "hls").strip().lower(),
+        "direct_playable": resolved.get("direct_playable", True),
+        "requires_proxy": bool(resolved.get("requires_proxy", False)),
+        "volatile_url": bool(resolved.get("volatile_url", False)),
+        "proxy_url": proxy_path,
+        "ttl": resolved.get("ttl"),
+        "expires_at": resolved.get("expires_at"),
+        "warnings": resolved.get("warnings") or [],
+    }
+
+
 @router.get("/api/media/channel/{channel_key}/playlist.m3u8")
 async def media_channel_playlist(
     channel_key: str,
     request: Request,
-    source_url: str = Query("", description="IPTV source selector; must match a source in this channel"),
+    source_id: str = Query("", description="IPTV source selector; must match a source in this channel"),
     access: MediaAccessContext = Depends(resolve_media_access),
 ):
     """按稳定 ID 解析频道 → 选 best source → 签 handle → 返回主播放列表。
@@ -286,11 +377,14 @@ async def media_channel_playlist(
     """
     import main as _m  # 延迟导入，避开循环
 
+    if "source_url" in request.query_params:
+        raise HTTPException(status_code=400, detail="source_url 参数已移除，请使用 source_id")
+
     # 1. IPTV 聚合频道优先：仅当用户订阅里真的存在该 canonical_key 才走 IPTV。
     channels, _groups = await _m._get_aggregated_iptv_channels()
     iptv_match = any(ch.get("canonical_key") == channel_key for ch in channels)
     if iptv_match:
-        return await _serve_iptv_channel_playlist(channel_key, request, access, source_url=source_url)
+        return await _serve_iptv_channel_playlist(channel_key, request, access, source_id=source_id)
 
     # 2. 回落到电台 station_id。
     if _is_radio_station_id(_m, channel_key):
@@ -384,7 +478,7 @@ async def _serve_iptv_channel_playlist(
     canonical_key: str,
     request: Request,
     access: MediaAccessContext,
-    source_url: str = "",
+    source_id: str = "",
 ) -> Response:
     import main as _m
 
@@ -393,17 +487,19 @@ async def _serve_iptv_channel_playlist(
     if not channel:
         raise HTTPException(status_code=404, detail="频道不存在")
 
+    requested_source_id = str(source_id or "").strip()
+    if requested_source_id:
+        _channel, source = await _find_iptv_channel_source(canonical_key, requested_source_id)
+        return await _serve_iptv_source_playlist(source, canonical_key, access)
+
+    all_sources = list(channel.get("urls", []) or [])
+    for source in all_sources:
+        if not source.get("source_id"):
+            source["source_id"] = source_id_for(source)
+
     sources = _m._sorted_sources([
-        s for s in channel.get("urls", []) if _playback_source_supported(_m, s)
+        s for s in all_sources if _playback_source_supported(_m, s)
     ])
-    requested_source_url = str(source_url or "").strip()
-    if requested_source_url:
-        sources = [
-            s for s in sources
-            if str(s.get("url") or "").strip() == requested_source_url
-        ]
-        if not sources:
-            raise HTTPException(status_code=404, detail="播放源不存在")
     if not sources:
         raise HTTPException(status_code=503, detail="没有可用播放源")
 
@@ -430,6 +526,8 @@ async def _serve_iptv_source_playlist(
     custom_ua = str(source.get("custom_ua") or "")
     referer = str(source.get("referer") or "")
     raw_url = str(source.get("url") or "").strip()
+    source_id = str(source.get("source_id") or source_id_for(source))
+    source_revision = source_revision_for(source)
     if not raw_url:
         raise HTTPException(status_code=502, detail="source url 为空")
 
@@ -460,6 +558,8 @@ async def _serve_iptv_source_playlist(
             cookie=ad_cookie,
             no_ua=no_ua,
             canonical_key=canonical_key,
+            source_id=source_id,
+            source_revision=source_revision,
             access=access,
         )
 
@@ -472,6 +572,8 @@ async def _serve_iptv_source_playlist(
         cookie="",
         no_ua=False,
         canonical_key=canonical_key,
+        source_id=source_id,
+        source_revision=source_revision,
         access=access,
     )
 
@@ -485,12 +587,15 @@ async def _serve_resolved_source_playlist(
     cookie: str,
     no_ua: bool,
     canonical_key: str,
+    source_id: str,
+    source_revision: str,
     access: MediaAccessContext,
 ) -> Response:
     """已经解析到 HTTP/RTSP URL 的 source 的统一入口。"""
     import main as _m
 
-    src_label = f"channel:{canonical_key}"
+    source_ref = source_id or canonical_key
+    src_label = f"channel:{canonical_key}:source:{source_ref}"
 
     # 是否需要建 ProxyContext（动态 header）
     ctx_id = ""
@@ -503,7 +608,8 @@ async def _serve_resolved_source_playlist(
             no_ua=no_ua,
             upstream_url=resolved_url,
             source_type=resolved_st,
-            source_id=canonical_key,
+            source_id=source_ref,
+            source_revision=source_revision,
         )
         ctx_id = get_proxy_context_registry().put(ctx)
 
@@ -515,7 +621,7 @@ async def _serve_resolved_source_playlist(
             kind="rtsp",
             url=resolved_url,
             src=src_label,
-            src_id=canonical_key,
+            src_id=source_ref,
             ctx=ctx_id,
             compat=0,
         )
@@ -531,7 +637,7 @@ async def _serve_resolved_source_playlist(
             kind="stream",
             url=resolved_url,
             src=src_label,
-            src_id=canonical_key,
+            src_id=source_ref,
             ctx=ctx_id,
         )
         suffix = "?stream_type=http_flv" if resolved_st == "http_flv" else ""
@@ -548,6 +654,8 @@ async def _serve_resolved_source_playlist(
         ctx_id=ctx_id,
         src_label=src_label,
         canonical_key=canonical_key,
+        source_id=source_ref,
+        source_revision=source_revision,
         access=access,
     )
 

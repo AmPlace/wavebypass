@@ -21,6 +21,16 @@ class ProxyContextTtlTest(unittest.TestCase):
         # 默认 TTL 必须把 ctx 至少撑过 chunk handle 的 6h
         self.assertGreater(got.expires_at, 0)
 
+    def test_source_revision_participates_in_fingerprint(self):
+        pc.reset_for_tests()
+        first = pc.get_registry().put(
+            pc.ProxyContext(custom_ua="UA", referer="https://x/", source_id="src", source_revision="rev1")
+        )
+        second = pc.get_registry().put(
+            pc.ProxyContext(custom_ua="UA", referer="https://x/", source_id="src", source_revision="rev2")
+        )
+        self.assertNotEqual(first, second)
+
 
 if __name__ == "__main__":
     unittest.main()

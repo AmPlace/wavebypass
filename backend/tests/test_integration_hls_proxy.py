@@ -111,6 +111,7 @@ class IntegrationTestBase(unittest.IsolatedAsyncioTestCase):
             cls.proc.wait()
 
     async def asyncSetUp(self):
+        os.environ["WAVEFLOW_PROXY_HANDLE_SECRET"] = "test-handle-secret-32bytes!!!"
         self.upstream = MockHLSServer(scenario=LiveScenario())
         await self.upstream.start()
         _seed_db_sync(self.upstream.playlist_url)

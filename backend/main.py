@@ -40,6 +40,7 @@ from routers.media_proxy import router as media_proxy_router
 from routers.settings import router as settings_router
 from routers.setup import router as setup_router
 from security.dependencies import require_admin, require_browse_access, require_media_access, resolve_media_access
+from security.source_ids import source_id_for
 
 
 TOKEN_REFRESH_INTERVAL_SECONDS = 18_000
@@ -1866,7 +1867,7 @@ async def _get_aggregated_iptv_channels(group: str = '', search: str = '') -> tu
         source_type = stored_source_type if stored_source_type and stored_source_type != 'hls' else detected_source_type
         youtube_video_id = parse_youtube_video_id(ch['url']) or ch.get('youtube_video_id')
         youtube_channel_id = parse_youtube_channel_id(ch['url'])
-        merged[key]['urls'].append({
+        source_entry = {
             'url': ch['url'],
             'is_working': ch['is_working'],
             'latency_ms': ch['latency_ms'],
@@ -1903,7 +1904,9 @@ async def _get_aggregated_iptv_channels(group: str = '', search: str = '') -> tu
             'market_source_id': ch.get('market_source_id', ''),
             'market_channel_id': ch.get('market_channel_id', ''),
             'market_source_item_id': ch.get('market_source_item_id', ''),
-        })
+        }
+        source_entry['source_id'] = source_id_for(ch)
+        merged[key]['urls'].append(source_entry)
 
     # 生成 tvg_id_candidates
     for ch in merged.values():
@@ -2310,13 +2313,14 @@ _THIN_TTL = 1.5          # 新鲜窗口：合并并发请求 + 极短回放，�
 _THIN_MAX_ENTRIES = 200
 
 
-def _thin_cache_key(url: str) -> str:
-    """稳定 cache key：scheme://netloc/path，去掉 query（含动态 token）。"""
+def _thin_cache_key(url: str, cache_scope: str = "") -> str:
+    """稳定 cache key：source/config scope + scheme://netloc/path，去掉 query（含动态 token）。"""
     parsed = urlparse(url)
-    return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+    stable_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+    return f"{cache_scope}\x1f{stable_url}" if cache_scope else stable_url
 
 
-async def _thin_playlist_fetch(url: str, headers: dict[str, str] | None = None) -> tuple[str, str]:
+async def _thin_playlist_fetch(url: str, headers: dict[str, str] | None = None, *, cache_scope: str = "") -> tuple[str, str]:
     """拉取上游 playlist，带薄韧性。
 
     - single-flight：同一 URL 并发请求合并为一次上游 fetch
@@ -2330,11 +2334,11 @@ async def _thin_playlist_fetch(url: str, headers: dict[str, str] | None = None) 
     _h = dict(headers or {})
     _h.setdefault("Accept-Encoding", "identity")
 
-    lock = _THIN_LOCKS.setdefault(url, asyncio.Lock())
+    ck = _thin_cache_key(url, cache_scope)
+    lock = _THIN_LOCKS.setdefault(ck, asyncio.Lock())
 
     async with lock:
         # single-flight：锁内再检查一次缓存（可能被上一个持有者写入）
-        ck = _thin_cache_key(url)
         cached = _THIN_CACHE.get(ck)
         if cached and cached[2] > time.time():
             return cached[0], cached[1]
@@ -2938,9 +2942,10 @@ async def _wide_refresher(cache_key: str, target_url: str, ctx_id: str, src_id: 
             _drop_wide_cache(cache_key)
             logger.info("IPTV wide playlist 后台刷新停止: idle %.0fs key=%s", time.time() - last_access, cache_key)
             return
+        active_target_url = cache.get('target_url') or target_url
 
         try:
-            resp = await http_client.get(target_url, follow_redirects=True, timeout=6, headers=_h)
+            resp = await http_client.get(active_target_url, follow_redirects=True, timeout=6, headers=_h)
             resp.raise_for_status()
             playlist_base_url = str(resp.url)
             segments, target_duration, _ = _parse_live_segments(resp.text, playlist_base_url)
@@ -3026,20 +3031,26 @@ def release_iptv_wide_playlist_by_key(cache_key: str) -> bool:
     return released
 
 
-def _wide_cache_key_for(upstream_url: str, ctx_id: str) -> str:
-    """稳定 cache key：上游 URL + ctx_id。
+def _wide_cache_key_for(upstream_url: str, ctx_id: str, *, source_id: str = "", source_revision: str = "") -> str:
+    """稳定 cache key：source/config scope + playlist identity + ctx_id。
 
     不使用 signed handle 当 cache key（每次签发都不同），避免缓存反复失效。
 
     fjtv 等 adapter 每次 resolve 带不同的 ``_upt`` / session token，导致
     upstream_url 次次换，cache_key 跟着换，刚建起来的 wide cache + 后台
-    refresher 立刻被孤立成 dead entry。这里只取 scheme://netloc/path，
-    query（含动态 token）不参与 cache key。
+    refresher 立刻被孤立成 dead entry。这里只取 scheme://netloc/path 作为
+    playlist 层级，query（含动态 token）不参与 cache key；source_revision
+    负责源配置变更时主动切到新缓存。
     """
     parsed = urlparse(upstream_url)
     stable_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
-    base = quote(stable_url, safe='')
-    return f"{base}#{ctx_id}" if ctx_id else base
+    parts = [
+        source_id or "",
+        source_revision or "",
+        stable_url,
+        ctx_id or "",
+    ]
+    return quote("\x1f".join(parts), safe='')
 
 
 async def serve_iptv_wide_playlist_by_source(
@@ -3048,6 +3059,8 @@ async def serve_iptv_wide_playlist_by_source(
     ctx_id: str,
     src_label: str,
     canonical_key: str,
+    source_id: str = "",
+    source_revision: str = "",
     access,
 ):
     """供 ``routers/media_proxy.py`` 调用：按上游 URL + ctx_id 拉播放列表。
@@ -3080,14 +3093,16 @@ async def serve_iptv_wide_playlist_by_source(
         if ctx.cookie:
             _headers['Cookie'] = ctx.cookie
     _headers.setdefault('Accept-Encoding', 'identity')
+    source_ref = source_id or f"channel:{canonical_key}"
+    cache_scope = f"{source_ref}:{source_revision or ''}"
 
     if not WIDE_ENABLED:
         # ── 薄韧性直通路径（非扩窗）─────────────────────────────
-        text, final_url = await _thin_playlist_fetch(upstream_url, _headers)
+        text, final_url = await _thin_playlist_fetch(upstream_url, _headers, cache_scope=cache_scope)
         from core.m3u8_rewriter import RewriteContext as _RC, rewrite_m3u8 as _rw
         rewrite_ctx = _RC(
             base_url=final_url,
-            src_id=f"channel:{canonical_key}",
+            src_id=source_ref,
             src_label=src_label,
             ctx_id=ctx_id,
             propagated_access_token=access.propagated_access_token or "" if access else "",
@@ -3102,8 +3117,8 @@ async def serve_iptv_wide_playlist_by_source(
     # ── 扩窗路径（WIDE_ENABLED=True）───────────────────────────
 
     access_token = access.propagated_access_token or "" if access else ""
-    src_id = f"channel:{canonical_key}"
-    cache_key = _wide_cache_key_for(upstream_url, ctx_id)
+    src_id = source_ref
+    cache_key = _wide_cache_key_for(upstream_url, ctx_id, source_id=source_ref, source_revision=source_revision)
 
     def _rewrite_ts(seg_url: str, seg_seq: int = -1) -> str:
         if not _should_proxy_iptv_chunk(seg_url, 1):
@@ -3163,6 +3178,7 @@ async def serve_iptv_wide_playlist_by_source(
             'meta': meta_lines,
             'base_url': playlist_base_url,
             'raw_meta_text': last_text,
+            'target_url': upstream_url,
             'last_refresh_at': time.time(),
             'stale_since': 0,
             'last_refresh_log_at': 0,
@@ -3202,6 +3218,7 @@ async def serve_iptv_wide_playlist_by_source(
     # 命中缓存：返回扩展窗口 playlist。重写时根据当前请求的 access_token 重生成（meta + chunk）
     _wide_cache[cache_key + '_ts'] = time.time()
     cache = _wide_cache[cache_key]
+    cache['target_url'] = upstream_url
     target_dur = cache.get('target_duration', 6)
     stale_since = float(cache.get('stale_since') or 0)
     if stale_since and time.time() - stale_since > _wide_stale_grace_for(target_dur):
@@ -3357,7 +3374,6 @@ async def serve_iptv_proxy_stream_response(
         upstream: httpx.Response | None = initial_upstream
         no_data_retries = 0
         last_data_at = time.monotonic()
-
         async def client_disconnected() -> bool:
             return bool(request and await request.is_disconnected())
 

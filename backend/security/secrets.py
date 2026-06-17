@@ -123,3 +123,4 @@ def reset_for_tests() -> None:
 
 # 用途常量，集中维护，避免拼写漂移。
 PROXY_HANDLE_PURPOSE = "proxy-handle-v1"
+SOURCE_ID_PURPOSE = "media-source-id-v1"
