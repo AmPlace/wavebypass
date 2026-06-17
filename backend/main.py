@@ -3380,7 +3380,7 @@ async def serve_iptv_proxy_stream_response(
 
                 try:
                     # identity 编码（headers 已声明），用 aiter_raw 跳过 httpx 解码层。
-                    async for chunk in upstream.aiter_raw(64 * 1024):
+                    async for chunk in upstream.aiter_raw():
                         if await client_disconnected():
                             close_reason = "client disconnected"
                             break
@@ -3462,6 +3462,9 @@ async def serve_iptv_proxy_stream_response(
                         if await sleep_unless_disconnected(retry_delay):
                             return
         finally:
+            if upstream is not None:
+                await upstream.aclose()
+                upstream = None
             await stream_client.aclose()
 
     stream_kind = (stream_type or "").strip().lower()
