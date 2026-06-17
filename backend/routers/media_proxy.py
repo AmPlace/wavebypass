@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
@@ -52,7 +52,7 @@ from security.proxy_handles import (
     HandleExpired,
     HandleSignatureError,
     decode_for_kind,
-    issue_handle,
+    issue_cached_handle,
 )
 from ssrf_guard import UnsafeTargetError, assert_safe_target_url
 
@@ -106,6 +106,140 @@ def _ctx_to_request_headers(ctx: ProxyContext | None, *, fallback_referer: str =
     return headers
 
 
+def _is_truthy(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() not in {"0", "false", "no", "off", ""}
+
+
+def _is_radio_station_id(_m, station_id: str) -> bool:
+    return (
+        station_id in _m.CURRENT_STREAMS
+        or station_id in _m.STATION_FETCHER_MAP
+        or station_id in _m.DIRECT_STREAM_STATIONS
+        or station_id in _m.MYRADIO_CACHE
+    )
+
+
+def _is_hls_like_url(url: str) -> bool:
+    return ".m3u8" in urlparse(url).path.lower()
+
+
+def _playback_source_supported(_m, source: dict) -> bool:
+    if not source.get("url"):
+        return False
+    if not _is_truthy(source.get("enabled", True)):
+        return False
+    return _m._source_type(source) not in {"unsupported"}
+
+
+async def _radio_station_url(_m, station_id: str) -> str:
+    real_url = _m.CURRENT_STREAMS.get(station_id)
+    if not real_url:
+        try:
+            real_url = await _m.refresh_station_stream_url(station_id)
+        except HTTPException:
+            raise
+    if not real_url and station_id in _m.MYRADIO_CACHE:
+        cached = _m.MYRADIO_CACHE.get(station_id) or {}
+        if _m.time.time() - float(cached.get("ts") or 0) < _m.MYRADIO_CACHE_TTL:
+            raw = cached.get("url")
+            if isinstance(raw, dict):
+                raw = raw.get("hlsurl") or raw.get("url")
+            real_url = str(raw or "")
+            if real_url:
+                _m.CURRENT_STREAMS[station_id] = real_url
+    return str(real_url or "").strip()
+
+
+def _media_access_suffix(access_ctx: MediaAccessContext, *, separator: str = "?") -> str:
+    token = access_ctx.propagated_access_token or ""
+    if not token:
+        return ""
+    return f"{separator}access_token={quote(token, safe='')}"
+
+
+# Hop-by-hop headers from RFC 7230 §6.1，外加 Content-Encoding（我们已用
+# Accept-Encoding: identity 强制上游不压缩，下游也不应该自己声明 gzip/br）。
+_HOP_BY_HOP_HEADERS = frozenset({
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+    # 与 streaming 行为相关，单独剔除
+    "content-encoding",
+})
+
+_CHUNK_PASSTHROUGH_HEADERS = frozenset({
+    "content-length",
+    "content-range",
+    "accept-ranges",
+    "etag",
+    "last-modified",
+})
+
+
+def _safe_upstream_response_headers(headers: httpx.Headers, *, live_chunk: bool = False) -> dict[str, str]:
+    """从上游响应中挑出可以安全透传给客户端的 header。
+
+    * 跳过 hop-by-hop 与 Content-Encoding（我们用 ``Accept-Encoding: identity`` 拉
+      上游，所以下游永远是身份编码，原始 ``Content-Length`` 直接透传是安全的）。
+    * 仅透传白名单中的关键媒体 header（长度/range/缓存校验）。
+    """
+    has_encoding = bool(headers.get("content-encoding"))
+    result: dict[str, str] = {}
+    for key, value in headers.items():
+        lower = key.lower()
+        if lower in _HOP_BY_HOP_HEADERS:
+            continue
+        if lower not in _CHUNK_PASSTHROUGH_HEADERS or not value:
+            continue
+        # 万一上游忽略了我们的 identity 请求又压缩了，就不要把错的 Content-Length
+        # 透传下去，否则浏览器/hls.js 会按声明长度截断或判定 corrupt。
+        if lower == "content-length" and has_encoding:
+            continue
+        result[key] = value
+    if live_chunk:
+        result["Cache-Control"] = "no-store"
+    return result
+
+
+def _fallback_chunk_content_type(url: str, content_type: str) -> str:
+    if content_type and content_type != "application/octet-stream":
+        return content_type
+    path = urlparse(url).path
+    ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
+    return {
+        "ts": "video/MP2T",
+        "m4s": "video/mp4",
+        "mp4": "video/mp4",
+        "fmp4": "video/mp4",
+        "m4v": "video/mp4",
+        "aac": "audio/aac",
+        "mp3": "audio/mpeg",
+    }.get(ext, content_type or "application/octet-stream")
+
+
+async def _stream_httpx_response(upstream: httpx.Response):
+    """流式透传上游响应。
+
+    使用 ``aiter_raw`` 而不是 ``aiter_bytes``，避免 httpx 自动解码
+    ``Content-Encoding``：我们已经用 ``Accept-Encoding: identity`` 显式禁止压缩，
+    上游若仍返回压缩内容也应原样转发，配合 ``_safe_upstream_response_headers`` 不
+    透传 ``Content-Length``，浏览器自己会按 ``Transfer-Encoding: chunked`` 处理。
+    """
+    try:
+        async for chunk in upstream.aiter_raw(64 * 1024):
+            if chunk:
+                yield chunk
+    finally:
+        await upstream.aclose()
+
+
 async def _validate_handle_url_or_403(handle_url: str, *, allowed_schemes: set[str]) -> None:
     try:
         await assert_safe_target_url(handle_url, allowed_schemes=allowed_schemes)
@@ -135,6 +269,7 @@ def _safe_decode(handle: str, *, expected_kind: str) -> "decoded":
 async def media_channel_playlist(
     channel_key: str,
     request: Request,
+    source_url: str = Query("", description="IPTV source selector; must match a source in this channel"),
     access: MediaAccessContext = Depends(resolve_media_access),
 ):
     """按稳定 ID 解析频道 → 选 best source → 签 handle → 返回主播放列表。
@@ -144,16 +279,62 @@ async def media_channel_playlist(
     * 电台 station_id（如 ``cnr_1``）
     * IPTV 聚合频道的 ``canonical_key``
 
-    后端按存在性优先匹配电台。
+    优先级：先尝试 IPTV 聚合频道（用户订阅里能命中 canonical_key 的话，
+    用户期望就是 IPTV）。命中失败再回落到电台 station_id。
+    这样可以避免用户自定义订阅的 canonical_key 撞上电台 station_id（如
+    ``cnr_1``）时整条频道被错判为电台的情况。
     """
     import main as _m  # 延迟导入，避开循环
 
-    # 1. 电台优先
-    if channel_key in _m.CURRENT_STREAMS or channel_key in _m.STATION_FETCHER_MAP or channel_key in _m.DIRECT_STREAM_STATIONS:
+    # 1. IPTV 聚合频道优先：仅当用户订阅里真的存在该 canonical_key 才走 IPTV。
+    channels, _groups = await _m._get_aggregated_iptv_channels()
+    iptv_match = any(ch.get("canonical_key") == channel_key for ch in channels)
+    if iptv_match:
+        return await _serve_iptv_channel_playlist(channel_key, request, access, source_url=source_url)
+
+    # 2. 回落到电台 station_id。
+    if _is_radio_station_id(_m, channel_key):
         return await _serve_radio_station_playlist(channel_key, request, access)
 
-    # 2. IPTV 聚合频道（canonical_key）
-    return await _serve_iptv_channel_playlist(channel_key, request, access)
+    raise HTTPException(status_code=404, detail="频道不存在")
+
+
+@router.get("/api/media/channel/{channel_key}/stream")
+async def media_channel_stream(
+    channel_key: str,
+    request: Request,
+    access: MediaAccessContext = Depends(resolve_media_access),
+):
+    """连续音频/直连流入口。
+
+    主要用于 MyRadio、DIRECT_STREAM_STATIONS 以及其它非 HLS 电台源。这里只暴露
+    稳定 station id，真实上游 URL 仍放在 signed stream handle 内。
+    """
+    import main as _m
+
+    if not _is_radio_station_id(_m, channel_key):
+        raise HTTPException(status_code=404, detail="电台不存在")
+    if _m._is_geo_blocked(channel_key, request):
+        raise HTTPException(status_code=403, detail="该电台因地域限制不可用。")
+
+    real_url = await _radio_station_url(_m, channel_key)
+    if not real_url:
+        raise HTTPException(status_code=503, detail="该电台播放地址尚未准备好。")
+    parsed = urlparse(real_url)
+    if parsed.scheme.lower() not in ("http", "https"):
+        raise HTTPException(status_code=400, detail="电台上游 scheme 不被允许")
+    await _validate_handle_url_or_403(real_url, allowed_schemes={"http", "https"})
+
+    handle = issue_cached_handle(
+        kind="stream",
+        url=real_url,
+        src=f"station:{channel_key}",
+        src_id=f"station:{channel_key}",
+    )
+    return RedirectResponse(
+        f"/api/media/proxy/stream/{handle}{_media_access_suffix(access)}",
+        status_code=307,
+    )
 
 
 async def _serve_radio_station_playlist(
@@ -166,19 +347,14 @@ async def _serve_radio_station_playlist(
     if _m._is_geo_blocked(station_id, request):
         raise HTTPException(status_code=403, detail="该电台因地域限制不可用。")
 
-    if station_id in _m.DIRECT_STREAM_STATIONS:
-        # 这条路径仅给 hls.js / video，不应到这里；指给 .stream
-        raise HTTPException(status_code=400, detail="该电台是直连音频流，请使用 stream 入口。")
-
-    real_url = _m.CURRENT_STREAMS.get(station_id)
-    if not real_url:
-        # 触发刷新一次
-        try:
-            real_url = await _m.refresh_station_stream_url(station_id)
-        except HTTPException:
-            raise
+    real_url = await _radio_station_url(_m, station_id)
     if not real_url:
         raise HTTPException(status_code=503, detail="该电台播放地址尚未准备好。")
+    if station_id in _m.DIRECT_STREAM_STATIONS or not _is_hls_like_url(real_url):
+        return RedirectResponse(
+            f"/api/media/channel/{quote(station_id, safe='')}/stream{_media_access_suffix(access)}",
+            status_code=307,
+        )
 
     parsed = urlparse(real_url)
     if parsed.scheme.lower() not in ("http", "https"):
@@ -208,6 +384,7 @@ async def _serve_iptv_channel_playlist(
     canonical_key: str,
     request: Request,
     access: MediaAccessContext,
+    source_url: str = "",
 ) -> Response:
     import main as _m
 
@@ -217,8 +394,16 @@ async def _serve_iptv_channel_playlist(
         raise HTTPException(status_code=404, detail="频道不存在")
 
     sources = _m._sorted_sources([
-        s for s in channel.get("urls", []) if _m._is_supported_export_source(s, healthy_only=True)
+        s for s in channel.get("urls", []) if _playback_source_supported(_m, s)
     ])
+    requested_source_url = str(source_url or "").strip()
+    if requested_source_url:
+        sources = [
+            s for s in sources
+            if str(s.get("url") or "").strip() == requested_source_url
+        ]
+        if not sources:
+            raise HTTPException(status_code=404, detail="播放源不存在")
     if not sources:
         raise HTTPException(status_code=503, detail="没有可用播放源")
 
@@ -248,10 +433,13 @@ async def _serve_iptv_source_playlist(
     if not raw_url:
         raise HTTPException(status_code=502, detail="source url 为空")
 
-    # adapter scheme：先 resolve 拿到真实 HTTP/RTSP URL + headers
-    if source_type == "adapter":
+    # adapter / YouTube：先 resolve 拿到真实 HTTP/RTSP URL + headers
+    if source_type in {"adapter", "youtube", "unsupported_youtube_url"}:
+        adapter_url = raw_url
+        if source_type in {"youtube", "unsupported_youtube_url"}:
+            adapter_url = raw_url if raw_url.lower().startswith("youtube://") else f"youtube://resolve?url={quote(raw_url, safe='')}"
         try:
-            resolved = await _m.resolve_adapter_source(raw_url, _m.http_client)
+            resolved = await _m.resolve_adapter_source(adapter_url, _m.http_client)
         except _m.AdapterResolveError as exc:
             raise HTTPException(status_code=exc.status_code, detail=exc.to_payload()) from exc
 
@@ -323,7 +511,7 @@ async def _serve_resolved_source_playlist(
         # 直接签 rtsp handle 并 302；让客户端命中 /api/media/proxy/rtsp/{handle}
         if not _m.config_rtsp_proxy_enabled():
             raise HTTPException(status_code=503, detail="RTSP 代理已禁用")
-        handle = issue_handle(
+        handle = issue_cached_handle(
             kind="rtsp",
             url=resolved_url,
             src=src_label,
@@ -339,7 +527,7 @@ async def _serve_resolved_source_playlist(
         return RedirectResponse(f"/api/media/proxy/rtsp/{handle}{token_qs}", status_code=307)
 
     if resolved_st in {"mpegts", "http_flv"}:
-        handle = issue_handle(
+        handle = issue_cached_handle(
             kind="stream",
             url=resolved_url,
             src=src_label,
@@ -415,16 +603,25 @@ async def media_proxy_playlist(
 
     ctx = get_proxy_context_registry().get(payload.ctx) if payload.ctx else None
     headers = _ctx_to_request_headers(ctx)
+    headers.setdefault("Accept-Encoding", "identity")
 
-    try:
-        upstream = await _m.http_client.get(
-            payload.url, follow_redirects=True, timeout=8, headers=headers
-        )
-        upstream.raise_for_status()
-    except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"拉取 M3U8 失败: {exc}") from exc
+    if not _m.WIDE_ENABLED:
+        # 薄韧性直通：重试 + single-flight + 短暂回退
+        text, final_url = await _m._thin_playlist_fetch(payload.url, headers)
+        base_url = final_url
+        raw_text = text
+    else:
+        # 扩窗路径的原始直拉行为
+        try:
+            upstream = await _m.http_client.get(
+                payload.url, follow_redirects=True, timeout=12, headers=headers
+            )
+            upstream.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=502, detail=f"拉取 M3U8 失败: {exc}") from exc
+        base_url = str(upstream.url)
+        raw_text = upstream.text
 
-    base_url = str(upstream.url)
     rewrite_ctx = _build_rewrite_context(
         base_url=base_url,
         src_id=payload.src_id,
@@ -433,7 +630,7 @@ async def media_proxy_playlist(
         access_ctx=access,
         proxy_segments=True,
     )
-    body = rewrite_m3u8(upstream.text, rewrite_ctx)
+    body = rewrite_m3u8(raw_text, rewrite_ctx)
     return Response(
         content=body,
         media_type="application/vnd.apple.mpegurl",
@@ -441,15 +638,38 @@ async def media_proxy_playlist(
     )
 
 
-@router.get("/api/media/proxy/chunk/{handle}")
+# HLS 客户端、CDN 预热和某些 link prefetch 会发 HEAD；只声明 GET 会让上游
+# 立即收到 405。这里把 HEAD 接到同一处理：FastAPI/Starlette 在 method=HEAD
+# 时会自动跳过响应体，handler 内部不需要分支。
+@router.api_route(
+    "/api/media/proxy/chunk/{handle}",
+    methods=["GET", "HEAD"],
+)
 async def media_proxy_chunk(
     handle: str,
+    request: Request,
     _: MediaAccessContext = Depends(resolve_media_access),
 ):
     import main as _m
 
     payload = _safe_decode(handle, expected_kind="chunk")
     await _validate_handle_url_or_403(payload.url, allowed_schemes={"http", "https"})
+
+    # HEAD 请求只回必要的元信息：handle 解析合法 + URL 通过 SSRF 校验就够了。
+    # 不去打上游 HEAD（很多直播源会拒 HEAD），也不开 GET 流，避免被预检放大成
+    # 真实下载。
+    if request.method == "HEAD":
+        return Response(
+            content=b"",
+            status_code=200,
+            media_type=_fallback_chunk_content_type(payload.url, ""),
+            headers={
+                "Cache-Control": "no-store",
+                # Range 是否可用要看上游；HEAD 阶段我们不下结论，告知 client
+                # 即可见 ``Accept-Ranges: bytes`` 是 GET 时按上游透传的事实。
+                "Accept-Ranges": "none",
+            },
+        )
 
     ctx = get_proxy_context_registry().get(payload.ctx) if payload.ctx else None
     headers = _ctx_to_request_headers(ctx, fallback_referer="")
@@ -458,29 +678,36 @@ async def media_proxy_chunk(
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 Chrome/130.0.0.0 Safari/537.36"
         )
+    # 直播分片走身份编码：避免 httpx 默认 ``Accept-Encoding: gzip,...`` →
+    # 上游返回压缩内容 + 原始 Content-Length 不一致导致 hls.js 判定截断。
+    headers["Accept-Encoding"] = "identity"
+    for header_name in ("range", "if-range", "if-none-match", "if-modified-since"):
+        value = request.headers.get(header_name)
+        if value:
+            headers["-".join(part.capitalize() for part in header_name.split("-"))] = value
 
     try:
-        upstream = await _m.http_client.get(
-            payload.url, follow_redirects=True, headers=headers
-        )
-        upstream.raise_for_status()
+        req = _m.http_client.build_request("GET", payload.url, headers=headers)
+        upstream = await _m.http_client.send(req, stream=True, follow_redirects=True)
+    except httpx.TimeoutException:
+        return Response(content=b"", status_code=504, media_type="text/plain")
     except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"拉取分片失败: {exc}") from exc
+        logger.warning(f"chunk proxy failed for {payload.url[:80]}: {exc}")
+        return Response(content=b"", status_code=502, media_type="text/plain")
 
-    content_type = upstream.headers.get("content-type", "")
-    if not content_type or content_type == "application/octet-stream":
-        path = urlparse(payload.url).path
-        ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
-        content_type = {
-            "ts": "video/MP2T",
-            "m4s": "video/mp4",
-            "mp4": "video/mp4",
-            "fmp4": "video/mp4",
-            "m4v": "video/mp4",
-            "aac": "audio/aac",
-            "mp3": "audio/mpeg",
-        }.get(ext, "application/octet-stream")
-    return Response(content=upstream.content, media_type=content_type)
+    content_type = _fallback_chunk_content_type(
+        payload.url,
+        upstream.headers.get("content-type", ""),
+    )
+    response_headers = _safe_upstream_response_headers(upstream.headers, live_chunk=True)
+    # 上游 4xx/5xx 也透传给客户端；不要把 404/410 升级成 502。
+    # hls.js 对 404 的 fragLoadError 自带 retry，比一刀切的 502 友好得多。
+    return StreamingResponse(
+        _stream_httpx_response(upstream),
+        status_code=upstream.status_code,
+        media_type=content_type,
+        headers=response_headers,
+    )
 
 
 @router.get("/api/media/proxy/stream/{handle}")
@@ -508,7 +735,7 @@ async def media_proxy_stream(
 
     return await _m.serve_iptv_proxy_stream_response(
         request=request,
-        target_url=payload.url,
+        upstream_url=payload.url,
         upstream_headers=upstream_headers,
         stream_type=stream_type,
     )
@@ -538,13 +765,16 @@ async def media_proxy_rtsp(
     custom_ua = ctx.custom_ua if ctx else ""
 
     return await _m.serve_rtsp_playlist_response(
-        target_url=payload.url,
+        upstream_url=payload.url,
         custom_ua=custom_ua,
         compat=bool(payload.compat),
     )
 
 
-@router.get("/api/media/proxy/image/{handle}")
+@router.api_route(
+    "/api/media/proxy/image/{handle}",
+    methods=["GET", "HEAD"],
+)
 async def media_proxy_image(
     handle: str,
     request: Request,
@@ -564,6 +794,19 @@ async def media_proxy_image(
     if not referer:
         raise HTTPException(status_code=403, detail="该域名不在封面代理白名单中")
 
+    # HEAD：handle 与 referer 校验都通过即可，直接给 200 + image/* 占位。
+    # 不去抓上游，避免封面 HEAD 被放大成全量下载。
+    if request.method == "HEAD":
+        return Response(
+            content=b"",
+            status_code=200,
+            media_type="image/jpeg",
+            headers={
+                "Cache-Control": "public, max-age=86400",
+                "Access-Control-Allow-Origin": "*",
+            },
+        )
+
     try:
         upstream = await _m.http_client.get(
             payload.url,
@@ -574,9 +817,15 @@ async def media_proxy_image(
     except Exception:
         raise HTTPException(status_code=502, detail="封面图片获取失败")
 
+    # 上游 content-type 透传必须是 image/*，否则降级到 image/jpeg 占位（不暴露
+    # 上游误返回的 text/html 等内容到 <img> 之外的环境，理论上 <img> 不执行
+    # 脚本，但搭配 ACAO:* + 长缓存仍是冗余风险）。
+    upstream_ct = (upstream.headers.get("content-type") or "").strip()
+    media_type = upstream_ct if upstream_ct.lower().startswith("image/") else "image/jpeg"
+
     return Response(
         content=upstream.content,
-        media_type=upstream.headers.get("content-type", "image/jpeg"),
+        media_type=media_type,
         headers={
             "Cache-Control": "public, max-age=86400",
             "Access-Control-Allow-Origin": "*",
@@ -590,9 +839,14 @@ async def media_proxy_image(
 @router.post("/api/media/proxy/release/{cache_key}")
 async def media_proxy_release(
     cache_key: str,
-    _: MediaAccessContext = Depends(resolve_media_access),
+    access: MediaAccessContext = Depends(resolve_media_access),
 ):
     import main as _m
+    # release 是「管理动作」（强制下次 wide playlist 回源），不能让匿名调用——
+    # 否则攻击者可以拿合法 cache_key 反复 release，造成 wide cache 抖动 / 上游
+    # 放大。media credential 来源也允许：使用受限凭证的外部播放器仍属于受信。
+    if access.source == "anonymous":
+        raise HTTPException(status_code=401, detail="release 需要登录或有效凭证")
     released = _m.release_iptv_wide_playlist_by_key(cache_key)
     return {"released": released}
 
