@@ -393,7 +393,7 @@
         <div class="overscroll-contain overflow-y-auto [-webkit-overflow-scrolling:touch]" :style="{ maxHeight: sourceMenuListMaxHeight }">
           <button
             v-for="source in iptvSourceOptions"
-            :key="`${source.index}-${source.url}`"
+            :key="source.identityKey || `${source.index}-${source.url}`"
             type="button"
             class="flex w-full items-center gap-2.5 rounded-xl px-2.5 py-2 text-left transition-colors hover:bg-neutral-100 dark:hover:bg-neutral-700/70"
             :class="{
@@ -440,6 +440,7 @@ import { fetchAggregatedChannels } from '../api/iptv'
 import { useEpg } from '../composables/useEpg'
 import { API_BASE } from '../apiBase'
 import { publicAsset } from '../publicAsset'
+import { sourceRaceKey, sourceTransport, extractSourceIdFromUrl } from '../utils/sourceIdentity'
 
 const playerStore = usePlayerStore()
 const { isPlayerExpanded, currentStation, isPlaying, isLoading, volume, stationMap, stationList } = storeToRefs(playerStore)
@@ -1146,9 +1147,10 @@ const iptvSourceOptions = computed(() => {
     const host = sourceHost(targetUrl)
     const working = Number(entry.is_working)
     const latency = Number(entry.latency_ms) > 0 ? `${entry.latency_ms}ms` : ''
-    const runtimeStatus = iptvSourceRuntimeStatus.value[index] || 'idle'
+    const runtimeKey = sourceRaceKey(entry)
+    const runtimeStatus = iptvSourceRuntimeStatus.value[runtimeKey] || 'idle'
     const probeStatus = entry.probe_status || ''
-    const disabled = ['not_live', 'offline', 'error', 'timeout'].includes(probeStatus)
+    const disabled = entry.disabled === true || st === 'unsupported_youtube_url'
     const health = probeStatus === 'not_live'
       ? '未开播'
       : probeStatus === 'untested'
@@ -1168,6 +1170,9 @@ const iptvSourceOptions = computed(() => {
     return {
       index,
       url: entry.url,
+      source_id: entry.source_id || '',
+      transport: sourceTransport(entry),
+      identityKey: sourceRaceKey(entry),
       type: st === 'youtube' ? 'youtube' : isProxySource ? 'proxy' : entry.type,
       typeLabel,
       title: `${index + 1}. ${host}`,
@@ -1752,6 +1757,73 @@ function isMpegTsEngineType(type) {
   return type === 'mpegts' || type === 'http_flv'
 }
 
+function isChannelProxyPlaylistUrl(url) {
+  try {
+    const parsed = new URL(url, window.location.origin)
+    return /\/api\/media\/channel\/.+\/playlist\.m3u8$/i.test(parsed.pathname)
+  } catch {
+    return false
+  }
+}
+
+function isAdapterSchemeUrl(url) {
+  const value = String(url || '').trim().toLowerCase()
+  return ADAPTER_SCHEMES.some(scheme => value.startsWith(`${scheme}://`))
+}
+
+function isDynamicAdapterProxyPlaylist(entry) {
+  return Boolean(
+    isProxyLikeEntry(entry)
+    && isChannelProxyPlaylistUrl(entry?.url || '')
+    && (entry?.adapter || isAdapterSchemeUrl(entry?.original_url || entry?.url || '')),
+  )
+}
+
+function sourceTypeFromProxyRedirect(url) {
+  try {
+    const parsed = new URL(url, window.location.origin)
+    if (/\/api\/media\/proxy\/stream\//i.test(parsed.pathname)) {
+      return parsed.searchParams.get('stream_type') === 'http_flv' ? 'http_flv' : 'mpegts'
+    }
+    if (/\/api\/media\/proxy\/rtsp\//i.test(parsed.pathname)) return 'rtsp'
+  } catch {}
+  return ''
+}
+
+async function preflightProxyPlaylistTransport(url, usingProxy) {
+  if (!usingProxy || !isChannelProxyPlaylistUrl(url)) return null
+  return await new Promise((resolve) => {
+    const xhr = new XMLHttpRequest()
+    let settled = false
+    const settle = (value) => {
+      if (settled) return
+      settled = true
+      try { xhr.abort() } catch {}
+      resolve(value)
+    }
+    xhr.open('GET', url, true)
+    xhr.setRequestHeader('Accept', 'application/vnd.apple.mpegurl,application/x-mpegURL,*/*')
+    xhr.timeout = 3500
+    xhr.onreadystatechange = () => {
+      if (xhr.readyState < 2 || settled) return
+      const finalUrl = xhr.responseURL || url
+      const sourceType = sourceTypeFromProxyRedirect(finalUrl)
+      if (sourceType) {
+        console.log('[IPTV] proxy playlist redirect', {
+          source_id: extractSourceIdFromUrl(url),
+          source_type: sourceType,
+        })
+        settle({ url: finalUrl, sourceType })
+        return
+      }
+      settle(null)
+    }
+    xhr.onerror = () => settle(null)
+    xhr.ontimeout = () => settle(null)
+    xhr.send()
+  })
+}
+
 function mpegtsPlayerType(type, url = '') {
   return type === 'http_flv' || isHttpFlvUrl(url) ? 'flv' : 'mse'
 }
@@ -1923,7 +1995,6 @@ let _youtubeStartupTimer = null
 let _youtubeApiPromise = null
 let _youtubeApiReachable = null
 let _youtubeApiCheckedAt = 0
-
 function isAttemptActive(attemptId) {
   return attemptId === _playAttemptId
 }
@@ -2012,14 +2083,25 @@ function recordMpegtsReconnect(sourceUrl) {
 
 function setSourceRuntimeStatus(index, status) {
   if (index < 0) return
+  const runtimeKey = sourceRaceKey(playerStore.iptvUrls[index])
+  if (!runtimeKey) return
   iptvSourceRuntimeStatus.value = {
     ...iptvSourceRuntimeStatus.value,
-    [index]: status,
+    [runtimeKey]: status,
   }
 }
 
+function getSourceRuntimeStatus(index) {
+  if (index < 0) return 'idle'
+  const runtimeKey = sourceRaceKey(playerStore.iptvUrls[index])
+  return runtimeKey ? (iptvSourceRuntimeStatus.value[runtimeKey] || 'idle') : 'idle'
+}
+
 function setSourceRuntimeStatusByUrl(url, status) {
-  const index = playerStore.iptvUrls.findIndex((entry) => entry.url === url)
+  const requestSourceId = extractSourceIdFromUrl(url || '')
+  const index = requestSourceId
+    ? playerStore.iptvUrls.findIndex((entry) => entry.source_id === requestSourceId && entry.url === url)
+    : playerStore.iptvUrls.findIndex((entry) => entry.url === url)
   setSourceRuntimeStatus(index, status)
 }
 
@@ -2047,6 +2129,7 @@ async function refreshVolatileEntryForRecovery(entry, attemptId, reason) {
   if (!isAttemptActive(attemptId)) return false
   if (!resolved?.url) return false
   entry.url = resolved.url
+  if (resolved.source_type) entry.source_type = resolved.source_type
   entry._volatileRetryCount = retryCount + 1
   return true
 }
@@ -2121,7 +2204,7 @@ async function recoverIptvPlayback(reason = 'stalled', options = {}) {
     }
 
     if (currentEntry?.url && (currentEntry.type === 'proxy' || currentEntry.via_proxy)) {
-      markRaceLoser(currentEntry.url)
+      markRaceLoser(currentEntry)
     }
 
     if (!allowFallbackRace || !isRecoveryActive(seq)) return false
@@ -2176,7 +2259,7 @@ async function switchIptvSource(index) {
   sourceMenuOpen.value = false
 
   const entry = playerStore.iptvUrls[index]
-  if (entry?.url) clearRaceLoser(entry.url)
+  if (entry?.url) clearRaceLoser(entry)
 
   const attemptId = ++_playAttemptId
   if (!(await setIptvUrlIndexForAttempt(index, attemptId))) return
@@ -2192,7 +2275,7 @@ async function switchIptvSource(index) {
     } catch (e) {
       if (!isAttemptActive(attemptId)) return
       setSourceRuntimeStatus(index, 'failed')
-      if (entry?.url) markRaceLoser(entry.url)
+      if (entry?.url) markRaceLoser(entry)
       console.warn('[IPTV] 手动切换代理源失败:', e?.message)
       if (await fallbackToNextIptvUrl(attemptId)) {
         return await playCurrentIptvUrl(attemptId)
@@ -2481,20 +2564,6 @@ async function tryPlayIptv(url, usingProxy = false, customUa = '', attemptId = 0
 
   setRuntimeStatus('trying')
 
-  const resolvedSourceType = playbackEngineType(playbackSourceType || sourceType({ url }), url)
-  const useHls = resolvedSourceType === 'hls' && isHlsUrl(url)
-  const useMpegTs = isMpegTsEngineType(resolvedSourceType) || (!useHls && isMpegTsUrl(url))
-
-  if (!useHls && !useMpegTs) {
-    setRuntimeStatus('failed')
-    throw new Error('不支持的播放格式')
-  }
-
-  if (useMpegTs && !canUseMpegTs()) {
-    setRuntimeStatus('failed')
-    throw new Error(`当前浏览器不支持 ${resolvedSourceType === 'http_flv' ? 'HTTP-FLV' : 'MPEG-TS'} 播放`)
-  }
-
   cancelCurrentStartup()
   cancelActiveProxyRace()
   destroyIptvEngines()
@@ -2506,7 +2575,28 @@ async function tryPlayIptv(url, usingProxy = false, customUa = '', attemptId = 0
     resetIptvVideo()
   }
   playerStore.setLoading(true)
-  console.log(`[START] ${usingProxy ? '(proxy) ' : ''}${url.slice(0, 80)}...`)
+  let effectiveUrl = url
+  let resolvedSourceType = playbackEngineType(playbackSourceType || sourceType({ url }), url)
+  const proxyTransport = await preflightProxyPlaylistTransport(url, usingProxy)
+  if (proxyTransport?.url && proxyTransport.sourceType) {
+    effectiveUrl = proxyTransport.url
+    resolvedSourceType = playbackEngineType(proxyTransport.sourceType, effectiveUrl)
+  }
+
+  const useHls = resolvedSourceType === 'hls' && isHlsUrl(effectiveUrl)
+  const useMpegTs = isMpegTsEngineType(resolvedSourceType) || (!useHls && isMpegTsUrl(effectiveUrl))
+
+  if (!useHls && !useMpegTs) {
+    setRuntimeStatus('failed')
+    throw new Error('不支持的播放格式')
+  }
+
+  if (useMpegTs && !canUseMpegTs()) {
+    setRuntimeStatus('failed')
+    throw new Error(`当前浏览器不支持 ${resolvedSourceType === 'http_flv' ? 'HTTP-FLV' : 'MPEG-TS'} 播放`)
+  }
+
+  console.log(`[START] ${usingProxy ? '(proxy) ' : ''}${effectiveUrl.slice(0, 80)}...`)
 
   return new Promise((resolve, reject) => {
     let settled = false
@@ -2516,6 +2606,7 @@ async function tryPlayIptv(url, usingProxy = false, customUa = '', attemptId = 0
     let mpegtsInstance = null
     const hlsEventFns = []
     const mpegtsEventFns = []
+    let mpegtsProgressTimer = null
     let nativeCleanup = null  // 原生 HLS listener cleanup
     let cancelStartup = null
 
@@ -2526,6 +2617,8 @@ async function tryPlayIptv(url, usingProxy = false, customUa = '', attemptId = 0
     const cleanupPending = () => {
       clearTimeout(timer)
       timer = null
+      clearInterval(mpegtsProgressTimer)
+      mpegtsProgressTimer = null
       for (const [evt, fn] of hlsEventFns) hlsInstance?.off(evt, fn)
       hlsEventFns.length = 0
       for (const [evt, fn] of mpegtsEventFns) mpegtsInstance?.off(evt, fn)
@@ -2624,10 +2717,10 @@ async function tryPlayIptv(url, usingProxy = false, customUa = '', attemptId = 0
     // MPEG-TS / HTTP-FLV over mpegts.js path
     if (useMpegTs) {
       const player = mpegts.createPlayer({
-        type: mpegtsPlayerType(resolvedSourceType, url),
+        type: mpegtsPlayerType(resolvedSourceType, effectiveUrl),
         isLive: true,
         cors: true,
-        url,
+        url: effectiveUrl,
       }, {
         enableWorker: true,
         lazyLoad: false,
@@ -2638,14 +2731,16 @@ async function tryPlayIptv(url, usingProxy = false, customUa = '', attemptId = 0
       iptvMpegtsRef.value = player
 
       const video = iptvVideoRef.value
-      const onMediaInfo = () => safeResolve()
+      const timeSnapshot = video.currentTime || 0
+      const onMediaInfo = () => {
+        try { video.play()?.catch?.(() => {}) } catch {}
+      }
       const onStats = (stats) => {
         if ((stats?.decodedFrames || 0) > 0) safeResolve()
       }
       const onMpegtsError = (type, detail, info) => {
         safeReject(new Error(`${type || 'mpegts error'}:${detail || info?.msg || ''}`))
       }
-      const onVideoReady = () => safeResolve()
       const onVideoError = () => safeReject(new Error('MPEG-TS 视频错误'))
 
       player.on(mpegts.Events.MEDIA_INFO, onMediaInfo)
@@ -2654,17 +2749,16 @@ async function tryPlayIptv(url, usingProxy = false, customUa = '', attemptId = 0
       mpegtsEventFns.push([mpegts.Events.MEDIA_INFO, onMediaInfo])
       mpegtsEventFns.push([mpegts.Events.STATISTICS_INFO, onStats])
       mpegtsEventFns.push([mpegts.Events.ERROR, onMpegtsError])
-      video.addEventListener('loadedmetadata', onVideoReady)
-      video.addEventListener('canplay', onVideoReady)
       video.addEventListener('error', onVideoError)
       nativeCleanup = () => {
-        video.removeEventListener('loadedmetadata', onVideoReady)
-        video.removeEventListener('canplay', onVideoReady)
         video.removeEventListener('error', onVideoError)
       }
 
       player.attachMediaElement(video)
       player.load()
+      mpegtsProgressTimer = setInterval(() => {
+        if ((video.currentTime || 0) - timeSnapshot > 0.1) safeResolve()
+      }, 250)
       timer = setTimeout(() => safeReject(new Error('MPEG-TS 加载超时')), options.startupTimeoutMs ?? 12_000)
       return
     }
@@ -2696,7 +2790,7 @@ async function tryPlayIptv(url, usingProxy = false, customUa = '', attemptId = 0
       }
       if (customUa) hlsConfig.xhrSetup = (xhr) => { xhr.setRequestHeader('User-Agent', customUa) }
       const hls = new Hls(hlsConfig)
-      trackHlsSource(hls, url)
+      trackHlsSource(hls, effectiveUrl)
       hlsInstance = hls
       iptvHlsRef.value = hls
       let fragFail = 0
@@ -2720,7 +2814,7 @@ async function tryPlayIptv(url, usingProxy = false, customUa = '', attemptId = 0
       hls.on(Hls.Events.ERROR, onError)
       hlsEventFns.push([Hls.Events.ERROR, onError])
 
-      hls.loadSource(url)
+      hls.loadSource(effectiveUrl)
       hls.attachMedia(iptvVideoRef.value)
       timer = setTimeout(() => safeReject(new Error('HLS 加载超时')), options.startupTimeoutMs ?? 10_000)
       return
@@ -2729,7 +2823,7 @@ async function tryPlayIptv(url, usingProxy = false, customUa = '', attemptId = 0
     // Safari native HLS
     if (iptvVideoRef.value.canPlayType('application/vnd.apple.mpegurl')) {
       const video = iptvVideoRef.value
-      video.src = url
+      video.src = effectiveUrl
       const onLoaded = () => safeResolve()
       const onErr = () => safeReject(new Error('原生 HLS 错误'))
       video.addEventListener('loadedmetadata', onLoaded)
@@ -2747,36 +2841,43 @@ async function tryPlayIptv(url, usingProxy = false, customUa = '', attemptId = 0
 }
 
 function pruneRaceLosers(now = Date.now()) {
-  for (const [url, expireAt] of _racedLosers.entries()) {
-    if (!expireAt || expireAt <= now) _racedLosers.delete(url)
+  for (const [key, expireAt] of _racedLosers.entries()) {
+    if (!expireAt || expireAt <= now) _racedLosers.delete(key)
   }
 }
 
-function isRaceLoser(url) {
-  if (!url) return false
-  const expireAt = _racedLosers.get(url)
+function isRaceLoser(entry) {
+  const key = sourceRaceKey(entry)
+  if (!key) return false
+  const expireAt = _racedLosers.get(key)
   if (!expireAt) return false
   if (expireAt <= Date.now()) {
-    _racedLosers.delete(url)
+    _racedLosers.delete(key)
     return false
   }
   return true
 }
 
-function markRaceLoser(url) {
-  if (!url) return
-  _racedLosers.set(url, Date.now() + RACE_LOSER_TTL_MS)
+function markRaceLoser(entry) {
+  const key = sourceRaceKey(entry)
+  if (!key) return
+  _racedLosers.set(key, Date.now() + RACE_LOSER_TTL_MS)
 }
 
-function clearRaceLoser(url) {
-  if (!url) return
-  _racedLosers.delete(url)
+function clearRaceLoser(entry) {
+  const key = sourceRaceKey(entry)
+  if (!key) return
+  _racedLosers.delete(key)
 }
 
 function resetRacedLosers() { _racedLosers.clear() }
 
 function isProxyLikeEntry(entry) {
   return entry?.type === 'proxy' || Boolean(entry?.via_proxy)
+}
+
+function entrySourceId(entry) {
+  return entry?.source_id || extractSourceIdFromUrl(entry?.url || '') || ''
 }
 
 function raceHealthRank(entry) {
@@ -2795,6 +2896,7 @@ function raceLatencyRank(entry) {
 
 function raceCandidateKind(entry) {
   if (!entry?.url || entry.disabled === true) return ''
+  if (isDynamicAdapterProxyPlaylist(entry)) return ''
   const st = sourceType(entry)
   if (st === 'unsupported_youtube_url' || st === 'youtube') return ''
   if (st === 'hls' && canUseHls()) return 'hls'
@@ -2809,7 +2911,7 @@ function sortedRaceCandidates(urls, startIndex, proxyLike) {
     .filter(({ entry, index, kind }) => {
       if (index < startIndex || !kind) return false
       if (isProxyLikeEntry(entry) !== proxyLike) return false
-      if (isRaceLoser(entry.url)) return false
+      if (isRaceLoser(entry)) return false
       return true
     })
     .sort((a, b) => {
@@ -2880,7 +2982,7 @@ async function playCurrentIptvUrl(attemptId = 0, options = {}) {
     }
     if (!isAttemptActive(attemptId)) return
     setSourceRuntimeStatus(idx, 'playing')
-    clearRaceLoser(entry.url)
+    clearRaceLoser(entry)
     playerStore.clearPlaybackError()
     playerStore.setLoading(false)
   } catch (e) {
@@ -2924,6 +3026,7 @@ async function playCurrentIptvUrl(attemptId = 0, options = {}) {
           if (!isAttemptActive(attemptId)) return
           if (resolved && resolved.url) {
             entry.url = resolved.url
+            if (resolved.source_type) entry.source_type = resolved.source_type
             entry._volatileRetryCount = retryCount + 1
             const nextAttemptId = ++_playAttemptId
             return await playCurrentIptvUrl(nextAttemptId, { ...options, allowStartupRace: false })
@@ -3021,7 +3124,7 @@ async function runHedgedRace(directRacers, proxyRacers, attemptId = 0, options =
       for (const racer of racers) {
         if (value && racer !== value.racer) {
           const racerIndex = playerStore.iptvUrls.indexOf(racer.entry)
-          if (iptvSourceRuntimeStatus.value[racerIndex] === 'trying') {
+          if (getSourceRuntimeStatus(racerIndex) === 'trying') {
             setSourceRuntimeStatus(racerIndex, 'stopped')
           }
         }
@@ -3035,7 +3138,7 @@ async function runHedgedRace(directRacers, proxyRacers, attemptId = 0, options =
       if (settled || racer.cleaned || racer.failed) return
       racer.failed = true
       failCount++
-      markRaceLoser(racer.entry?.url)
+      markRaceLoser(racer.entry)
       setSourceRuntimeStatusByEntry(racer.entry, 'failed')
       cleanupRacer(racer)
       if (failCount >= allCandidates.length) finish(null)
@@ -3044,7 +3147,13 @@ async function runHedgedRace(directRacers, proxyRacers, attemptId = 0, options =
     const winRacer = (racer, label) => {
       if (!isAttemptActive(attemptId)) { finish(null); return }
       if (settled || racer.cleaned || racer.failed) return
-      console.log(`[RACE:hedged] ${label} 胜出: ${racer.entry.url.slice(0, 50)}`)
+      console.log('[RACE:hedged] winner', {
+        label,
+        source_id: entrySourceId(racer.entry),
+        request_source_id: extractSourceIdFromUrl(racer.entry?.url || ''),
+        transport: sourceTransport(racer.entry),
+        url: (racer.entry?.url || '').slice(0, 80),
+      })
       setSourceRuntimeStatusByEntry(racer.entry, 'trying')
       finish({ racer, entry: racer.entry, index: racer.index })
     }
@@ -3075,7 +3184,7 @@ async function runHedgedRace(directRacers, proxyRacers, attemptId = 0, options =
 
     raceTimer = setTimeout(() => {
       for (const { entry } of allCandidates) {
-        markRaceLoser(entry?.url)
+        markRaceLoser(entry)
         setSourceRuntimeStatusByEntry(entry, 'failed')
       }
       finish(null)
@@ -3228,12 +3337,12 @@ async function runHedgedRace(directRacers, proxyRacers, attemptId = 0, options =
     })
     if (!isAttemptActive(attemptId)) return
     setSourceRuntimeStatus(winnerIndex, 'playing')
-    clearRaceLoser(winnerEntry.url)
+    clearRaceLoser(winnerEntry)
     playerStore.clearPlaybackError()
     playerStore.setLoading(false)
   } catch (e) {
     if (!isAttemptActive(attemptId)) return
-    markRaceLoser(winnerEntry.url)
+    markRaceLoser(winnerEntry)
     setSourceRuntimeStatus(winnerIndex, 'failed')
     console.warn('[RACE:hedged] 胜出源正式起播失败:', e?.message)
     if (await fallbackToNextIptvUrl(attemptId)) {
@@ -3283,7 +3392,7 @@ async function raceDirectHlsSources(entries, attemptId = 0) {
       for (const racer of racers) {
         if (value && racer.hls !== value.hls) {
           const racerIndex = playerStore.iptvUrls.indexOf(racer.entry)
-          if (iptvSourceRuntimeStatus.value[racerIndex] === 'trying') {
+          if (getSourceRuntimeStatus(racerIndex) === 'trying') {
             setSourceRuntimeStatus(racerIndex, 'stopped')
           }
         }
@@ -3316,7 +3425,13 @@ async function raceDirectHlsSources(entries, attemptId = 0) {
       hls.on(Hls.Events.FRAG_LOADED, () => {
         if (!isAttemptActive(attemptId)) { finish(null); return }
         if (settled) return
-        console.log(`[RACE:direct] #${i} 胜出: ${entry.url.slice(0, 50)}`)
+        console.log('[RACE:direct] winner', {
+          index: i,
+          source_id: entrySourceId(entry),
+          request_source_id: extractSourceIdFromUrl(entry?.url || ''),
+          transport: sourceTransport(entry),
+          url: (entry?.url || '').slice(0, 80),
+        })
         setSourceRuntimeStatusByEntry(entry, 'trying')
         hls.detachMedia()
         finish({ hls, entry, video: probeVideo })
@@ -3437,7 +3552,7 @@ async function raceProxySources(entries, attemptId = 0) {
   resetIptvVideo()
   playerStore.setLoading(true)
 
-  const fresh = entries.filter(e => sourceType(e) !== 'youtube' && sourceType(e) !== 'unsupported_youtube_url' && !isRaceLoser(e.url))
+  const fresh = entries.filter(e => sourceType(e) !== 'youtube' && sourceType(e) !== 'unsupported_youtube_url' && !isRaceLoser(e))
   if (!fresh.length) {
     if (await fallbackToNextIptvUrl(attemptId)) {
       return await playCurrentIptvUrl(attemptId)
@@ -3458,7 +3573,7 @@ async function raceProxySources(entries, attemptId = 0) {
       playerStore.setLoading(false)
     } catch (e) {
       if (!isAttemptActive(attemptId)) return
-      markRaceLoser(entry.url)
+      markRaceLoser(entry)
       console.warn('[IPTV] 原生代理源失败:', e?.message)
       if (await fallbackToNextIptvUrl(attemptId)) {
         return await playCurrentIptvUrl(attemptId)
@@ -3495,7 +3610,7 @@ async function raceProxySources(entries, attemptId = 0) {
       for (const racer of racers) {
         if (value && racer.hls !== value.hls) {
           const racerIndex = playerStore.iptvUrls.indexOf(racer.entry)
-          if (iptvSourceRuntimeStatus.value[racerIndex] === 'trying') {
+          if (getSourceRuntimeStatus(racerIndex) === 'trying') {
             setSourceRuntimeStatus(racerIndex, 'stopped')
           }
         }
@@ -3510,7 +3625,7 @@ async function raceProxySources(entries, attemptId = 0) {
 
     raceTimer = setTimeout(() => {
       for (const entry of fresh) {
-        markRaceLoser(entry.url)
+        markRaceLoser(entry)
         setSourceRuntimeStatusByEntry(entry, 'failed')
       }
       finish(null)
@@ -3533,7 +3648,13 @@ async function raceProxySources(entries, attemptId = 0) {
       hls.on(Hls.Events.FRAG_LOADED, () => {
         if (!isAttemptActive(attemptId)) { finish(null); return }
         if (settled) return
-        console.log(`[RACE] #${i} 胜出: ${entry.url.slice(0, 50)}`)
+        console.log('[RACE] winner', {
+          index: i,
+          source_id: entrySourceId(entry),
+          request_source_id: extractSourceIdFromUrl(entry?.url || ''),
+          transport: sourceTransport(entry),
+          url: (entry?.url || '').slice(0, 80),
+        })
         setSourceRuntimeStatusByEntry(entry, 'trying')
         hls.detachMedia()
         finish({ hls, entry, video: probeVideo })
@@ -3547,7 +3668,7 @@ async function raceProxySources(entries, attemptId = 0) {
         }
         if (d.fatal || d.type === Hls.ErrorTypes.NETWORK_ERROR || racer.fragFail >= 2) {
           failCount++
-          markRaceLoser(entry.url)
+          markRaceLoser(entry)
           setSourceRuntimeStatusByEntry(entry, 'failed')
           cleanupRacer(racer)
           if (failCount >= fresh.length) finish(null)
@@ -3635,7 +3756,7 @@ async function raceProxySources(entries, attemptId = 0) {
       return
     }
     console.warn('[RACE] 胜出代理接管失败:', e?.message)
-    markRaceLoser(winnerEntry.url)
+    markRaceLoser(winnerEntry)
     setSourceRuntimeStatusByEntry(winnerEntry, 'failed')
     releaseWideProxyUrl(winnerEntry.url)
     winnerHls.destroy()

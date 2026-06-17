@@ -6,4 +6,6 @@ const currentOrigin = typeof window !== 'undefined' && /^https?:$/.test(window.l
   ? window.location.origin
   : ''
 
-export const API_BASE = desktopApiBase || import.meta.env.VITE_API_BASE_URL || currentOrigin || ''
+const viteEnv = import.meta.env || {}
+
+export const API_BASE = desktopApiBase || viteEnv.VITE_API_BASE_URL || currentOrigin || ''

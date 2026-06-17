@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
-import { API_BASE } from '../apiBase'
+import { API_BASE } from '../apiBase.js'
+import { buildChannelProxyUrl } from '../utils/sourceIdentity.js'
 
 const ADAPTER_SCHEMES = [
   'youtube',
@@ -247,17 +248,44 @@ export const usePlayerStore = defineStore('player', {
         }
       }
       const proxyUrlFor = (u, options = {}) => {
-        const key = u._canonical_key || ''
-        if (key) {
-          const params = new URLSearchParams()
-          const sourceSelector = options.sourceUrl || u.original_url || u.url || ''
-          if (sourceSelector) params.set('source_url', sourceSelector)
-          if (u._access_token) params.set('access_token', u._access_token)
-          const suffix = params.toString() ? `?${params.toString()}` : ''
-          return `${API_BASE}/api/media/channel/${encodeURIComponent(key)}/playlist.m3u8${suffix}`
-        }
-        return ''
+        return buildChannelProxyUrl({
+          apiBase: API_BASE,
+          channelKey: u._canonical_key || '',
+          sourceId: options.sourceId || u.source_id || '',
+          accessToken: u._access_token || '',
+        })
       }
+      const resolveUrlFor = (u) => {
+        const key = String(u?._canonical_key || '').trim()
+        const sourceId = String(u?.source_id || '').trim()
+        if (!key || !sourceId) return ''
+        const params = new URLSearchParams({ source_id: sourceId })
+        if (u._access_token) params.set('access_token', u._access_token)
+        return `${API_BASE}/api/media/channel/${encodeURIComponent(key)}/resolve?${params.toString()}`
+      }
+      const absoluteApiUrl = (url) => {
+        if (!url) return ''
+        return /^https?:\/\//i.test(url) ? url : `${API_BASE}${url.startsWith('/') ? url : `/${url}`}`
+      }
+      const resolveAdapterSource = async (u) => {
+        const resolveUrl = resolveUrlFor(u)
+        if (!resolveUrl) return null
+        const ctrl = new AbortController()
+        const timer = setTimeout(() => ctrl.abort(), 10_000)
+        try {
+          const res = await fetch(resolveUrl, { signal: ctrl.signal })
+          const data = await res.json().catch(() => ({}))
+          if (!res.ok || data.ok === false) {
+            throw new Error(data.message || data.detail?.message || data.detail || `HTTP ${res.status}`)
+          }
+          return { ...data, _resolve_url: resolveUrl }
+        } finally {
+          clearTimeout(timer)
+        }
+      }
+      const sourceForcesProxy = (u) => Boolean(
+        u?.force_proxy || u?.requires_proxy_declared,
+      )
       // 分两组：直连组 + 必须代理组
       const directUrls = []
       const proxyOnlyUrls = []
@@ -311,6 +339,7 @@ export const usePlayerStore = defineStore('player', {
         const url = sourceUrl(u)
         const adapter = u.adapter || adapterName(url)
         const originalUrl = u.original_url || url
+        const fallbackProxyUrl = proxyUrlFor(u)
         if (adapter === 'youtube') {
           const youtubeVideoId = parseYoutubeVideoId(originalUrl) || u.youtube_video_id || ''
           const youtubeChannelId = parseYoutubeChannelId(originalUrl) || u.youtube_channel_id || ''
@@ -330,11 +359,47 @@ export const usePlayerStore = defineStore('player', {
             })
           }
         }
-        const proxyUrl = proxyUrlFor(u)
-        if (proxyUrl) {
+        if (adapter !== 'youtube') {
+          try {
+            const resolved = await resolveAdapterSource(u)
+            const resolvedUrl = String(resolved?.url || '').trim()
+            const proxyUrl = absoluteApiUrl(resolved?.proxy_url) || fallbackProxyUrl
+            // Adapter 自身声明 requires_proxy/direct_playable=false 是硬约束；
+            // Market/订阅侧 force_proxy 只能额外要求代理，不能覆盖 adapter 硬约束为 direct。
+            const adapterAllowsDirect = !resolved?.requires_proxy && resolved?.direct_playable !== false
+            const canDirectPlay = Boolean(resolvedUrl && adapterAllowsDirect && !sourceForcesProxy(u))
+            if (canDirectPlay) {
+              directUrls.push({
+                ...u,
+                url: resolvedUrl,
+                original_url: originalUrl,
+                adapter,
+                adapter_source_url: resolved._resolve_url,
+                adapter_proxy_url: proxyUrl,
+                adapter_volatile_url: resolved.volatile_url === true,
+                source_type: resolved.source_type || 'hls',
+                type: 'direct',
+              })
+            } else if (proxyUrl) {
+              proxyOnlyUrls.push({
+                ...u,
+                url: proxyUrl,
+                original_url: originalUrl,
+                adapter,
+                type: 'proxy',
+                via_proxy: true,
+                source_type: resolved?.source_type === 'probe_only' ? 'hls' : resolved?.source_type || 'hls',
+              })
+            }
+            continue
+          } catch (e) {
+            console.warn('[IPTV] adapter resolve failed:', e?.message || e)
+          }
+        }
+        if (fallbackProxyUrl) {
           proxyOnlyUrls.push({
             ...u,
-            url: proxyUrl,
+            url: fallbackProxyUrl,
             original_url: originalUrl,
             adapter,
             type: 'proxy',
@@ -352,7 +417,7 @@ export const usePlayerStore = defineStore('player', {
         const url = sourceUrl(u)
         const st = sourceType(u)
         if (st === 'youtube') continue
-        const proxyUrl = proxyUrlFor(u)
+        const proxyUrl = u.adapter_proxy_url || proxyUrlFor(u)
         if (!proxyUrl) continue
         list.push({
           ...u,
@@ -393,8 +458,21 @@ export const usePlayerStore = defineStore('player', {
       return false
     },
 
-    async reResolveAdapterUrl() {
-      return null
+    async reResolveAdapterUrl(resolveUrl) {
+      const url = String(resolveUrl || '').trim()
+      if (!url || !/\/api\/media\/channel\/.+\/resolve(?:\?|$)/i.test(url)) return null
+      const ctrl = new AbortController()
+      const timer = setTimeout(() => ctrl.abort(), 10_000)
+      try {
+        const res = await fetch(url, { signal: ctrl.signal, cache: 'no-store' })
+        const data = await res.json().catch(() => ({}))
+        if (!res.ok || data.ok === false) {
+          throw new Error(data.message || data.detail?.message || data.detail || `HTTP ${res.status}`)
+        }
+        return data
+      } finally {
+        clearTimeout(timer)
+      }
     },
   },
 })
