@@ -88,7 +88,12 @@ def get_cdn_headers_for_station(station_id: str) -> dict[str, str]:
 TOKEN_REFRESH_HTTP_STATUS_CODES = {401, 403, 404, 410}
 
 
-DIRECT_STREAM_STATIONS = {""}
+# RFC 8216: ``EXT-X-DISCONTINUITY-SEQUENCE`` 是 playlist 级别（出现在头部一次），
+# 不是 per-segment。从 prefix tag 列表里挪走，作为 meta 处理（_HLS_META_TAGS）。
+
+# 直连而不走 HLS 处理的电台 ID 集合。空字符串元素是历史遗留，没有任何匹配语义，
+# 留着只会让代码读起来怪。这里替换成真正的空集合，需要新增直连电台时再 union。
+DIRECT_STREAM_STATIONS: set[str] = set()
 
 
 # ========== 地域限制配置 ==========
@@ -214,7 +219,7 @@ def get_cached_m3u8_text(cache_key: str) -> str | None:
 
 # NOTE: 旧 ``rewrite_m3u8_text`` 已被 ``core.m3u8_rewriter.rewrite_m3u8`` 取代，
 # 通过 signed handle 屏蔽上游 URL，并把 access_token 透传到子 playlist/分片。
-# 旧的 ``/api/{station_id}/playlist.m3u8?target_url=...`` 公共入口已删除，
+# 旧的电台 raw-url 公共入口已删除，
 # 客户端统一使用 ``/api/media/channel/{station_id}/playlist.m3u8``。
 
 
@@ -781,7 +786,10 @@ async def proxy_direct_audio_stream(station_id: str, request: Request) -> Stream
 
     try:
 
-        upstream_req = http_client.build_request("GET", real_stream_url, headers=CDN_REQUEST_HEADERS)
+        # 直连音频流：和 chunk 路径一致，强制 identity，避免 httpx 默认 gzip 把
+        # 流式音频解码出错或乱报 Content-Length。
+        _stream_headers = {**CDN_REQUEST_HEADERS, "Accept-Encoding": "identity"}
+        upstream_req = http_client.build_request("GET", real_stream_url, headers=_stream_headers)
         upstream_response = await http_client.send(upstream_req, stream=True)
 
         if upstream_response.status_code in TOKEN_REFRESH_HTTP_STATUS_CODES:
@@ -794,7 +802,7 @@ async def proxy_direct_audio_stream(station_id: str, request: Request) -> Stream
             )
 
             real_stream_url = await refresh_station_stream_url(station_id)
-            upstream_req = http_client.build_request("GET", real_stream_url, headers=CDN_REQUEST_HEADERS)
+            upstream_req = http_client.build_request("GET", real_stream_url, headers=_stream_headers)
             upstream_response = await http_client.send(upstream_req, stream=True)
 
         upstream_response.raise_for_status()
@@ -806,7 +814,9 @@ async def proxy_direct_audio_stream(station_id: str, request: Request) -> Stream
 
     async def stream_audio_bytes() -> AsyncIterator[bytes]:
         try:
-            async for chunk in upstream_response.aiter_bytes(chunk_size=64 * 1024):
+            # 强制 identity 编码（见上方 build_request 处的 headers 注释），
+            # 因此用 aiter_raw 直接吐字节，避免 httpx 对未压缩内容做无意义 decode。
+            async for chunk in upstream_response.aiter_raw(64 * 1024):
                 if chunk:
                     yield chunk
         finally:
@@ -1482,6 +1492,9 @@ async def add_subscription(request: Request):
     except db.DuplicateSubscriptionError as exc:
         raise HTTPException(status_code=409, detail="订阅源已存在") from exc
     await db.add_channels_bulk(sub_id, channels)
+    # 频道数据变更后失效 Cover 缓存
+    from core.cover_cache import invalidate_all_covers
+    invalidate_all_covers()
 
     return {"id": sub_id, "title": title, "url": url, "channel_count": len(channels)}
 
@@ -1505,6 +1518,9 @@ async def delete_subscription(sub_id: int):
     if not sub:
         raise HTTPException(status_code=404, detail="订阅不存在")
     await db.delete_subscription(sub_id)
+    # 频道数据变更后失效 Cover 缓存
+    from core.cover_cache import invalidate_all_covers
+    invalidate_all_covers()
     return {"ok": True}
 
 
@@ -1521,6 +1537,9 @@ async def _refresh_regular_subscription(sub: dict) -> dict:
     channels = deduplicate_channels(channels)
     await db.add_channels_bulk(sub['id'], channels)
     await db.update_subscription(sub['id'], valid=1, channel_count=len(channels))
+    # 频道数据变更后失效 Cover 缓存
+    from core.cover_cache import invalidate_all_covers
+    invalidate_all_covers()
 
     return {"channel_count": len(channels)}
 
@@ -1533,6 +1552,9 @@ async def _refresh_market_subscription(sub: dict) -> dict:
         result = await _market.update_installed_package(package_id)
     except Exception as exc:
         _market_http_error(exc)
+    # 频道数据变更后失效 Cover 缓存
+    from core.cover_cache import invalidate_all_covers
+    invalidate_all_covers()
     return result
 
 
@@ -1573,6 +1595,10 @@ async def refresh_all_subscriptions():
                 "status": "failed",
                 "error": exc.detail,
             })
+    # 批量刷新后统一失效一次
+    if updated > 0:
+        from core.cover_cache import invalidate_all_covers
+        invalidate_all_covers()
     return {"ok": True, "updated": updated, "failed": failed, "results": results}
 
 
@@ -1612,11 +1638,14 @@ async def refresh_market(request: Request):
     try:
         body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
         source_id = (body or {}).get("source_id")
-        return await _market.refresh_market(
+        result = await _market.refresh_market(
             (body or {}).get("market_url"),
             allow_private=_truthy_query((body or {}).get("allow_private", False)),
             source_id=int(source_id) if source_id else None,
         )
+        from core.cover_cache import invalidate_all_covers
+        invalidate_all_covers()
+        return result
     except Exception as exc:
         _market_http_error(exc)
 
@@ -1708,12 +1737,15 @@ async def preview_market_package(package_id: str):
 async def import_market_package(package_id: str, request: Request):
     try:
         body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
-        return await _market.import_package(
+        result = await _market.import_package(
             package_id,
             preview_id=(body or {}).get("preview_id", ""),
             prefer_cached_preview=_truthy_query((body or {}).get("prefer_cached_preview", True)),
             reinstall=_truthy_query((body or {}).get("reinstall", False)),
         )
+        from core.cover_cache import invalidate_all_covers
+        invalidate_all_covers()
+        return result
     except Exception as exc:
         _market_http_error(exc)
 
@@ -1721,7 +1753,10 @@ async def import_market_package(package_id: str, request: Request):
 @app.post("/api/admin/market/packages/{package_id}/update", dependencies=[Depends(require_admin)])
 async def update_market_package(package_id: str):
     try:
-        return await _market.update_installed_package(package_id)
+        result = await _market.update_installed_package(package_id)
+        from core.cover_cache import invalidate_all_covers
+        invalidate_all_covers()
+        return result
     except Exception as exc:
         _market_http_error(exc)
 
@@ -1742,9 +1777,12 @@ async def update_market_install(package_id: str, request: Request):
 async def run_market_updates(request: Request):
     try:
         body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
-        return await _market.run_installed_updates(
+        result = await _market.run_installed_updates(
             auto_update_only=_truthy_query((body or {}).get("auto_update_only", False)),
         )
+        from core.cover_cache import invalidate_all_covers
+        invalidate_all_covers()
+        return result
     except Exception as exc:
         _market_http_error(exc)
 
@@ -1752,7 +1790,10 @@ async def run_market_updates(request: Request):
 @app.delete("/api/admin/market/packages/{package_id}/install", dependencies=[Depends(require_admin)])
 async def uninstall_market_package(package_id: str):
     try:
-        return await _market.uninstall_package(package_id)
+        result = await _market.uninstall_package(package_id)
+        from core.cover_cache import invalidate_all_covers
+        invalidate_all_covers()
+        return result
     except Exception as exc:
         _market_http_error(exc)
 
@@ -2234,11 +2275,127 @@ async def test_status(sub_id: int):
 
 # 扩展窗口代理：定期拉上游 playlist
 _wide_cache: dict[str, dict] = {}
-_WIDE_WINDOW = 20  
-_WIDE_TTL = 120    
+# 扩展窗口设计目标：维持「比上游 sliding window 略大但不要长到老 segment 404」。
+# 实际上游窗口典型 3~6 段；这里取 8 既能覆盖瞬时缺段，又能让 hls.js 看到一个稳定的
+# live edge。``_WIDE_WINDOW`` 只是上限，实际 deque 仍然按 seq 推进。
+# 一些 IPTV 上游会用循环文件名（如 0.ts/1.ts/.../4.ts）+ 滚动 MEDIA-SEQUENCE；
+# 同一文件名的内容会被覆盖。窗口必须 ≤ 上游 sliding window，否则队尾的旧
+# segment URL 拉回来已是新内容，hls.js 会触发 levelParsingError / bufferStalled。
+# 取 6：略大于福建系上游的 5 段，给一两段缓冲；其它源上游窗口通常 ≥ 6。
+_WIDE_WINDOW = 6
+_WIDE_TTL = 120
+# stale grace 不再写死秒数；按 target_duration 折算，至少 30s、最多 90s。
+_WIDE_STALE_GRACE_MIN = 30
+_WIDE_STALE_GRACE_MAX = 90
+_WIDE_REFRESH_LOG_INTERVAL = 30
+# 后台 refresher 的最短/最长睡眠时间，按 target_duration 自适应。
+_WIDE_REFRESH_INTERVAL_MIN = 1.0
+_WIDE_REFRESH_INTERVAL_MAX = 4.0
+# 后台刷新最多允许的连续失败次数。超过后主动释放缓存，让下一请求重新
+# 调用 adapter resolve 拿到新鲜 token。fjtv 等上游的动态 ``_upt`` token
+# 可能几个月也不变，也可能几分钟就过期；我们靠「反复失败」来推断。
+_WIDE_MAX_CONSECUTIVE_ERRORS = 12
 _IPTV_SEGMENT_EXTENSIONS = (".ts", ".m4s", ".mp4", ".m4v", ".aac", ".mp3", ".key")
 _HLS_URI_TAGS = ("EXT-X-KEY", "EXT-X-MAP", "EXT-X-PART", "EXT-X-PRELOAD-HINT", "EXT-X-MEDIA", "EXT-X-I-FRAME-STREAM-INF")
 _HLS_URI_RE = re.compile(r'(URI=")([^"]+)(")', re.IGNORECASE)
+
+WIDE_ENABLED = False  # 全局扩窗开关；False=统一直通重写，True=恢复旧扩窗行为
+
+# ── 薄韧性 playlist 代理缓存（非扩窗）────────────────────────────
+# 扩窗关闭时，所有 playlist 拉取走这里：重试 + single-flight + 短暂成功回退。
+# 不做队列、不做后台 refresher、不自己维护 MEDIA-SEQUENCE。
+_THIN_CACHE: dict[str, tuple[str, str, float]] = {}   # cache_key → (text, final_url, ts)
+_THIN_LOCKS: dict[str, asyncio.Lock] = {}
+_THIN_TTL = 1.5          # 新鲜窗口：合并并发请求 + 极短回放，避免 short-window 上游（如 yxfy 3×5s）丢段
+_THIN_MAX_ENTRIES = 200
+
+
+def _thin_cache_key(url: str) -> str:
+    """稳定 cache key：scheme://netloc/path，去掉 query（含动态 token）。"""
+    parsed = urlparse(url)
+    return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+
+
+async def _thin_playlist_fetch(url: str, headers: dict[str, str] | None = None) -> tuple[str, str]:
+    """拉取上游 playlist，带薄韧性。
+
+    - single-flight：同一 URL 并发请求合并为一次上游 fetch
+    - 重试 1 次（共 2 次尝试，间隔 0.3s）
+    - 成功结果按稳定 key 缓存 5s，作为后续失败时的回退
+    - 全失败且缓存中有未过期结果 → 返回缓存
+    - 全失败且无缓存 → raise HTTPException(502)
+
+    返回 ``(响应文本, 最终 URL)``。
+    """
+    _h = dict(headers or {})
+    _h.setdefault("Accept-Encoding", "identity")
+
+    lock = _THIN_LOCKS.setdefault(url, asyncio.Lock())
+
+    async with lock:
+        # single-flight：锁内再检查一次缓存（可能被上一个持有者写入）
+        ck = _thin_cache_key(url)
+        cached = _THIN_CACHE.get(ck)
+        if cached and cached[2] > time.time():
+            return cached[0], cached[1]
+
+        last_exc = None
+        last_text = ""
+        last_url = ""
+
+        for attempt in range(2):
+            try:
+                resp = await http_client.get(
+                    url, follow_redirects=True, timeout=8, headers=_h,
+                )
+                resp.raise_for_status()
+                last_text = resp.text
+                last_url = str(resp.url)
+
+                # 成功：写入短暂缓存（按稳定 key）
+                now = time.time()
+                _THIN_CACHE[ck] = (last_text, last_url, now + _THIN_TTL)
+                # 防止缓存无限制增长
+                if len(_THIN_CACHE) > _THIN_MAX_ENTRIES:
+                    expired = [k for k, v in _THIN_CACHE.items() if v[2] <= now]
+                    for k in expired:
+                        _THIN_CACHE.pop(k, None)
+                    # 如果过期清理不够，删最老的
+                    while len(_THIN_CACHE) > _THIN_MAX_ENTRIES:
+                        oldest = min(_THIN_CACHE, key=lambda k: _THIN_CACHE[k][2], default=None)
+                        if oldest:
+                            _THIN_CACHE.pop(oldest, None)
+                        else:
+                            break
+
+                return last_text, last_url
+            except httpx.HTTPError as exc:
+                last_exc = exc
+                if attempt == 0:
+                    await asyncio.sleep(0.3)
+
+        # 全部尝试失败 → 尝试返回缓存（即使已过期，作为最后回退）
+        cached = _THIN_CACHE.get(ck)
+        if cached:
+            logger.warning(
+                "薄韧性回退: 上游 %s 拉取失败 (%s)，返回 %ds 前缓存",
+                url[:100], last_exc, int(time.time() - cached[2] + _THIN_TTL),
+            )
+            return cached[0], cached[1]
+
+        raise HTTPException(status_code=502, detail=f"拉取 playlist 失败: {last_exc}")
+
+
+def _wide_stale_grace_for(target_duration: int) -> float:
+    return min(
+        _WIDE_STALE_GRACE_MAX,
+        max(_WIDE_STALE_GRACE_MIN, float(target_duration) * 4.0),
+    )
+
+
+def _wide_refresh_interval_for(target_duration: int) -> float:
+    base = max(1.0, float(target_duration) / 2.0)
+    return min(_WIDE_REFRESH_INTERVAL_MAX, max(_WIDE_REFRESH_INTERVAL_MIN, base))
 
 
 def _drop_wide_cache(cache_key: str) -> None:
@@ -2290,7 +2447,7 @@ def _make_handle_path(*, kind: str, upstream_url: str, ctx_id: str, src_id: str,
     ctx_id / src_id / src_label 来自调用方所处的请求上下文（rewriter / wide refresher）。
     access_token 仅在调用方持有 Media Credential 时透传。
     """
-    from security.proxy_handles import issue_handle as _issue
+    from security.proxy_handles import issue_cached_handle as _issue
     handle = _issue(
         kind=kind,
         url=upstream_url,
@@ -2378,8 +2535,7 @@ def _rewrite_iptv_wide_m3u8_text(raw_m3u8_text: str, base_url: str, ctx_id: str,
     return "\n".join(rewritten_lines)
 
 
-# 旧 ``/api/iptv/adapter/resolve`` / ``/api/iptv/adapter/play.m3u8`` 已被
-# ``/api/media/channel/{key}/playlist.m3u8`` 取代：
+# 旧 adapter 公共解析/播放入口已被 ``/api/media/channel/{key}/playlist.m3u8`` 取代：
 # 入口完全基于稳定 channel canonical_key，后端内部完成 adapter resolve →
 # ProxyContext 注入 → signed handle → 重写。前端不再传 adapter URL。
 
@@ -2580,7 +2736,7 @@ def _cover_img_proxy_url(raw_url: str) -> str:
     """如果 raw_url 命中防盗链白名单，返回 image handle 路径；否则原样返回。"""
     if not _cover_img_referer_for(raw_url):
         return raw_url
-    from security.proxy_handles import issue_handle as _issue
+    from security.proxy_handles import issue_cached_handle as _issue
     handle = _issue(kind="image", url=raw_url, src="adapter:cover")
     return f"/api/media/proxy/image/{handle}"
 
@@ -2633,7 +2789,30 @@ async def fetch_adapter_cover_payload(adapter_url: str) -> dict:
 # 封面元数据走 /api/media/channel/{key}/cover；封面图片走 image handle。
 
 
-_HLS_META_TAGS = ("EXT-X-MAP", "EXT-X-KEY", "EXT-X-VERSION", "EXT-X-PLAYLIST-TYPE")
+# Header-level 全局元数据（出现在 playlist 头部一次的标签）。
+# DISCONTINUITY / DISCONTINUITY-SEQUENCE / PROGRAM-DATE-TIME 是「跨 segment」标签，
+# 必须按出现位置和顺序写入，不能放在头部，故此处不包含。
+_HLS_META_TAGS = (
+    "EXT-X-MAP",
+    "EXT-X-KEY",
+    "EXT-X-VERSION",
+    "EXT-X-PLAYLIST-TYPE",
+    "EXT-X-INDEPENDENT-SEGMENTS",
+    "EXT-X-START",
+    # RFC 8216 §4.3.3.3: DISCONTINUITY-SEQUENCE 只能在 playlist 头部出现一次，
+    # 不是 per-segment。归到 meta（出现一次即可）。
+    "EXT-X-DISCONTINUITY-SEQUENCE",
+)
+
+# 这些标签作用域是「下一个 segment」，要按位置插在 EXTINF 之前。
+_HLS_PER_SEGMENT_PREFIX_TAGS = (
+    "EXT-X-DISCONTINUITY",
+    "EXT-X-PROGRAM-DATE-TIME",
+    "EXT-X-BYTERANGE",
+    "EXT-X-CUE-OUT",
+    "EXT-X-CUE-IN",
+    "EXT-X-CUE",
+)
 
 
 def _extract_hls_meta_lines(m3u8_text: str, base_url: str, ctx_id: str, src_id: str, src_label: str, *, access_token: str = "", proxy_ts: int = 1) -> list[str]:
@@ -2648,11 +2827,88 @@ def _extract_hls_meta_lines(m3u8_text: str, base_url: str, ctx_id: str, src_id: 
             if upper.startswith(f'#{tag}:'):
                 meta.append(_rewrite_hls_tag_uri(line, base_url, ctx_id, src_id, src_label, access_token=access_token, proxy_ts=proxy_ts))
                 break
+            if upper == f'#{tag}':
+                # 无值标签（如 #EXT-X-INDEPENDENT-SEGMENTS）
+                meta.append(line)
+                break
     return meta
 
 
+def _is_per_segment_prefix_tag(line: str) -> bool:
+    upper = line.strip().upper()
+    if not upper.startswith('#'):
+        return False
+    body = upper[1:]
+    for tag in _HLS_PER_SEGMENT_PREFIX_TAGS:
+        if body == tag or body.startswith(f'{tag}:'):
+            return True
+    return False
+
+
+def _parse_live_segments(text: str, base_url: str) -> tuple[list[dict], int, int]:
+    """从 m3u8 文本中提取 segment 列表，并保留每段前置标签（DISCONTINUITY 等）。
+
+    返回 ``(segments, target_duration, last_media_seq)``。每个 segment dict::
+
+        {"url": <abs upstream url>, "dur": "8.080",
+         "seq": <媒体序号>, "prefix_tags": [<原文 #EXT-X-...>...]}
+    """
+    segments: list[dict] = []
+    target_duration = 6
+    media_seq = 0
+    pending_tags: list[str] = []
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        raw = lines[i]
+        line = raw.strip()
+        upper = line.upper()
+        if upper.startswith('#EXT-X-TARGETDURATION:'):
+            try:
+                target_duration = int(line.split(':', 1)[1].split(',', 1)[0])
+            except Exception:
+                pass
+        elif upper.startswith('#EXT-X-MEDIA-SEQUENCE:'):
+            try:
+                media_seq = int(line.split(':', 1)[1].split(',', 1)[0])
+            except Exception:
+                pass
+        elif _is_per_segment_prefix_tag(line):
+            pending_tags.append(raw.rstrip())
+        elif upper.startswith('#EXTINF:'):
+            dur = line.split(':', 1)[1].rstrip(',')
+            seg_url = ''
+            j = i + 1
+            # 跳过 EXTINF 与 URL 之间可能出现的注释/扩展标签
+            while j < len(lines):
+                nxt = lines[j].strip()
+                if not nxt:
+                    j += 1
+                    continue
+                if nxt.startswith('#'):
+                    if _is_per_segment_prefix_tag(nxt):
+                        pending_tags.append(lines[j].rstrip())
+                    j += 1
+                    continue
+                seg_url = nxt
+                break
+            if seg_url:
+                abs_url = urljoin(base_url, seg_url)
+                segments.append({
+                    'dur': dur,
+                    'url': abs_url,
+                    'seq': media_seq,
+                    'prefix_tags': pending_tags,
+                })
+                pending_tags = []
+                media_seq += 1
+                i = j
+        i += 1
+    return segments, target_duration, media_seq
+
+
 async def _wide_refresher(cache_key: str, target_url: str, ctx_id: str, src_id: str, src_label: str):
-    """后台任务：每 2s 拉一次上游，更新分片队列。
+    """后台任务：按 target_duration 自适应频率拉上游 playlist，更新分片队列。
 
     上游 header 由 ProxyContext (按 ctx_id 索引) 提供；access_token 在生成
     response 阶段由 wide_playlist 调用方按需注入，refresher 不持有该 token。
@@ -2670,8 +2926,11 @@ async def _wide_refresher(cache_key: str, target_url: str, ctx_id: str, src_id: 
             _h['Referer'] = ctx.referer
         if ctx.cookie:
             _h['Cookie'] = ctx.cookie
+    # 直播 m3u8 不要被中间层缓存，且我们处理 raw 文本，不要 gzip。
+    _h.setdefault('Accept-Encoding', 'identity')
     while True:
         cache = _wide_cache.get(cache_key)
+        _consec_error_key = cache_key + '_err'
         last_access = _wide_cache.get(cache_key + '_ts', 0)
         if not cache:
             return
@@ -2684,27 +2943,7 @@ async def _wide_refresher(cache_key: str, target_url: str, ctx_id: str, src_id: 
             resp = await http_client.get(target_url, follow_redirects=True, timeout=6, headers=_h)
             resp.raise_for_status()
             playlist_base_url = str(resp.url)
-            lines = resp.text.splitlines()
-
-            segments = []
-            target_duration = 6
-            media_seq = 0
-            i = 0
-            while i < len(lines):
-                line = lines[i].strip()
-                if line.startswith('#EXT-X-TARGETDURATION:'):
-                    target_duration = int(line.split(':')[1])
-                elif line.startswith('#EXT-X-MEDIA-SEQUENCE:'):
-                    media_seq = int(line.split(':')[1])
-                elif line.startswith('#EXTINF:'):
-                    dur = line.split(':')[1].rstrip(',')
-                    url = lines[i + 1].strip() if i + 1 < len(lines) else ''
-                    if url and not url.startswith('#'):
-                        abs_url = urljoin(playlist_base_url, url)
-                        segments.append({'dur': dur, 'url': abs_url, 'seq': media_seq})
-                        media_seq += 1
-                    i += 1
-                i += 1
+            segments, target_duration, _ = _parse_live_segments(resp.text, playlist_base_url)
 
             # Extract and rewrite metadata lines (MAP, KEY, etc.) — refresher 不带 access_token，
             # 重写后的 meta 由响应阶段按需附加；此处生成的 path 不含 access_token，
@@ -2714,22 +2953,68 @@ async def _wide_refresher(cache_key: str, target_url: str, ctx_id: str, src_id: 
             cache = _wide_cache.get(cache_key)
             if not cache:
                 return
+            cache['last_refresh_at'] = time.time()
+            cache['stale_since'] = 0
             cache['target_duration'] = target_duration
+            # 成功刷新 → 重置连续失败计数
+            _wide_cache[cache_key + '_err'] = 0
             if meta_lines:
                 cache['meta'] = meta_lines
             cache['base_url'] = playlist_base_url
             cache['raw_meta_text'] = resp.text  # 缓存原文，响应阶段按 token 重写
-            seen = cache.get('seen', set())
+            # 上游有些频道（如福建 qznews）会循环复用 0.ts/1.ts/... 文件名，
+            # 内容随 MEDIA-SEQUENCE 变化。**只用 URL 去重会让 refresher 永远丢掉
+            # 后续段**，sequence 永远卡在第一次见到的队尾。这里以「比当前队尾大
+            # 的 seq」为追加门槛。
+            #
+            # 但还有一种真实场景需要照顾：上游直播流被中断后重启（CDN 切换、
+            # 编码器重启），新一轮 MEDIA-SEQUENCE 会从一个比当前 tail 小很多的
+            # 值重新开始。如果一直靠 ``seg.seq > tail`` 跳过，整个 queue 会冻结，
+            # 直到 stale_grace 过期才被清掉，造成 30-90s 的假冻结窗口。
+            # 检测条件：上游 playlist 头部 MEDIA-SEQUENCE 比我们记下的 tail_seq
+            # 还小很多（差距 > _WIDE_WINDOW * 2），认为是 reset，清空 queue。
+            queue = cache['queue']
+            current_tail_seq = queue[-1]['seq'] if queue else -1
+            upstream_head_seq = segments[0]['seq'] if segments else -1
+            if (
+                queue
+                and upstream_head_seq >= 0
+                and upstream_head_seq < current_tail_seq - (_WIDE_WINDOW * 2)
+            ):
+                logger.warning(
+                    "IPTV wide playlist 检测到上游 sequence 重置: tail=%d upstream_head=%d key=%s",
+                    current_tail_seq,
+                    upstream_head_seq,
+                    cache_key,
+                )
+                queue.clear()
+                current_tail_seq = -1
             for seg in segments:
-                if seg['url'] not in seen:
-                    cache['queue'].append(seg)
-                    seen.add(seg['url'])
-            while len(cache['queue']) > _WIDE_WINDOW:
-                cache['queue'].popleft()
-            cache['seen'] = seen
-        except Exception:
-            pass
-        await asyncio.sleep(2)
+                if seg['seq'] > current_tail_seq:
+                    queue.append(seg)
+                    current_tail_seq = seg['seq']
+            while len(queue) > _WIDE_WINDOW:
+                queue.popleft()
+            # 维护与 queue 一致的 seen（仅作向后兼容，不再参与去重判定）
+            cache['seen'] = {s['url'] for s in queue}
+        except Exception as exc:
+            cache = _wide_cache.get(cache_key)
+            if cache:
+                now = time.time()
+                if not cache.get('stale_since'):
+                    cache['stale_since'] = now
+                last_log = float(cache.get('last_refresh_log_at') or 0)
+                if now - last_log >= _WIDE_REFRESH_LOG_INTERVAL:
+                    logger.warning(
+                        "IPTV wide playlist 后台刷新失败，暂时保留旧缓存: key=%s error=%s",
+                        cache_key,
+                        exc,
+                    )
+                    cache['last_refresh_log_at'] = now
+        # 自适应：按 target_duration 折算，避免对 8s targetDuration 的源 2s 一刷的过密流量。
+        cache_now = _wide_cache.get(cache_key) or {}
+        sleep_for = _wide_refresh_interval_for(cache_now.get('target_duration', 6))
+        await asyncio.sleep(sleep_for)
 
 
 def release_iptv_wide_playlist_by_key(cache_key: str) -> bool:
@@ -2745,8 +3030,15 @@ def _wide_cache_key_for(upstream_url: str, ctx_id: str) -> str:
     """稳定 cache key：上游 URL + ctx_id。
 
     不使用 signed handle 当 cache key（每次签发都不同），避免缓存反复失效。
+
+    fjtv 等 adapter 每次 resolve 带不同的 ``_upt`` / session token，导致
+    upstream_url 次次换，cache_key 跟着换，刚建起来的 wide cache + 后台
+    refresher 立刻被孤立成 dead entry。这里只取 scheme://netloc/path，
+    query（含动态 token）不参与 cache key。
     """
-    base = quote(upstream_url, safe='')
+    parsed = urlparse(upstream_url)
+    stable_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+    base = quote(stable_url, safe='')
     return f"{base}#{ctx_id}" if ctx_id else base
 
 
@@ -2767,6 +3059,13 @@ async def serve_iptv_wide_playlist_by_source(
 
     if urlparse(upstream_url).scheme.lower() not in ("http", "https"):
         raise HTTPException(status_code=400, detail="上游 scheme 不被允许")
+    # 第一次拉上游必须跑 SSRF 校验。adapter 解析后的 URL 进入这里之前并没有
+    # 别的拦截层；后续 chunk/playlist 各自的子路由有 _validate_handle_url_or_403
+    # 兜底，但这里是入口，直接 fetch 之前必须挡一次。
+    try:
+        await assert_safe_target_url(upstream_url, allowed_schemes={"http", "https"})
+    except UnsafeTargetError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
 
     ctx = _get_registry().get(ctx_id) if ctx_id else None
     _headers: dict[str, str] = {}
@@ -2780,15 +3079,52 @@ async def serve_iptv_wide_playlist_by_source(
             _headers['Referer'] = ctx.referer
         if ctx.cookie:
             _headers['Cookie'] = ctx.cookie
+    _headers.setdefault('Accept-Encoding', 'identity')
+
+    if not WIDE_ENABLED:
+        # ── 薄韧性直通路径（非扩窗）─────────────────────────────
+        text, final_url = await _thin_playlist_fetch(upstream_url, _headers)
+        from core.m3u8_rewriter import RewriteContext as _RC, rewrite_m3u8 as _rw
+        rewrite_ctx = _RC(
+            base_url=final_url,
+            src_id=f"channel:{canonical_key}",
+            src_label=src_label,
+            ctx_id=ctx_id,
+            propagated_access_token=access.propagated_access_token or "" if access else "",
+            proxy_segments=True,
+        )
+        body = _rw(text, rewrite_ctx)
+        return Response(
+            content=body,
+            media_type="application/x-mpegURL",
+            headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+        )
+    # ── 扩窗路径（WIDE_ENABLED=True）───────────────────────────
 
     access_token = access.propagated_access_token or "" if access else ""
     src_id = f"channel:{canonical_key}"
     cache_key = _wide_cache_key_for(upstream_url, ctx_id)
 
-    def _rewrite_ts(seg_url: str) -> str:
-        if _should_proxy_iptv_chunk(seg_url, 1):
-            return _iptv_chunk_handle_path(seg_url, ctx_id, src_id, src_label, access_token)
-        return seg_url
+    def _rewrite_ts(seg_url: str, seg_seq: int = -1) -> str:
+        if not _should_proxy_iptv_chunk(seg_url, 1):
+            return seg_url
+        # 上游若复用 segment 文件名（如 0.ts/1.ts/...），仅靠 url 作为 handle cache
+        # key 会让连续不同 sequence 都映射到同一个 handle URL；hls.js 把它当作
+        # 重复段去重，导致缺帧 / bufferStalled。把 seq 注入上游 URL 的 query，
+        # CDN 一般忽略未知 query 参数，但我们的 handle 就能按 seq 区分。
+        upstream_with_seq = seg_url
+        if seg_seq >= 0:
+            sep = '&' if urlparse(seg_url).query else '?'
+            upstream_with_seq = f'{seg_url}{sep}wf_seq={seg_seq}'
+        return _iptv_chunk_handle_path(upstream_with_seq, ctx_id, src_id, src_label, access_token)
+
+    def _emit_segment_lines(seg: dict) -> list[str]:
+        out: list[str] = []
+        for tag in seg.get('prefix_tags') or ():
+            out.append(tag)
+        out.append(f'#EXTINF:{seg["dur"]},')
+        out.append(_rewrite_ts(seg['url'], seg.get('seq', -1)))
+        return out
 
     if cache_key not in _wide_cache:
         from collections import deque
@@ -2800,30 +3136,19 @@ async def serve_iptv_wide_playlist_by_source(
         last_text = ""
         for attempt in range(4):
             try:
-                resp = await http_client.get(upstream_url, follow_redirects=True, timeout=6, headers=_headers)
+                resp = await http_client.get(upstream_url, follow_redirects=True, timeout=8, headers=_headers)
                 resp.raise_for_status()
                 playlist_base_url = str(resp.url)
                 last_text = resp.text
-                lines = resp.text.splitlines()
-                media_seq = 0
-                i = 0
-                while i < len(lines):
-                    line = lines[i].strip()
-                    if line.startswith('#EXT-X-TARGETDURATION:'):
-                        target_dur = int(line.split(':')[1])
-                    elif line.startswith('#EXT-X-MEDIA-SEQUENCE:'):
-                        media_seq = int(line.split(':')[1])
-                    elif line.startswith('#EXTINF:'):
-                        dur = line.split(':')[1].rstrip(',')
-                        url = lines[i + 1].strip() if i + 1 < len(lines) else ''
-                        if url and not url.startswith('#'):
-                            abs_url = urljoin(playlist_base_url, url)
-                            if abs_url not in seen:
-                                queue.append({'dur': dur, 'url': abs_url, 'seq': media_seq})
-                                seen.add(abs_url)
-                            media_seq += 1
-                        i += 1
-                    i += 1
+                fresh_segs, fresh_target, _ = _parse_live_segments(resp.text, playlist_base_url)
+                if fresh_target:
+                    target_dur = fresh_target
+                tail_seq = queue[-1]['seq'] if queue else -1
+                for seg in fresh_segs:
+                    if seg['seq'] > tail_seq:
+                        queue.append(seg)
+                        seen.add(seg['url'])
+                        tail_seq = seg['seq']
             except Exception:
                 pass
             if attempt < 3:
@@ -2838,49 +3163,62 @@ async def serve_iptv_wide_playlist_by_source(
             'meta': meta_lines,
             'base_url': playlist_base_url,
             'raw_meta_text': last_text,
+            'last_refresh_at': time.time(),
+            'stale_since': 0,
+            'last_refresh_log_at': 0,
         }
         _wide_cache[cache_key] = cache
         _wide_cache[cache_key + '_ts'] = time.time()
         asyncio.create_task(_wide_refresher(cache_key, upstream_url, ctx_id, src_id, src_label))
 
         if queue:
+            first_seq = queue[0]["seq"]
             out_lines = [
                 '#EXTM3U', '#EXT-X-VERSION:3',
                 f'#EXT-X-TARGETDURATION:{target_dur}',
-                f'#EXT-X-MEDIA-SEQUENCE:{queue[0]["seq"]}',
+                f'#EXT-X-MEDIA-SEQUENCE:{first_seq}',
             ]
             for m in meta_lines:
                 if not m.upper().startswith('#EXT-X-VERSION:'):
                     out_lines.append(m)
             for seg in queue:
-                out_lines.append(f'#EXTINF:{seg["dur"]},')
-                out_lines.append(_rewrite_ts(seg['url']))
+                out_lines.extend(_emit_segment_lines(seg))
             content = '\n'.join(out_lines)
             return Response(content=content, media_type="application/x-mpegURL",
                 headers={'Cache-Control': 'no-cache, no-store, must-revalidate'})
         # 没拿到 segment（可能是 master playlist），直接重写转发
         try:
-            resp = await http_client.get(upstream_url, follow_redirects=True, timeout=6, headers=_headers)
+            resp = await http_client.get(upstream_url, follow_redirects=True, timeout=8, headers=_headers)
             _ensure_hls_playlist_text(resp.text, str(resp.url))
             rewritten = _rewrite_iptv_wide_m3u8_text(resp.text, str(resp.url), ctx_id, src_id, src_label, access_token=access_token, proxy_ts=1)
-            return Response(content=rewritten, media_type="application/x-mpegURL")
+            return Response(
+                content=rewritten,
+                media_type="application/x-mpegURL",
+                headers={'Cache-Control': 'no-cache, no-store, must-revalidate'},
+            )
         except httpx.HTTPError as exc:
             raise HTTPException(status_code=502, detail=f"拉取失败: {exc}") from exc
 
     # 命中缓存：返回扩展窗口 playlist。重写时根据当前请求的 access_token 重生成（meta + chunk）
     _wide_cache[cache_key + '_ts'] = time.time()
     cache = _wide_cache[cache_key]
+    target_dur = cache.get('target_duration', 6)
+    stale_since = float(cache.get('stale_since') or 0)
+    if stale_since and time.time() - stale_since > _wide_stale_grace_for(target_dur):
+        _drop_wide_cache(cache_key)
+        # 用 503 显式告诉前端「上游暂不可用」，hls.js 在 levelLoadError 上会重试，
+        # 不会立刻把整个播放器 destroy 掉。
+        raise HTTPException(status_code=503, detail="直播 playlist 刷新失败，缓存已过期")
     queue = cache['queue']
     if not queue:
-        try:
-            resp = await http_client.get(upstream_url, follow_redirects=True, timeout=6, headers=_headers)
-            _ensure_hls_playlist_text(resp.text, str(resp.url))
-            rewritten = _rewrite_iptv_wide_m3u8_text(resp.text, str(resp.url), ctx_id, src_id, src_label, access_token=access_token, proxy_ts=1)
-            return Response(content=rewritten, media_type="application/x-mpegURL")
-        except httpx.HTTPError as exc:
-            raise HTTPException(status_code=502, detail=f"拉取失败: {exc}") from exc
+        # 队列为空（冷启动阶段上游 4 次尝试都失败）：直接释放缓存，让下一轮
+        # 请求重新触发 adapter resolve + 新的缓存 + 新的后台 refresher，
+        # 不再走「每次直接取一次上游但不持久」的 half-baked 路径。
+        # 这里抛 503 告诉 hls.js 暂时不可用；hls.js 的 levelLoadError 会重试，
+        # 重试时 cache_key 已不在 _wide_cache，就会进入带 4 次重试的冷启动。
+        _drop_wide_cache(cache_key)
+        raise HTTPException(status_code=503, detail="直播 playlist 队列未就绪，请稍后重试")
 
-    target_dur = cache.get('target_duration', 6)
     base_url = cache.get('base_url') or upstream_url
     raw_meta_text = cache.get('raw_meta_text') or ""
     meta_lines = _extract_hls_meta_lines(raw_meta_text, base_url, ctx_id, src_id, src_label, access_token=access_token, proxy_ts=1) if raw_meta_text else []
@@ -2894,8 +3232,7 @@ async def serve_iptv_wide_playlist_by_source(
         if not m.upper().startswith('#EXT-X-VERSION:'):
             out_lines.append(m)
     for seg in queue:
-        out_lines.append(f'#EXTINF:{seg["dur"]},')
-        out_lines.append(_rewrite_ts(seg['url']))
+        out_lines.extend(_emit_segment_lines(seg))
     content = '\n'.join(out_lines)
     return Response(
         content=content,
@@ -2909,7 +3246,7 @@ async def serve_iptv_wide_playlist_by_source(
 
 async def serve_rtsp_playlist_response(
     *,
-    target_url: str,
+    upstream_url: str,
     custom_ua: str = "",
     compat: bool = False,
 ) -> FileResponse:
@@ -2917,10 +3254,10 @@ async def serve_rtsp_playlist_response(
 
     handle payload 已通过 SSRF 校验，此处不再做 URL 校验。
     """
-    if not target_url:
+    if not upstream_url:
         raise HTTPException(status_code=400, detail="缺少 target_url")
     try:
-        session_id, playlist_path = await _ensure_rtsp_hls_session(target_url, custom_ua, compat=compat)
+        session_id, playlist_path = await _ensure_rtsp_hls_session(upstream_url, custom_ua, compat=compat)
     except HTTPException:
         raise
     except Exception as exc:
@@ -2960,7 +3297,7 @@ async def media_proxy_rtsp_segment(session_id: str, filename: str):
 async def serve_iptv_proxy_stream_response(
     *,
     request: Request,
-    target_url: str,
+    upstream_url: str,
     upstream_headers: dict[str, str],
     stream_type: str = "",
 ) -> StreamingResponse:
@@ -2968,12 +3305,15 @@ async def serve_iptv_proxy_stream_response(
 
     handle payload 已通过 SSRF 校验，reconnect 内部直接使用上游 URL。
     """
-    parsed = urlparse(target_url)
+    parsed = urlparse(upstream_url)
     headers = {
         "User-Agent": upstream_headers.get("User-Agent", CDN_REQUEST_HEADERS["User-Agent"]),
         "Accept": "*/*",
         "Connection": "keep-alive",
         "Referer": upstream_headers.get("Referer", f"{parsed.scheme}://{parsed.netloc}/"),
+        # 与 chunk 路径一致：强制 identity，避免 httpx 默认 gzip,br 在 mpegts/flv
+        # 长连接上把 Content-Encoding 误标。下游不需要解码。
+        "Accept-Encoding": "identity",
     }
     if upstream_headers.get("Cookie"):
         headers["Cookie"] = upstream_headers["Cookie"]
@@ -2986,7 +3326,7 @@ async def serve_iptv_proxy_stream_response(
     )
 
     async def open_upstream() -> httpx.Response:
-        req = stream_client.build_request("GET", target_url, headers=headers)
+        req = stream_client.build_request("GET", upstream_url, headers=headers)
         response: httpx.Response | None = None
         try:
             response = await stream_client.send(req, stream=True)
@@ -3003,7 +3343,7 @@ async def serve_iptv_proxy_stream_response(
                 logger.warning(
                     "IPTV stream 上游 Content-Length 较小: %s bytes url=%s",
                     length,
-                    target_url,
+                    upstream_url,
                 )
         return response
 
@@ -3039,7 +3379,8 @@ async def serve_iptv_proxy_stream_response(
                 close_reason = "eof"
 
                 try:
-                    async for chunk in upstream.aiter_bytes(64 * 1024):
+                    # identity 编码（headers 已声明），用 aiter_raw 跳过 httpx 解码层。
+                    async for chunk in upstream.aiter_raw(64 * 1024):
                         if await client_disconnected():
                             close_reason = "client disconnected"
                             break
@@ -3067,7 +3408,7 @@ async def serve_iptv_proxy_stream_response(
                         close_reason,
                         bytes_this_connection,
                         elapsed,
-                        target_url,
+                        upstream_url,
                     )
                 else:
                     logger.info(
@@ -3085,7 +3426,7 @@ async def serve_iptv_proxy_stream_response(
                             "IPTV stream 上游连续无数据，结束代理流: retries=%s no_data_age=%.2fs url=%s",
                             no_data_retries,
                             no_data_age,
-                            target_url,
+                            upstream_url,
                         )
                         break
 
@@ -3110,7 +3451,7 @@ async def serve_iptv_proxy_stream_response(
                             no_data_retries,
                             no_data_age,
                             exc,
-                            target_url,
+                            upstream_url,
                         )
                         if no_data_retries >= IPTV_STREAM_NO_DATA_RETRIES or no_data_age > IPTV_STREAM_NO_DATA_TIMEOUT_SECONDS:
                             return
@@ -3385,8 +3726,16 @@ def _source_type(source: dict) -> str:
 
 
 def _sorted_sources(sources: list[dict]) -> list[dict]:
+    def _health_rank(source: dict) -> int:
+        status = str(source.get("probe_status") or "").strip().lower()
+        if source.get("is_working") == 1 or status == "online":
+            return 0
+        if status in {"", "untested", "unknown", "pending"} or source.get("is_working") in {-1, None}:
+            return 1
+        return 2
+
     return sorted(sources, key=lambda u: (
-        0 if u.get('is_working') == 1 else 1 if u.get('is_working') == -1 else 2,
+        _health_rank(u),
         u.get('latency_ms') or 9999,
         -(u.get('speed_mbps') or 0),
     ))
@@ -3394,6 +3743,8 @@ def _sorted_sources(sources: list[dict]) -> list[dict]:
 
 def _is_supported_export_source(source: dict, healthy_only: bool = True) -> bool:
     if not source.get('url'):
+        return False
+    if not _truthy_query(source.get('enabled', True)):
         return False
     if healthy_only and source.get('is_working') != 1:
         return False
@@ -3411,7 +3762,7 @@ def _absolute_api_url(request: Request, path: str) -> str:
 def _iptv_proxy_path_for_source(source: dict) -> str:
     """用于 M3U 导出：按 source 的 canonical_key 生成 media API 入口。
 
-    不再把 ``target_url=`` / Header 明文编入 query。
+    不再把 raw upstream URL / Header 明文编入 query。
     导出的 .m3u 中每条频道地址都是：
 
         /api/media/channel/{canonical_key}/playlist.m3u8
@@ -3605,7 +3956,7 @@ async def iptv_smart_playlist(canonical_key: str, request: Request):
         try:
             if source_type == 'rtsp':
                 return await serve_rtsp_playlist_response(
-                    target_url=source['url'],
+                    upstream_url=source['url'],
                     custom_ua=source.get('custom_ua', ''),
                     compat=False,
                 )
