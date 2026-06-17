@@ -9,7 +9,7 @@
 * 普通 URL 行根据扩展名归类为 playlist 或 chunk。
 * 相对 URL 一律用 ``urljoin(base_url, line)`` 解析，禁止字符串拼接。
 * 重写后 URL 可附加 ``?access_token=...``，仅当来源是 Media Credential 时使用。
-* 输出中**绝对不会**包含 ``target_url=`` / 管理员凭证 / cookie / 上游 URL 明文。
+* 输出中**绝对不会**包含 raw upstream query / 管理员凭证 / cookie / 上游 URL 明文。
 
 调用方需先做完 SSRF 校验和上游 fetch；本模块只做文本变换 + handle 签发。
 """
@@ -20,7 +20,7 @@ import re
 from dataclasses import dataclass
 from urllib.parse import quote, urljoin, urlparse
 
-from security.proxy_handles import issue_handle
+from security.proxy_handles import issue_cached_handle
 
 
 _HLS_URI_TAGS = (
@@ -41,6 +41,21 @@ _PLAYLIST_EXTENSIONS = (".m3u8", ".m3u")
 _SEGMENT_EXTENSIONS = (
     ".ts", ".m4s", ".mp4", ".fmp4", ".m4v", ".aac", ".mp3", ".webm", ".cmfa", ".cmfv",
 )
+
+_MEDIA_SEQ_RE = re.compile(r"^\s*#EXT-X-MEDIA-SEQUENCE\s*:\s*(\d+)", re.IGNORECASE)
+
+
+def _inject_wf_seq(url: str, seq: int) -> str:
+    """在 url 的 query 末尾追加 ``wf_seq=<seq>``。
+
+    上游通常会忽略未知 query；我们用它打破文件名循环上游（如 fjtv qznews：
+    0.ts/1.ts/2.ts 循环复用）的 handle 去重。只在 segment URL（chunk kind）
+    上注入，KEY/MAP 等不动。
+    """
+    if seq < 0:
+        return url
+    sep = "&" if urlparse(url).query else "?"
+    return f"{url}{sep}wf_seq={seq}"
 
 
 @dataclass(frozen=True)
@@ -79,7 +94,7 @@ def _make_handle_url(
         ttl = ctx.chunk_ttl
     elif kind == "image":
         ttl = ctx.image_ttl
-    handle = issue_handle(
+    handle = issue_cached_handle(
         kind=kind,
         url=upstream_url,
         ttl_seconds=ttl,
@@ -127,12 +142,25 @@ def rewrite_m3u8(text: str, ctx: RewriteContext) -> str:
     返回值末尾会保证有换行（hls.js 对最后一行的 newline 比较宽容，但保险）。
     """
     out: list[str] = []
+    # 单遍扫描，维护「下一段的 MEDIA-SEQUENCE 编号」。
+    # 用法：遇到 ``#EXT-X-MEDIA-SEQUENCE:N`` 把 ``current_seq`` 设成 N；
+    # 每写一个 chunk URL 就 ``+1``。子 playlist / variant playlist 不动。
+    # 没有 MEDIA-SEQUENCE 头的 VOD playlist 默认从 0 开始（RFC 8216 §4.3.3.2）。
+    current_seq = 0
+    seen_media_seq = False
     for raw_line in text.splitlines():
         stripped = raw_line.strip()
         if not stripped:
             out.append(raw_line)
             continue
         if stripped.startswith("#"):
+            mseq_match = _MEDIA_SEQ_RE.match(raw_line)
+            if mseq_match:
+                try:
+                    current_seq = int(mseq_match.group(1))
+                    seen_media_seq = True
+                except ValueError:
+                    pass
             out.append(_rewrite_tag_line(raw_line, ctx))
             continue
 
@@ -147,11 +175,17 @@ def rewrite_m3u8(text: str, ctx: RewriteContext) -> str:
             out.append(_make_handle_url(kind="playlist", upstream_url=absolute, ctx=ctx))
         elif kind == "chunk":
             if ctx.proxy_segments:
-                out.append(_make_handle_url(kind="chunk", upstream_url=absolute, ctx=ctx))
+                # wf_seq 注入：避免上游文件名循环（fjtv qznews 等）→ handle URL
+                # 重复 → hls.js 把后续段当重复段去重的硬伤。
+                tagged = _inject_wf_seq(absolute, current_seq)
+                out.append(_make_handle_url(kind="chunk", upstream_url=tagged, ctx=ctx))
+                current_seq += 1
             else:
                 out.append(absolute)
         else:
             # 不识别的扩展（init.mp4 兜底走 chunk；其余罕见情况原样保留）
             out.append(absolute)
+    # seen_media_seq 仅作未来扩展位（比如做 sequence 一致性校验时用），目前无副作用。
+    _ = seen_media_seq
     rewritten = "\n".join(out)
     return rewritten if rewritten.endswith("\n") else rewritten + "\n"
