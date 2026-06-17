@@ -51,3 +51,7 @@ ffmpeg/*/.processed
 backend/config/alias.txt.bak
 backend/config/template_draft.txt
 backend/scripts/migrate_epg_keys.py
+
+# 本地诊断脚本（非项目交付物）
+scripts/diag_fjtv_qznews.py
+scripts/hls_proxy_probe.py

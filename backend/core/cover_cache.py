@@ -28,12 +28,13 @@ _COVER_SUCCESS_TTL = 30 * 60             # 成功封面缓存 30min
 _COVER_FAILURE_TTL = 2 * 60              # 失败封面缓存 2min
 _COVER_MAX_ENTRIES = 2048                # 最大缓存条目
 _COVER_MAX_CONCURRENT_FETCHES = 4        # adapter fetch 最大并发
+_COVER_FETCH_TIMEOUT = 5.0               # 单次 cover fetch 超时（秒）
 
 
 class CoverCache:
-    """封面专用缓存：index + result + single-flight + semaphore。"""
+    """封面专用缓存：index + result + single-flight + semaphore + generation。"""
 
-    def __init__(self) -> None:
+    def __init__(self, *, fetch_timeout: float = _COVER_FETCH_TIMEOUT) -> None:
         self._lock = asyncio.Lock()
         # 频道索引缓存（dict[canonical_key, channel] — O(1) 查找）
         self._index: dict[str, dict] | None = None
@@ -45,6 +46,10 @@ class CoverCache:
         self._inflight: dict[str, asyncio.Future[dict]] = {}
         # Adapter fetch 并发限制
         self._semaphore = asyncio.Semaphore(_COVER_MAX_CONCURRENT_FETCHES)
+        # Generation：invalidate 时递增，resolver 完成后比对，防止旧结果回写
+        self._generation: int = 0
+        # 单次 fetch 超时（可注入）
+        self._fetch_timeout: float = fetch_timeout
 
     # ── 频道索引 ────────────────────────────────────────────────────────
 
@@ -70,6 +75,26 @@ class CoverCache:
         """主动失效频道索引（订阅刷新 / Market 导入后调用）。"""
         self._index = None
         self._index_expires = 0.0
+
+    def invalidate_cover(self, canonical_key_or_url: str) -> None:
+        """精准失效某个 key 的封面缓存（含成功+失败+noop）。"""
+        for prefix in ("adapter:", "noop:"):
+            key = f"{prefix}{canonical_key_or_url}"
+            self._results.pop(key, None)
+            self._expires.pop(key, None)
+
+    def invalidate_all(self) -> None:
+        """清除所有 Cover 缓存状态（索引+结果+generation）。
+
+        不清除 ProxyContext、auth session、handle secret 等无关安全状态。
+        """
+        self._index = None
+        self._index_expires = 0.0
+        self._results.clear()
+        self._expires.clear()
+        self._generation += 1
+        # 不取消正在进行的 inflight resolver（让其自然完成；
+        # 但 resolver 完成后会比对 generation，过期不回写）
 
     async def get_channel(self, canonical_key: str) -> dict | None:
         """按 canonical_key 查频道（O(1) 内存查找）。"""
@@ -153,26 +178,31 @@ class CoverCache:
         # 3. Owner：创建 Future，执行 resolver
         future: asyncio.Future[dict] = asyncio.Future()
         self._inflight[cache_key] = future
+        gen_at_start = self._generation
         try:
             result = await self._run_fetch(future, adapter_source_url)
             # Only set_result if future hasn't been resolved (by cancellation or timeout)
             if not future.done():
                 future.set_result(result)
-            ttl = _COVER_SUCCESS_TTL if result.get("cover_url") or result.get("avatar_url") else _COVER_FAILURE_TTL
-            self._set_result(cache_key, result, ttl)
+            # 仅当 generation 未变时才写缓存（防止 invalidate 后旧结果回写）
+            if self._generation == gen_at_start:
+                ttl = _COVER_SUCCESS_TTL if result.get("cover_url") or result.get("avatar_url") else _COVER_FAILURE_TTL
+                self._set_result(cache_key, result, ttl)
             return result
         except asyncio.CancelledError:
             # Owner was cancelled — set empty result so waiters don't hang
             empty = self._make_empty_result()
             if not future.done():
                 future.set_result(empty)
-            self._set_result(cache_key, empty, _COVER_FAILURE_TTL)
+            if self._generation == gen_at_start:
+                self._set_result(cache_key, empty, _COVER_FAILURE_TTL)
             raise
         except Exception:
             empty = self._make_empty_result()
             if not future.done():
                 future.set_result(empty)
-            self._set_result(cache_key, empty, _COVER_FAILURE_TTL)
+            if self._generation == gen_at_start:
+                self._set_result(cache_key, empty, _COVER_FAILURE_TTL)
             return empty
         finally:
             # 仅删除仍指向当前 future 的条目（防止误删后续新请求创建的 future）
@@ -191,7 +221,7 @@ class CoverCache:
                 try:
                     return await asyncio.wait_for(
                         _m.fetch_adapter_cover_payload(adapter_source_url),
-                        timeout=5.0,
+                        timeout=self._fetch_timeout,
                     )
                 except asyncio.TimeoutError:
                     logger.info("cover fetch timeout for %s", adapter_source_url[:80])
@@ -214,3 +244,13 @@ def get_cover_cache() -> CoverCache:
 def invalidate_cover_index() -> None:
     """主动失效频道索引（供订阅刷新 / Market 导入后调用）。"""
     _cover_cache.invalidate_index()
+
+
+def invalidate_cover(canonical_key_or_url: str) -> None:
+    """精准失效单个 cover 缓存。"""
+    _cover_cache.invalidate_cover(canonical_key_or_url)
+
+
+def invalidate_all_covers() -> None:
+    """清除所有 Cover 缓存（索引+结果），供批量数据变更后调用。"""
+    _cover_cache.invalidate_all()
