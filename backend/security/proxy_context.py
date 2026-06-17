@@ -21,9 +21,12 @@ import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
+import hashlib
 
 
-_DEFAULT_TTL = 30 * 60   # 30 min；与最长 handle TTL 持平
+# Context TTL 必须 ≥ 任意 handle TTL。最大 handle TTL = image (24h)，chunk = 6h。
+# 这里取 26h，确保 chunk handle 在快到期之前 ctx 都还在。
+_DEFAULT_TTL = 26 * 60 * 60
 _DEFAULT_MAX_ENTRIES = 2048
 
 
@@ -48,6 +51,9 @@ class ProxyContextRegistry:
     def __init__(self, *, max_entries: int = _DEFAULT_MAX_ENTRIES, default_ttl: int = _DEFAULT_TTL) -> None:
         self._lock = threading.Lock()
         self._items: OrderedDict[str, ProxyContext] = OrderedDict()
+        # fingerprint -> ctx_id；用于让"内容相同"的 ProxyContext 在同一进程内
+        # 复用同一个 ctx_id，避免下游 cache_key（含 ctx_id）随每次请求抖动。
+        self._fingerprints: dict[str, str] = {}
         self._max = max_entries
         self._default_ttl = default_ttl
 
@@ -62,17 +68,64 @@ class ProxyContextRegistry:
             ctx = self._items.get(key)
             if ctx and ctx.expires_at <= now:
                 self._items.pop(key, None)
+                # fingerprint 反向索引也跟着清理
+                fp = self._fp_for_locked(ctx)
+                if fp and self._fingerprints.get(fp) == key:
+                    self._fingerprints.pop(fp, None)
+
+    @staticmethod
+    def _fp_for_locked(ctx: "ProxyContext") -> str:
+        """根据 ctx 的可识别字段算一个稳定 fingerprint。
+
+        只覆盖会影响上游请求语义的字段（UA/Referer/Cookie/no_ua/upstream_url/
+        source_type/source_id）。``expires_at`` / ``extras`` 不参与，否则永远不命中。
+        """
+        h = hashlib.sha256()
+        for v in (
+            ctx.custom_ua or "",
+            ctx.referer or "",
+            ctx.cookie or "",
+            "1" if ctx.no_ua else "0",
+            ctx.upstream_url or "",
+            ctx.source_type or "",
+            ctx.source_id or "",
+        ):
+            h.update(v.encode("utf-8", errors="replace"))
+            h.update(b"\x1f")  # 字段分隔符，避免拼接歧义
+        return h.hexdigest()
 
     def put(self, ctx: ProxyContext, *, ttl: int | None = None) -> str:
-        """写入并返回不透明 ctx_id。"""
-        ctx_id = secrets.token_urlsafe(18)
-        ctx.expires_at = self._now() + (ttl if ttl is not None else self._default_ttl)
+        """写入并返回不透明 ctx_id。
+
+        若已经存在「内容等价」的 ProxyContext（按 fingerprint 比较），复用其
+        ctx_id 并刷新过期时间。这让 wide playlist 的 cache_key（含 ctx_id）在
+        同一频道短时间内的请求间稳定，下游 cache 才能真正命中。
+        """
+        effective_ttl = ttl if ttl is not None else self._default_ttl
         with self._lock:
             self._purge_expired_locked()
+            fp = self._fp_for_locked(ctx)
+            existing_id = self._fingerprints.get(fp)
+            if existing_id:
+                existing = self._items.get(existing_id)
+                if existing and existing.expires_at > self._now():
+                    # 复用：刷新 ttl + LRU 位置即可，原 ctx 字段保持不变。
+                    existing.expires_at = self._now() + effective_ttl
+                    self._items.move_to_end(existing_id)
+                    return existing_id
+                # 反向索引指向了一个已被淘汰/过期的条目，清掉重来。
+                self._fingerprints.pop(fp, None)
+
+            ctx_id = secrets.token_urlsafe(18)
+            ctx.expires_at = self._now() + effective_ttl
             self._items[ctx_id] = ctx
             self._items.move_to_end(ctx_id)
+            self._fingerprints[fp] = ctx_id
             while len(self._items) > self._max:
-                self._items.popitem(last=False)
+                evicted_id, evicted_ctx = self._items.popitem(last=False)
+                ev_fp = self._fp_for_locked(evicted_ctx)
+                if self._fingerprints.get(ev_fp) == evicted_id:
+                    self._fingerprints.pop(ev_fp, None)
         return ctx_id
 
     def get(self, ctx_id: str) -> ProxyContext | None:
@@ -92,11 +145,18 @@ class ProxyContextRegistry:
         if not ctx_id:
             return False
         with self._lock:
-            return self._items.pop(ctx_id, None) is not None
+            ctx = self._items.pop(ctx_id, None)
+            if ctx is None:
+                return False
+            fp = self._fp_for_locked(ctx)
+            if self._fingerprints.get(fp) == ctx_id:
+                self._fingerprints.pop(fp, None)
+            return True
 
     def clear(self) -> None:
         with self._lock:
             self._items.clear()
+            self._fingerprints.clear()
 
     def __len__(self) -> int:
         with self._lock:

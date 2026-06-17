@@ -30,15 +30,19 @@ from security.proxy_handles import (
     HandleKindMismatch,
     HandleSignatureError,
     HandleVersionError,
+    clear_handle_cache_for_tests,
     decode_for_kind,
+    issue_cached_handle,
     issue_handle,
 )
+import security.proxy_handles as proxy_handles
 
 
 class ProxyHandleTest(unittest.TestCase):
     def setUp(self):
         # Re-set env var that may have been popped by other tests' tearDown
         os.environ["WAVEFLOW_PROXY_HANDLE_SECRET"] = "test-handle-secret-32bytes!!!"
+        clear_handle_cache_for_tests()
 
     def test_issue_and_decode_roundtrip(self):
         handle = issue_handle(kind="chunk", url="https://cdn.example.com/seg.ts", ttl_seconds=3600)
@@ -108,6 +112,56 @@ class ProxyHandleTest(unittest.TestCase):
         handle = issue_handle(kind="image", url="https://cdn.example.com/cover.jpg")
         with self.assertRaises(HandleKindMismatch):
             decode_for_kind(handle, "chunk")
+
+    def test_cached_handle_stable_until_near_expiry(self):
+        original_now = proxy_handles._now
+        try:
+            proxy_handles._now = lambda: 1_000_000
+            first = issue_cached_handle(
+                kind="chunk",
+                url="https://cdn.example.com/live/seg.ts",
+                ttl_seconds=3600,
+                src="channel:test",
+                ctx="ctx1",
+                src_id="channel:test",
+            )
+            proxy_handles._now = lambda: 1_000_120
+            second = issue_cached_handle(
+                kind="chunk",
+                url="https://cdn.example.com/live/seg.ts",
+                ttl_seconds=3600,
+                src="channel:test",
+                ctx="ctx1",
+                src_id="channel:test",
+            )
+            proxy_handles._now = lambda: 1_003_590
+            third = issue_cached_handle(
+                kind="chunk",
+                url="https://cdn.example.com/live/seg.ts",
+                ttl_seconds=3600,
+                src="channel:test",
+                ctx="ctx1",
+                src_id="channel:test",
+            )
+        finally:
+            proxy_handles._now = original_now
+
+        self.assertEqual(first, second)
+        self.assertNotEqual(first, third)
+
+    def test_cached_handle_lru_capacity(self):
+        original_max = proxy_handles._HANDLE_CACHE_MAX_ENTRIES
+        try:
+            proxy_handles._HANDLE_CACHE_MAX_ENTRIES = 2
+            for idx in range(3):
+                issue_cached_handle(
+                    kind="chunk",
+                    url=f"https://cdn.example.com/{idx}.ts",
+                    ttl_seconds=3600,
+                )
+            self.assertLessEqual(len(proxy_handles._handle_cache), 2)
+        finally:
+            proxy_handles._HANDLE_CACHE_MAX_ENTRIES = original_max
 
 
 if __name__ == "__main__":
