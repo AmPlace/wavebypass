@@ -366,6 +366,35 @@ export const usePlayerStore = defineStore('player', {
             continue
           } catch (e) {
             console.warn('[IPTV] adapter resolve failed:', e?.message || e)
+            // 非强制代理：resolve 失败只是本次未取到流地址，不得把 source 改写为 proxy-only，
+            // 也不得从菜单删除。保留原始 adapter identity 作为直连 entry（FullPlayer 的
+            // volatile adapter re-resolve 路径会在实际播放时重新调用 /resolve）。
+            if (!sourceForcesProxy(u)) {
+              const resolveUrl = resolveUrlFor(u)
+              directUrls.push({
+                ...u,
+                url,
+                original_url: originalUrl,
+                adapter,
+                adapter_source_url: resolveUrl,
+                adapter_volatile_url: true,
+                source_type: 'adapter',
+                type: 'direct',
+              })
+              if (fallbackProxyUrl) {
+                proxyOnlyUrls.push({
+                  ...u,
+                  url: fallbackProxyUrl,
+                  original_url: originalUrl,
+                  adapter,
+                  type: 'proxy',
+                  via_proxy: true,
+                  source_type: 'hls',
+                })
+              }
+              continue
+            }
+            // force_proxy：resolve 失败时保留 channel proxy fallback
           }
         }
         if (fallbackProxyUrl) {
@@ -388,7 +417,7 @@ export const usePlayerStore = defineStore('player', {
       for (const u of directUrls) {
         const url = sourceUrl(u)
         const st = sourceType(u)
-        if (st === 'youtube') continue
+        if (st === 'youtube' || st === 'adapter') continue
         const proxyUrl = u.adapter_proxy_url || proxyUrlFor(u)
         if (!proxyUrl) continue
         list.push({

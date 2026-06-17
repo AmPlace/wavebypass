@@ -120,6 +120,7 @@ import { useEpg } from '../composables/useEpg'
 import { useLogoVisual } from '../composables/useLogoVisual'
 import { loadCover, abortPendingCoverRequests } from '../composables/coverLoader'
 import TagFilterRow from '../components/TagFilterRow.vue'
+import { isChannelAllNotLive, isChannelAllUrlsBlocked } from '../utils/sourceIdentity'
 
 const playerStore = usePlayerStore()
 const toastStore = useToastStore()
@@ -330,25 +331,18 @@ function isUntested(ch) {
 }
 
 function isAllFailed(ch) {
-  return ch.urls.every(u => {
-    const status = u.probe_status || ''
-    if (status) return ['offline', 'error', 'timeout'].includes(status)
-    return u.is_working === 0
-  })
+  return isChannelAllUrlsBlocked(ch)
 }
 
 function isAllNotLive(ch) {
-  return ch.urls.length > 0 && ch.urls.every(u => u.probe_status === 'not_live')
+  return isChannelAllNotLive(ch)
 }
 
 function isUnavailable(ch) {
   // 只禁"全失败"。not_live 是临时状态（上次测速时没开播≠现在没开播），
   // 放开可点：点了照常播放，同时 toast 提示用户上次结果。
-  return ch.urls.length > 0 && ch.urls.every(u => {
-    const status = u.probe_status || ''
-    if (status) return ['offline', 'error', 'timeout'].includes(status)
-    return u.is_working === 0
-  })
+  // 与 FullPlayer 频道列表使用同一规则（utils/sourceIdentity.isChannelAllUrlsBlocked）。
+  return isChannelAllUrlsBlocked(ch)
 }
 
 function isAnyPlayable(ch) {

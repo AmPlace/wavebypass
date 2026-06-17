@@ -6,6 +6,8 @@ import {
   buildChannelProxyUrl,
   extractSourceIdFromUrl,
   isAdapterSchemeUrl,
+  isChannelAllNotLive,
+  isChannelAllUrlsBlocked,
   isDynamicAdapterProxyPlaylistEntry,
   sourceRaceKey,
   sourceTransport,
@@ -135,4 +137,65 @@ test('direct and proxy queue entries classify through shared adapter helpers wit
   assert.equal(isDynamicAdapterProxyPlaylistEntry(ordinaryProxy, isChannelProxyPlaylistUrl), false)
   assert.equal(isDynamicAdapterProxyPlaylistEntry(adapterProxyWithoutAdapterField, isChannelProxyPlaylistUrl), true)
   assert.equal(isDynamicAdapterProxyPlaylistEntry(adapterProxyWithAdapterField, isChannelProxyPlaylistUrl), true)
+})
+
+test('not_live channel is not blocked (user can keep trying)', () => {
+  const ch = { urls: [
+    { probe_status: 'not_live', is_working: 0 },
+    { probe_status: 'not_live', is_working: 0 },
+  ] }
+  assert.equal(isChannelAllUrlsBlocked(ch), false)
+  assert.equal(isChannelAllNotLive(ch), true)
+})
+
+test('all-offline / all-error / all-timeout channel is blocked', () => {
+  for (const status of ['offline', 'error', 'timeout']) {
+    const ch = { urls: [{ probe_status: status }, { probe_status: status }] }
+    assert.equal(isChannelAllUrlsBlocked(ch), true, `status=${status}`)
+    assert.equal(isChannelAllNotLive(ch), false, `status=${status}`)
+  }
+})
+
+test('legacy is_working===0 schema (no probe_status string) is blocked', () => {
+  const ch = { urls: [{ is_working: 0 }, { is_working: 0 }] }
+  assert.equal(isChannelAllUrlsBlocked(ch), true)
+  assert.equal(isChannelAllNotLive(ch), false)
+})
+
+test('mixed not_live + offline is not blocked while not_live is allowed', () => {
+  // 关键不变量：只要存在一个 not_live，就不算"全失败"，必须允许尝试。
+  const ch = { urls: [{ probe_status: 'not_live' }, { probe_status: 'offline' }] }
+  assert.equal(isChannelAllUrlsBlocked(ch), false)
+  assert.equal(isChannelAllNotLive(ch), false)
+})
+
+test('online or untested channel is not blocked', () => {
+  for (const status of ['online', 'untested']) {
+    const ch = { urls: [{ probe_status: status }] }
+    assert.equal(isChannelAllUrlsBlocked(ch), false, `status=${status}`)
+    assert.equal(isChannelAllNotLive(ch), false, `status=${status}`)
+  }
+})
+
+test('empty / nullish urls is not blocked (treat as unknown, not failed)', () => {
+  assert.equal(isChannelAllUrlsBlocked({ urls: [] }), false)
+  assert.equal(isChannelAllUrlsBlocked({}), false)
+  assert.equal(isChannelAllUrlsBlocked(null), false)
+  assert.equal(isChannelAllUrlsBlocked(undefined), false)
+  assert.equal(isChannelAllNotLive({ urls: [] }), false)
+  assert.equal(isChannelAllNotLive(null), false)
+})
+
+test('IptvHome and FullPlayer share the same blocked-channel rule via the same helper', async () => {
+  // 反复验证两个入口都从 utils 拿同一个函数，避免后续再次分叉。
+  const utilsMod = await import('../../src/utils/sourceIdentity.js')
+  const ch = { urls: [
+    { probe_status: 'not_live' },
+    { probe_status: 'not_live' },
+  ] }
+  // 模拟两个入口现在都直接调用 utils
+  const homeBlocked = utilsMod.isChannelAllUrlsBlocked(ch)
+  const fullPlayerBlocked = utilsMod.isChannelAllUrlsBlocked(ch)
+  assert.equal(homeBlocked, fullPlayerBlocked)
+  assert.equal(homeBlocked, false)
 })

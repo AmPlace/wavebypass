@@ -77,3 +77,33 @@ export function isDynamicAdapterProxyPlaylistEntry(entry, isChannelProxyPlaylist
     && (entry?.adapter || isAdapterSchemeUrl(entry?.original_url || entry?.url || '')),
   )
 }
+
+// 真正禁止用户尝试播放的 probe 状态集合。
+// 注意：not_live 不在其中——它只是上次测速时未开播的旧结果，不代表当前不能播。
+// 不同 schema：新版字符串 probe_status；旧版数字 is_working===0。
+const BLOCKED_PROBE_STATUSES = Object.freeze(['offline', 'error', 'timeout'])
+
+function isUrlEntryBlocked(u) {
+  const status = String(u?.probe_status || '').toLowerCase()
+  if (status) return BLOCKED_PROBE_STATUSES.includes(status)
+  return Number(u?.is_working) === 0
+}
+
+function isUrlEntryNotLive(u) {
+  return String(u?.probe_status || '').toLowerCase() === 'not_live'
+}
+
+// 频道是否所有 source 都属于"明确不可用"集合（offline/error/timeout 或旧 is_working===0）。
+// 这是首页与 FullPlayer 频道列表共享的唯一事实：true 才禁止点击。
+export function isChannelAllUrlsBlocked(channel) {
+  const urls = channel?.urls
+  if (!Array.isArray(urls) || urls.length === 0) return false
+  return urls.every(isUrlEntryBlocked)
+}
+
+// 频道是否所有 source 都是 not_live。仅用于显示提示文案，不用于禁止点击。
+export function isChannelAllNotLive(channel) {
+  const urls = channel?.urls
+  if (!Array.isArray(urls) || urls.length === 0) return false
+  return urls.every(isUrlEntryNotLive)
+}

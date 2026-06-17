@@ -442,13 +442,17 @@ import { API_BASE } from '../apiBase'
 import { publicAsset } from '../publicAsset'
 import {
   extractSourceIdFromUrl,
+  isChannelAllNotLive,
+  isChannelAllUrlsBlocked,
   isDynamicAdapterProxyPlaylistEntry,
   sourceRaceKey,
   sourceTransport,
 } from '../utils/sourceIdentity'
+import { useToastStore } from '../stores/toast'
 
 const playerStore = usePlayerStore()
 const { isPlayerExpanded, currentStation, isPlaying, isLoading, volume, stationMap, stationList } = storeToRefs(playerStore)
+const toastStore = useToastStore()
 
 const iptvVideoRef = ref(null)
 const iptvHlsRef = ref(null)
@@ -986,8 +990,12 @@ async function playIptvChannelFromFullPlayer(channel) {
     return
   }
   if (isIptvUnavailable(channel)) {
-    playerStore.setPlaybackError(isIptvAllNotLive(channel) ? '频道未开播' : '频道检测不可用')
+    playerStore.setPlaybackError('频道检测不可用')
     return
+  }
+  // not_live 是上次测速结果，不阻断；toast 提示后照常进入起播链路（与 IptvHome 一致）。
+  if (isIptvAllNotLive(channel)) {
+    toastStore.info('该频道上次检测未开播，正在尝试播放')
   }
 
   const videoEl = playerStore.iptvVideoEl || iptvVideoRef.value
@@ -1217,23 +1225,17 @@ function isIptvUntested(ch) {
 }
 
 function isIptvAllFailed(ch) {
-  return ch.urls?.length > 0 && ch.urls.every(u => {
-    const status = u.probe_status || ''
-    if (status) return ['offline', 'error', 'timeout'].includes(status)
-    return u.is_working === 0
-  })
+  return isChannelAllUrlsBlocked(ch)
 }
 
 function isIptvAllNotLive(ch) {
-  return ch.urls?.length > 0 && ch.urls.every(u => u.probe_status === 'not_live')
+  return isChannelAllNotLive(ch)
 }
 
 function isIptvUnavailable(ch) {
-  return ch.urls?.length > 0 && ch.urls.every(u => {
-    const status = u.probe_status || ''
-    if (status) return ['offline', 'error', 'timeout', 'not_live'].includes(status)
-    return u.is_working === 0
-  })
+  // 与 IptvHome 共享同一规则：只禁"全失败"（offline/error/timeout 或旧 is_working===0）。
+  // not_live 不算禁止——它只是上次测速结果，照常允许尝试播放。
+  return isChannelAllUrlsBlocked(ch)
 }
 
 // 切换到 IPTV 模式时加载频道列表
