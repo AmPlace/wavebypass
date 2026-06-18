@@ -1248,11 +1248,30 @@ async def import_package(
             await db.delete_subscription(sub["id"])
         await db.delete_market_install(package_id)
 
-    force_proxy = 1 if any(ch.get("force_proxy") for ch in channels) else 0
-    custom_uas = sorted({str(ch.get("custom_ua") or "").strip() for ch in channels if ch.get("custom_ua")})
-    subscription_custom_ua = custom_uas[0] if custom_uas else ""
-    if len(custom_uas) > 1:
-        preview.setdefault("warnings", []).append("V1 仅支持订阅级 User-Agent；检测到多个 UA，导入时使用第一个。")
+    # subscription 级属性只允许来自 manifest 明确声明，不得从子 source 聚合。
+    # 一个 source 因 Referer/headers 需要代理，不能影响同包其他 source。
+    # defaults.source.requires_proxy 是 source 级默认值，在 _normalize_source() 中
+    # 逐 source 合并，不应提升到订阅级。
+    def _truthy(v):
+        if v is None:
+            return False
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, (int, float)):
+            return v != 0
+        return str(v).strip().lower() not in ("", "0", "false", "no", "off", "none", "null")
+
+    force_proxy = 1 if _truthy(package.get("requires_proxy")) else 0
+    # custom_ua 同理：只取 manifest 明确声明的订阅级 UA，不从子 source 聚合。
+    subscription_custom_ua = str(package.get("custom_ua") or "").strip()
+    if not subscription_custom_ua:
+        custom_uas = sorted({str(ch.get("custom_ua") or "").strip() for ch in channels if ch.get("custom_ua")})
+        if custom_uas:
+            subscription_custom_ua = custom_uas[0]
+            if len(custom_uas) > 1:
+                preview.setdefault("warnings", []).append(
+                    "V1 仅支持订阅级 User-Agent；检测到多个 UA，导入时使用第一个。"
+                )
     url = f"market://{package_id}"
     try:
         sub_id = await db.add_subscription(
