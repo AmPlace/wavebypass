@@ -4259,6 +4259,7 @@ watch(() => playerStore.iptvUrlIndex, () => {
 })
 
 // EPG 集成
+const epgRequestDate = ref('')
 const {
   current: _epgCurrent,
   next: _epgNext,
@@ -4266,20 +4267,30 @@ const {
   selectedDate: _epgSelectedDate,
   availableDates: _epgAvailableDates,
   fetchPrograms: _epgFetch,
-} = useEpg()
+  clearPrograms: _epgClear,
+  invalidatePrograms: _epgInvalidate,
+} = useEpg({
+  getCurrentChannelKey: () => playerStore.currentIptvChannel?.canonical_key || '',
+  getCurrentDate: () => epgRequestDate.value,
+})
 
 async function selectEpgDate(date) {
   const key = playerStore.currentIptvChannel?.canonical_key
   if (!key || !date || date === _epgSelectedDate.value) return
-  await _epgFetch(key, { date })
+  epgRequestDate.value = date
+  const result = await _epgFetch(key, { date })
+  if (!result?.applied) return
   playerStore.currentEpgProgram = _epgCurrent.value
 }
 
 async function refreshCurrentEpg(options = {}) {
   const key = playerStore.currentIptvChannel?.canonical_key
-  if (!key) return
-  await _epgFetch(key, options)
+  if (!key) return { applied: false, stale: true }
+  epgRequestDate.value = String(options.date || '').trim()
+  const result = await _epgFetch(key, options)
+  if (!result?.applied) return result
   playerStore.currentEpgProgram = _epgCurrent.value
+  return result
 }
 
 function clearEpgRefreshAfterEndTimer() {
@@ -4302,14 +4313,13 @@ function scheduleEpgRefreshAfterProgramEnd(program = playerStore.currentEpgProgr
 
 watch(() => playerStore.currentIptvChannel, (ch) => {
   if (ch?.canonical_key) {
-    refreshCurrentEpg().then(() => {
-      scheduleEpgRefreshAfterProgramEnd()
+    refreshCurrentEpg().then((result) => {
+      if (result?.applied) scheduleEpgRefreshAfterProgramEnd()
     })
   } else {
     playerStore.currentEpgProgram = null
-    _epgSchedule.value = []
-    _epgAvailableDates.value = []
-    _epgSelectedDate.value = ''
+    epgRequestDate.value = ''
+    _epgClear()
     clearEpgRefreshAfterEndTimer()
   }
 })
@@ -4376,6 +4386,7 @@ onBeforeUnmount(() => {
     clearInterval(epgTickTimer)
     epgTickTimer = null
   }
+  _epgInvalidate()
   clearEpgRefreshAfterEndTimer()
   clearMobileOverlayTimer()
 })
