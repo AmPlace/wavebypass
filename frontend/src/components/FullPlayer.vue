@@ -2556,6 +2556,13 @@ async function tryPlayIptv(url, usingProxy = false, customUa = '', attemptId = 0
   setRuntimeStatus('trying')
 
   cancelCurrentStartup()
+  const preflightController = new AbortController()
+  let preflightCancelled = false
+  const cancelPreflight = () => {
+    preflightCancelled = true
+    preflightController.abort()
+  }
+  _cancelCurrentStartup = cancelPreflight
   cancelActiveProxyRace()
   destroyIptvEngines()
   activeIptvEngine.value = 'video'
@@ -2568,7 +2575,13 @@ async function tryPlayIptv(url, usingProxy = false, customUa = '', attemptId = 0
   playerStore.setLoading(true)
   let effectiveUrl = url
   let resolvedSourceType = playbackEngineType(playbackSourceType || sourceType({ url }), url)
-  const proxyTransport = await preflightProxyPlaylistTransport(url, usingProxy)
+  let proxyTransport = null
+  try {
+    proxyTransport = await preflightProxyPlaylistTransport(url, usingProxy, preflightController.signal)
+  } finally {
+    if (_cancelCurrentStartup === cancelPreflight) _cancelCurrentStartup = null
+  }
+  if (preflightCancelled || !isAttemptActive(attemptId)) throw cancelledError()
   if (proxyTransport?.url && proxyTransport.sourceType) {
     effectiveUrl = proxyTransport.url
     resolvedSourceType = playbackEngineType(proxyTransport.sourceType, effectiveUrl)
@@ -3395,6 +3408,7 @@ async function handleIptvError(e) {
 }
 
 let _stallRecovering = false
+let _stallRecoverySeq = 0
 let _lastRecoveryTime = 0
 let _lastVideoProgressAt = 0
 let _lastVideoCurrentTime = 0
@@ -3439,6 +3453,8 @@ function stopPlaybackProgressWatch() {
 }
 
 function stopPlaybackWatchdogs() {
+  _stallRecoverySeq++
+  _stallRecovering = false
   clearStallRecoveryTimer()
   stopVideoFrameWatch()
   stopPlaybackProgressWatch()
@@ -3523,6 +3539,8 @@ async function doRecovery(v, reason = 'stalled') {
   if (!v || v.paused || _stallRecovering) return
   if (Date.now() - _lastRecoveryTime < 10_000) return
 
+  const attemptId = _playAttemptId
+  const seq = ++_stallRecoverySeq
   _stallRecovering = true
   _lastRecoveryTime = Date.now()
   console.warn(`[IPTV] ${reason} 持续无进展，尝试恢复`, {
@@ -3538,13 +3556,14 @@ async function doRecovery(v, reason = 'stalled') {
       console.warn('[IPTV] stalled HLS startLoad failed:', e?.message || e)
     }
     await v.play()
+    if (seq !== _stallRecoverySeq || !isAttemptActive(attemptId) || iptvVideoRef.value !== v) return
     if (Date.now() - _lastVideoProgressAt > 3000) {
       seekNearLiveEdge(v)
     }
   } catch (e) {
     console.warn('[IPTV] stalled 恢复 play() 失败:', e?.message || e)
   } finally {
-    _stallRecovering = false
+    if (seq === _stallRecoverySeq) _stallRecovering = false
   }
 }
 
@@ -3747,6 +3766,7 @@ function startVideoFrameWatch(v = iptvVideoRef.value) {
 }
 
 function onVideoStalled() {
+  if (_cancelCurrentStartup) return
   const v = iptvVideoRef.value
   if (!v || v.paused) return
   console.warn('[IPTV] stalled observed', {
@@ -3758,6 +3778,7 @@ function onVideoStalled() {
 }
 
 function onVideoEvent(evt) {
+  if (_cancelCurrentStartup) return
   if (evt === 'playing') {
     clearPauseReleaseTimer()
     _softPausedAt = 0
