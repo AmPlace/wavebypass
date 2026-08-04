@@ -374,9 +374,7 @@ function isAllNotLive(ch) {
 }
 
 function isUnavailable(ch) {
-  // 只禁"全失败"。not_live 是临时状态（上次测速时没开播≠现在没开播），
-  // 放开可点：点了照常播放，同时 toast 提示用户上次结果。
-  // 与 FullPlayer 频道列表使用同一规则（utils/sourceIdentity.isChannelAllUrlsBlocked）。
+  // 测速结果只影响排序和提示；只有配置明确禁用全部 source 时才禁止点击。
   return isChannelAllUrlsBlocked(ch)
 }
 

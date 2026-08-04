@@ -370,8 +370,12 @@ export function createRadioAudioEngine({
       })
     })
 
+    const winnerPromises = promises.map((promise) => promise.then((winner) => {
+      if (!winner) throw new Error('probe failed')
+      return winner
+    }))
     const result = await Promise.race([
-      Promise.any(promises).catch(() => null),
+      Promise.any(winnerPromises).catch(() => null),
       new Promise((resolve) => setTimer(() => { cleanupAll(); resolve(null) }, 12_000)),
     ])
     removeCleanup()

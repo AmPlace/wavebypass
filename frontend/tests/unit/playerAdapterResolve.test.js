@@ -231,6 +231,25 @@ test('多源频道中一个 adapter resolve 失败不影响其他 source', async
   assert.ok(store.iptvUrls.some((e) => e.source_id === 'src_huya' && e.via_proxy))
 })
 
+test('测速失败源保留，只有明确 disabled 的源从播放队列排除', async () => {
+  setActivePinia(createPinia())
+  const store = usePlayerStore()
+  const channel = {
+    canonical_key: '状态测试',
+    urls: [
+      { url: 'https://offline.example/live.m3u8', source_id: 'src_offline', source_type: 'hls', probe_status: 'offline', is_working: 0 },
+      { url: 'https://disabled.example/live.m3u8', source_id: 'src_disabled', source_type: 'hls', probe_status: 'online', is_working: 1, disabled: true },
+    ],
+  }
+
+  await store.playIptvChannel(channel)
+
+  assert.equal(store.iptvUrls.length, 2)
+  assert.ok(store.iptvUrls.every((entry) => entry.source_id === 'src_offline'))
+  assert.ok(store.iptvUrls.some((entry) => entry.via_proxy !== true))
+  assert.ok(store.iptvUrls.some((entry) => entry.via_proxy === true))
+})
+
 test('用户再次点击会重新 resolve', async () => {
   setActivePinia(createPinia())
   installFetchStub([

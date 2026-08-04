@@ -136,11 +136,6 @@ def _playback_source_supported(_m, source: dict) -> bool:
 
 async def _radio_station_url(_m, station_id: str) -> str:
     real_url = _m.CURRENT_STREAMS.get(station_id)
-    if not real_url:
-        try:
-            real_url = await _m.refresh_station_stream_url(station_id)
-        except HTTPException:
-            raise
     if not real_url and station_id in _m.MYRADIO_CACHE:
         cached = _m.MYRADIO_CACHE.get(station_id) or {}
         if _m.time.time() - float(cached.get("ts") or 0) < _m.MYRADIO_CACHE_TTL:
@@ -150,6 +145,11 @@ async def _radio_station_url(_m, station_id: str) -> str:
             real_url = str(raw or "")
             if real_url:
                 _m.CURRENT_STREAMS[station_id] = real_url
+    if not real_url and station_id in _m.STATION_FETCHER_MAP:
+        try:
+            real_url = await _m.refresh_station_stream_url(station_id)
+        except HTTPException:
+            raise
     return str(real_url or "").strip()
 
 

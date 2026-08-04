@@ -382,6 +382,33 @@ test('正常路径回归：direct、fallback、proxy fallback 顺序保持', asy
   assert.equal(h2.state.directStreamMode.value, 'direct')
 })
 
+test('并发探测中快速失败不得抢先结束较慢的可播放源', async () => {
+  const fetchImpl = async (url, options = {}) => {
+    if (String(url).includes('/A/all-urls')) {
+      return responseJson([
+        'https://a.example/fast-fail.mp3',
+        'https://a.example/slow-winner.mp3',
+      ])
+    }
+    if (options.method === 'HEAD') return {}
+    throw new Error(`unexpected fetch ${url}`)
+  }
+  const h = createHarness({ fetchImpl })
+  h.state.currentStation.value = 'A'
+  h.engine.loadStation('A')
+  await flush()
+
+  assert.equal(h.probeAudios.length, 2)
+  h.probeAudios[0].emit('error')
+  await flush()
+  assert.equal(h.probeAudios.length, 2, '一个失败后不应提前启动代理兜底')
+
+  h.probeAudios[1].emit('canplay')
+  await flush()
+  assert.equal(h.audio.currentSrc, 'https://a.example/slow-winner.mp3')
+  assert.equal(h.state.directStreamMode.value, 'direct')
+})
+
 test('原生 audio error：当前 attempt 触发 fallback，旧 attempt 的 error 不触发', async () => {
   // 模拟 direct station（directUrl 存在 → error 后走 fallbackToProxyStream）
   const h = createHarness({ fetchImpl: async (url, options = {}) => {

@@ -3,7 +3,7 @@
 // 关键不变量：
 //   1. 全 not_live 频道点击：toast 调用一次 + 真实进入 playIptvChannel
 //   2. 非 not_live 频道点击：不调用该 toast
-//   3. 明确 blocked 频道（offline/error/timeout）：不进入 playIptvChannel
+//   3. 测速失败仍可尝试；只有明确 disabled 的频道不进入 playIptvChannel
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -102,7 +102,7 @@ test('non-not_live (online) click does NOT show the not_live toast', async () =>
   assert.equal(toast.toasts.filter((t) => /未开播/.test(t.message)).length, 0)
 })
 
-test('all-blocked (offline) click does NOT enter playIptvChannel and shows no not_live toast', async () => {
+test('all-offline probe result still enters playIptvChannel without not_live toast', async () => {
   const { player, toast } = freshStores()
   let played = null
   player.playIptvChannel = async (ch) => { played = ch }
@@ -111,10 +111,25 @@ test('all-blocked (offline) click does NOT enter playIptvChannel and shows no no
   const r1 = await simulateHomeClick(toast, player, ch)
   const r2 = await simulateFullPlayerClick(toast, player, ch)
 
-  assert.equal(r1.entered, false, 'IptvHome 应阻断')
-  assert.equal(r2.entered, false, 'FullPlayer 应阻断')
-  assert.equal(played, null)
+  assert.equal(r1.entered, true, 'IptvHome 应继续尝试')
+  assert.equal(r2.entered, true, 'FullPlayer 应继续尝试')
+  assert.equal(played, ch)
   assert.equal(toast.toasts.filter((t) => /未开播/.test(t.message)).length, 0)
+})
+
+test('all explicitly disabled sources remain blocked', async () => {
+  const { player, toast } = freshStores()
+  let played = null
+  player.playIptvChannel = async (ch) => { played = ch }
+  const ch = makeChannel('online')
+  ch.urls = ch.urls.map((entry) => ({ ...entry, disabled: true }))
+
+  const r1 = await simulateHomeClick(toast, player, ch)
+  const r2 = await simulateFullPlayerClick(toast, player, ch)
+
+  assert.equal(r1.entered, false)
+  assert.equal(r2.entered, false)
+  assert.equal(played, null)
 })
 
 test('mixed not_live + online click: toast not triggered (因为不是全部 not_live)', async () => {

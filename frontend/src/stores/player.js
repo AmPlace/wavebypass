@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { API_BASE } from '../apiBase.js'
-import { adapterNameFromUrl, buildChannelProxyUrl, isAdapterSchemeUrl } from '../utils/sourceIdentity.js'
+import { adapterNameFromUrl, buildChannelProxyUrl, isAdapterSchemeUrl, isSourceExplicitlyDisabled } from '../utils/sourceIdentity.js'
 
 export const usePlayerStore = defineStore('player', {
   state: () => ({
@@ -264,6 +264,7 @@ export const usePlayerStore = defineStore('player', {
       const adapterSources = []
       const canonicalKey = channel.canonical_key || ''  // 聚合频道 key，用于 media API
       for (const u of sorted) {
+        if (isSourceExplicitlyDisabled(u)) continue
         const url = sourceUrl(u)
         if (!url) continue
         const st = sourceType(u)

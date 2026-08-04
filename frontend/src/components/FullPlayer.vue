@@ -444,9 +444,10 @@ import {
   extractSourceIdFromUrl,
   isChannelAllNotLive,
   isChannelAllUrlsBlocked,
-  isDynamicAdapterProxyPlaylistEntry,
+  isSourceExplicitlyDisabled,
   sourceRaceKey,
   sourceTransport,
+  startupRaceCandidateKind,
 } from '../utils/sourceIdentity'
 import { useToastStore } from '../stores/toast'
 
@@ -909,7 +910,7 @@ function normalizeGroupName(value) {
 
 function channelRowSummary(ch, active) {
   if (isIptvAllNotLive(ch)) return '未开播'
-  if (isIptvUnavailable(ch)) return '检测不可用'
+  if (isIptvUnavailable(ch)) return '已禁用'
   if (active) {
     if (hasCurrentEpgProgram.value) {
       const remaining = currentProgram.value.remaining
@@ -990,7 +991,7 @@ async function playIptvChannelFromFullPlayer(channel) {
     return
   }
   if (isIptvUnavailable(channel)) {
-    playerStore.setPlaybackError('频道检测不可用')
+    playerStore.setPlaybackError('频道已禁用')
     return
   }
   // not_live 是上次测速结果，不阻断；toast 提示后照常进入起播链路（与 IptvHome 一致）。
@@ -1163,7 +1164,7 @@ const iptvSourceOptions = computed(() => {
     const runtimeKey = sourceRaceKey(entry)
     const runtimeStatus = iptvSourceRuntimeStatus.value[runtimeKey] || 'idle'
     const probeStatus = entry.probe_status || ''
-    const disabled = entry.disabled === true || st === 'unsupported_youtube_url'
+    const disabled = isSourceExplicitlyDisabled(entry) || st === 'unsupported_youtube_url'
     const health = probeStatus === 'not_live'
       ? '未开播'
       : probeStatus === 'untested'
@@ -1224,17 +1225,12 @@ function isIptvUntested(ch) {
   })
 }
 
-function isIptvAllFailed(ch) {
-  return isChannelAllUrlsBlocked(ch)
-}
-
 function isIptvAllNotLive(ch) {
   return isChannelAllNotLive(ch)
 }
 
 function isIptvUnavailable(ch) {
-  // 与 IptvHome 共享同一规则：只禁"全失败"（offline/error/timeout 或旧 is_working===0）。
-  // not_live 不算禁止——它只是上次测速结果，照常允许尝试播放。
+  // 与 IptvHome 共享同一规则：测速只排序，只有全部 source 明确禁用才阻止播放。
   return isChannelAllUrlsBlocked(ch)
 }
 
@@ -1282,15 +1278,7 @@ function playNext() {
 
 // ── IPTV 视频播放 ──
 
-function releaseWideProxyUrl(url) {
-  // 迁移到 /api/media/proxy/release/{cache_key}。
-  // 前端不再按 target_url 寻址 cache key；改为从 entry 元数据提取。
-  if (!url) return
-  const releaseUrl = `${API_BASE}/api/media/proxy/release/default`
-  fetch(releaseUrl, { method: 'POST', keepalive: true }).catch((e) => {
-    console.warn('[IPTV] wide proxy release failed:', e?.message || e)
-  })
-}
+function releaseWideProxyUrl() {}
 
 const HLS_ABR_PATCH_KEY = '__waveflowAbrNullGuard'
 
@@ -1773,10 +1761,6 @@ function isChannelProxyPlaylistUrl(url) {
   }
 }
 
-function isDynamicAdapterProxyPlaylist(entry) {
-  return isDynamicAdapterProxyPlaylistEntry(entry, isChannelProxyPlaylistUrl)
-}
-
 function sourceTypeFromProxyRedirect(url) {
   try {
     const parsed = new URL(url, window.location.origin)
@@ -2250,7 +2234,7 @@ async function switchIptvSource(index) {
   if (!isIptvMode.value || index < 0 || index >= playerStore.iptvUrls.length) return
   const option = iptvSourceOptions.value.find((item) => item.index === index)
   if (option?.disabled) {
-    playerStore.setPlaybackError(option.meta?.includes('未开播') ? '播放源未开播' : '播放源检测不可用')
+    playerStore.setPlaybackError('播放源已禁用或不受支持')
     sourceMenuOpen.value = false
     return
   }
@@ -2893,13 +2877,11 @@ function raceLatencyRank(entry) {
 }
 
 function raceCandidateKind(entry) {
-  if (!entry?.url || entry.disabled === true) return ''
-  if (isDynamicAdapterProxyPlaylist(entry)) return ''
-  const st = sourceType(entry)
-  if (st === 'unsupported_youtube_url' || st === 'youtube') return ''
-  if (st === 'hls' && canUseHls()) return 'hls'
-  if (isMpegTsEngineType(st) && canUseMpegTs()) return st
-  return ''
+  return startupRaceCandidateKind(entry, {
+    sourceType: sourceType(entry),
+    hlsSupported: canUseHls(),
+    mpegTsSupported: canUseMpegTs(),
+  })
 }
 
 function sortedRaceCandidates(urls, startIndex, proxyLike) {

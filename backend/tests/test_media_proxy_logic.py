@@ -44,6 +44,12 @@ class MediaProxyLogicTest(unittest.TestCase):
         self.assertFalse(_playback_source_supported(_FakeMain, source))
 
     def test_myradio_stream_uses_signed_stream_redirect(self):
+        refresh_calls = []
+
+        async def unexpected_refresh(station_id):
+            refresh_calls.append(station_id)
+            raise AssertionError("myradio cache hit must not call station fetcher refresh")
+
         fake_main = types.SimpleNamespace(
             CURRENT_STREAMS={},
             STATION_FETCHER_MAP={},
@@ -57,7 +63,7 @@ class MediaProxyLogicTest(unittest.TestCase):
             MYRADIO_CACHE_TTL=3600,
             time=time,
             _is_geo_blocked=lambda station_id, request: False,
-            refresh_station_stream_url=lambda station_id: asyncio.sleep(0, result=""),
+            refresh_station_stream_url=unexpected_refresh,
         )
         old_main = sys.modules.get("main")
         old_validate = media_proxy._validate_handle_url_or_403
@@ -82,6 +88,7 @@ class MediaProxyLogicTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 307)
         self.assertIn("/api/media/proxy/stream/", response.headers["location"])
+        self.assertEqual(refresh_calls, [])
 
     def test_myradio_playlist_redirects_to_stream_endpoint(self):
         fake_main = types.SimpleNamespace(
