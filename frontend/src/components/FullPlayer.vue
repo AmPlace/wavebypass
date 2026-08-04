@@ -1604,24 +1604,6 @@ async function startYoutubeCandidate(entry, attemptId = 0, sourceIndex = -1) {
   activeIptvEngine.value = 'youtube'
   resetMediaAspect()
   youtubeHostRef.value.innerHTML = ''
-  if (liveEmbedUrl && !videoId) {
-    console.log(`[START] YouTubeLive:${entry.youtube_channel_id || liveEmbedUrl}`)
-    const iframe = document.createElement('iframe')
-    iframe.src = liveEmbedUrl
-    iframe.allow = 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share'
-    iframe.allowFullscreen = true
-    iframe.referrerPolicy = 'strict-origin-when-cross-origin'
-    iframe.style.width = '100%'
-    iframe.style.height = '100%'
-    iframe.style.border = '0'
-    youtubeHostRef.value.appendChild(iframe)
-    setRuntimeStatus('playing')
-    playerStore.togglePlay(true)
-    playerStore.clearPlaybackError()
-    playerStore.setLoading(false)
-    syncIptvMediaSession('playing')
-    return
-  }
 
   const reachable = await loadYoutubeIframeApi()
   if (!isAttemptActive(attemptId)) throw cancelledError()
@@ -1630,14 +1612,32 @@ async function startYoutubeCandidate(entry, attemptId = 0, sourceIndex = -1) {
     throw new Error('YouTube API 不可达')
   }
 
-  console.log(`[START] YouTube:${videoId}`)
+  console.log(videoId
+    ? `[START] YouTube:${videoId}`
+    : `[START] YouTubeLive:${entry.youtube_channel_id || liveEmbedUrl}`)
 
   return new Promise((resolve, reject) => {
     let settled = false
     let confirmed = false
+    let playerInstance = null
+    let startupTimer = null
+    let cancelStartup = null
+    const clearOwnedStartup = () => {
+      if (startupTimer) {
+        clearTimeout(startupTimer)
+        if (_youtubeStartupTimer === startupTimer) _youtubeStartupTimer = null
+        startupTimer = null
+      }
+      if (_cancelCurrentStartup === cancelStartup) _cancelCurrentStartup = null
+    }
     const cleanupFailure = () => {
-      clearYoutubeStartupTimer()
-      destroyYoutubePlayer()
+      clearOwnedStartup()
+      if (_youtubePlayer === playerInstance) {
+        destroyYoutubePlayer()
+        return
+      }
+      try { playerInstance?.stopVideo?.() } catch {}
+      try { playerInstance?.destroy?.() } catch {}
     }
     const safeReject = (err) => {
       if (settled) return
@@ -1650,7 +1650,7 @@ async function startYoutubeCandidate(entry, attemptId = 0, sourceIndex = -1) {
       if (settled || !isAttemptActive(attemptId)) return
       settled = true
       confirmed = true
-      clearYoutubeStartupTimer()
+      clearOwnedStartup()
       setRuntimeStatus('playing')
       playerStore.togglePlay(true)
       playerStore.clearPlaybackError()
@@ -1659,12 +1659,14 @@ async function startYoutubeCandidate(entry, attemptId = 0, sourceIndex = -1) {
       resolve()
     }
 
-    _youtubeStartupTimer = setTimeout(() => {
+    cancelStartup = () => safeReject(cancelledError())
+    _cancelCurrentStartup = cancelStartup
+    startupTimer = setTimeout(() => {
       safeReject(new Error('YouTube 起播超时'))
     }, 8000)
+    _youtubeStartupTimer = startupTimer
 
-    _youtubePlayer = new window.YT.Player(youtubeHostRef.value, {
-      videoId,
+    const playerOptions = {
       width: '100%',
       height: '100%',
       playerVars: {
@@ -1714,7 +1716,29 @@ async function startYoutubeCandidate(entry, attemptId = 0, sourceIndex = -1) {
           handleActiveYoutubeFailure(err.message, attemptId, sourceIndex)
         },
       },
-    })
+    }
+
+    if (videoId) {
+      playerOptions.videoId = videoId
+      playerInstance = new window.YT.Player(youtubeHostRef.value, playerOptions)
+      _youtubePlayer = playerInstance
+      return
+    }
+
+    const iframe = document.createElement('iframe')
+    const embedUrl = new URL(liveEmbedUrl)
+    embedUrl.searchParams.set('enablejsapi', '1')
+    if (window.location?.origin) embedUrl.searchParams.set('origin', window.location.origin)
+    iframe.src = embedUrl.toString()
+    iframe.allow = 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share'
+    iframe.allowFullscreen = true
+    iframe.referrerPolicy = 'strict-origin-when-cross-origin'
+    iframe.style.width = '100%'
+    iframe.style.height = '100%'
+    iframe.style.border = '0'
+    youtubeHostRef.value.appendChild(iframe)
+    playerInstance = new window.YT.Player(iframe, { events: playerOptions.events })
+    _youtubePlayer = playerInstance
   })
 }
 
