@@ -15,7 +15,7 @@
 | 普通 HLS | `channel/{key}/playlist.m3u8` 薄缓存重写 | 德化 60 秒、建宁真实播放 | 更多上游与长时间 soak |
 | 短窗口 HLS | hls.js count 配置与恢复阈值已调整 | 泉州新闻 60 秒连续推进 | iOS 真机、30–60 分钟 soak |
 | Adapter HLS | `/resolve` 直连 + `source_id` 代理兜底 | 福建综合 45 秒连续推进 | Adapter 失败/换 transport 专项 E2E |
-| HTTP-FLV | mpegts.js + stream handle 路由已接通 | 路由 307、后端流测试 | 当前真实样本上游失效，缺浏览器成功样本 |
+| HTTP-FLV | mpegts.js + stream handle 路由已接通 | 天祝电视台 45 秒连续推进，直连与代理手动切换均通过 | 更多 Adapter HTTP-FLV 与长播 |
 | MPEG-TS | mpegts.js 与 stream handle 代码存在 | 单元/后端逻辑测试 | 当前数据无真实样本 |
 | RTSP | FFmpeg RTSP→HLS session manager 已存在 | 单元逻辑与代码审计 | 当前数据无真实样本、缺进程生命周期实测 |
 | YouTube | iframe 与 adapter 解析代码存在 | 解析/身份单测 | 当前数据无真实样本 |
@@ -28,6 +28,7 @@
 - MyRadio 新安全入口错误地先调用动态 fetcher，`mr_*` 缓存源返回 404；改为优先读取预热缓存。
 - 测速 `offline/error/timeout` 不再禁止播放，只参与排序和提示；建宁被标记 offline 但实际可以播放，证明该策略必要。
 - Adapter 的代理副本重新参加 2.5 秒 hedged race，不再等待直连彻底失败或被整轮跳过。
+- 多源菜单手动切换保持精确 `source_id`；旧源状态会切为 stopped，不再同时显示多个“当前可播”。
 - 音频并发探测不再被第一个快速失败源提前结束。
 - wide 已关闭时不再发送无意义的 `/api/media/proxy/release/default`，消除匿名播放时的 401。
 
@@ -45,7 +46,7 @@
 
 1. 审核并提交本次播放器/音频修复。
 2. 为 FullPlayer hedged race 抽出可测试状态机或组件 harness。
-3. 补齐 HTTP-FLV、MPEG-TS、RTSP、YouTube 的真实成功样本回归。
+3. 补齐 MPEG-TS、RTSP、YouTube 的真实成功样本回归。
 4. 对德化、泉州新闻、福建综合做 30–60 分钟 soak，并补 iOS 真机验证。
 5. 代表源稳定后，单独提交删除 wide 与旧 release/race 残留。
 6. 最后更新 README、安全审计和 CI 回归说明。

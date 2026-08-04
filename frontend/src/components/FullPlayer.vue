@@ -2240,6 +2240,10 @@ async function switchIptvSource(index) {
   }
   sourceMenuOpen.value = false
 
+  const previousIndex = playerStore.iptvUrlIndex
+  if (previousIndex !== index && ['trying', 'playing'].includes(getSourceRuntimeStatus(previousIndex))) {
+    setSourceRuntimeStatus(previousIndex, 'stopped')
+  }
   const entry = playerStore.iptvUrls[index]
   if (entry?.url) clearRaceLoser(entry)
 
@@ -2247,7 +2251,7 @@ async function switchIptvSource(index) {
   if (!(await setIptvUrlIndexForAttempt(index, attemptId))) return
   setSourceRuntimeStatus(index, 'trying')
 
-  if (entry?.type === 'proxy') {
+  if (isProxyLikeEntry(entry)) {
     try {
       await tryPlayIptv(entry.url, true, entry.custom_ua || '', attemptId, index, sourceType(entry))
       if (!isAttemptActive(attemptId)) return
