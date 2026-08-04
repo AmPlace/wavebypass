@@ -24,6 +24,21 @@ export const usePlayerStore = defineStore('player', {
   }),
 
   actions: {
+    stopAndClearPlayback() {
+      ++this.iptvSelectionToken
+      this.currentStation = ''
+      this.currentIptvChannel = null
+      this.pendingIptvChannel = null
+      this.iptvUrls = []
+      this.iptvUrlIndex = 0
+      this.iptvVideoEl = null
+      this.currentEpgProgram = null
+      this.isPlayerExpanded = false
+      this.isPlaying = false
+      this.isLoading = false
+      this.playbackError = ''
+    },
+
     // stationId 对应后端路由中的 {station_id}
     switchStation(stationId) {
       if (!stationId) {
@@ -331,6 +346,7 @@ export const usePlayerStore = defineStore('player', {
         if (adapter !== 'youtube') {
           try {
             const resolved = await resolveAdapterSource(u)
+            if (selectionToken !== this.iptvSelectionToken) return
             const resolvedUrl = String(resolved?.url || '').trim()
             const proxyUrl = absoluteApiUrl(resolved?.proxy_url) || fallbackProxyUrl
             // Adapter 自身声明 requires_proxy/direct_playable=false 是硬约束；
@@ -362,6 +378,7 @@ export const usePlayerStore = defineStore('player', {
             }
             continue
           } catch (e) {
+            if (selectionToken !== this.iptvSelectionToken) return
             console.warn('[IPTV] adapter resolve failed:', e?.message || e)
             // 非强制代理：resolve 失败只是本次未取到流地址，不得把 source 改写为 proxy-only，
             // 也不得从菜单删除。保留原始 adapter identity 作为直连 entry（FullPlayer 的
@@ -438,9 +455,8 @@ export const usePlayerStore = defineStore('player', {
       this.isPlaying = false
       // isPlaying 由实际播放事件设置，不提前设
       } catch (e) {
-        if (selectionToken === this.iptvSelectionToken) {
-          this.pendingIptvChannel = null
-        }
+        if (selectionToken !== this.iptvSelectionToken) return
+        this.pendingIptvChannel = null
         throw e
       }
     },

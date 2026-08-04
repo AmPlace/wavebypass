@@ -155,6 +155,17 @@ export function createRadioAudioEngine({
     navigatorRef.mediaSession.setActionHandler('pause', () => playerStore.togglePlay(false))
   }
 
+  function clearRadioMediaSession() {
+    const navigatorRef = getNavigator()
+    if (!navigatorRef || !('mediaSession' in navigatorRef)) return
+    const session = navigatorRef.mediaSession
+    try { session.metadata = null } catch {}
+    try { session.playbackState = 'none' } catch {}
+    for (const action of ['play', 'pause']) {
+      try { session.setActionHandler(action, null) } catch {}
+    }
+  }
+
   function updateMediaSessionForCurrentSubtitle(subtitle) {
     const attempt = activeAttempt
     if (subtitle && isAttemptActive(attempt)) updateSystemMediaSession(attempt.stationId, attempt)
@@ -654,9 +665,8 @@ export function createRadioAudioEngine({
         hls.loadSource(hlsUrl)
         hls.attachMedia(audioRef.value)
 
-        hls.on(Hls.Events.MANIFEST_PARSED, () => { if (isAttemptActive(attempt)) playAudioSafely(attempt) })
-
-        hls.on(Hls.Events.ERROR, (_event, data) => {
+        const onManifestParsed = () => { if (isAttemptActive(attempt)) playAudioSafely(attempt) }
+        const onHlsError = (_event, data) => {
           if (!isAttemptActive(attempt) || !data?.fatal) return
           logger.warn('HLS 播放发生致命错误。', data)
 
@@ -680,6 +690,12 @@ export function createRadioAudioEngine({
           }
           playerStore.setPlaybackError('HLS 播放发生错误，请稍后重试。')
           playerStore.togglePlay(false)
+        }
+        hls.on(Hls.Events.MANIFEST_PARSED, onManifestParsed)
+        hls.on(Hls.Events.ERROR, onHlsError)
+        addAttemptCleanup(attempt, () => {
+          hls.off?.(Hls.Events.MANIFEST_PARSED, onManifestParsed)
+          hls.off?.(Hls.Events.ERROR, onHlsError)
         })
 
         if (canDirectPlay) {
@@ -743,6 +759,12 @@ export function createRadioAudioEngine({
     invalidateActiveAttempt()
     destroyCurrentHls()
     resetAudioSource()
+    fallbackUrls = []
+    fallbackIndex = 0
+    fallbackStationId = ''
+    directProbeWinner = null
+    directStreamMode.value = ''
+    clearRadioMediaSession()
   }
 
   function pauseCurrentAudio() {

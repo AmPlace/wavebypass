@@ -587,3 +587,47 @@ test('同一 station 重选：重新 load 并正常播放', async () => {
   // 第二次 loadStation 又调 2 次 load()，总计 4
   assert.equal(h.audio.loadCalls >= 4, true)
 })
+
+test('进入 auth 时 Radio 停止 HLS/audio/probe 并清理 MediaSession，旧回调不能复活', async () => {
+  const timers = createTimerTracker()
+  const playDeferred = deferred()
+  const h = createHarness({
+    hlsSupported: true,
+    fetchImpl: async () => { throw new Error('no fetch') },
+    setTimerImpl: timers.setTimer,
+    clearTimerImpl: timers.clearTimer,
+  })
+  h.state.currentStation.value = 'HLS_A'
+  h.audio.nextPlay = playDeferred
+  h.engine.loadStation('HLS_A')
+  await flush()
+  const hls = h.hlsInstances[0]
+  hls.emit('MANIFEST_PARSED')
+  await flush()
+
+  h.state.currentStation.value = ''
+  h.engine.stopRadioAttempt()
+  h.store.isPlaying = false
+  h.store.isLoading = false
+  h.store.playbackError = ''
+  playDeferred.resolve()
+  hls.emit('MANIFEST_PARSED')
+  hls.emit('ERROR', { fatal: true })
+  h.audio.emit('error')
+  await flush()
+
+  assert.equal(h.engine.activeAttemptInfo(), null)
+  assert.equal(hls.destroyed, true)
+  assert.equal(hls.handlerCount(), 0)
+  assert.equal(h.audio.currentSrc, '')
+  assert.ok(h.audio.pauseCalls > 0)
+  assert.equal(h.audio.listenerCount(), 0)
+  assert.equal(timers.pendingCount(), 0)
+  assert.equal(h.mediaSession.metadata, null)
+  assert.equal(h.mediaSession.playbackState, 'none')
+  assert.equal(h.mediaSession.handlers.play, null)
+  assert.equal(h.mediaSession.handlers.pause, null)
+  assert.equal(h.store.isPlaying, false)
+  assert.equal(h.store.isLoading, false)
+  assert.equal(h.store.playbackError, '')
+})

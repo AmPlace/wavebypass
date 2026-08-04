@@ -1105,6 +1105,16 @@ function syncIptvMediaSession(playbackState = isPlaying.value ? 'playing' : 'pau
   }
 }
 
+function clearIptvMediaSession() {
+  if (!('mediaSession' in navigator)) return
+  const session = navigator.mediaSession
+  try { session.metadata = null } catch {}
+  try { session.playbackState = 'none' } catch {}
+  for (const action of ['play', 'pause', 'stop']) {
+    try { session.setActionHandler(action, null) } catch {}
+  }
+}
+
 function registerMediaSessionAction(action, handler) {
   if (!('mediaSession' in navigator)) return
   try {
@@ -1429,12 +1439,15 @@ async function resumeSoftPausedIptv(reason = 'resume') {
 
       if (iptvHlsRef.value) {
         await video.play()
+        if (!isAttemptActive(attemptId)) return false
         attachRuntimeHlsErrorHandlers(iptvHlsRef.value, sourceUrl, usingProxy, attemptId, sourceIndex)
       } else if (iptvMpegtsRef.value) {
         await video.play()
+        if (!isAttemptActive(attemptId)) return false
         attachRuntimeMpegtsErrorHandlers(iptvMpegtsRef.value, sourceUrl, usingProxy, attemptId, sourceIndex)
       } else if (video.src || video.currentSrc) {
         await video.play()
+        if (!isAttemptActive(attemptId)) return false
       } else {
         return false
       }
@@ -1963,8 +1976,9 @@ let _youtubeStartupTimer = null
 let _youtubeApiPromise = null
 let _youtubeApiReachable = null
 let _youtubeApiCheckedAt = 0
+let _componentDisposed = false
 function isAttemptActive(attemptId) {
-  return attemptId === _playAttemptId
+  return !_componentDisposed && attemptId === _playAttemptId
 }
 
 function cancelledError() {
@@ -3396,6 +3410,7 @@ let _playbackProgressWatchTimer = null
 let _playbackProgressWatchVideo = null
 let _playbackProgressWatchSeq = 0
 let _lastAvSyncRecoveryTime = 0
+let _avSyncFollowupTimer = null
 let _lastReconnectTime = 0
 let _lastBufferNudgeTime = 0
 
@@ -3427,6 +3442,10 @@ function stopPlaybackWatchdogs() {
   clearStallRecoveryTimer()
   stopVideoFrameWatch()
   stopPlaybackProgressWatch()
+  if (_avSyncFollowupTimer) {
+    clearTimeout(_avSyncFollowupTimer)
+    _avSyncFollowupTimer = null
+  }
   _lastVideoProgressAt = 0
   _lastVideoCurrentTime = 0
   _lastVideoFrameAt = 0
@@ -3569,7 +3588,9 @@ async function recoverAvSync(v, reason = 'video-frame-stall') {
   try {
     await v.play()
     if (!seekForwardTiny(v)) seekNearLiveEdge(v)
-    setTimeout(() => {
+    if (_avSyncFollowupTimer) clearTimeout(_avSyncFollowupTimer)
+    _avSyncFollowupTimer = setTimeout(() => {
+      _avSyncFollowupTimer = null
       const current = iptvVideoRef.value
       if (!current || current.paused || !isIptvMode.value) return
       const noProgress = Date.now() - _lastVideoProgressAt > 5000
@@ -3761,6 +3782,27 @@ function onVideoEvent(evt) {
   }
 }
 
+function disposeIptvPlayback() {
+  _componentDisposed = true
+  _playAttemptId++
+  _recoverySeq++
+  _recoveryInFlight = false
+  _manualIptvStartPending = 0
+  clearPauseReleaseTimer()
+  _softPausedAt = 0
+  _softPauseReleased = false
+  stopPlaybackWatchdogs()
+  cancelCurrentStartup()
+  cancelActiveProxyRace()
+  destroyIptvEngines()
+  resetIptvVideo()
+  clearIptvMediaSession()
+  playerStore.iptvVideoEl = null
+  iptvSourceRuntimeStatus.value = {}
+  _racedLosers.clear()
+  _mpegtsRecoveries.clear()
+}
+
 // 注册 video 元素到 store，同步 muted 状态
 watch(iptvVideoRef, (el) => {
   playerStore.iptvVideoEl = el
@@ -3931,6 +3973,7 @@ watch(() => playerStore.currentEpgProgram?.stop, () => {
 })
 
 onMounted(() => {
+  _componentDisposed = false
   epgTickTimer = setInterval(() => {
     epgNow.value = Date.now()
   }, 30_000)
@@ -3974,16 +4017,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('resize', scheduleMediaFrameSizeUpdate)
   window.removeEventListener('orientationchange', updateSourceMenuPosition)
   window.removeEventListener('orientationchange', scheduleMediaFrameSizeUpdate)
-  _playAttemptId++
-  _recoverySeq++
-  _recoveryInFlight = false
-  clearPauseReleaseTimer()
-  _softPausedAt = 0
-  _softPauseReleased = false
-  stopPlaybackWatchdogs()
-  cancelCurrentStartup()
-  cancelActiveProxyRace()
-  destroyIptvEngines()
+  disposeIptvPlayback()
   if (epgTickTimer) {
     clearInterval(epgTickTimer)
     epgTickTimer = null
