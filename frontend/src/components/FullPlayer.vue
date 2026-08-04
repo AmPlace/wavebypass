@@ -1957,6 +1957,7 @@ const RACE_HLS_CONFIRM_MS = 700
 const RACE_HLS_CONFIRM_RETRY_MS = 500
 
 let _playAttemptId = 0
+let _playSelectionToken = playerStore.iptvSelectionToken
 let _recoverySeq = 0
 let _recoveryInFlight = false
 let _pauseReleaseTimer = null
@@ -1978,7 +1979,9 @@ let _youtubeApiReachable = null
 let _youtubeApiCheckedAt = 0
 let _componentDisposed = false
 function isAttemptActive(attemptId) {
-  return !_componentDisposed && attemptId === _playAttemptId
+  return !_componentDisposed
+    && attemptId === _playAttemptId
+    && _playSelectionToken === playerStore.iptvSelectionToken
 }
 
 function cancelledError() {
@@ -3851,8 +3854,20 @@ watch(iptvVideoRef, (el) => {
   if (el) el.muted = iptvMuted.value
 })
 
+watch(() => playerStore.iptvSelectionToken, (selectionToken) => {
+  if (selectionToken === _playSelectionToken) return
+  _playAttemptId++
+  _recoverySeq++
+  _recoveryInFlight = false
+  clearPauseReleaseTimer()
+  stopPlaybackWatchdogs()
+  cancelCurrentStartup()
+  cancelActiveProxyRace()
+})
+
 // IptvHome 已同步设置 src + play，这里跳过
 watch(() => playerStore.currentIptvChannel, async (ch) => {
+  const selectionToken = playerStore.iptvSelectionToken
   if (!ch) {
     resetIptvVideo()
     destroyIptvEngines()
@@ -3864,8 +3879,13 @@ watch(() => playerStore.currentIptvChannel, async (ch) => {
     iptvSourceRuntimeStatus.value = {}
     if (_manualIptvStartPending > 0) return
     await nextTick()
+    if (
+      selectionToken !== playerStore.iptvSelectionToken
+      || playerStore.currentIptvChannel !== ch
+    ) return
     if (iptvVideoRef.value) {
       resetRacedLosers()
+      _playSelectionToken = selectionToken
       const attemptId = ++_playAttemptId
       await playCurrentIptvUrl(attemptId)
     }
