@@ -26,6 +26,7 @@ class FakeAudio {
     this.currentSrc = ''
     this.volume = 1
     this.listeners = new Map()
+    this.onceListeners = new Set()
     this.playCalls = []
     this.pauseCalls = 0
     this.loadCalls = 0
@@ -41,17 +42,28 @@ class FakeAudio {
     return this._src
   }
 
-  addEventListener(name, fn) {
+  addEventListener(name, fn, options = {}) {
     if (!this.listeners.has(name)) this.listeners.set(name, new Set())
     this.listeners.get(name).add(fn)
+    if (options?.once) this.onceListeners.add(fn)
   }
 
   removeEventListener(name, fn) {
     this.listeners.get(name)?.delete(fn)
+    this.onceListeners.delete(fn)
   }
 
   emit(name) {
-    for (const fn of Array.from(this.listeners.get(name) || [])) fn()
+    for (const fn of Array.from(this.listeners.get(name) || [])) {
+      if (this.onceListeners.has(fn)) this.removeEventListener(name, fn)
+      fn()
+    }
+  }
+
+  listenerCount() {
+    let count = 0
+    for (const listeners of this.listeners.values()) count += listeners.size
+    return count
   }
 
   play() {
@@ -116,6 +128,12 @@ function createHlsMock({ supported = true } = {}) {
       for (const fn of Array.from(this.handlers.get(name) || [])) fn(name, data)
     }
 
+    handlerCount() {
+      let count = 0
+      for (const handlers of this.handlers.values()) count += handlers.size
+      return count
+    }
+
     loadSource(url) {
       this.source = url
     }
@@ -135,7 +153,7 @@ function responseJson(value) {
   return { ok: true, json: async () => value }
 }
 
-function createHarness({ hlsSupported = false, fetchImpl } = {}) {
+function createHarness({ hlsSupported = false, fetchImpl, setTimerImpl, clearTimerImpl } = {}) {
   const audio = new FakeAudio('main')
   const hlsMock = createHlsMock({ supported: hlsSupported })
   const probeAudios = []
@@ -197,12 +215,30 @@ function createHarness({ hlsSupported = false, fetchImpl } = {}) {
       return item
     },
     fetchImpl,
-    setTimer: () => ({ fake: true }),
-    clearTimer: () => {},
+    setTimer: setTimerImpl || (() => ({ fake: true })),
+    clearTimer: clearTimerImpl || (() => {}),
     logger: { log() {}, warn() {} },
   })
 
   return { audio, engine, hlsInstances: hlsMock.instances, mediaSession, probeAudios, state, store }
+}
+
+function createTimerTracker() {
+  let sequence = 0
+  const pending = new Map()
+  return {
+    setTimer(fn, ms) {
+      const id = ++sequence
+      pending.set(id, { fn, ms })
+      return id
+    },
+    clearTimer(id) {
+      pending.delete(id)
+    },
+    pendingCount() {
+      return pending.size
+    },
+  }
 }
 
 test('旧成功晚返回：A probe 晚成功不得接管 B', async () => {
@@ -407,6 +443,71 @@ test('并发探测中快速失败不得抢先结束较慢的可播放源', async
   await flush()
   assert.equal(h.audio.currentSrc, 'https://a.example/slow-winner.mp3')
   assert.equal(h.state.directStreamMode.value, 'direct')
+})
+
+test('并发探测胜出后立即清理 loser 的 timer 和 audio listener', async () => {
+  const timers = createTimerTracker()
+  const fetchImpl = async (url, options = {}) => {
+    if (String(url).includes('/A/all-urls')) {
+      return responseJson([
+        'https://a.example/loser.mp3',
+        'https://a.example/winner.mp3',
+      ])
+    }
+    if (options.method === 'HEAD') return {}
+    throw new Error(`unexpected fetch ${url}`)
+  }
+  const h = createHarness({
+    fetchImpl,
+    setTimerImpl: timers.setTimer,
+    clearTimerImpl: timers.clearTimer,
+  })
+  h.state.currentStation.value = 'A'
+  h.engine.loadStation('A')
+  await flush()
+
+  assert.equal(h.probeAudios.length, 2)
+  h.probeAudios[1].emit('canplay')
+  await flush()
+
+  assert.equal(h.audio.currentSrc, 'https://a.example/winner.mp3')
+  assert.equal(h.probeAudios[0].listenerCount(), 0, 'loser audio listener 应立即移除')
+  assert.equal(timers.pendingCount(), 0, 'winner 产生后不应留下 probe/HEAD/overall timer')
+})
+
+test('HLS 并发探测胜出后立即销毁 loser 并移除事件监听', async () => {
+  const timers = createTimerTracker()
+  const fetchImpl = async (url, options = {}) => {
+    if (String(url).includes('/A/all-urls')) {
+      return responseJson([
+        'https://a.example/loser.m3u8',
+        'https://a.example/winner.m3u8',
+      ])
+    }
+    if (options.method === 'HEAD') return {}
+    throw new Error(`unexpected fetch ${url}`)
+  }
+  const h = createHarness({
+    hlsSupported: true,
+    fetchImpl,
+    setTimerImpl: timers.setTimer,
+    clearTimerImpl: timers.clearTimer,
+  })
+  h.state.currentStation.value = 'A'
+  h.engine.loadStation('A')
+  await flush()
+
+  assert.equal(h.hlsInstances.length, 2)
+  const loser = h.hlsInstances[0]
+  const winner = h.hlsInstances[1]
+  winner.emit('FRAG_LOADED')
+  await flush()
+
+  assert.equal(loser.destroyed, true)
+  assert.equal(loser.handlerCount(), 0)
+  assert.equal(winner.destroyed, true, 'probe winner 也应销毁，正式播放使用独立实例')
+  assert.equal(winner.handlerCount(), 0)
+  assert.equal(timers.pendingCount(), 1, '只允许保留正式 HLS 起播超时 timer')
 })
 
 test('原生 audio error：当前 attempt 触发 fallback，旧 attempt 的 error 不触发', async () => {

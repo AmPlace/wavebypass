@@ -204,6 +204,23 @@ test('dynamic adapter proxy remains eligible for delayed startup race', () => {
   }), 'hls')
 })
 
+test('adapter proxy with unresolved transport enters deferred preflight race', () => {
+  const entry = {
+    url: '/api/media/channel/test/playlist.m3u8?source_id=src_adapter',
+    source_id: 'src_adapter',
+    source_type: 'adapter',
+    type: 'proxy',
+    via_proxy: true,
+    adapter: 'huya',
+    adapter_transport_pending: true,
+  }
+  assert.equal(startupRaceCandidateKind(entry, {
+    sourceType: 'adapter',
+    hlsSupported: true,
+    mpegTsSupported: true,
+  }), 'proxy_auto')
+})
+
 test('explicitly disabled source is excluded from startup race', () => {
   const entry = { url: 'https://cdn.example/live.m3u8', disabled: true }
   assert.equal(startupRaceCandidateKind(entry, {

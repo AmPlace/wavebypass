@@ -177,6 +177,8 @@ test('resolve fail + non-force_proxy: 直连+代理两个选项保留', async ()
   assert.match(proxy.url, /\/api\/media\/channel\/.+\/playlist\.m3u8/)
   assert.equal(proxy.url.includes('huya://'), false)
   assert.equal(proxy.url.includes('target_url='), false)
+  assert.equal(proxy.source_type, 'adapter', '首次 resolve 失败时代理的实际 transport 仍未知，不得伪装成 HLS')
+  assert.equal(proxy.adapter_transport_pending, true)
 })
 
 test('resolve fail + force_proxy: 仅保留代理', async () => {
@@ -188,6 +190,8 @@ test('resolve fail + force_proxy: 仅保留代理', async () => {
   assert.equal(store.iptvUrls.length, 1)
   assert.equal(store.iptvUrls[0].via_proxy, true)
   assert.match(store.iptvUrls[0].url, /\/api\/media\/channel\/.+\/playlist\.m3u8/)
+  assert.equal(store.iptvUrls[0].source_type, 'adapter')
+  assert.equal(store.iptvUrls[0].adapter_transport_pending, true)
 })
 
 test('resolve fail + non-force_proxy: 直连保留原始 adapter identity', async () => {

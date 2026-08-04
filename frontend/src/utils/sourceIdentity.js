@@ -91,6 +91,7 @@ export function startupRaceCandidateKind(entry, {
   mpegTsSupported = false,
 } = {}) {
   if (!entry?.url || isSourceExplicitlyDisabled(entry)) return ''
+  if (isProxyTransport(entry) && entry.adapter_transport_pending) return 'proxy_auto'
   if (sourceType === 'unsupported_youtube_url' || sourceType === 'youtube') return ''
   if (sourceType === 'hls' && hlsSupported) return 'hls'
   if (['mpegts', 'http_flv'].includes(sourceType) && mpegTsSupported) return sourceType

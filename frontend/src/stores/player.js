@@ -390,7 +390,8 @@ export const usePlayerStore = defineStore('player', {
                   adapter,
                   type: 'proxy',
                   via_proxy: true,
-                  source_type: 'hls',
+                  source_type: 'adapter',
+                  adapter_transport_pending: true,
                 })
               }
               continue
@@ -406,7 +407,8 @@ export const usePlayerStore = defineStore('player', {
             adapter,
             type: 'proxy',
             via_proxy: true,
-            source_type: 'hls',
+            source_type: adapter === 'youtube' ? 'hls' : 'adapter',
+            adapter_transport_pending: adapter !== 'youtube',
           })
         }
       }

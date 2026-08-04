@@ -1772,16 +1772,26 @@ function sourceTypeFromProxyRedirect(url) {
   return ''
 }
 
-async function preflightProxyPlaylistTransport(url, usingProxy) {
+async function preflightProxyPlaylistTransport(url, usingProxy, signal = null) {
   if (!usingProxy || !isChannelProxyPlaylistUrl(url)) return null
   return await new Promise((resolve) => {
     const xhr = new XMLHttpRequest()
     let settled = false
+    let abortHandler = null
     const settle = (value) => {
       if (settled) return
       settled = true
+      if (abortHandler) signal?.removeEventListener('abort', abortHandler)
       try { xhr.abort() } catch {}
       resolve(value)
+    }
+    if (signal?.aborted) {
+      settle(null)
+      return
+    }
+    if (signal) {
+      abortHandler = () => settle(null)
+      signal.addEventListener('abort', abortHandler, { once: true })
     }
     xhr.open('GET', url, true)
     xhr.setRequestHeader('Accept', 'application/vnd.apple.mpegurl,application/x-mpegURL,*/*')
@@ -2248,6 +2258,11 @@ async function switchIptvSource(index) {
   if (entry?.url) clearRaceLoser(entry)
 
   const attemptId = ++_playAttemptId
+  _recoverySeq++
+  _recoveryInFlight = false
+  clearStallRecoveryTimer()
+  cancelCurrentStartup()
+  cancelActiveProxyRace()
   if (!(await setIptvUrlIndexForAttempt(index, attemptId))) return
   setSourceRuntimeStatus(index, 'trying')
 
@@ -3074,18 +3089,20 @@ async function runHedgedRace(directRacers, proxyRacers, attemptId = 0, options =
   const cleanupRacer = (racer) => {
     if (!racer || racer.cleaned) return
     racer.cleaned = true
+    racer.abortController?.abort()
+    racer.abortController = null
     for (const timer of racer.timers || []) clearTimeout(timer)
     if (racer.interval) clearInterval(racer.interval)
     for (const cleanup of racer.cleanups || []) {
       try { cleanup() } catch {}
     }
     try {
-      if (racer.kind === 'hls') {
+      if (racer.kind === 'hls' && racer.engine) {
         racer.engine.stopLoad?.()
         racer.engine.detachMedia?.()
         releaseWideProxyUrl(racer.entry?.url)
         racer.engine.destroy()
-      } else if (isMpegTsEngineType(racer.kind)) {
+      } else if (isMpegTsEngineType(racer.kind) && racer.engine) {
         racer.engine.unload?.()
         racer.engine.detachMediaElement?.()
         racer.engine.destroy()
@@ -3096,7 +3113,7 @@ async function runHedgedRace(directRacers, proxyRacers, attemptId = 0, options =
         console.warn('[RACE:hedged] cleanup failed:', e)
       }
     }
-    if (racer.video.parentNode) racer.video.remove()
+    if (racer.video?.parentNode) racer.video.remove()
   }
 
   const result = await new Promise((resolve) => {
@@ -3177,114 +3194,155 @@ async function runHedgedRace(directRacers, proxyRacers, attemptId = 0, options =
     const startRacers = (candidates, phaseLabel) => {
       if (settled || !candidates.length) return
       candidates.forEach(({ entry }) => setSourceRuntimeStatusByEntry(entry, 'trying'))
-      candidates.forEach(({ entry, index, kind }, i) => {
-        const probeVideo = document.createElement('video')
-        probeVideo.muted = true
-        probeVideo.playsInline = true
-        probeVideo.autoplay = true
-        probeVideo.style.display = 'none'
-        document.body.appendChild(probeVideo)
+      candidates.forEach(({ entry, index, kind: initialKind }, i) => {
+        const racer = {
+          engine: null,
+          video: null,
+          entry,
+          index,
+          kind: initialKind,
+          cleaned: false,
+          failed: false,
+          fragFail: 0,
+          timers: [],
+          cleanups: [],
+          lastDecodedFrames: 0,
+          abortController: null,
+        }
+        racers.push(racer)
 
-        if (kind === 'hls') {
-          const hlsConfig = { enableWorker: false, maxBufferLength: 1, maxMaxBufferLength: 2 }
-          if (entry.custom_ua) hlsConfig.xhrSetup = (xhr) => { xhr.setRequestHeader('User-Agent', entry.custom_ua) }
-          const hls = new Hls(hlsConfig)
-          trackHlsSource(hls, entry.url)
-          const racer = { engine: hls, video: probeVideo, entry, index, kind, cleaned: false, failed: false, fragFail: 0, timers: [], cleanups: [] }
-          racers.push(racer)
-
-          const label = `${phaseLabel}#${i} HLS`
-          const onMediaAttached = () => {
-            try { probeVideo.play()?.catch?.(() => {}) } catch {}
-          }
-          const onFragBuffered = () => {
-            clearTimeout(racer.fragLoadedFallbackTimer)
-            armHlsConfirmation(racer, label)
-          }
-          const onFragLoaded = () => {
-            if (racer.confirming || racer.fragLoadedFallbackTimer) return
-            racer.fragLoadedFallbackTimer = setTimeout(() => {
-              racer.fragLoadedFallbackTimer = null
-              armHlsConfirmation(racer, label)
-            }, 250)
-            racer.timers.push(racer.fragLoadedFallbackTimer)
-          }
-          const onError = (_, d) => {
-            if (!isAttemptActive(attemptId)) { finish(null); return }
-            if (settled || racer.cleaned || racer.failed) return
-            if (!d.fatal && d.details === Hls.ErrorDetails.FRAG_LOAD_ERROR) racer.fragFail++
-            if (d.fatal || d.type === Hls.ErrorTypes.NETWORK_ERROR || racer.fragFail >= 2) {
+        void (async () => {
+          let kind = initialKind
+          let effectiveUrl = entry.url
+          if (kind === 'proxy_auto') {
+            const controller = new AbortController()
+            racer.abortController = controller
+            const transport = await preflightProxyPlaylistTransport(entry.url, true, controller.signal)
+            racer.abortController = null
+            if (settled || racer.cleaned || racer.failed || !isAttemptActive(attemptId)) return
+            if (transport?.url && transport.sourceType) {
+              effectiveUrl = transport.url
+              kind = startupRaceCandidateKind(
+                { ...entry, adapter_transport_pending: false, url: effectiveUrl },
+                {
+                  sourceType: transport.sourceType,
+                  hlsSupported: canUseHls(),
+                  mpegTsSupported: canUseMpegTs(),
+                },
+              )
+            } else {
+              kind = canUseHls() ? 'hls' : ''
+            }
+            racer.kind = kind
+            if (!kind || kind === 'proxy_auto') {
               failRacer(racer)
+              return
             }
           }
-          hls.on(Hls.Events.MEDIA_ATTACHED, onMediaAttached)
-          hls.on(Hls.Events.FRAG_BUFFERED, onFragBuffered)
-          hls.on(Hls.Events.FRAG_LOADED, onFragLoaded)
-          hls.on(Hls.Events.ERROR, onError)
-          racer.cleanups.push(() => hls.off(Hls.Events.MEDIA_ATTACHED, onMediaAttached))
-          racer.cleanups.push(() => hls.off(Hls.Events.FRAG_BUFFERED, onFragBuffered))
-          racer.cleanups.push(() => hls.off(Hls.Events.FRAG_LOADED, onFragLoaded))
-          racer.cleanups.push(() => hls.off(Hls.Events.ERROR, onError))
-          hls.loadSource(entry.url)
-          hls.attachMedia(probeVideo)
-          return
-        }
 
-        const player = mpegts.createPlayer({
-          type: mpegtsPlayerType(kind, entry.url),
-          isLive: true,
-          cors: true,
-          url: entry.url,
-        }, {
-          enableWorker: true,
-          lazyLoad: false,
-          liveBufferLatencyChasing: true,
-          statisticsInfoReportInterval: 1000,
-        })
-        const racer = { engine: player, video: probeVideo, entry, index, kind, cleaned: false, failed: false, timers: [], cleanups: [], lastDecodedFrames: 0 }
-        racers.push(racer)
-        const label = `${phaseLabel}#${i} ${kind === 'http_flv' ? 'HTTP-FLV' : 'MPEG-TS'}`
-        const timeSnapshot = probeVideo.currentTime || 0
-        const onMediaInfo = () => {
-          try { probeVideo.play()?.catch?.(() => {}) } catch {}
-        }
-        const onStats = (stats) => {
-          const decodedFrames = Number(stats?.decodedFrames || 0)
-          if (decodedFrames > racer.lastDecodedFrames) {
-            winRacer(racer, label)
+          const probeVideo = document.createElement('video')
+          racer.video = probeVideo
+          probeVideo.muted = true
+          probeVideo.playsInline = true
+          probeVideo.autoplay = true
+          probeVideo.style.display = 'none'
+          document.body.appendChild(probeVideo)
+
+          if (kind === 'hls') {
+            const hlsConfig = { enableWorker: false, maxBufferLength: 1, maxMaxBufferLength: 2 }
+            if (entry.custom_ua) hlsConfig.xhrSetup = (xhr) => { xhr.setRequestHeader('User-Agent', entry.custom_ua) }
+            const hls = new Hls(hlsConfig)
+            racer.engine = hls
+            trackHlsSource(hls, effectiveUrl)
+
+            const label = `${phaseLabel}#${i} HLS`
+            const onMediaAttached = () => {
+              try { probeVideo.play()?.catch?.(() => {}) } catch {}
+            }
+            const onFragBuffered = () => {
+              clearTimeout(racer.fragLoadedFallbackTimer)
+              armHlsConfirmation(racer, label)
+            }
+            const onFragLoaded = () => {
+              if (racer.confirming || racer.fragLoadedFallbackTimer) return
+              racer.fragLoadedFallbackTimer = setTimeout(() => {
+                racer.fragLoadedFallbackTimer = null
+                armHlsConfirmation(racer, label)
+              }, 250)
+              racer.timers.push(racer.fragLoadedFallbackTimer)
+            }
+            const onError = (_, d) => {
+              if (!isAttemptActive(attemptId)) { finish(null); return }
+              if (settled || racer.cleaned || racer.failed) return
+              if (!d.fatal && d.details === Hls.ErrorDetails.FRAG_LOAD_ERROR) racer.fragFail++
+              if (d.fatal || d.type === Hls.ErrorTypes.NETWORK_ERROR || racer.fragFail >= 2) {
+                failRacer(racer)
+              }
+            }
+            hls.on(Hls.Events.MEDIA_ATTACHED, onMediaAttached)
+            hls.on(Hls.Events.FRAG_BUFFERED, onFragBuffered)
+            hls.on(Hls.Events.FRAG_LOADED, onFragLoaded)
+            hls.on(Hls.Events.ERROR, onError)
+            racer.cleanups.push(() => hls.off(Hls.Events.MEDIA_ATTACHED, onMediaAttached))
+            racer.cleanups.push(() => hls.off(Hls.Events.FRAG_BUFFERED, onFragBuffered))
+            racer.cleanups.push(() => hls.off(Hls.Events.FRAG_LOADED, onFragLoaded))
+            racer.cleanups.push(() => hls.off(Hls.Events.ERROR, onError))
+            hls.loadSource(effectiveUrl)
+            hls.attachMedia(probeVideo)
             return
           }
-          racer.lastDecodedFrames = Math.max(racer.lastDecodedFrames, decodedFrames)
-        }
-        const onError = () => failRacer(racer)
-        const onVideoLoaded = () => {
-          try { probeVideo.play()?.catch?.(() => {}) } catch {}
-        }
-        const onVideoError = () => failRacer(racer)
-        player.on(mpegts.Events.MEDIA_INFO, onMediaInfo)
-        player.on(mpegts.Events.STATISTICS_INFO, onStats)
-        player.on(mpegts.Events.ERROR, onError)
-        racer.cleanups.push(() => player.off(mpegts.Events.MEDIA_INFO, onMediaInfo))
-        racer.cleanups.push(() => player.off(mpegts.Events.STATISTICS_INFO, onStats))
-        racer.cleanups.push(() => player.off(mpegts.Events.ERROR, onError))
-        probeVideo.addEventListener('loadedmetadata', onVideoLoaded)
-        probeVideo.addEventListener('canplay', onVideoLoaded)
-        probeVideo.addEventListener('error', onVideoError)
-        racer.cleanups.push(() => probeVideo.removeEventListener('loadedmetadata', onVideoLoaded))
-        racer.cleanups.push(() => probeVideo.removeEventListener('canplay', onVideoLoaded))
-        racer.cleanups.push(() => probeVideo.removeEventListener('error', onVideoError))
-        racer.interval = setInterval(() => {
-          if (!settled && !racer.cleaned && !racer.failed && (probeVideo.currentTime || 0) - timeSnapshot > 0.1) {
-            winRacer(racer, label)
+
+          const player = mpegts.createPlayer({
+            type: mpegtsPlayerType(kind, effectiveUrl),
+            isLive: true,
+            cors: true,
+            url: effectiveUrl,
+          }, {
+            enableWorker: true,
+            lazyLoad: false,
+            liveBufferLatencyChasing: true,
+            statisticsInfoReportInterval: 1000,
+          })
+          racer.engine = player
+          const label = `${phaseLabel}#${i} ${kind === 'http_flv' ? 'HTTP-FLV' : 'MPEG-TS'}`
+          const timeSnapshot = probeVideo.currentTime || 0
+          const onMediaInfo = () => {
+            try { probeVideo.play()?.catch?.(() => {}) } catch {}
           }
-        }, 500)
-        try {
+          const onStats = (stats) => {
+            const decodedFrames = Number(stats?.decodedFrames || 0)
+            if (decodedFrames > racer.lastDecodedFrames) {
+              winRacer(racer, label)
+              return
+            }
+            racer.lastDecodedFrames = Math.max(racer.lastDecodedFrames, decodedFrames)
+          }
+          const onError = () => failRacer(racer)
+          const onVideoLoaded = () => {
+            try { probeVideo.play()?.catch?.(() => {}) } catch {}
+          }
+          const onVideoError = () => failRacer(racer)
+          player.on(mpegts.Events.MEDIA_INFO, onMediaInfo)
+          player.on(mpegts.Events.STATISTICS_INFO, onStats)
+          player.on(mpegts.Events.ERROR, onError)
+          racer.cleanups.push(() => player.off(mpegts.Events.MEDIA_INFO, onMediaInfo))
+          racer.cleanups.push(() => player.off(mpegts.Events.STATISTICS_INFO, onStats))
+          racer.cleanups.push(() => player.off(mpegts.Events.ERROR, onError))
+          probeVideo.addEventListener('loadedmetadata', onVideoLoaded)
+          probeVideo.addEventListener('canplay', onVideoLoaded)
+          probeVideo.addEventListener('error', onVideoError)
+          racer.cleanups.push(() => probeVideo.removeEventListener('loadedmetadata', onVideoLoaded))
+          racer.cleanups.push(() => probeVideo.removeEventListener('canplay', onVideoLoaded))
+          racer.cleanups.push(() => probeVideo.removeEventListener('error', onVideoError))
+          racer.interval = setInterval(() => {
+            if (!settled && !racer.cleaned && !racer.failed && (probeVideo.currentTime || 0) - timeSnapshot > 0.1) {
+              winRacer(racer, label)
+            }
+          }, 500)
           player.attachMediaElement(probeVideo)
           player.load()
           try { probeVideo.play()?.catch?.(() => {}) } catch {}
-        } catch {
-          failRacer(racer)
-        }
+        })().catch(() => failRacer(racer))
       })
     }
 
