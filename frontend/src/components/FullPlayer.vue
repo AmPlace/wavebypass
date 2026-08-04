@@ -1009,12 +1009,19 @@ async function playIptvChannelFromFullPlayer(channel) {
     playerStore.setPlaybackError(e?.message || '频道起播失败')
     return
   }
+  const selectionToken = playerStore.iptvSelectionToken
   nextTick(() => {
     _manualIptvStartPending = Math.max(0, _manualIptvStartPending - 1)
-    if (!iptvVideoRef.value || !playerStore.currentIptvChannel) {
+    if (
+      selectionToken !== playerStore.iptvSelectionToken
+      || playerStore.currentIptvChannel !== channel
+      || !iptvVideoRef.value
+      || !playerStore.currentIptvChannel
+    ) {
       return
     }
     resetRacedLosers()
+    _playSelectionToken = selectionToken
     const attemptId = ++_playAttemptId
     playCurrentIptvUrl(attemptId).catch((e) => {
       console.warn('[IPTV] 列表切台起播失败:', e?.message)
