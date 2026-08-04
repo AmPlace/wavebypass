@@ -1762,7 +1762,7 @@ function sourceTypeFromProxyRedirect(url) {
     if (/\/api\/media\/proxy\/stream\//i.test(parsed.pathname)) {
       return parsed.searchParams.get('stream_type') === 'http_flv' ? 'http_flv' : 'mpegts'
     }
-    if (/\/api\/media\/proxy\/rtsp\//i.test(parsed.pathname)) return 'rtsp'
+    if (/\/api\/media\/proxy\/rtsp\//i.test(parsed.pathname)) return 'hls'
   } catch {}
   return ''
 }
@@ -1781,7 +1781,7 @@ async function preflightProxyPlaylistTransport(url, usingProxy, signal = null) {
       resolve(value)
     }
     if (signal?.aborted) {
-      settle(null)
+      settle({ url: finalUrl, sourceType: 'hls' })
       return
     }
     if (signal) {
@@ -1817,7 +1817,7 @@ function mpegtsPlayerType(type, url = '') {
 
 function playbackEngineType(type, url = '') {
   const normalized = String(type || '').trim().toLowerCase()
-  if (normalized === 'rtsp' && isHlsUrl(url)) return 'hls'
+  if (normalized === 'rtsp' && (isHlsUrl(url) || sourceTypeFromProxyRedirect(url) === 'hls')) return 'hls'
   return normalized
 }
 
@@ -2573,13 +2573,23 @@ async function tryPlayIptv(url, usingProxy = false, customUa = '', attemptId = 0
     resetIptvVideo()
   }
   playerStore.setLoading(true)
-  let effectiveUrl = url
-  let resolvedSourceType = playbackEngineType(playbackSourceType || sourceType({ url }), url)
-  let proxyTransport = null
-  try {
-    proxyTransport = await preflightProxyPlaylistTransport(url, usingProxy, preflightController.signal)
-  } finally {
-    if (_cancelCurrentStartup === cancelPreflight) _cancelCurrentStartup = null
+  const suppliedTransport = options.effectiveTransport?.url && options.effectiveTransport?.sourceType
+    ? options.effectiveTransport
+    : null
+  let effectiveUrl = suppliedTransport?.url || url
+  let resolvedSourceType = playbackEngineType(
+    suppliedTransport?.sourceType || playbackSourceType || sourceType({ url }),
+    effectiveUrl,
+  )
+  let proxyTransport = suppliedTransport
+  if (!suppliedTransport) {
+    try {
+      proxyTransport = await preflightProxyPlaylistTransport(url, usingProxy, preflightController.signal)
+    } finally {
+      if (_cancelCurrentStartup === cancelPreflight) _cancelCurrentStartup = null
+    }
+  } else if (_cancelCurrentStartup === cancelPreflight) {
+    _cancelCurrentStartup = null
   }
   if (preflightCancelled || !isAttemptActive(attemptId)) throw cancelledError()
   if (proxyTransport?.url && proxyTransport.sourceType) {
@@ -2587,7 +2597,7 @@ async function tryPlayIptv(url, usingProxy = false, customUa = '', attemptId = 0
     resolvedSourceType = playbackEngineType(proxyTransport.sourceType, effectiveUrl)
   }
 
-  const useHls = resolvedSourceType === 'hls' && isHlsUrl(effectiveUrl)
+  const useHls = resolvedSourceType === 'hls'
   const useMpegTs = isMpegTsEngineType(resolvedSourceType) || (!useHls && isMpegTsUrl(effectiveUrl))
 
   if (!useHls && !useMpegTs) {
@@ -3158,7 +3168,12 @@ async function runHedgedRace(directRacers, proxyRacers, attemptId = 0, options =
         url: (racer.entry?.url || '').slice(0, 80),
       })
       setSourceRuntimeStatusByEntry(racer.entry, 'trying')
-      finish({ racer, entry: racer.entry, index: racer.index })
+      finish({
+        racer,
+        entry: racer.entry,
+        index: racer.index,
+        effectiveTransport: racer.effectiveTransport,
+      })
     }
 
     const armHlsConfirmation = (racer, label) => {
@@ -3210,6 +3225,9 @@ async function runHedgedRace(directRacers, proxyRacers, attemptId = 0, options =
           cleanups: [],
           lastDecodedFrames: 0,
           abortController: null,
+          effectiveTransport: initialKind && initialKind !== 'proxy_auto'
+            ? { url: entry.url, sourceType: initialKind }
+            : null,
         }
         racers.push(racer)
 
@@ -3232,8 +3250,10 @@ async function runHedgedRace(directRacers, proxyRacers, attemptId = 0, options =
                   mpegTsSupported: canUseMpegTs(),
                 },
               )
+              racer.effectiveTransport = { url: effectiveUrl, sourceType: kind }
             } else {
               kind = canUseHls() ? 'hls' : ''
+              racer.effectiveTransport = kind ? { url: effectiveUrl, sourceType: kind } : null
             }
             racer.kind = kind
             if (!kind || kind === 'proxy_auto') {
@@ -3371,13 +3391,14 @@ async function runHedgedRace(directRacers, proxyRacers, attemptId = 0, options =
     return
   }
 
-  const { entry: winnerEntry, index: winnerIndex } = result
+  const { entry: winnerEntry, index: winnerIndex, effectiveTransport } = result
   if (!(await setIptvUrlIndexForAttempt(winnerIndex, attemptId))) return
 
   try {
-    await tryPlayIptv(winnerEntry.url, isProxyLikeEntry(winnerEntry), winnerEntry.custom_ua || '', attemptId, winnerIndex, sourceType(winnerEntry), {
+    await tryPlayIptv(winnerEntry.url, isProxyLikeEntry(winnerEntry), winnerEntry.custom_ua || '', attemptId, winnerIndex, effectiveTransport?.sourceType || sourceType(winnerEntry), {
       startupTimeoutMs: playCurrentOptions.startupTimeoutMs,
       preserveFrame: playCurrentOptions.preserveFrame,
+      effectiveTransport,
     })
     if (!isAttemptActive(attemptId)) return
     setSourceRuntimeStatus(winnerIndex, 'playing')
