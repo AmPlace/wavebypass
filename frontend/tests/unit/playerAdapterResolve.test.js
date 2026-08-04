@@ -254,6 +254,30 @@ test('测速失败源保留，只有明确 disabled 的源从播放队列排除'
   assert.ok(store.iptvUrls.some((entry) => entry.via_proxy === true))
 })
 
+test('force_proxy 或 requires_proxy_declared 的 YouTube 源禁止创建直连 iframe 候选', async () => {
+  for (const proxyConstraint of [
+    { force_proxy: true },
+    { requires_proxy_declared: true },
+  ]) {
+    setActivePinia(createPinia())
+    const store = usePlayerStore()
+    await store.playIptvChannel({
+      canonical_key: 'YouTube直播',
+      urls: [{
+        url: 'https://www.youtube.com/watch?v=abcdefghijk',
+        source_id: 'src_youtube',
+        source_type: 'youtube',
+        ...proxyConstraint,
+      }],
+    })
+
+    assert.equal(store.iptvUrls.some((entry) => entry.type === 'youtube'), false)
+    assert.equal(store.iptvUrls.length, 1)
+    assert.equal(store.iptvUrls[0].via_proxy, true)
+    assert.match(store.iptvUrls[0].url, /\/api\/media\/channel\/.+\/playlist\.m3u8/)
+  }
+})
+
 test('用户再次点击会重新 resolve', async () => {
   setActivePinia(createPinia())
   installFetchStub([

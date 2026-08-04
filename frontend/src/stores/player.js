@@ -327,7 +327,7 @@ export const usePlayerStore = defineStore('player', {
         if (adapter === 'youtube') {
           const youtubeVideoId = parseYoutubeVideoId(originalUrl) || u.youtube_video_id || ''
           const youtubeChannelId = parseYoutubeChannelId(originalUrl) || u.youtube_channel_id || ''
-          if (youtubeVideoId || youtubeChannelId) {
+          if ((youtubeVideoId || youtubeChannelId) && !sourceForcesProxy(u)) {
             directUrls.push({
               ...u,
               url: originalUrl,
