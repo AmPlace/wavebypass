@@ -133,6 +133,23 @@ const allGroups = ref([])
 const selectedGroup = ref('')
 const loading = ref(false)
 const epgMap = ref({})
+
+let requestSeq = 0
+let activeRequestSeq = 0
+let activeController = null
+
+function _invalidateListRequest() {
+  requestSeq += 1
+  activeRequestSeq = 0
+  if (activeController) {
+    activeController.abort()
+    activeController = null
+  }
+}
+
+function _isCurrentListRequest(seq) {
+  return seq === activeRequestSeq && seq === requestSeq
+}
 const logoCandidateIndexes = ref({})
 const channelSortMode = ref('original')
 const categoryTabs = computed(() => ['全部', ...allGroups.value])
@@ -216,11 +233,20 @@ function isSelectedCategory(tab) {
 }
 
 async function loadChannels() {
+  _invalidateListRequest()
+  const seq = ++requestSeq
+  activeRequestSeq = seq
+  const ctrl = new AbortController()
+  activeController = ctrl
+
   loading.value = true
   try {
-    const data = await fetchAggregatedChannels({ group: selectedGroup.value, search: searchQuery.value.trim() })
+    const group = selectedGroup.value
+    const search = searchQuery.value.trim()
+    const data = await fetchAggregatedChannels({ group, search, signal: ctrl.signal })
+    if (!_isCurrentListRequest(seq)) return { applied: false }
     allChannels.value = data.channels || []
-    if (!selectedGroup.value && !searchQuery.value.trim()) {
+    if (!group && !search) {
       allGroups.value = data.groups || []
     }
     // 同步后端 adapter 能力表：仅取支持 "cover" 的 adapter 名字。
@@ -229,18 +255,26 @@ async function loadChannels() {
     for (const [name, list] of Object.entries(caps)) {
       if (Array.isArray(list) && list.includes('cover')) next.add(String(name).toLowerCase())
     }
-    adapterCoverSupported.value = next
+    if (_isCurrentListRequest(seq)) adapterCoverSupported.value = next
     const keys = (data.channels || []).map(c => c.canonical_key).filter(Boolean)
-    if (keys.length) {
-      useEpg().batchCurrent(keys).then(m => { epgMap.value = m || {} })
+    if (keys.length && _isCurrentListRequest(seq)) {
+      const batchSeq = seq
+      useEpg().batchCurrent(keys).then(m => {
+        if (_isCurrentListRequest(batchSeq)) epgMap.value = m || {}
+      })
     }
     // 延迟触发封面加载：等 DOM 更新后，IntersectionObserver 开始观察可见卡片
     await nextTick()
     _observeVisibleCards()
+    return { applied: true }
   } catch (e) {
+    if (!_isCurrentListRequest(seq)) return { applied: false }
+    if (e?.name === 'AbortError' || e?.status === 0) return { applied: false }
     console.error('加载频道失败:', e)
+    return { applied: false }
+  } finally {
+    if (_isCurrentListRequest(seq)) loading.value = false
   }
-  loading.value = false
 }
 
 // ── IntersectionObserver：仅加载视口附近频道的封面 ──
@@ -293,6 +327,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  _invalidateListRequest()
   if (_coverObserver) {
     _coverObserver.disconnect()
     _coverObserver = null
