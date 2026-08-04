@@ -55,7 +55,16 @@ class SourceIdRefreshTest(unittest.TestCase):
 
             conn = db._connect()
             conn.execute(
-                "UPDATE channels SET probe_status='online', is_working=1 WHERE subscription_id=? AND url=?",
+                """
+                UPDATE channels SET
+                    probe_status='online',
+                    is_working=1,
+                    requires_headers=1,
+                    proxy_required_hint=1,
+                    adapter_title='测速解析标题',
+                    youtube_video_id='probe-video-id'
+                WHERE subscription_id=? AND url=?
+                """,
                 (subscription_id, 'fjtv://fjzh'),
             )
             conn.commit()
@@ -93,6 +102,10 @@ class SourceIdRefreshTest(unittest.TestCase):
             self.assertNotIn(after[new_key][1], {value[1] for value in before.values()})
             self.assertEqual(after[adapter_key][2]['probe_status'], 'online')
             self.assertEqual(after[adapter_key][2]['is_working'], 1)
+            self.assertEqual(after[adapter_key][2]['requires_headers'], 1)
+            self.assertEqual(after[adapter_key][2]['proxy_required_hint'], 1)
+            self.assertEqual(after[adapter_key][2]['adapter_title'], '测速解析标题')
+            self.assertEqual(after[adapter_key][2]['youtube_video_id'], 'probe-video-id')
 
             surviving_ids = {source_id_for(row) for row in after_rows}
             self.assertIn(before[adapter_key][1], surviving_ids)

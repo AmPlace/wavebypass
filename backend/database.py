@@ -411,9 +411,7 @@ _CHANNEL_IDENTITY_FIELDS = (
     'custom_ua',
     'referer',
     'force_proxy',
-    'requires_headers',
     'requires_proxy_declared',
-    'proxy_required_hint',
     'adapter_provider',
     'market_package_id',
     'market_source_id',
@@ -444,6 +442,16 @@ _CHANNEL_CONFIG_FIELDS = (
     'market_source_item_id',
 )
 
+_CHANNEL_UPDATE_FIELDS = tuple(
+    field for field in _CHANNEL_CONFIG_FIELDS
+    if field not in {
+        'youtube_video_id',
+        'requires_headers',
+        'proxy_required_hint',
+        'adapter_title',
+    }
+)
+
 _CHANNEL_BOOLEAN_FIELDS = {
     'force_proxy',
     'requires_headers',
@@ -463,6 +471,8 @@ def _channel_config_value(channel: dict, field: str):
         return _channel_bool(channel.get(field))
     if field == 'source_type':
         return str(channel.get(field) or 'hls').strip().lower()
+    if field == 'adapter_provider':
+        return str(channel.get(field) or channel.get('adapter') or '').strip().lower()
     return str(channel.get(field) or '').strip()
 
 
@@ -493,7 +503,7 @@ async def add_channels_bulk(sub_id: int, channels: list[dict]):
                     existing_by_key.setdefault(_channel_identity_key(dict(row)), []).append(row)
 
                 retained_ids = []
-                update_assignments = ', '.join(f"{field}=?" for field in _CHANNEL_CONFIG_FIELDS)
+                update_assignments = ', '.join(f"{field}=?" for field in _CHANNEL_UPDATE_FIELDS)
                 insert_fields = ('subscription_id', *_CHANNEL_CONFIG_FIELDS)
                 insert_columns = ', '.join(insert_fields)
                 insert_placeholders = ', '.join('?' for _ in insert_fields)
@@ -501,14 +511,15 @@ async def add_channels_bulk(sub_id: int, channels: list[dict]):
                 for original, values in prepared:
                     matches = existing_by_key.get(_channel_identity_key(original)) or []
                     existing = matches.pop(0) if matches else None
-                    config_values = tuple(values[field] for field in _CHANNEL_CONFIG_FIELDS)
                     if existing is not None:
                         row_id = int(existing['id'])
+                        update_values = tuple(values[field] for field in _CHANNEL_UPDATE_FIELDS)
                         conn.execute(
                             f"UPDATE channels SET {update_assignments} WHERE id=? AND subscription_id=?",
-                            (*config_values, row_id, sub_id),
+                            (*update_values, row_id, sub_id),
                         )
                     else:
+                        config_values = tuple(values[field] for field in _CHANNEL_CONFIG_FIELDS)
                         cursor = conn.execute(
                             f"INSERT INTO channels({insert_columns}) VALUES({insert_placeholders})",
                             (sub_id, *config_values),
