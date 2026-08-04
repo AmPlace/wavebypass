@@ -1044,14 +1044,7 @@ function handleChannelRowClick(item) {
 }
 
 function sourceTargetUrl(entry) {
-  if (!entry?.url) return ''
-  if (entry.original_url) return entry.original_url
-  try {
-    const parsed = new URL(entry.url)
-    return parsed.searchParams.get('target_url') || entry.url
-  } catch {
-    return entry.url
-  }
+  return entry?.original_url || entry?.url || ''
 }
 
 function sourceHost(url) {
@@ -1218,13 +1211,6 @@ function isCurrentIptv(ch) {
   return current && current.name === ch.name
 }
 
-function isIptvUntested(ch) {
-  return ch.urls.every(u => {
-    const status = u.probe_status || ''
-    return status ? status === 'untested' : u.is_working === -1
-  })
-}
-
 function isIptvAllNotLive(ch) {
   return isChannelAllNotLive(ch)
 }
@@ -1278,8 +1264,6 @@ function playNext() {
 
 // ── IPTV 视频播放 ──
 
-function releaseWideProxyUrl() {}
-
 const HLS_ABR_PATCH_KEY = '__waveflowAbrNullGuard'
 
 function patchHlsAbrNullGuard(hls) {
@@ -1314,15 +1298,13 @@ function clearHlsInternalTimers(hls) {
   }
 }
 
-function trackHlsSource(hls, url) {
+function trackHlsSource(hls) {
   patchHlsAbrNullGuard(hls)
-  if (hls && url) hls.__waveflowSourceUrl = url
 }
 
 function releaseTrackedHls(hls) {
   clearRuntimeHandlerCleanup(hls)
   clearHlsInternalTimers(hls)
-  releaseWideProxyUrl(hls?.__waveflowSourceUrl)
 }
 
 function destroyIptvHls() {
@@ -1931,12 +1913,6 @@ function canUseMpegTs() {
   } catch {
     return false
   }
-}
-
-function getProxyUrl(url) {
-  // 旧路由已删除。直接返回 channel-based URL。
-  // 调用方 (mpegts 降级) 后续应改为 canonical_key 入口。
-  return `${API_BASE}/api/media/proxy/playlist/${encodeURIComponent(url)}`
 }
 
 // 设置面板候选：起播并发数。建议未来高级设置暴露为 1-12，默认 6。
@@ -2791,7 +2767,7 @@ async function tryPlayIptv(url, usingProxy = false, customUa = '', attemptId = 0
       }
       if (customUa) hlsConfig.xhrSetup = (xhr) => { xhr.setRequestHeader('User-Agent', customUa) }
       const hls = new Hls(hlsConfig)
-      trackHlsSource(hls, effectiveUrl)
+      trackHlsSource(hls)
       hlsInstance = hls
       iptvHlsRef.value = hls
       let fragFail = 0
@@ -3100,7 +3076,6 @@ async function runHedgedRace(directRacers, proxyRacers, attemptId = 0, options =
       if (racer.kind === 'hls' && racer.engine) {
         racer.engine.stopLoad?.()
         racer.engine.detachMedia?.()
-        releaseWideProxyUrl(racer.entry?.url)
         racer.engine.destroy()
       } else if (isMpegTsEngineType(racer.kind) && racer.engine) {
         racer.engine.unload?.()
@@ -3253,7 +3228,7 @@ async function runHedgedRace(directRacers, proxyRacers, attemptId = 0, options =
             if (entry.custom_ua) hlsConfig.xhrSetup = (xhr) => { xhr.setRequestHeader('User-Agent', entry.custom_ua) }
             const hls = new Hls(hlsConfig)
             racer.engine = hls
-            trackHlsSource(hls, effectiveUrl)
+            trackHlsSource(hls)
 
             const label = `${phaseLabel}#${i} HLS`
             const onMediaAttached = () => {
@@ -3389,422 +3364,6 @@ async function runHedgedRace(directRacers, proxyRacers, attemptId = 0, options =
     console.warn('[RACE:hedged] 胜出源正式起播失败:', e?.message)
     if (await fallbackToNextIptvUrl(attemptId)) {
       return await playCurrentIptvUrl(attemptId, playCurrentOptions)
-    }
-    markAllIptvSourcesUnavailable(attemptId)
-  }
-}
-
-async function raceDirectHlsSources(entries, attemptId = 0) {
-  if (!isAttemptActive(attemptId)) return
-  cancelCurrentStartup()
-  cancelActiveProxyRace()
-  destroyIptvEngines()
-  resetIptvVideo()
-  playerStore.setLoading(true)
-
-  const fresh = entries.filter((entry) => sourceType(entry) === 'hls' && isHlsUrl(entry.url) && !isMpegTsUrl(entry.url))
-  if (fresh.length < 2) {
-    return false
-  }
-
-  console.log(`[RACE:direct] ${fresh.length} 个直连 HLS 源并发探测`)
-  fresh.forEach((entry) => setSourceRuntimeStatusByEntry(entry, 'trying'))
-  let failCount = 0
-  let raceTimer = null
-  let settled = false
-  const racers = []
-
-  const cleanupRacer = (racer) => {
-    if (!racer || racer.cleaned) return
-    racer.cleaned = true
-    try {
-      releaseWideProxyUrl(racer.entry?.url)
-      racer.hls.destroy()
-    } catch (e) {
-      console.warn('[RACE:direct] cleanup failed:', e)
-    }
-    if (racer.video.parentNode) racer.video.remove()
-  }
-
-  const result = await new Promise((resolve) => {
-    const finish = (value) => {
-      if (settled) return
-      settled = true
-      clearTimeout(raceTimer)
-      for (const racer of racers) {
-        if (value && racer.hls !== value.hls) {
-          const racerIndex = playerStore.iptvUrls.indexOf(racer.entry)
-          if (getSourceRuntimeStatus(racerIndex) === 'trying') {
-            setSourceRuntimeStatus(racerIndex, 'stopped')
-          }
-        }
-        if (!value || racer.hls !== value.hls) cleanupRacer(racer)
-      }
-      if (_cleanupActiveRace === cancelRace) _cleanupActiveRace = null
-      resolve(value)
-    }
-
-    const cancelRace = () => finish(null)
-    _cleanupActiveRace = cancelRace
-
-    raceTimer = setTimeout(() => {
-      for (const entry of fresh) setSourceRuntimeStatusByEntry(entry, 'failed')
-      finish(null)
-    }, 12_000)
-
-    fresh.forEach((entry, i) => {
-      const hlsConfig = { enableWorker: false, maxBufferLength: 1, maxMaxBufferLength: 2 }
-      const hls = new Hls(hlsConfig)
-      trackHlsSource(hls, entry.url)
-      const probeVideo = document.createElement('video')
-      probeVideo.muted = true
-      probeVideo.playsInline = true
-      probeVideo.style.display = 'none'
-      document.body.appendChild(probeVideo)
-      const racer = { hls, video: probeVideo, entry, cleaned: false, fragFail: 0 }
-      racers.push(racer)
-
-      hls.on(Hls.Events.FRAG_LOADED, () => {
-        if (!isAttemptActive(attemptId)) { finish(null); return }
-        if (settled) return
-        console.log('[RACE:direct] winner', {
-          index: i,
-          source_id: entrySourceId(entry),
-          request_source_id: extractSourceIdFromUrl(entry?.url || ''),
-          transport: sourceTransport(entry),
-          url: (entry?.url || '').slice(0, 80),
-        })
-        setSourceRuntimeStatusByEntry(entry, 'trying')
-        hls.detachMedia()
-        finish({ hls, entry, video: probeVideo })
-      })
-
-      hls.on(Hls.Events.ERROR, (_, d) => {
-        if (!isAttemptActive(attemptId)) { finish(null); return }
-        if (settled || racer.cleaned) return
-        if (!d.fatal && d.details === Hls.ErrorDetails.FRAG_LOAD_ERROR) {
-          racer.fragFail++
-        }
-        if (d.fatal || d.type === Hls.ErrorTypes.NETWORK_ERROR || racer.fragFail >= 2) {
-          failCount++
-          setSourceRuntimeStatusByEntry(entry, 'failed')
-          cleanupRacer(racer)
-          if (failCount >= fresh.length) finish(null)
-        }
-      })
-
-      hls.loadSource(entry.url)
-      hls.attachMedia(probeVideo)
-    })
-  })
-
-  if (!isAttemptActive(attemptId)) {
-    if (result) {
-      releaseWideProxyUrl(result.entry?.url)
-      result.hls.destroy()
-      if (result.video.parentNode) result.video.remove()
-    }
-    return
-  }
-
-  if (!result) {
-    console.warn('[RACE:direct] 本轮直连 HLS 探测全部失败')
-    const lastRacedIndex = Math.max(...fresh.map((entry) => playerStore.iptvUrls.indexOf(entry)))
-    if (lastRacedIndex >= 0) await setIptvUrlIndexForAttempt(lastRacedIndex, attemptId)
-    if (await fallbackToNextIptvUrl(attemptId)) {
-      return await playCurrentIptvUrl(attemptId)
-    }
-    markAllIptvSourcesUnavailable(attemptId)
-    return
-  }
-
-  const { hls: winnerHls, entry: winnerEntry, video: winnerVideo } = result
-  winnerVideo.remove()
-  const winnerIndex = playerStore.iptvUrls.indexOf(winnerEntry)
-  if (!(await setIptvUrlIndexForAttempt(winnerIndex, attemptId))) {
-    releaseWideProxyUrl(winnerEntry.url)
-    winnerHls.destroy()
-    return
-  }
-  iptvHlsRef.value = winnerHls
-  trackHlsSource(winnerHls, winnerEntry.url)
-
-  try {
-    await new Promise((resolve, reject) => {
-      let settledAttach = false
-      let attachTimer = null
-      const cleanupAttach = () => {
-        clearTimeout(attachTimer)
-        winnerHls.off(Hls.Events.MEDIA_ATTACHED, onMediaAttached)
-        winnerHls.off(Hls.Events.ERROR, onAttachError)
-      }
-      const settleAttach = (err) => {
-        if (settledAttach) return
-        settledAttach = true
-        cleanupAttach()
-        if (err) reject(err)
-        else resolve()
-      }
-      const onMediaAttached = () => settleAttach()
-      const onAttachError = (_, data) => {
-        if (data.fatal || data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-          settleAttach(new Error(data.details || data.type))
-        }
-      }
-      winnerHls.on(Hls.Events.MEDIA_ATTACHED, onMediaAttached)
-      winnerHls.on(Hls.Events.ERROR, onAttachError)
-      attachTimer = setTimeout(() => settleAttach(new Error('直连源接管超时')), 10_000)
-      winnerHls.attachMedia(iptvVideoRef.value)
-      winnerHls.startLoad(-1)
-    })
-
-    if (!isAttemptActive(attemptId)) throw cancelledError()
-    iptvVideoRef.value.volume = volume.value
-    await iptvVideoRef.value.play()
-    if (!isAttemptActive(attemptId)) throw cancelledError()
-    attachRuntimeHlsErrorHandlers(winnerHls, winnerEntry.url, false, attemptId, winnerIndex)
-    setSourceRuntimeStatusByEntry(winnerEntry, 'playing')
-    playerStore.togglePlay(true)
-    playerStore.clearPlaybackError()
-    playerStore.setLoading(false)
-  } catch (e) {
-    if (!isAttemptActive(attemptId)) {
-      releaseWideProxyUrl(winnerEntry.url)
-      winnerHls.destroy()
-      clearCurrentHlsIf(winnerHls)
-      return
-    }
-    console.warn('[RACE:direct] 胜出直连源接管失败:', e?.message)
-    setSourceRuntimeStatusByEntry(winnerEntry, 'failed')
-    releaseWideProxyUrl(winnerEntry.url)
-    winnerHls.destroy()
-    clearCurrentHlsIf(winnerHls)
-    if (await fallbackToNextIptvUrl(attemptId)) {
-      return await playCurrentIptvUrl(attemptId)
-    }
-    markAllIptvSourcesUnavailable(attemptId)
-  }
-}
-
-async function raceProxySources(entries, attemptId = 0) {
-  if (!isAttemptActive(attemptId)) return
-  cancelCurrentStartup()
-  cancelActiveProxyRace()
-  destroyIptvEngines()
-  resetIptvVideo()
-  playerStore.setLoading(true)
-
-  const fresh = entries.filter(e => sourceType(e) !== 'youtube' && sourceType(e) !== 'unsupported_youtube_url' && !isRaceLoser(e))
-  if (!fresh.length) {
-    if (await fallbackToNextIptvUrl(attemptId)) {
-      return await playCurrentIptvUrl(attemptId)
-    }
-    markAllIptvSourcesUnavailable(attemptId)
-    return
-  }
-
-  if (!canUseHls()) {
-    const entry = fresh[0]
-    const index = playerStore.iptvUrls.indexOf(entry)
-    if (!(await setIptvUrlIndexForAttempt(index, attemptId))) return
-    try {
-      const sourceIndex = playerStore.iptvUrls.indexOf(entry)
-      await tryPlayIptv(entry.url, true, entry.custom_ua || '', attemptId, sourceIndex, sourceType(entry))
-      if (!isAttemptActive(attemptId)) return
-      playerStore.clearPlaybackError()
-      playerStore.setLoading(false)
-    } catch (e) {
-      if (!isAttemptActive(attemptId)) return
-      markRaceLoser(entry)
-      console.warn('[IPTV] 原生代理源失败:', e?.message)
-      if (await fallbackToNextIptvUrl(attemptId)) {
-        return await playCurrentIptvUrl(attemptId)
-      }
-      markAllIptvSourcesUnavailable(attemptId)
-    }
-    return
-  }
-
-  console.log(`[RACE] ${fresh.length} 个代理源并发探测`)
-  fresh.forEach((entry) => setSourceRuntimeStatusByEntry(entry, 'trying'))
-  let failCount = 0
-  let raceTimer = null
-  let settled = false
-  const racers = []
-
-  const cleanupRacer = (racer) => {
-    if (!racer || racer.cleaned) return
-    racer.cleaned = true
-    try {
-      releaseWideProxyUrl(racer.entry?.url)
-      racer.hls.destroy()
-    } catch (e) {
-      console.warn('[RACE] cleanup failed:', e)
-    }
-    if (racer.video.parentNode) racer.video.remove()
-  }
-
-  const result = await new Promise((resolve) => {
-    const finish = (value) => {
-      if (settled) return
-      settled = true
-      clearTimeout(raceTimer)
-      for (const racer of racers) {
-        if (value && racer.hls !== value.hls) {
-          const racerIndex = playerStore.iptvUrls.indexOf(racer.entry)
-          if (getSourceRuntimeStatus(racerIndex) === 'trying') {
-            setSourceRuntimeStatus(racerIndex, 'stopped')
-          }
-        }
-        if (!value || racer.hls !== value.hls) cleanupRacer(racer)
-      }
-      if (_cleanupActiveRace === cancelRace) _cleanupActiveRace = null
-      resolve(value)
-    }
-
-    const cancelRace = () => finish(null)
-    _cleanupActiveRace = cancelRace
-
-    raceTimer = setTimeout(() => {
-      for (const entry of fresh) {
-        markRaceLoser(entry)
-        setSourceRuntimeStatusByEntry(entry, 'failed')
-      }
-      finish(null)
-    }, 8000)
-
-    fresh.forEach((entry, i) => {
-      const customUa = entry.custom_ua || ''
-      const hlsConfig = { enableWorker: false, maxBufferLength: 1, maxMaxBufferLength: 2 }
-      if (customUa) hlsConfig.xhrSetup = (xhr) => { xhr.setRequestHeader('User-Agent', customUa) }
-      const hls = new Hls(hlsConfig)
-      trackHlsSource(hls, entry.url)
-      const probeVideo = document.createElement('video')
-      probeVideo.muted = true
-      probeVideo.playsInline = true
-      probeVideo.style.display = 'none'
-      document.body.appendChild(probeVideo)
-      const racer = { hls, video: probeVideo, entry, cleaned: false, fragFail: 0 }
-      racers.push(racer)
-
-      hls.on(Hls.Events.FRAG_LOADED, () => {
-        if (!isAttemptActive(attemptId)) { finish(null); return }
-        if (settled) return
-        console.log('[RACE] winner', {
-          index: i,
-          source_id: entrySourceId(entry),
-          request_source_id: extractSourceIdFromUrl(entry?.url || ''),
-          transport: sourceTransport(entry),
-          url: (entry?.url || '').slice(0, 80),
-        })
-        setSourceRuntimeStatusByEntry(entry, 'trying')
-        hls.detachMedia()
-        finish({ hls, entry, video: probeVideo })
-      })
-
-      hls.on(Hls.Events.ERROR, (_, d) => {
-        if (!isAttemptActive(attemptId)) { finish(null); return }
-        if (settled || racer.cleaned) return
-        if (!d.fatal && d.details === Hls.ErrorDetails.FRAG_LOAD_ERROR) {
-          racer.fragFail++
-        }
-        if (d.fatal || d.type === Hls.ErrorTypes.NETWORK_ERROR || racer.fragFail >= 2) {
-          failCount++
-          markRaceLoser(entry)
-          setSourceRuntimeStatusByEntry(entry, 'failed')
-          cleanupRacer(racer)
-          if (failCount >= fresh.length) finish(null)
-        }
-      })
-
-      hls.loadSource(entry.url)
-      hls.attachMedia(probeVideo)
-    })
-  })
-
-  if (!isAttemptActive(attemptId)) {
-    if (result) {
-      releaseWideProxyUrl(result.entry?.url)
-      result.hls.destroy()
-      if (result.video.parentNode) result.video.remove()
-    }
-    return
-  }
-
-  if (!result) {
-    console.warn('[RACE] 全部代理源探测失败')
-    if (await fallbackToNextIptvUrl(attemptId)) {
-      return await playCurrentIptvUrl(attemptId)
-    }
-    markAllIptvSourcesUnavailable(attemptId)
-    return
-  }
-
-  // 胜者接管播放
-  const { hls: winnerHls, entry: winnerEntry, video: winnerVideo } = result
-  winnerVideo.remove()
-  const winnerIndex = playerStore.iptvUrls.indexOf(winnerEntry)
-  if (!(await setIptvUrlIndexForAttempt(winnerIndex, attemptId))) {
-    releaseWideProxyUrl(winnerEntry.url)
-    winnerHls.destroy()
-    return
-  }
-  iptvHlsRef.value = winnerHls
-  trackHlsSource(winnerHls, winnerEntry.url)
-
-  try {
-    await new Promise((resolve, reject) => {
-      let settledAttach = false
-      let attachTimer = null
-      const cleanupAttach = () => {
-        clearTimeout(attachTimer)
-        winnerHls.off(Hls.Events.MEDIA_ATTACHED, onMediaAttached)
-        winnerHls.off(Hls.Events.ERROR, onAttachError)
-      }
-      const settleAttach = (err) => {
-        if (settledAttach) return
-        settledAttach = true
-        cleanupAttach()
-        if (err) reject(err)
-        else resolve()
-      }
-      const onMediaAttached = () => settleAttach()
-      const onAttachError = (_, data) => {
-        if (data.fatal || data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-          settleAttach(new Error(data.details || data.type))
-        }
-      }
-      winnerHls.on(Hls.Events.MEDIA_ATTACHED, onMediaAttached)
-      winnerHls.on(Hls.Events.ERROR, onAttachError)
-      attachTimer = setTimeout(() => settleAttach(new Error('代理源接管超时')), 10_000)
-      winnerHls.attachMedia(iptvVideoRef.value)
-      winnerHls.startLoad(-1)
-    })
-
-    if (!isAttemptActive(attemptId)) throw cancelledError()
-    iptvVideoRef.value.volume = volume.value
-    await iptvVideoRef.value.play()
-    if (!isAttemptActive(attemptId)) throw cancelledError()
-    attachRuntimeHlsErrorHandlers(winnerHls, winnerEntry.url, true, attemptId, winnerIndex)
-    setSourceRuntimeStatusByEntry(winnerEntry, 'playing')
-    playerStore.togglePlay(true)
-    playerStore.clearPlaybackError()
-    playerStore.setLoading(false)
-  } catch (e) {
-    if (!isAttemptActive(attemptId)) {
-      releaseWideProxyUrl(winnerEntry.url)
-      winnerHls.destroy()
-      clearCurrentHlsIf(winnerHls)
-      return
-    }
-    console.warn('[RACE] 胜出代理接管失败:', e?.message)
-    markRaceLoser(winnerEntry)
-    setSourceRuntimeStatusByEntry(winnerEntry, 'failed')
-    releaseWideProxyUrl(winnerEntry.url)
-    winnerHls.destroy()
-    clearCurrentHlsIf(winnerHls)
-    if (await fallbackToNextIptvUrl(attemptId)) {
-      return await playCurrentIptvUrl(attemptId)
     }
     markAllIptvSourcesUnavailable(attemptId)
   }
@@ -4306,7 +3865,6 @@ watch(() => playerStore.iptvUrlIndex, () => {
 const epgRequestDate = ref('')
 const {
   current: _epgCurrent,
-  next: _epgNext,
   schedule: _epgSchedule,
   selectedDate: _epgSelectedDate,
   availableDates: _epgAvailableDates,

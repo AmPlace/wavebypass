@@ -12,13 +12,13 @@ import json
 from datetime import datetime, timedelta, timezone
 from collections.abc import AsyncIterator
 from pathlib import Path
-from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlparse, urlunparse
+from urllib.parse import quote, urljoin, urlparse
 from zoneinfo import ZoneInfo
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from contextlib import asynccontextmanager
 from fetchers import STATION_FETCHER_MAP, yunting
 import database
@@ -743,7 +743,7 @@ async def get_config(request: Request) -> dict:
 
 @app.get("/api/stations", dependencies=[Depends(require_browse_access)])
 async def get_stations(request: Request) -> Response:
-    """返回静态电台列表，根据地域限制过滤。前端启动时调用替代本地 stations.js。"""
+    """返回静态电台列表，并根据地域限制过滤。"""
 
     if not GEO_RESTRICT:
         stations = STATIC_STATIONS
@@ -2407,37 +2407,9 @@ def _drop_wide_cache(cache_key: str) -> None:
     _wide_cache.pop(cache_key + '_ts', None)
 
 
-def _strip_youtube_probe_param(target_url: str) -> str:
-    """从 adapter target_url 里剥掉 ?probe=1 等仅用于元信息探测的参数。
-
-    YouTube probe 模式只用于前端轻量探测频道是否在播、video id 是什么；
-    一旦把带 probe 的 URL 当 proxy_url 反吐回去，
-    后续 resolve 会再次走 probe 分支并返回空 url，最终把播放路径打成 502。
-    """
-    raw = (target_url or '').strip()
-    if not raw:
-        return raw
-    try:
-        parsed = urlparse(raw)
-    except ValueError:
-        return raw
-    # 只对 adapter scheme 生效
-    if parsed.scheme.lower() != 'youtube' or not parsed.query:
-        return raw
-    pairs = parse_qsl(parsed.query, keep_blank_values=True)
-    cleaned = [(k, v) for k, v in pairs if k.lower() != 'probe']
-    if len(cleaned) == len(pairs):
-        return raw
-    return urlunparse(parsed._replace(query=urlencode(cleaned, doseq=True)))
-
-
 def _ensure_hls_playlist_text(text: str, url: str) -> None:
     if not (text or "").lstrip().startswith("#EXTM3U"):
         raise HTTPException(status_code=502, detail=f"上游没有返回有效 M3U8: {url}")
-
-
-def _adapter_error_response(exc: AdapterResolveError) -> JSONResponse:
-    return JSONResponse(status_code=exc.status_code, content=exc.to_payload())
 
 
 def _should_proxy_iptv_chunk(seg_url: str, proxy_ts: int = 0) -> bool:

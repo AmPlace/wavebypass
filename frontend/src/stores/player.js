@@ -23,10 +23,6 @@ export const usePlayerStore = defineStore('player', {
     currentEpgProgram: null,   // EPG: { title, start, stop, progress, remaining_minutes }
   }),
 
-  getters: {
-    stationCount: (state) => state.stationList.length,
-  },
-
   actions: {
     // stationId 对应后端路由中的 {station_id}
     switchStation(stationId) {
