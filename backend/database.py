@@ -405,48 +405,133 @@ async def delete_subscription(sub_id: int):
 
 # ── Channels ──
 
+_CHANNEL_IDENTITY_FIELDS = (
+    'url',
+    'source_type',
+    'custom_ua',
+    'referer',
+    'force_proxy',
+    'requires_headers',
+    'requires_proxy_declared',
+    'proxy_required_hint',
+    'adapter_provider',
+    'market_package_id',
+    'market_source_id',
+    'market_channel_id',
+    'market_source_item_id',
+)
+
+_CHANNEL_CONFIG_FIELDS = (
+    'name',
+    'url',
+    'logo_url',
+    'group_name',
+    'tvg_id',
+    'tvg_name',
+    'source_type',
+    'youtube_video_id',
+    'referer',
+    'custom_ua',
+    'force_proxy',
+    'requires_headers',
+    'requires_proxy_declared',
+    'proxy_required_hint',
+    'adapter_provider',
+    'adapter_title',
+    'market_package_id',
+    'market_source_id',
+    'market_channel_id',
+    'market_source_item_id',
+)
+
+_CHANNEL_BOOLEAN_FIELDS = {
+    'force_proxy',
+    'requires_headers',
+    'requires_proxy_declared',
+    'proxy_required_hint',
+}
+
+
+def _channel_bool(value) -> int:
+    if isinstance(value, str):
+        return 0 if value.strip().lower() in {'', '0', 'false', 'no', 'off', 'none', 'null'} else 1
+    return 1 if value else 0
+
+
+def _channel_config_value(channel: dict, field: str):
+    if field in _CHANNEL_BOOLEAN_FIELDS:
+        return _channel_bool(channel.get(field))
+    if field == 'source_type':
+        return str(channel.get(field) or 'hls').strip().lower()
+    return str(channel.get(field) or '').strip()
+
+
+def _channel_identity_key(channel: dict) -> tuple:
+    return tuple(_channel_config_value(channel, field) for field in _CHANNEL_IDENTITY_FIELDS)
+
+
 async def add_channels_bulk(sub_id: int, channels: list[dict]):
     def _add():
+        prepared = []
+        for channel in channels:
+            values = {field: _channel_config_value(channel, field) for field in _CHANNEL_CONFIG_FIELDS}
+            if not values['name']:
+                raise ValueError('channel name 不能为空')
+            if not values['url']:
+                raise ValueError('channel url 不能为空')
+            prepared.append((channel, values))
+
         conn = _connect()
-        conn.execute("DELETE FROM channels WHERE subscription_id=?", (sub_id,))
-        now = datetime.now(timezone.utc).isoformat()
-        conn.executemany(
-            "INSERT INTO channels("
-            "subscription_id, name, url, logo_url, group_name, tvg_id, tvg_name, "
-            "is_working, probe_status, live_status, source_type, youtube_video_id, referer, custom_ua, force_proxy, "
-            "market_package_id, market_source_id, market_channel_id, market_source_item_id"
-            ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [
-                (
-                    sub_id,
-                    ch['name'],
-                    ch['url'],
-                    ch.get('logo_url', ''),
-                    ch.get('group_name', ''),
-                    ch.get('tvg_id', ''),
-                    ch.get('tvg_name', ''),
-                    0,
-                    'untested',
-                    'unknown',
-                    ch.get('source_type', 'hls'),
-                    ch.get('youtube_video_id', ''),
-                    ch.get('referer', ''),
-                    ch.get('custom_ua', ''),
-                    1 if ch.get('force_proxy') else 0,
-                    ch.get('market_package_id', ''),
-                    ch.get('market_source_id', ''),
-                    ch.get('market_channel_id', ''),
-                    ch.get('market_source_item_id', ''),
+        try:
+            with conn:
+                existing_rows = conn.execute(
+                    "SELECT * FROM channels WHERE subscription_id=? ORDER BY id",
+                    (sub_id,),
+                ).fetchall()
+                existing_by_key: dict[tuple, list[sqlite3.Row]] = {}
+                for row in existing_rows:
+                    existing_by_key.setdefault(_channel_identity_key(dict(row)), []).append(row)
+
+                retained_ids = []
+                update_assignments = ', '.join(f"{field}=?" for field in _CHANNEL_CONFIG_FIELDS)
+                insert_fields = ('subscription_id', *_CHANNEL_CONFIG_FIELDS)
+                insert_columns = ', '.join(insert_fields)
+                insert_placeholders = ', '.join('?' for _ in insert_fields)
+
+                for original, values in prepared:
+                    matches = existing_by_key.get(_channel_identity_key(original)) or []
+                    existing = matches.pop(0) if matches else None
+                    config_values = tuple(values[field] for field in _CHANNEL_CONFIG_FIELDS)
+                    if existing is not None:
+                        row_id = int(existing['id'])
+                        conn.execute(
+                            f"UPDATE channels SET {update_assignments} WHERE id=? AND subscription_id=?",
+                            (*config_values, row_id, sub_id),
+                        )
+                    else:
+                        cursor = conn.execute(
+                            f"INSERT INTO channels({insert_columns}) VALUES({insert_placeholders})",
+                            (sub_id, *config_values),
+                        )
+                        row_id = int(cursor.lastrowid)
+                    retained_ids.append(row_id)
+
+                if retained_ids:
+                    placeholders = ', '.join('?' for _ in retained_ids)
+                    conn.execute(
+                        f"DELETE FROM channels WHERE subscription_id=? AND id NOT IN ({placeholders})",
+                        (sub_id, *retained_ids),
+                    )
+                else:
+                    conn.execute("DELETE FROM channels WHERE subscription_id=?", (sub_id,))
+
+                now = datetime.now(timezone.utc).isoformat()
+                conn.execute(
+                    "UPDATE subscriptions SET channel_count=?, last_updated=? WHERE id=?",
+                    (len(channels), now, sub_id),
                 )
-                for ch in channels
-            ],
-        )
-        conn.execute(
-            "UPDATE subscriptions SET channel_count=?, last_updated=? WHERE id=?",
-            (len(channels), now, sub_id),
-        )
-        conn.commit()
-        conn.close()
+        finally:
+            conn.close()
     await asyncio.to_thread(_add)
 
 
