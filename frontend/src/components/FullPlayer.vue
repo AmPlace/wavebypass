@@ -1233,8 +1233,13 @@ function isIptvAllNotLive(ch) {
 }
 
 function isIptvUnavailable(ch) {
-  // 与 IptvHome 共享同一规则：测速只排序，只有全部 source 明确禁用才阻止播放。
-  return isChannelAllUrlsBlocked(ch)
+  if (isChannelAllUrlsBlocked(ch)) return true
+  const urls = Array.isArray(ch?.urls) ? ch.urls : []
+  return urls.length > 0 && urls.every((entry) => {
+    if (isSourceExplicitlyDisabled(entry)) return true
+    const sourceType = String(entry?.source_type || entry?.transport || '').trim().toLowerCase()
+    return sourceType === 'unsupported' || sourceType === 'unsupported_youtube_url'
+  })
 }
 
 // 切换到 IPTV 模式时加载频道列表
