@@ -500,11 +500,11 @@ class AutomationRunnerTest(unittest.IsolatedAsyncioTestCase):
         database_module.update_automation_task_progress.assert_awaited_once()
 
     def test_runner_contains_no_scheduler_or_background_loop(self):
-        source = inspect.getsource(self.automation)
+        source = inspect.getsource(self.automation.AutomationRunner)
         self.assertNotIn("asyncio.create_task", source)
         self.assertNotIn("asyncio.sleep", source)
-        self.assertNotIn("class AutomationScheduler", source)
-        self.assertNotIn("class AutomationService", source)
+        self.assertNotIn("AutomationScheduler", source)
+        self.assertNotIn("AutomationService", source)
 
 
 if __name__ == "__main__":

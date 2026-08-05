@@ -104,3 +104,82 @@ M2A-1 只提供数据库所有权。如果 Scheduler、管理 API 和业务模�
 ### 边界
 
 本批未实现 Scheduler、AutomationService 生命周期、FastAPI lifespan、Market task handler 或 API。
+
+## M2A-2b：通用 AutomationScheduler 与 AutomationService 生命周期
+
+### 背景与成因
+
+M2A-2a 已经统一了单轮任务的 claim、run token、handler 执行和状态结算，但仍没有长期调度生命周期。如果各业务模块自行使用 `asyncio.create_task()` 和 `asyncio.sleep()`，会再次出现重复 Scheduler、不可控 shutdown、配置变化不生效、后台异常无人读取，以及手动任务与自动任务走不同执行路径的问题。因此本批只补通用调度和 task handle 所有权，不接入任何 Market 业务。
+
+### 采用方案
+
+- `AutomationTaskDefinition` 增加 `scheduled_task_type` 和 `allow_automatic_scheduling`。
+- 自动调度默认关闭；启用时必须明确 scheduled task type，且该类型必须属于 `allowed_task_types`。
+- `AutomationEventWaiter` 统一等待 timeout、config changed 和 stop 三种结果。
+- `AutomationScheduler` 一个实例只负责一个 definition，只读取配置、等待和调用统一 Runner。
+- `AutomationService` 是长期 Scheduler task handle 的唯一所有者，负责 interrupted 恢复、幂等 start/stop、配置唤醒、异常观察和可选强制取消。
+- Runner、数据库 claim、run token 和完成状态语义保持不变。
+
+### Scheduler 时间语义
+
+```text
+enabled 首次启动
+→ 读取持久化配置
+→ 等待完整 initial delay
+→ Runner.run(trigger=scheduler)
+→ 从本轮完成时开始等待 interval
+→ 下一轮 Runner
+```
+
+- disabled 时使用无超时等待，不运行 Runner，也不 busy loop。
+- disabled → enabled 后重新等待完整 initial delay，不立即执行。
+- interval 修改会中断当前周期等待，重新读取配置并从头等待新 interval。
+- initial delay 中只修改 interval 不重置初始 deadline；关闭任务会退出 initial 阶段，重新启用后重新等待完整 initial delay。
+- Runner 返回 success、partial、failed 或 busy 后都进入正常 interval，不排队、不立即重试。
+- Runner 返回 cancelled 或 stop event 已设置时退出 Scheduler。
+- Repository/Runner 基础设施异常记录日志并等待默认 60 秒受控退避，避免高速重试；definition 与持久化 conflict group 不一致属于终止性配置错误。
+
+### Waiter 和资源清理
+
+生产 waiter 使用两个短期 task 分别监听 stop event 和 config event，并使用 `asyncio.wait(..., timeout=delay)` 实现可取消等待。返回前会取消并 await 所有未完成的内部 task，不遗留 pending task。测试使用可控 waiter 显式释放 timeout、reconfigured 和 stopped，不真实等待 5 分钟或 24 小时，也不 patch 全局 `asyncio.sleep()`。
+
+### Service task handle 所有权
+
+- Service 保存 `task_id → AutomationScheduler` 和 `task_id → asyncio.Task`。
+- 长期 Scheduler 的 `asyncio.create_task()` 只出现在 Service 启动路径。
+- start 先执行 `running → interrupted` 恢复，恢复完成前不创建任何 Scheduler task。
+- start 和 stop 均受 lifecycle lock 保护并保持幂等。
+- stop 设置每个 Scheduler 的共享 stop event，等待当前 Runner 协作退出。
+- 只有调用者显式提供 timeout 时，超时后才强制 cancel task；取消继续传播到 Runner，保留其 cancelled 尽力落库语义。
+- stop 后清空 Scheduler 和 task handle，可在测试或新生命周期中重新 start。
+- Scheduler 异常由 done callback 主动读取并记录，不产生 `Task exception was never retrieved`，也不取消其他 Scheduler。
+
+### 配置变化通知
+
+`AutomationService.notify_config_changed(task_id)` 只设置目标 Scheduler 的 Event。Event 只作为合并唤醒信号，Scheduler 醒来后始终从 Repository 重新读取真实配置。重复通知会自然合并，不携带配置快照，也不会唤醒其他任务。
+
+### 实际落地
+
+- 修改 `backend/automation.py`：补充调度字段、只读 definition 列表、Waiter、Scheduler 和 Service。
+- 新增 `backend/tests/test_automation_scheduler.py`。
+- 最小调整 `backend/tests/test_automation_runner.py`：将“Runner 不包含后台循环”的源码检查限定到 Runner 类本身。
+- 未修改 `backend/database.py`、`backend/main.py`、`backend/market.py` 或任何前端文件。
+
+### 测试先行证据
+
+1. 在生产代码修改前新增 Scheduler/Service 定向测试。
+2. 当前 HEAD 因 `AutomationTaskDefinition` 不支持 `scheduled_task_type`，8 个测试稳定失败。
+3. 初版实现后测试进一步暴露 mock Runner 调用形态和异步等待夹具的时序问题；修正测试夹具后未发现需要改变业务策略的额外生产缺陷。
+4. 扩展测试覆盖 initial/interval/disabled/config change、stop/cancel/busy/failed、waiter 清理、Service handle、interrupted 恢复、任务隔离、异常观察、配置冲突和强制取消。
+
+### 验证结果
+
+- Scheduler/Service 定向与 Runner 测试：38 passed。
+- Scheduler、Runner、持久化和 Market 生命周期组合：73 passed，4 subtests passed。
+- 后端全量：294 passed，54 subtests passed。
+- Python 编译检查和 `git diff --check` 通过。
+- 全量端口型 HLS 集成测试在允许绑定 localhost 端口的环境运行通过；沙箱内失败原因为 Uvicorn 无法启动，不是代码回归。
+
+### 边界
+
+本批未实现 Market task handler、`market_tasks.py`、FastAPI lifespan、管理 API、前端设置页或旧 Radio/EPG 后台任务迁移。AutomationService 目前只是可复用通用底座，尚未在应用启动时创建，也不会自动执行任何业务任务。

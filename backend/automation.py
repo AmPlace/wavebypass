@@ -1,4 +1,4 @@
-"""通用自动任务定义、持久化适配和单轮执行器。"""
+"""通用自动任务定义、持久化适配、单轮执行器和调度生命周期。"""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from enum import Enum
 from types import MappingProxyType
 from typing import Any, Awaitable, Callable, Mapping
 
@@ -20,6 +21,7 @@ logger = logging.getLogger(__name__)
 AUTOMATION_TRIGGERS = frozenset({"scheduler", "manual_api", "internal"})
 AUTOMATION_RESULT_STATUSES = frozenset({"success", "partial", "failed", "cancelled"})
 AUTOMATION_ERROR_MAX_LENGTH = 2048
+AUTOMATION_INFRASTRUCTURE_RETRY_SECONDS = 60
 
 Handler = Callable[["AutomationTaskContext"], Awaitable["AutomationHandlerResult"]]
 
@@ -50,6 +52,12 @@ class AutomationTriggerNotAllowedError(AutomationError):
 
 class AutomationOwnershipLostError(AutomationError):
     pass
+
+
+class AutomationWaitOutcome(str, Enum):
+    TIMEOUT = "timeout"
+    RECONFIGURED = "reconfigured"
+    STOPPED = "stopped"
 
 
 def _normalize_identifier(value: Any, field_name: str) -> str:
@@ -116,6 +124,8 @@ class AutomationTaskDefinition:
     maximum_interval_seconds: int | None = None
     initial_delay_seconds: int = 0
     allowed_task_types: frozenset[str] = field(default_factory=lambda: frozenset({"check"}))
+    scheduled_task_type: str | None = None
+    allow_automatic_scheduling: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "task_id", _normalize_identifier(self.task_id, "task_id"))
@@ -125,6 +135,8 @@ class AutomationTaskDefinition:
             raise TypeError("default_enabled 必须是布尔值")
         if not isinstance(self.allow_manual_trigger, bool):
             raise TypeError("allow_manual_trigger 必须是布尔值")
+        if not isinstance(self.allow_automatic_scheduling, bool):
+            raise TypeError("allow_automatic_scheduling 必须是布尔值")
         minimum = _normalize_positive_int(self.minimum_interval_seconds, "minimum_interval_seconds")
         default_interval = _normalize_positive_int(self.default_interval_seconds, "default_interval_seconds")
         maximum = self.maximum_interval_seconds
@@ -142,11 +154,19 @@ class AutomationTaskDefinition:
         task_types = frozenset(self.allowed_task_types)
         if not task_types or any(not isinstance(item, str) or not item.strip() for item in task_types):
             raise ValueError("allowed_task_types 不能为空，且必须全部为非空字符串")
+        scheduled_task_type = self.scheduled_task_type
+        if scheduled_task_type is not None:
+            scheduled_task_type = _normalize_identifier(scheduled_task_type, "scheduled_task_type")
+            if scheduled_task_type not in task_types:
+                raise ValueError("scheduled_task_type 必须包含在 allowed_task_types 中")
+        if self.allow_automatic_scheduling and scheduled_task_type is None:
+            raise ValueError("允许自动调度的任务必须设置 scheduled_task_type")
         object.__setattr__(self, "minimum_interval_seconds", minimum)
         object.__setattr__(self, "default_interval_seconds", default_interval)
         object.__setattr__(self, "maximum_interval_seconds", maximum)
         object.__setattr__(self, "initial_delay_seconds", initial_delay)
         object.__setattr__(self, "allowed_task_types", task_types)
+        object.__setattr__(self, "scheduled_task_type", scheduled_task_type)
 
 
 @dataclass(frozen=True, slots=True)
@@ -356,6 +376,9 @@ class AutomationRegistry:
         except KeyError as exc:
             raise AutomationTaskNotFoundError(f"未知自动任务: {task_id}") from exc
 
+    def list_definitions(self) -> tuple[AutomationTaskDefinition, ...]:
+        return tuple(self._definitions.values())
+
     def __contains__(self, task_id: str) -> bool:
         return task_id in self._definitions
 
@@ -564,3 +587,286 @@ class AutomationRunner:
             or result.checked_count > result.failed_count
         )
         return "partial" if has_successful_work else "failed"
+
+
+class AutomationEventWaiter:
+    """等待超时、配置变化或停止，并在返回前回收内部短期 task。"""
+
+    async def wait(
+        self,
+        delay_seconds: float | None,
+        *,
+        stop_event: asyncio.Event,
+        config_event: asyncio.Event,
+    ) -> AutomationWaitOutcome:
+        if stop_event.is_set():
+            return AutomationWaitOutcome.STOPPED
+        if config_event.is_set():
+            return AutomationWaitOutcome.RECONFIGURED
+        if delay_seconds is not None and delay_seconds <= 0:
+            return AutomationWaitOutcome.TIMEOUT
+
+        stop_task = asyncio.create_task(stop_event.wait())
+        config_task = asyncio.create_task(config_event.wait())
+        tasks = (stop_task, config_task)
+        try:
+            done, _ = await asyncio.wait(
+                tasks,
+                timeout=delay_seconds,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not done:
+                return AutomationWaitOutcome.TIMEOUT
+            if stop_task in done and stop_event.is_set():
+                return AutomationWaitOutcome.STOPPED
+            return AutomationWaitOutcome.RECONFIGURED
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+
+class AutomationScheduler:
+    """调度一个任务；不 claim、不直接执行 handler，也不拥有长期 task handle。"""
+
+    def __init__(
+        self,
+        definition: AutomationTaskDefinition,
+        runner: AutomationRunner,
+        repository: AutomationRepository,
+        *,
+        waiter: AutomationEventWaiter | None = None,
+        infrastructure_retry_seconds: int = AUTOMATION_INFRASTRUCTURE_RETRY_SECONDS,
+        monotonic: Callable[[], float] | None = None,
+    ):
+        if not definition.allow_automatic_scheduling or definition.scheduled_task_type is None:
+            raise AutomationConfigurationError(f"任务不允许自动调度: {definition.task_id}")
+        self.definition = definition
+        self.runner = runner
+        self.repository = repository
+        self.waiter = waiter or AutomationEventWaiter()
+        self.infrastructure_retry_seconds = _normalize_positive_int(
+            infrastructure_retry_seconds,
+            "infrastructure_retry_seconds",
+        )
+        self._monotonic = monotonic or asyncio.get_running_loop().time
+        self.stop_event = asyncio.Event()
+        self.config_event = asyncio.Event()
+
+    def stop(self) -> None:
+        self.stop_event.set()
+        self.config_event.set()
+
+    def notify_config_changed(self) -> None:
+        self.config_event.set()
+
+    async def run(self) -> None:
+        needs_initial_delay = True
+        while not self.stop_event.is_set():
+            try:
+                config = await self._load_config()
+                if not config.enabled:
+                    needs_initial_delay = True
+                    outcome = await self._wait(None)
+                    if outcome is AutomationWaitOutcome.STOPPED:
+                        return
+                    self.config_event.clear()
+                    continue
+
+                if needs_initial_delay:
+                    outcome = await self._wait_initial_delay()
+                    if outcome is AutomationWaitOutcome.STOPPED:
+                        return
+                    if outcome is AutomationWaitOutcome.RECONFIGURED:
+                        continue
+                else:
+                    outcome = await self._wait(config.interval_seconds)
+                    if outcome is AutomationWaitOutcome.STOPPED:
+                        return
+                    if outcome is AutomationWaitOutcome.RECONFIGURED:
+                        self.config_event.clear()
+                        continue
+
+                if self.stop_event.is_set():
+                    return
+                needs_initial_delay = False
+                result = await self.runner.run(
+                    AutomationRunRequest(
+                        task_id=self.definition.task_id,
+                        task_type=self.definition.scheduled_task_type,
+                        trigger="scheduler",
+                        stop_event=self.stop_event,
+                    )
+                )
+                if isinstance(result, AutomationRunResult) and result.status == "cancelled":
+                    return
+                if self.stop_event.is_set():
+                    return
+            except AutomationConfigurationError:
+                raise
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("自动任务调度基础设施异常: %s", self.definition.task_id)
+                outcome = await self._wait(self.infrastructure_retry_seconds)
+                if outcome is AutomationWaitOutcome.STOPPED:
+                    return
+                if outcome is AutomationWaitOutcome.RECONFIGURED:
+                    self.config_event.clear()
+
+    async def _load_config(self) -> AutomationTaskConfig:
+        config = await self.repository.ensure_config(self.definition)
+        if config.conflict_group != self.definition.conflict_group:
+            raise AutomationConfigurationError(
+                f"任务 conflict_group 与数据库配置不一致: {self.definition.task_id}"
+            )
+        if config.interval_seconds < self.definition.minimum_interval_seconds:
+            raise AutomationConfigurationError(
+                f"任务 interval_seconds 小于定义下限: {self.definition.task_id}"
+            )
+        if (
+            self.definition.maximum_interval_seconds is not None
+            and config.interval_seconds > self.definition.maximum_interval_seconds
+        ):
+            raise AutomationConfigurationError(
+                f"任务 interval_seconds 大于定义上限: {self.definition.task_id}"
+            )
+        return config
+
+    async def _wait_initial_delay(self) -> AutomationWaitOutcome:
+        deadline = self._monotonic() + self.definition.initial_delay_seconds
+        remaining = float(self.definition.initial_delay_seconds)
+        while True:
+            outcome = await self._wait(remaining)
+            if outcome is not AutomationWaitOutcome.RECONFIGURED:
+                return outcome
+            self.config_event.clear()
+            config = await self._load_config()
+            if not config.enabled:
+                return AutomationWaitOutcome.RECONFIGURED
+            remaining = max(0.0, deadline - self._monotonic())
+
+    async def _wait(self, delay_seconds: float | None) -> AutomationWaitOutcome:
+        raw_outcome = await self.waiter.wait(
+            delay_seconds,
+            stop_event=self.stop_event,
+            config_event=self.config_event,
+        )
+        try:
+            return AutomationWaitOutcome(raw_outcome)
+        except ValueError as exc:
+            raise AutomationConfigurationError(f"waiter 返回非法结果: {raw_outcome}") from exc
+
+
+class AutomationService:
+    """统一拥有 Scheduler 实例、长期 task handle 和协作式启停。"""
+
+    def __init__(
+        self,
+        *,
+        registry: AutomationRegistry,
+        repository: AutomationRepository | None = None,
+        runner: AutomationRunner | None = None,
+        waiter_factory: Callable[[AutomationTaskDefinition], AutomationEventWaiter] | None = None,
+        scheduler_factory: Callable[..., AutomationScheduler] | None = None,
+    ):
+        self.registry = registry
+        self.repository = repository or AutomationRepository()
+        self.runner = runner or AutomationRunner(registry, self.repository)
+        self._waiter_factory = waiter_factory or (lambda _definition: AutomationEventWaiter())
+        self._scheduler_factory = scheduler_factory or AutomationScheduler
+        self._schedulers: dict[str, AutomationScheduler] = {}
+        self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._scheduler_errors: dict[str, str] = {}
+        self._lifecycle_lock = asyncio.Lock()
+        self._started = False
+
+    @property
+    def schedulers(self) -> dict[str, AutomationScheduler]:
+        return dict(self._schedulers)
+
+    @property
+    def tasks(self) -> dict[str, asyncio.Task[None]]:
+        return dict(self._tasks)
+
+    @property
+    def scheduler_errors(self) -> dict[str, str]:
+        return dict(self._scheduler_errors)
+
+    async def start(self) -> int:
+        async with self._lifecycle_lock:
+            if self._started:
+                return 0
+            self._schedulers.clear()
+            self._tasks.clear()
+            self._scheduler_errors.clear()
+            recovered_count = await self.repository.recover_interrupted()
+            for definition in self.registry.list_definitions():
+                if not definition.allow_automatic_scheduling:
+                    continue
+                waiter = self._waiter_factory(definition)
+                scheduler = self._scheduler_factory(
+                    definition,
+                    self.runner,
+                    self.repository,
+                    waiter=waiter,
+                )
+                task = asyncio.create_task(
+                    scheduler.run(),
+                    name=f"automation-scheduler:{definition.task_id}",
+                )
+                task.add_done_callback(
+                    lambda completed, task_id=definition.task_id: self._observe_task(task_id, completed)
+                )
+                self._schedulers[definition.task_id] = scheduler
+                self._tasks[definition.task_id] = task
+            self._started = True
+            return recovered_count
+
+    async def stop(self, *, timeout_seconds: float | None = None) -> None:
+        async with self._lifecycle_lock:
+            if not self._started and not self._tasks:
+                return
+            if timeout_seconds is not None and timeout_seconds <= 0:
+                raise ValueError("timeout_seconds 必须大于 0")
+            schedulers = tuple(self._schedulers.values())
+            tasks = tuple(self._tasks.values())
+            for scheduler in schedulers:
+                scheduler.stop()
+            if tasks:
+                if timeout_seconds is None:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                else:
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.gather(*tasks, return_exceptions=True),
+                            timeout=timeout_seconds,
+                        )
+                    except asyncio.TimeoutError:
+                        for task in tasks:
+                            if not task.done():
+                                task.cancel()
+                        await asyncio.gather(*tasks, return_exceptions=True)
+            self._schedulers.clear()
+            self._tasks.clear()
+            self._started = False
+
+    def notify_config_changed(self, task_id: str) -> None:
+        scheduler = self._schedulers.get(task_id)
+        if scheduler is None:
+            raise AutomationTaskNotFoundError(f"没有运行中的自动调度任务: {task_id}")
+        scheduler.notify_config_changed()
+
+    def _observe_task(self, task_id: str, task: asyncio.Task[None]) -> None:
+        if task.cancelled():
+            return
+        try:
+            error = task.exception()
+        except asyncio.CancelledError:
+            return
+        if error is None:
+            return
+        message = _sanitize_error(str(error)) or error.__class__.__name__
+        self._scheduler_errors[task_id] = message
+        logger.error("自动任务 Scheduler 异常退出: %s: %s", task_id, message)
