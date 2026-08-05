@@ -367,7 +367,7 @@ class AutomationLifespanTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(self.main.app.state.automation_service)
 
-    async def test_legacy_tasks_still_start_once_and_no_automation_api_exists(self):
+    async def test_legacy_tasks_still_start_once_with_market_automation_api(self):
         service = SimpleNamespace(
             start=mock.AsyncMock(),
             stop=mock.AsyncMock(),
@@ -392,11 +392,11 @@ class AutomationLifespanTest(unittest.IsolatedAsyncioTestCase):
         ):
             self.assertEqual(events.count(name), 1)
         paths = {route.path for route in self.main.app.routes}
-        self.assertNotIn("/api/admin/market/automation", paths)
+        self.assertIn("/api/admin/market/automation", paths)
+        self.assertIn("/api/admin/market/check-updates", paths)
+        self.assertIn("/api/admin/market/run-auto-update", paths)
+        self.assertIn("/api/admin/market/update-all", paths)
         self.assertNotIn("/api/admin/market/automation/status", paths)
-        self.assertNotIn("/api/admin/market/check-updates", paths)
-        self.assertNotIn("/api/admin/market/run-auto-update", paths)
-        self.assertNotIn("/api/admin/market/update-all", paths)
 
 
 if __name__ == "__main__":

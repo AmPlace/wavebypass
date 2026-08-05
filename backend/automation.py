@@ -321,6 +321,20 @@ class AutomationRepository:
         rows = await self._database.list_automation_task_configs()
         return [_config_from_row(row) for row in rows]
 
+    async def update_config(
+        self,
+        task_id: str,
+        *,
+        enabled: bool | None = None,
+        interval_seconds: int | None = None,
+    ) -> AutomationTaskConfig | None:
+        row = await self._database.update_automation_task_config(
+            task_id,
+            enabled=enabled,
+            interval_seconds=interval_seconds,
+        )
+        return _config_from_row(row) if row else None
+
     async def claim(
         self,
         task_id: str,
@@ -800,6 +814,10 @@ class AutomationService:
     @property
     def scheduler_errors(self) -> dict[str, str]:
         return dict(self._scheduler_errors)
+
+    @property
+    def is_started(self) -> bool:
+        return self._started
 
     async def start(self) -> int:
         async with self._lifecycle_lock:

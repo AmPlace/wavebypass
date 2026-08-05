@@ -18,7 +18,8 @@ from zoneinfo import ZoneInfo
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
+from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt, model_validator
 from contextlib import asynccontextmanager
 from fetchers import STATION_FETCHER_MAP, yunting
 import database
@@ -31,7 +32,21 @@ from adapters import (
 )
 from iptv_probe import probe_channel_source
 from media_tools import media_tool_bin
-from market_tasks import create_market_automation_service
+from automation import (
+    AutomationBusy,
+    AutomationConfigurationError,
+    AutomationOwnershipLostError,
+    AutomationRequestError,
+    AutomationRunRequest,
+    AutomationRunResult,
+    AutomationTaskNotFoundError,
+)
+from market_tasks import (
+    MARKET_MAXIMUM_INTERVAL_SECONDS,
+    MARKET_MINIMUM_INTERVAL_SECONDS,
+    MARKET_TASK_ID,
+    create_market_automation_service,
+)
 from ssrf_guard import UnsafeTargetError, assert_safe_target_url, assert_safe_host_ips
 from core.config import get_settings
 from core.settings_service import get_effective_settings
@@ -1638,6 +1653,217 @@ async def list_channels(sub_id: int, group: str = '', search: str = ''):
 # WaveFlow Market
 # =====================================================================
 
+
+class MarketAutomationUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: StrictBool | None = None
+    interval_seconds: StrictInt | None = None
+
+    @model_validator(mode="after")
+    def validate_update(self):
+        if self.enabled is None and self.interval_seconds is None:
+            raise ValueError("至少需要提供 enabled 或 interval_seconds")
+        if self.interval_seconds is not None:
+            if self.interval_seconds < MARKET_MINIMUM_INTERVAL_SECONDS:
+                raise ValueError("interval_seconds 小于允许下限")
+            if (
+                self.interval_seconds > MARKET_MAXIMUM_INTERVAL_SECONDS
+            ):
+                raise ValueError("interval_seconds 大于允许上限")
+        return self
+
+
+class MarketAutomationResponse(BaseModel):
+    task_id: str
+    enabled: bool
+    interval_seconds: int
+    minimum_interval_seconds: int
+    maximum_interval_seconds: int | None
+    initial_delay_seconds: int
+    scheduled_task_type: str
+    service_started: bool
+    is_running: bool
+    task_type: str
+    last_started_at: str
+    last_finished_at: str
+    last_status: str
+    checked_count: int
+    updated_count: int
+    skipped_count: int
+    failed_count: int
+    last_error: str
+
+
+class MarketAutomationRunResponse(BaseModel):
+    task_id: str
+    task_type: str
+    status: str
+    checked_count: int
+    updated_count: int
+    skipped_count: int
+    failed_count: int
+    error: str
+    errors: list[str]
+    started_at: str
+    finished_at: str
+
+
+class MarketAutomationBusyResponse(BaseModel):
+    code: str = "automation_busy"
+    message: str = "Market 自动任务正在运行"
+    current_task_type: str
+    started_at: str
+    status: str
+
+
+def _get_market_automation_service(request: Request):
+    service = getattr(request.app.state, "automation_service", None)
+    if service is None or not service.is_started:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "automation_unavailable",
+                "message": "Market 自动任务服务尚未就绪",
+            },
+        )
+    return service
+
+
+def _get_market_automation_definition(service):
+    try:
+        return service.registry.get(MARKET_TASK_ID)
+    except (AutomationTaskNotFoundError, AutomationConfigurationError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "automation_unavailable",
+                "message": "Market 自动任务配置不可用",
+            },
+        ) from exc
+
+
+async def _market_automation_snapshot(request: Request) -> MarketAutomationResponse:
+    service = _get_market_automation_service(request)
+    try:
+        definition = _get_market_automation_definition(service)
+        config = await service.repository.ensure_config(definition)
+        state = await service.repository.get_state(MARKET_TASK_ID)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("读取 Market 自动任务状态失败")
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "automation_status_failed",
+                "message": "读取 Market 自动任务状态失败",
+            },
+        ) from exc
+
+    return MarketAutomationResponse(
+        task_id=definition.task_id,
+        enabled=config.enabled,
+        interval_seconds=config.interval_seconds,
+        minimum_interval_seconds=definition.minimum_interval_seconds,
+        maximum_interval_seconds=definition.maximum_interval_seconds,
+        initial_delay_seconds=definition.initial_delay_seconds,
+        scheduled_task_type=definition.scheduled_task_type or "",
+        service_started=service.is_started,
+        is_running=bool(state and state.status == "running"),
+        task_type=state.task_type if state else "",
+        last_started_at=state.last_started_at if state else "",
+        last_finished_at=state.last_finished_at if state else "",
+        last_status=state.status if state else "never_run",
+        checked_count=state.checked_count if state else 0,
+        updated_count=state.updated_count if state else 0,
+        skipped_count=state.skipped_count if state else 0,
+        failed_count=state.failed_count if state else 0,
+        last_error=state.last_error if state else "",
+    )
+
+
+async def _execute_market_automation(request: Request, task_type: str):
+    service = _get_market_automation_service(request)
+    try:
+        return await service.runner.run(
+            AutomationRunRequest(
+                task_id=MARKET_TASK_ID,
+                task_type=task_type,
+                trigger="manual_api",
+            )
+        )
+    except (AutomationTaskNotFoundError, AutomationConfigurationError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "automation_unavailable",
+                "message": "Market 自动任务配置不可用",
+            },
+        ) from exc
+    except AutomationRequestError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "automation_request_invalid",
+                "message": str(exc),
+            },
+        ) from exc
+    except AutomationOwnershipLostError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "automation_ownership_lost",
+                "message": "Market 自动任务执行权已失效",
+            },
+        ) from exc
+    except Exception as exc:
+        logger.exception("执行 Market 自动任务失败: %s", task_type)
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "automation_execution_failed",
+                "message": "执行 Market 自动任务失败",
+            },
+        ) from exc
+
+
+def _market_automation_run_response(result):
+    if isinstance(result, AutomationBusy):
+        body = MarketAutomationBusyResponse(
+            current_task_type=result.task_type,
+            started_at=result.started_at,
+            status=result.status,
+        )
+        return JSONResponse(status_code=409, content=body.model_dump())
+    if not isinstance(result, AutomationRunResult):
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "automation_result_invalid",
+                "message": "Market 自动任务返回了无效结果",
+            },
+        )
+    return MarketAutomationRunResponse(
+        task_id=result.task_id,
+        task_type=result.task_type,
+        status=result.status,
+        checked_count=result.checked_count,
+        updated_count=result.updated_count,
+        skipped_count=result.skipped_count,
+        failed_count=result.failed_count,
+        error=result.error,
+        errors=list(result.errors),
+        started_at=result.started_at,
+        finished_at=result.finished_at,
+    )
+
+
+def _invalidate_market_covers_after_update(result) -> None:
+    if isinstance(result, AutomationRunResult) and result.updated_count > 0:
+        from core.cover_cache import invalidate_all_covers
+        invalidate_all_covers()
+
 def _market_http_error(exc: Exception):
     if isinstance(exc, _market.MarketError):
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
@@ -1651,6 +1877,102 @@ async def get_market_summary():
         return _market.market_summary()
     except Exception as exc:
         _market_http_error(exc)
+
+
+@app.get(
+    "/api/admin/market/automation",
+    response_model=MarketAutomationResponse,
+    dependencies=[Depends(require_admin)],
+)
+async def get_market_automation(request: Request):
+    return await _market_automation_snapshot(request)
+
+
+@app.patch(
+    "/api/admin/market/automation",
+    response_model=MarketAutomationResponse,
+    dependencies=[Depends(require_admin)],
+)
+async def update_market_automation(request: Request, body: MarketAutomationUpdateRequest):
+    service = _get_market_automation_service(request)
+    definition = _get_market_automation_definition(service)
+    if body.interval_seconds is not None:
+        if body.interval_seconds < definition.minimum_interval_seconds:
+            raise HTTPException(status_code=422, detail="interval_seconds 小于允许下限")
+        if (
+            definition.maximum_interval_seconds is not None
+            and body.interval_seconds > definition.maximum_interval_seconds
+        ):
+            raise HTTPException(status_code=422, detail="interval_seconds 大于允许上限")
+    try:
+        updated = await service.repository.update_config(
+            MARKET_TASK_ID,
+            enabled=body.enabled,
+            interval_seconds=body.interval_seconds,
+        )
+    except Exception as exc:
+        logger.exception("更新 Market 自动任务配置失败")
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "automation_config_update_failed",
+                "message": "更新 Market 自动任务配置失败",
+            },
+        ) from exc
+    if updated is None:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "automation_unavailable",
+                "message": "Market 自动任务配置不存在",
+            },
+        )
+    try:
+        service.notify_config_changed(MARKET_TASK_ID)
+    except AutomationTaskNotFoundError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "automation_unavailable",
+                "message": "Market 自动任务调度器尚未就绪",
+            },
+        ) from exc
+    return await _market_automation_snapshot(request)
+
+
+@app.post(
+    "/api/admin/market/check-updates",
+    response_model=MarketAutomationRunResponse,
+    responses={409: {"model": MarketAutomationBusyResponse}},
+    dependencies=[Depends(require_admin)],
+)
+async def check_market_updates(request: Request):
+    result = await _execute_market_automation(request, "check")
+    return _market_automation_run_response(result)
+
+
+@app.post(
+    "/api/admin/market/run-auto-update",
+    response_model=MarketAutomationRunResponse,
+    responses={409: {"model": MarketAutomationBusyResponse}},
+    dependencies=[Depends(require_admin)],
+)
+async def run_market_auto_update(request: Request):
+    result = await _execute_market_automation(request, "auto_update")
+    _invalidate_market_covers_after_update(result)
+    return _market_automation_run_response(result)
+
+
+@app.post(
+    "/api/admin/market/update-all",
+    response_model=MarketAutomationRunResponse,
+    responses={409: {"model": MarketAutomationBusyResponse}},
+    dependencies=[Depends(require_admin)],
+)
+async def update_all_market_packages(request: Request):
+    result = await _execute_market_automation(request, "update_all")
+    _invalidate_market_covers_after_update(result)
+    return _market_automation_run_response(result)
 
 
 @app.post("/api/admin/market/refresh", dependencies=[Depends(require_admin)])
@@ -1793,18 +2115,24 @@ async def update_market_install(package_id: str, request: Request):
         _market_http_error(exc)
 
 
-@app.post("/api/admin/market/updates/run", dependencies=[Depends(require_admin)])
+@app.post(
+    "/api/admin/market/updates/run",
+    dependencies=[Depends(require_admin)],
+    deprecated=True,
+)
 async def run_market_updates(request: Request):
-    try:
-        body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
-        result = await _market.run_installed_updates(
-            auto_update_only=_truthy_query((body or {}).get("auto_update_only", False)),
-        )
-        from core.cover_cache import invalidate_all_covers
-        invalidate_all_covers()
-        return result
-    except Exception as exc:
-        _market_http_error(exc)
+    result = await _execute_market_automation(request, "update_all")
+    _invalidate_market_covers_after_update(result)
+    response = _market_automation_run_response(result)
+    if isinstance(response, JSONResponse):
+        return response
+    return {
+        **response.model_dump(),
+        "updated": response.updated_count,
+        "skipped": response.skipped_count,
+        "failed": response.failed_count,
+        "results": [],
+    }
 
 
 @app.delete("/api/admin/market/packages/{package_id}/install", dependencies=[Depends(require_admin)])
