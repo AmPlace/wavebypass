@@ -9,8 +9,10 @@ import {
   isChannelAllNotLive,
   isChannelAllUrlsBlocked,
   isDynamicAdapterProxyPlaylistEntry,
+  isSourceExplicitlyDisabled,
   sourceRaceKey,
   sourceTransport,
+  startupRaceCandidateKind,
 } from '../../src/utils/sourceIdentity.js'
 
 const isChannelProxyPlaylistUrl = (url) => {
@@ -148,22 +150,29 @@ test('not_live channel is not blocked (user can keep trying)', () => {
   assert.equal(isChannelAllNotLive(ch), true)
 })
 
-test('all-offline / all-error / all-timeout channel is blocked', () => {
+test('all-offline / all-error / all-timeout channel is still playable', () => {
   for (const status of ['offline', 'error', 'timeout']) {
     const ch = { urls: [{ probe_status: status }, { probe_status: status }] }
-    assert.equal(isChannelAllUrlsBlocked(ch), true, `status=${status}`)
+    assert.equal(isChannelAllUrlsBlocked(ch), false, `status=${status}`)
     assert.equal(isChannelAllNotLive(ch), false, `status=${status}`)
   }
 })
 
-test('legacy is_working===0 schema (no probe_status string) is blocked', () => {
+test('legacy is_working===0 schema (no probe_status string) is still playable', () => {
   const ch = { urls: [{ is_working: 0 }, { is_working: 0 }] }
-  assert.equal(isChannelAllUrlsBlocked(ch), true)
+  assert.equal(isChannelAllUrlsBlocked(ch), false)
   assert.equal(isChannelAllNotLive(ch), false)
 })
 
+test('only explicit source disable flags block a channel', () => {
+  const ch = { urls: [{ disabled: true }, { enabled: '0' }] }
+  assert.equal(isChannelAllUrlsBlocked(ch), true)
+  assert.equal(isSourceExplicitlyDisabled(ch.urls[0]), true)
+  assert.equal(isSourceExplicitlyDisabled(ch.urls[1]), true)
+})
+
 test('mixed not_live + offline is not blocked while not_live is allowed', () => {
-  // 关键不变量：只要存在一个 not_live，就不算"全失败"，必须允许尝试。
+  // 关键不变量：测速状态只排序和提示，不阻止用户尝试。
   const ch = { urls: [{ probe_status: 'not_live' }, { probe_status: 'offline' }] }
   assert.equal(isChannelAllUrlsBlocked(ch), false)
   assert.equal(isChannelAllNotLive(ch), false)
@@ -175,6 +184,49 @@ test('online or untested channel is not blocked', () => {
     assert.equal(isChannelAllUrlsBlocked(ch), false, `status=${status}`)
     assert.equal(isChannelAllNotLive(ch), false, `status=${status}`)
   }
+})
+
+test('dynamic adapter proxy remains eligible for delayed startup race', () => {
+  const entry = {
+    url: '/api/media/channel/test/playlist.m3u8?source_id=src_adapter',
+    source_id: 'src_adapter',
+    source_type: 'hls',
+    type: 'proxy',
+    via_proxy: true,
+    adapter: 'fjtv',
+    probe_status: 'offline',
+  }
+  assert.equal(isDynamicAdapterProxyPlaylistEntry(entry, isChannelProxyPlaylistUrl), true)
+  assert.equal(startupRaceCandidateKind(entry, {
+    sourceType: 'hls',
+    hlsSupported: true,
+    mpegTsSupported: true,
+  }), 'hls')
+})
+
+test('adapter proxy with unresolved transport enters deferred preflight race', () => {
+  const entry = {
+    url: '/api/media/channel/test/playlist.m3u8?source_id=src_adapter',
+    source_id: 'src_adapter',
+    source_type: 'adapter',
+    type: 'proxy',
+    via_proxy: true,
+    adapter: 'huya',
+    adapter_transport_pending: true,
+  }
+  assert.equal(startupRaceCandidateKind(entry, {
+    sourceType: 'adapter',
+    hlsSupported: true,
+    mpegTsSupported: true,
+  }), 'proxy_auto')
+})
+
+test('explicitly disabled source is excluded from startup race', () => {
+  const entry = { url: 'https://cdn.example/live.m3u8', disabled: true }
+  assert.equal(startupRaceCandidateKind(entry, {
+    sourceType: 'hls',
+    hlsSupported: true,
+  }), '')
 })
 
 test('empty / nullish urls is not blocked (treat as unknown, not failed)', () => {

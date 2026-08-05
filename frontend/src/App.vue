@@ -232,6 +232,10 @@ watch(() => route.path, (path) => {
   playerStore.setActiveMode(path.startsWith('/iptv') || path.startsWith('/admin') || path.startsWith('/market') ? 'iptv' : 'radio')
 }, { immediate: true })
 
+watch(showAppShell, (visible) => {
+  if (!visible) playerStore.stopAndClearPlayback()
+}, { immediate: true, flush: 'sync' })
+
 function forceMetaContent(name, content) {
   const old = document.querySelector(`meta[name="${name}"]`)
   if (old) {

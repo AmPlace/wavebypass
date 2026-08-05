@@ -1,6 +1,19 @@
 import { defineStore } from 'pinia'
 import { API_BASE } from '../apiBase.js'
-import { adapterNameFromUrl, buildChannelProxyUrl, isAdapterSchemeUrl } from '../utils/sourceIdentity.js'
+import { adapterNameFromUrl, buildChannelProxyUrl, channelIdentity, isAdapterSchemeUrl, isSourceExplicitlyDisabled } from '../utils/sourceIdentity.js'
+import { normalizeIptvChannelSortMode } from '../utils/iptvChannelList.js'
+
+function normalizeChannelContextChannels(channels) {
+  const result = []
+  const seen = new Set()
+  for (const channel of Array.isArray(channels) ? channels : []) {
+    const identity = channelIdentity(channel)
+    if (!identity || seen.has(identity)) continue
+    seen.add(identity)
+    result.push(channel)
+  }
+  return result
+}
 
 export const usePlayerStore = defineStore('player', {
   state: () => ({
@@ -21,13 +34,29 @@ export const usePlayerStore = defineStore('player', {
     iptvSelectionToken: 0,      // 防止异步解析旧频道覆盖新频道
     iptvVideoEl: null,         // FullPlayer 中的 video 元素引用（iOS 同步播放用）
     currentEpgProgram: null,   // EPG: { title, start, stop, progress, remaining_minutes }
+    iptvChannelSortMode: 'original',
+    iptvChannelContext: null,  // { token, origin, group, search, channels }
+    iptvChannelContextToken: 0,
   }),
 
-  getters: {
-    stationCount: (state) => state.stationList.length,
-  },
-
   actions: {
+    stopAndClearPlayback() {
+      ++this.iptvSelectionToken
+      this.currentStation = ''
+      this.currentIptvChannel = null
+      this.pendingIptvChannel = null
+      this.iptvUrls = []
+      this.iptvUrlIndex = 0
+      this.iptvVideoEl = null
+      this.currentEpgProgram = null
+      this.iptvChannelContext = null
+      ++this.iptvChannelContextToken
+      this.isPlayerExpanded = false
+      this.isPlaying = false
+      this.isLoading = false
+      this.playbackError = ''
+    },
+
     // stationId 对应后端路由中的 {station_id}
     switchStation(stationId) {
       if (!stationId) {
@@ -115,8 +144,44 @@ export const usePlayerStore = defineStore('player', {
       this.activeMode = mode
     },
 
-    async playIptvChannel(channel) {
+    setIptvChannelSortMode(mode) {
+      this.iptvChannelSortMode = normalizeIptvChannelSortMode(mode)
+    },
+
+    setIptvChannelContext({ origin = 'iptv-home', group = '', search = '', channels = [] } = {}) {
+      const token = ++this.iptvChannelContextToken
+      this.iptvChannelContext = {
+        token,
+        origin: String(origin || 'iptv-home'),
+        group: String(group || ''),
+        search: String(search || ''),
+        channels: normalizeChannelContextChannels(channels),
+      }
+      return token
+    },
+
+    refreshIptvChannelContext({ token = 0, group = '', search = '', channels = [] } = {}) {
+      const current = this.iptvChannelContext
+      if (!current) return false
+      if (token && current.token !== token) return false
+      if (current.group !== String(group || '') || current.search !== String(search || '')) return false
+      this.iptvChannelContext = {
+        ...current,
+        channels: normalizeChannelContextChannels(channels),
+      }
+      return true
+    },
+
+    async playIptvChannel(channel, options = {}) {
       const selectionToken = ++this.iptvSelectionToken
+      if (Object.prototype.hasOwnProperty.call(options, 'channelContext')) {
+        const context = options.channelContext
+        if (context) this.setIptvChannelContext(context)
+        else {
+          this.iptvChannelContext = null
+          ++this.iptvChannelContextToken
+        }
+      }
       // 停止电台播放，触发 AudioEngine destroyHls
       this.currentStation = ''
       this.pendingIptvChannel = channel
@@ -264,6 +329,7 @@ export const usePlayerStore = defineStore('player', {
       const adapterSources = []
       const canonicalKey = channel.canonical_key || ''  // 聚合频道 key，用于 media API
       for (const u of sorted) {
+        if (isSourceExplicitlyDisabled(u)) continue
         const url = sourceUrl(u)
         if (!url) continue
         const st = sourceType(u)
@@ -315,7 +381,7 @@ export const usePlayerStore = defineStore('player', {
         if (adapter === 'youtube') {
           const youtubeVideoId = parseYoutubeVideoId(originalUrl) || u.youtube_video_id || ''
           const youtubeChannelId = parseYoutubeChannelId(originalUrl) || u.youtube_channel_id || ''
-          if (youtubeVideoId || youtubeChannelId) {
+          if ((youtubeVideoId || youtubeChannelId) && !sourceForcesProxy(u)) {
             directUrls.push({
               ...u,
               url: originalUrl,
@@ -334,6 +400,7 @@ export const usePlayerStore = defineStore('player', {
         if (adapter !== 'youtube') {
           try {
             const resolved = await resolveAdapterSource(u)
+            if (selectionToken !== this.iptvSelectionToken) return
             const resolvedUrl = String(resolved?.url || '').trim()
             const proxyUrl = absoluteApiUrl(resolved?.proxy_url) || fallbackProxyUrl
             // Adapter 自身声明 requires_proxy/direct_playable=false 是硬约束；
@@ -365,6 +432,7 @@ export const usePlayerStore = defineStore('player', {
             }
             continue
           } catch (e) {
+            if (selectionToken !== this.iptvSelectionToken) return
             console.warn('[IPTV] adapter resolve failed:', e?.message || e)
             // 非强制代理：resolve 失败只是本次未取到流地址，不得把 source 改写为 proxy-only，
             // 也不得从菜单删除。保留原始 adapter identity 作为直连 entry（FullPlayer 的
@@ -389,7 +457,8 @@ export const usePlayerStore = defineStore('player', {
                   adapter,
                   type: 'proxy',
                   via_proxy: true,
-                  source_type: 'hls',
+                  source_type: 'adapter',
+                  adapter_transport_pending: true,
                 })
               }
               continue
@@ -405,7 +474,8 @@ export const usePlayerStore = defineStore('player', {
             adapter,
             type: 'proxy',
             via_proxy: true,
-            source_type: 'hls',
+            source_type: adapter === 'youtube' ? 'hls' : 'adapter',
+            adapter_transport_pending: adapter !== 'youtube',
           })
         }
       }
@@ -439,9 +509,8 @@ export const usePlayerStore = defineStore('player', {
       this.isPlaying = false
       // isPlaying 由实际播放事件设置，不提前设
       } catch (e) {
-        if (selectionToken === this.iptvSelectionToken) {
-          this.pendingIptvChannel = null
-        }
+        if (selectionToken !== this.iptvSelectionToken) return
+        this.pendingIptvChannel = null
         throw e
       }
     },

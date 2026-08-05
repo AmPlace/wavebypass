@@ -177,6 +177,8 @@ test('resolve fail + non-force_proxy: 直连+代理两个选项保留', async ()
   assert.match(proxy.url, /\/api\/media\/channel\/.+\/playlist\.m3u8/)
   assert.equal(proxy.url.includes('huya://'), false)
   assert.equal(proxy.url.includes('target_url='), false)
+  assert.equal(proxy.source_type, 'adapter', '首次 resolve 失败时代理的实际 transport 仍未知，不得伪装成 HLS')
+  assert.equal(proxy.adapter_transport_pending, true)
 })
 
 test('resolve fail + force_proxy: 仅保留代理', async () => {
@@ -188,6 +190,8 @@ test('resolve fail + force_proxy: 仅保留代理', async () => {
   assert.equal(store.iptvUrls.length, 1)
   assert.equal(store.iptvUrls[0].via_proxy, true)
   assert.match(store.iptvUrls[0].url, /\/api\/media\/channel\/.+\/playlist\.m3u8/)
+  assert.equal(store.iptvUrls[0].source_type, 'adapter')
+  assert.equal(store.iptvUrls[0].adapter_transport_pending, true)
 })
 
 test('resolve fail + non-force_proxy: 直连保留原始 adapter identity', async () => {
@@ -229,6 +233,49 @@ test('多源频道中一个 adapter resolve 失败不影响其他 source', async
   assert.equal(huyaDirect.adapter_volatile_url, true)
   // huya 代理 entry 也必须存在
   assert.ok(store.iptvUrls.some((e) => e.source_id === 'src_huya' && e.via_proxy))
+})
+
+test('测速失败源保留，只有明确 disabled 的源从播放队列排除', async () => {
+  setActivePinia(createPinia())
+  const store = usePlayerStore()
+  const channel = {
+    canonical_key: '状态测试',
+    urls: [
+      { url: 'https://offline.example/live.m3u8', source_id: 'src_offline', source_type: 'hls', probe_status: 'offline', is_working: 0 },
+      { url: 'https://disabled.example/live.m3u8', source_id: 'src_disabled', source_type: 'hls', probe_status: 'online', is_working: 1, disabled: true },
+    ],
+  }
+
+  await store.playIptvChannel(channel)
+
+  assert.equal(store.iptvUrls.length, 2)
+  assert.ok(store.iptvUrls.every((entry) => entry.source_id === 'src_offline'))
+  assert.ok(store.iptvUrls.some((entry) => entry.via_proxy !== true))
+  assert.ok(store.iptvUrls.some((entry) => entry.via_proxy === true))
+})
+
+test('force_proxy 或 requires_proxy_declared 的 YouTube 源禁止创建直连 iframe 候选', async () => {
+  for (const proxyConstraint of [
+    { force_proxy: true },
+    { requires_proxy_declared: true },
+  ]) {
+    setActivePinia(createPinia())
+    const store = usePlayerStore()
+    await store.playIptvChannel({
+      canonical_key: 'YouTube直播',
+      urls: [{
+        url: 'https://www.youtube.com/watch?v=abcdefghijk',
+        source_id: 'src_youtube',
+        source_type: 'youtube',
+        ...proxyConstraint,
+      }],
+    })
+
+    assert.equal(store.iptvUrls.some((entry) => entry.type === 'youtube'), false)
+    assert.equal(store.iptvUrls.length, 1)
+    assert.equal(store.iptvUrls[0].via_proxy, true)
+    assert.match(store.iptvUrls[0].url, /\/api\/media\/channel\/.+\/playlist\.m3u8/)
+  }
 })
 
 test('用户再次点击会重新 resolve', async () => {

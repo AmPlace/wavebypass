@@ -42,6 +42,13 @@ export function sourceIdentity(entry) {
   return String(entry?.source_id || '').trim()
 }
 
+export function channelIdentity(channel) {
+  const canonicalKey = String(channel?.canonical_key || '').trim()
+  if (canonicalKey) return canonicalKey
+  const name = String(channel?.name || '').trim()
+  return name ? `name:${name}` : ''
+}
+
 export function sourceRaceKey(entry) {
   const sourceId = sourceIdentity(entry)
   if (sourceId) return `${sourceId}:${sourceTransport(entry)}`
@@ -78,27 +85,45 @@ export function isDynamicAdapterProxyPlaylistEntry(entry, isChannelProxyPlaylist
   )
 }
 
-// 真正禁止用户尝试播放的 probe 状态集合。
-// 注意：not_live 不在其中——它只是上次测速时未开播的旧结果，不代表当前不能播。
-// 不同 schema：新版字符串 probe_status；旧版数字 is_working===0。
-const BLOCKED_PROBE_STATUSES = Object.freeze(['offline', 'error', 'timeout'])
+export function isSourceExplicitlyDisabled(entry) {
+  if (entry?.disabled === true) return true
+  const enabled = entry?.enabled
+  if (enabled === false || enabled === 0) return true
+  return typeof enabled === 'string' && ['0', 'false', 'no', 'off'].includes(enabled.trim().toLowerCase())
+}
 
-function isUrlEntryBlocked(u) {
-  const status = String(u?.probe_status || '').toLowerCase()
-  if (status) return BLOCKED_PROBE_STATUSES.includes(status)
-  return Number(u?.is_working) === 0
+export function startupRaceCandidateKind(entry, {
+  sourceType = '',
+  hlsSupported = false,
+  mpegTsSupported = false,
+} = {}) {
+  if (!entry?.url || isSourceExplicitlyDisabled(entry)) return ''
+  if (isProxyTransport(entry) && entry.adapter_transport_pending) return 'proxy_auto'
+  if (sourceType === 'unsupported_youtube_url' || sourceType === 'youtube') return ''
+  if (sourceType === 'hls' && hlsSupported) return 'hls'
+  if (['mpegts', 'http_flv'].includes(sourceType) && mpegTsSupported) return sourceType
+  return ''
 }
 
 function isUrlEntryNotLive(u) {
   return String(u?.probe_status || '').toLowerCase() === 'not_live'
 }
 
-// 频道是否所有 source 都属于"明确不可用"集合（offline/error/timeout 或旧 is_working===0）。
-// 这是首页与 FullPlayer 频道列表共享的唯一事实：true 才禁止点击。
+// 测速状态只用于排序和提示；只有配置明确禁用的 source 才阻止用户尝试。
 export function isChannelAllUrlsBlocked(channel) {
   const urls = channel?.urls
   if (!Array.isArray(urls) || urls.length === 0) return false
-  return urls.every(isUrlEntryBlocked)
+  return urls.every(isSourceExplicitlyDisabled)
+}
+
+export function isChannelAllUnsupported(channel) {
+  const urls = channel?.urls
+  if (!Array.isArray(urls) || urls.length === 0) return false
+  return urls.every((entry) => {
+    if (isSourceExplicitlyDisabled(entry)) return true
+    const sourceType = String(entry?.source_type || entry?.transport || '').trim().toLowerCase()
+    return sourceType === 'unsupported' || sourceType === 'unsupported_youtube_url'
+  })
 }
 
 // 频道是否所有 source 都是 not_live。仅用于显示提示文案，不用于禁止点击。

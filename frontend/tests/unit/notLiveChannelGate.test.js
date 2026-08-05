@@ -31,13 +31,20 @@ test('not_live channel: clickable in IptvHome, FullPlayer list, prev/next', () =
   assert.equal(isChannelAllNotLive(ch), true, '可以显示 not_live 提示文案')
 })
 
-test('all-failed channel (offline): blocked in all three entries (规则未误放开)', () => {
+test('all-failed probe status remains clickable in all three entries', () => {
   for (const status of ['offline', 'error', 'timeout']) {
     const ch = { urls: [{ probe_status: status }, { probe_status: status }] }
-    assert.equal(homeIsUnavailable(ch), true, `IptvHome 应禁止 ${status}`)
-    assert.equal(fullPlayerRowDisabled(ch), true, `FullPlayer 应禁止 ${status}`)
-    assert.equal(prevNextSkips(ch), true, `prev/next 应跳过 ${status}`)
+    assert.equal(homeIsUnavailable(ch), false, `IptvHome 应允许尝试 ${status}`)
+    assert.equal(fullPlayerRowDisabled(ch), false, `FullPlayer 应允许尝试 ${status}`)
+    assert.equal(prevNextSkips(ch), false, `prev/next 不应跳过 ${status}`)
   }
+})
+
+test('only explicitly disabled sources block a channel', () => {
+  const ch = { urls: [{ disabled: true }, { enabled: false }] }
+  assert.equal(homeIsUnavailable(ch), true)
+  assert.equal(fullPlayerRowDisabled(ch), true)
+  assert.equal(prevNextSkips(ch), true)
 })
 
 test('mixed not_live + online channel: clickable everywhere', () => {
@@ -51,8 +58,8 @@ test('mixed not_live + online channel: clickable everywhere', () => {
   assert.equal(isChannelAllNotLive(ch), false)
 })
 
-test('mixed not_live + offline channel: clickable (only ALL-failed blocks)', () => {
-  // 关键：只要存在一个 not_live（用户可尝试的状态），就不算"全失败"。
+test('mixed not_live + offline channel remains clickable', () => {
+  // 测速状态不阻断，混合状态同样允许尝试。
   const ch = { urls: [{ probe_status: 'not_live' }, { probe_status: 'offline' }] }
   assert.equal(homeIsUnavailable(ch), false)
   assert.equal(fullPlayerRowDisabled(ch), false)

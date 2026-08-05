@@ -155,6 +155,17 @@ export function createRadioAudioEngine({
     navigatorRef.mediaSession.setActionHandler('pause', () => playerStore.togglePlay(false))
   }
 
+  function clearRadioMediaSession() {
+    const navigatorRef = getNavigator()
+    if (!navigatorRef || !('mediaSession' in navigatorRef)) return
+    const session = navigatorRef.mediaSession
+    try { session.metadata = null } catch {}
+    try { session.playbackState = 'none' } catch {}
+    for (const action of ['play', 'pause']) {
+      try { session.setActionHandler(action, null) } catch {}
+    }
+  }
+
   function updateMediaSessionForCurrentSubtitle(subtitle) {
     const attempt = activeAttempt
     if (subtitle && isAttemptActive(attempt)) updateSystemMediaSession(attempt.stationId, attempt)
@@ -275,14 +286,39 @@ export function createRadioAudioEngine({
   }
 
   async function filterReachable(urls, { tryHttps = false, attempt = activeAttempt } = {}) {
+    const activeChecks = new Set()
+    const cleanupChecks = () => {
+      for (const cancel of Array.from(activeChecks)) cancel()
+      activeChecks.clear()
+    }
+    const removeCleanup = addAttemptCleanup(attempt, cleanupChecks)
     const checks = urls.map((url) => {
       const testUrl = tryHttps ? upgradeHttps(url) : url
-      return Promise.race([
-        fetchImpl(testUrl, { method: 'HEAD', mode: 'no-cors' }).then(() => [testUrl, url]).catch(() => null),
-        new Promise((r) => setTimer(() => r(null), 3000)),
-      ])
+      return new Promise((resolve) => {
+        const controller = new AbortController()
+        let settled = false
+        let timer = null
+        const finish = (result) => {
+          if (settled) return
+          settled = true
+          if (timer) clearTimer(timer)
+          activeChecks.delete(cancel)
+          resolve(result)
+        }
+        const cancel = () => {
+          try { controller.abort() } catch {}
+          finish(null)
+        }
+        activeChecks.add(cancel)
+        fetchImpl(testUrl, { method: 'HEAD', mode: 'no-cors', signal: controller.signal })
+          .then(() => finish([testUrl, url]))
+          .catch(() => finish(null))
+        timer = setTimer(cancel, 3000)
+      })
     })
     const results = await Promise.all(checks)
+    cleanupChecks()
+    removeCleanup()
     if (!isAttemptActive(attempt)) return []
     return results.filter(Boolean)
   }
@@ -296,8 +332,11 @@ export function createRadioAudioEngine({
 
     const activeHls = new Set()
     const activeAudio = new Set()
+    const activeProbeCancels = new Set()
 
     function cleanupAll() {
+      for (const cancel of Array.from(activeProbeCancels)) cancel()
+      activeProbeCancels.clear()
       for (const h of activeHls) { try { h.destroy() } catch {} }
       activeHls.clear()
       for (const a of activeAudio) {
@@ -323,10 +362,15 @@ export function createRadioAudioEngine({
           hls.attachMedia(probeEl)
           let settled = false
           let timer = null
-          const done = (result) => {
-            if (settled) return
-            settled = true
+          let cancelProbe = null
+          const onFragLoaded = () => done({ url, origUrl, index: i, type: 'hls' })
+          const onError = (_e, d) => { if (d?.fatal) done(null) }
+          const cleanup = () => {
             if (timer) clearTimer(timer)
+            timer = null
+            hls.off(Hls.Events.FRAG_LOADED, onFragLoaded)
+            hls.off(Hls.Events.ERROR, onError)
+            if (cancelProbe) activeProbeCancels.delete(cancelProbe)
             activeHls.delete(hls)
             activeAudio.delete(probeEl)
             try { hls.destroy() } catch {}
@@ -334,12 +378,19 @@ export function createRadioAudioEngine({
               probeEl.removeAttribute('src')
               probeEl.load()
             } catch {}
+          }
+          const done = (result) => {
+            if (settled) return
+            settled = true
+            cleanup()
             if (result) cleanupAll()
             resolve(isAttemptActive(attempt) ? result : null)
           }
-          hls.on(Hls.Events.FRAG_LOADED, () => done({ url, origUrl, index: i, type: 'hls' }))
-          hls.on(Hls.Events.ERROR, (_e, d) => { if (d?.fatal) done(null) })
-          timer = setTimer(() => done(null), 10_000)
+          cancelProbe = () => done(null)
+          activeProbeCancels.add(cancelProbe)
+          hls.on(Hls.Events.FRAG_LOADED, onFragLoaded)
+          hls.on(Hls.Events.ERROR, onError)
+          timer = setTimer(cancelProbe, 10_000)
         })
       }
       return new Promise((resolve) => {
@@ -351,29 +402,50 @@ export function createRadioAudioEngine({
         probeEl.load()
         let settled = false
         let timer = null
-        const done = (result) => {
-          if (settled) return
-          settled = true
+        let cancelProbe = null
+        const onCanPlay = () => done({ url, origUrl, index: i, type: 'direct' })
+        const onError = () => done(null)
+        const cleanup = () => {
           if (timer) clearTimer(timer)
+          timer = null
+          probeEl.removeEventListener('canplay', onCanPlay)
+          probeEl.removeEventListener('error', onError)
+          if (cancelProbe) activeProbeCancels.delete(cancelProbe)
           activeAudio.delete(probeEl)
           try {
             probeEl.pause()
             probeEl.removeAttribute('src')
             probeEl.load()
           } catch {}
+        }
+        const done = (result) => {
+          if (settled) return
+          settled = true
+          cleanup()
           if (result) cleanupAll()
           resolve(isAttemptActive(attempt) ? result : null)
         }
-        probeEl.addEventListener('canplay', () => done({ url, origUrl, index: i, type: 'direct' }), { once: true })
-        probeEl.addEventListener('error', () => done(null), { once: true })
-        timer = setTimer(() => done(null), 10_000)
+        cancelProbe = () => done(null)
+        activeProbeCancels.add(cancelProbe)
+        probeEl.addEventListener('canplay', onCanPlay, { once: true })
+        probeEl.addEventListener('error', onError, { once: true })
+        timer = setTimer(cancelProbe, 10_000)
       })
     })
 
+    const winnerPromises = promises.map((promise) => promise.then((winner) => {
+      if (!winner) throw new Error('probe failed')
+      return winner
+    }))
+    let overallTimer = null
     const result = await Promise.race([
-      Promise.any(promises).catch(() => null),
-      new Promise((resolve) => setTimer(() => { cleanupAll(); resolve(null) }, 12_000)),
+      Promise.any(winnerPromises).catch(() => null),
+      new Promise((resolve) => {
+        overallTimer = setTimer(() => { cleanupAll(); resolve(null) }, 12_000)
+      }),
     ])
+    if (overallTimer) clearTimer(overallTimer)
+    cleanupAll()
     removeCleanup()
     if (!isAttemptActive(attempt)) {
       cleanupAll()
@@ -593,9 +665,8 @@ export function createRadioAudioEngine({
         hls.loadSource(hlsUrl)
         hls.attachMedia(audioRef.value)
 
-        hls.on(Hls.Events.MANIFEST_PARSED, () => { if (isAttemptActive(attempt)) playAudioSafely(attempt) })
-
-        hls.on(Hls.Events.ERROR, (_event, data) => {
+        const onManifestParsed = () => { if (isAttemptActive(attempt)) playAudioSafely(attempt) }
+        const onHlsError = (_event, data) => {
           if (!isAttemptActive(attempt) || !data?.fatal) return
           logger.warn('HLS 播放发生致命错误。', data)
 
@@ -619,6 +690,12 @@ export function createRadioAudioEngine({
           }
           playerStore.setPlaybackError('HLS 播放发生错误，请稍后重试。')
           playerStore.togglePlay(false)
+        }
+        hls.on(Hls.Events.MANIFEST_PARSED, onManifestParsed)
+        hls.on(Hls.Events.ERROR, onHlsError)
+        addAttemptCleanup(attempt, () => {
+          hls.off?.(Hls.Events.MANIFEST_PARSED, onManifestParsed)
+          hls.off?.(Hls.Events.ERROR, onHlsError)
         })
 
         if (canDirectPlay) {
@@ -682,6 +759,12 @@ export function createRadioAudioEngine({
     invalidateActiveAttempt()
     destroyCurrentHls()
     resetAudioSource()
+    fallbackUrls = []
+    fallbackIndex = 0
+    fallbackStationId = ''
+    directProbeWinner = null
+    directStreamMode.value = ''
+    clearRadioMediaSession()
   }
 
   function pauseCurrentAudio() {

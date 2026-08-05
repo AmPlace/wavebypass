@@ -120,7 +120,8 @@ import { useEpg } from '../composables/useEpg'
 import { useLogoVisual } from '../composables/useLogoVisual'
 import { loadCover, abortPendingCoverRequests } from '../composables/coverLoader'
 import TagFilterRow from '../components/TagFilterRow.vue'
-import { isChannelAllNotLive, isChannelAllUrlsBlocked } from '../utils/sourceIdentity'
+import { channelIdentity, isChannelAllNotLive, isChannelAllUnsupported, isChannelAllUrlsBlocked } from '../utils/sourceIdentity'
+import { IPTV_CHANNEL_SORT_MODES, sortIptvChannels } from '../utils/iptvChannelList'
 
 const playerStore = usePlayerStore()
 const toastStore = useToastStore()
@@ -133,8 +134,25 @@ const allGroups = ref([])
 const selectedGroup = ref('')
 const loading = ref(false)
 const epgMap = ref({})
+
+let requestSeq = 0
+let activeRequestSeq = 0
+let activeController = null
+
+function _invalidateListRequest() {
+  requestSeq += 1
+  activeRequestSeq = 0
+  if (activeController) {
+    activeController.abort()
+    activeController = null
+  }
+}
+
+function _isCurrentListRequest(seq) {
+  return seq === activeRequestSeq && seq === requestSeq
+}
 const logoCandidateIndexes = ref({})
-const channelSortMode = ref('original')
+const channelSortMode = computed(() => playerStore.iptvChannelSortMode)
 const categoryTabs = computed(() => ['全部', ...allGroups.value])
 
 const YOUTUBE_THUMBNAIL_VARIANTS = ['maxresdefault', 'hq720', 'hqdefault']
@@ -188,22 +206,12 @@ const {
   fallbackName: '未知频道',
 })
 
-const SORT_MODES = [
-  { key: 'original', label: '默认排序' },
-  { key: 'natural', label: 'A-Z排序' },
-  { key: 'group', label: '分组排序' },
-]
-
-function naturalSort(a, b) {
-  return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' })
-}
-
 function nextSortMode() {
-  const idx = SORT_MODES.findIndex(m => m.key === channelSortMode.value)
-  channelSortMode.value = SORT_MODES[(idx + 1) % SORT_MODES.length].key
+  const idx = IPTV_CHANNEL_SORT_MODES.findIndex(m => m.key === channelSortMode.value)
+  playerStore.setIptvChannelSortMode(IPTV_CHANNEL_SORT_MODES[(idx + 1) % IPTV_CHANNEL_SORT_MODES.length].key)
 }
 
-const currentSortLabel = computed(() => SORT_MODES.find(m => m.key === channelSortMode.value)?.label || '默认排序')
+const currentSortLabel = computed(() => IPTV_CHANNEL_SORT_MODES.find(m => m.key === channelSortMode.value)?.label || '默认排序')
 
 function selectCategoryTab(tab) {
   abortPendingCoverRequests()
@@ -216,11 +224,25 @@ function isSelectedCategory(tab) {
 }
 
 async function loadChannels() {
+  _invalidateListRequest()
+  const seq = ++requestSeq
+  activeRequestSeq = seq
+  const ctrl = new AbortController()
+  activeController = ctrl
+
   loading.value = true
   try {
-    const data = await fetchAggregatedChannels({ group: selectedGroup.value, search: searchQuery.value.trim() })
+    const group = selectedGroup.value
+    const search = searchQuery.value.trim()
+    const data = await fetchAggregatedChannels({ group, search, signal: ctrl.signal })
+    if (!_isCurrentListRequest(seq)) return { applied: false }
     allChannels.value = data.channels || []
-    if (!selectedGroup.value && !searchQuery.value.trim()) {
+    playerStore.refreshIptvChannelContext({
+      group,
+      search,
+      channels: allChannels.value,
+    })
+    if (!group && !search) {
       allGroups.value = data.groups || []
     }
     // 同步后端 adapter 能力表：仅取支持 "cover" 的 adapter 名字。
@@ -229,18 +251,26 @@ async function loadChannels() {
     for (const [name, list] of Object.entries(caps)) {
       if (Array.isArray(list) && list.includes('cover')) next.add(String(name).toLowerCase())
     }
-    adapterCoverSupported.value = next
+    if (_isCurrentListRequest(seq)) adapterCoverSupported.value = next
     const keys = (data.channels || []).map(c => c.canonical_key).filter(Boolean)
-    if (keys.length) {
-      useEpg().batchCurrent(keys).then(m => { epgMap.value = m || {} })
+    if (keys.length && _isCurrentListRequest(seq)) {
+      const batchSeq = seq
+      useEpg().batchCurrent(keys).then(m => {
+        if (_isCurrentListRequest(batchSeq)) epgMap.value = m || {}
+      })
     }
     // 延迟触发封面加载：等 DOM 更新后，IntersectionObserver 开始观察可见卡片
     await nextTick()
     _observeVisibleCards()
+    return { applied: true }
   } catch (e) {
+    if (!_isCurrentListRequest(seq)) return { applied: false }
+    if (e?.name === 'AbortError' || e?.status === 0) return { applied: false }
     console.error('加载频道失败:', e)
+    return { applied: false }
+  } finally {
+    if (_isCurrentListRequest(seq)) loading.value = false
   }
-  loading.value = false
 }
 
 // ── IntersectionObserver：仅加载视口附近频道的封面 ──
@@ -293,6 +323,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  _invalidateListRequest()
   if (_coverObserver) {
     _coverObserver.disconnect()
     _coverObserver = null
@@ -305,13 +336,7 @@ onUnmounted(() => {
 })
 
 const filteredChannels = computed(() => {
-  const list = allChannels.value.slice()
-  if (channelSortMode.value === 'natural') {
-    list.sort((a, b) => naturalSort(a.name || '', b.name || ''))
-  } else if (channelSortMode.value === 'group') {
-    list.sort((a, b) => naturalSort(a.group_name || '', b.group_name || '') || naturalSort(a.name || '', b.name || ''))
-  }
-  return list
+  return sortIptvChannels(allChannels.value, channelSortMode.value)
 })
 
 onMounted(loadChannels)
@@ -320,7 +345,7 @@ watch(searchQuery, () => { loadChannels() })
 
 function isCurrentChannel(ch) {
   const current = playerStore.pendingIptvChannel || playerStore.currentIptvChannel
-  return current && current.name === ch.name
+  return Boolean(current && channelIdentity(current) === channelIdentity(ch))
 }
 
 function isUntested(ch) {
@@ -339,10 +364,8 @@ function isAllNotLive(ch) {
 }
 
 function isUnavailable(ch) {
-  // 只禁"全失败"。not_live 是临时状态（上次测速时没开播≠现在没开播），
-  // 放开可点：点了照常播放，同时 toast 提示用户上次结果。
-  // 与 FullPlayer 频道列表使用同一规则（utils/sourceIdentity.isChannelAllUrlsBlocked）。
-  return isChannelAllUrlsBlocked(ch)
+  // 测速结果只影响排序和提示；明确禁用或全部 unsupported 才禁止点击。
+  return isChannelAllUrlsBlocked(ch) || isChannelAllUnsupported(ch)
 }
 
 function isAnyPlayable(ch) {
@@ -533,7 +556,14 @@ async function playChannel(ch) {
   }
   const videoEl = playerStore.iptvVideoEl
   if (videoEl) videoEl.play().catch(() => {})
-  await playerStore.playIptvChannel(ch)
+  await playerStore.playIptvChannel(ch, {
+    channelContext: {
+      origin: 'iptv-home',
+      group: selectedGroup.value,
+      search: searchQuery.value.trim(),
+      channels: allChannels.value,
+    },
+  })
 }
 
 const gridRef = ref(null)

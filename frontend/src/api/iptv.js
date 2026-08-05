@@ -57,12 +57,12 @@ export async function fetchTestStatus(subId) {
 
 // ── 聚合频道（前端用）──
 
-export async function fetchAggregatedChannels({ group = '', search = '' } = {}) {
+export async function fetchAggregatedChannels({ group = '', search = '', signal } = {}) {
   const params = new URLSearchParams()
   if (group) params.set('group', group)
   if (search) params.set('search', search)
   const qs = params.toString()
-  const res = await request(`/api/iptv/channels${qs ? '?' + qs : ''}`)
+  const res = await request(`/api/iptv/channels${qs ? '?' + qs : ''}`, { signal })
   return res.json()
 }
 
