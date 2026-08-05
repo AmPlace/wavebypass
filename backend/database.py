@@ -477,73 +477,194 @@ def _channel_config_value(channel: dict, field: str):
 
 
 def _channel_identity_key(channel: dict) -> tuple:
-    return tuple(_channel_config_value(channel, field) for field in _CHANNEL_IDENTITY_FIELDS)
+    values = []
+    for field in _CHANNEL_IDENTITY_FIELDS:
+        value = _channel_config_value(channel, field)
+        if field == 'market_source_item_id' and str(value).startswith('auto-'):
+            value = ''
+        values.append(value)
+    return tuple(values)
+
+
+def _prepare_channels(channels: list[dict]) -> list[tuple[dict, dict]]:
+    prepared = []
+    for channel in channels:
+        values = {field: _channel_config_value(channel, field) for field in _CHANNEL_CONFIG_FIELDS}
+        if not values['name']:
+            raise ValueError('channel name 不能为空')
+        if not values['url']:
+            raise ValueError('channel url 不能为空')
+        prepared.append((channel, values))
+    return prepared
+
+
+def _sync_channels_conn(conn: sqlite3.Connection, sub_id: int, prepared: list[tuple[dict, dict]]) -> None:
+    existing_rows = conn.execute(
+        "SELECT * FROM channels WHERE subscription_id=? ORDER BY id",
+        (sub_id,),
+    ).fetchall()
+    existing_by_key: dict[tuple, list[sqlite3.Row]] = {}
+    for row in existing_rows:
+        existing_by_key.setdefault(_channel_identity_key(dict(row)), []).append(row)
+
+    retained_ids = []
+    update_assignments = ', '.join(f"{field}=?" for field in _CHANNEL_UPDATE_FIELDS)
+    insert_fields = ('subscription_id', *_CHANNEL_CONFIG_FIELDS)
+    insert_columns = ', '.join(insert_fields)
+    insert_placeholders = ', '.join('?' for _ in insert_fields)
+
+    for original, values in prepared:
+        matches = existing_by_key.get(_channel_identity_key(original)) or []
+        existing = matches.pop(0) if matches else None
+        if existing is not None:
+            row_id = int(existing['id'])
+            update_values = tuple(values[field] for field in _CHANNEL_UPDATE_FIELDS)
+            conn.execute(
+                f"UPDATE channels SET {update_assignments} WHERE id=? AND subscription_id=?",
+                (*update_values, row_id, sub_id),
+            )
+        else:
+            config_values = tuple(values[field] for field in _CHANNEL_CONFIG_FIELDS)
+            cursor = conn.execute(
+                f"INSERT INTO channels({insert_columns}) VALUES({insert_placeholders})",
+                (sub_id, *config_values),
+            )
+            row_id = int(cursor.lastrowid)
+        retained_ids.append(row_id)
+
+    if retained_ids:
+        placeholders = ', '.join('?' for _ in retained_ids)
+        conn.execute(
+            f"DELETE FROM channels WHERE subscription_id=? AND id NOT IN ({placeholders})",
+            (sub_id, *retained_ids),
+        )
+    else:
+        conn.execute("DELETE FROM channels WHERE subscription_id=?", (sub_id,))
+
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        "UPDATE subscriptions SET channel_count=?, last_updated=? WHERE id=?",
+        (len(prepared), now, sub_id),
+    )
 
 
 async def add_channels_bulk(sub_id: int, channels: list[dict]):
-    def _add():
-        prepared = []
-        for channel in channels:
-            values = {field: _channel_config_value(channel, field) for field in _CHANNEL_CONFIG_FIELDS}
-            if not values['name']:
-                raise ValueError('channel name 不能为空')
-            if not values['url']:
-                raise ValueError('channel url 不能为空')
-            prepared.append((channel, values))
+    prepared = _prepare_channels(channels)
 
+    def _add():
         conn = _connect()
         try:
             with conn:
-                existing_rows = conn.execute(
-                    "SELECT * FROM channels WHERE subscription_id=? ORDER BY id",
-                    (sub_id,),
-                ).fetchall()
-                existing_by_key: dict[tuple, list[sqlite3.Row]] = {}
-                for row in existing_rows:
-                    existing_by_key.setdefault(_channel_identity_key(dict(row)), []).append(row)
-
-                retained_ids = []
-                update_assignments = ', '.join(f"{field}=?" for field in _CHANNEL_UPDATE_FIELDS)
-                insert_fields = ('subscription_id', *_CHANNEL_CONFIG_FIELDS)
-                insert_columns = ', '.join(insert_fields)
-                insert_placeholders = ', '.join('?' for _ in insert_fields)
-
-                for original, values in prepared:
-                    matches = existing_by_key.get(_channel_identity_key(original)) or []
-                    existing = matches.pop(0) if matches else None
-                    if existing is not None:
-                        row_id = int(existing['id'])
-                        update_values = tuple(values[field] for field in _CHANNEL_UPDATE_FIELDS)
-                        conn.execute(
-                            f"UPDATE channels SET {update_assignments} WHERE id=? AND subscription_id=?",
-                            (*update_values, row_id, sub_id),
-                        )
-                    else:
-                        config_values = tuple(values[field] for field in _CHANNEL_CONFIG_FIELDS)
-                        cursor = conn.execute(
-                            f"INSERT INTO channels({insert_columns}) VALUES({insert_placeholders})",
-                            (sub_id, *config_values),
-                        )
-                        row_id = int(cursor.lastrowid)
-                    retained_ids.append(row_id)
-
-                if retained_ids:
-                    placeholders = ', '.join('?' for _ in retained_ids)
-                    conn.execute(
-                        f"DELETE FROM channels WHERE subscription_id=? AND id NOT IN ({placeholders})",
-                        (sub_id, *retained_ids),
-                    )
-                else:
-                    conn.execute("DELETE FROM channels WHERE subscription_id=?", (sub_id,))
-
-                now = datetime.now(timezone.utc).isoformat()
-                conn.execute(
-                    "UPDATE subscriptions SET channel_count=?, last_updated=? WHERE id=?",
-                    (len(channels), now, sub_id),
-                )
+                _sync_channels_conn(conn, sub_id, prepared)
         finally:
             conn.close()
     await asyncio.to_thread(_add)
+
+
+async def install_market_package_atomic(
+    *,
+    package_id: str,
+    market_url: str,
+    title: str,
+    subscription_url: str,
+    channels: list[dict],
+    installed_version: str = '',
+    metadata_json: str = '',
+    custom_ua: str = '',
+    force_proxy: int = 0,
+    auto_update: int = 0,
+) -> int:
+    if not channels:
+        raise ValueError('没有可导入的频道源')
+    prepared = _prepare_channels(channels)
+
+    def _install():
+        conn = _connect()
+        try:
+            with conn:
+                install = conn.execute(
+                    "SELECT * FROM market_packages_installed WHERE package_id=?",
+                    (package_id,),
+                ).fetchone()
+                sub_id = int(install['installed_subscription_id']) if install and install['installed_subscription_id'] else 0
+                subscription = conn.execute(
+                    "SELECT * FROM subscriptions WHERE id=?",
+                    (sub_id,),
+                ).fetchone() if sub_id else None
+
+                now = datetime.now(timezone.utc).isoformat()
+                if subscription is None:
+                    existing = conn.execute(
+                        "SELECT id FROM subscriptions WHERE url=?",
+                        (subscription_url,),
+                    ).fetchone()
+                    if existing:
+                        raise DuplicateSubscriptionError(subscription_url)
+                    cursor = conn.execute(
+                        """
+                        INSERT INTO subscriptions(
+                            title, url, channel_count, valid, last_updated, created_at,
+                            custom_ua, force_proxy
+                        ) VALUES(?, ?, ?, 1, ?, ?, ?, ?)
+                        """,
+                        (title, subscription_url, len(channels), now, now, custom_ua, force_proxy),
+                    )
+                    sub_id = int(cursor.lastrowid)
+                else:
+                    conn.execute(
+                        """
+                        UPDATE subscriptions SET
+                            title=?, url=?, channel_count=?, valid=1, last_updated=?,
+                            custom_ua=?, force_proxy=?
+                        WHERE id=?
+                        """,
+                        (title, subscription_url, len(channels), now, custom_ua, force_proxy, sub_id),
+                    )
+
+                _sync_channels_conn(conn, sub_id, prepared)
+                conn.execute(
+                    """
+                    INSERT INTO market_packages_installed(
+                        package_id, market_url, installed_subscription_id, installed_version,
+                        installed_at, auto_update, metadata_json
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(package_id) DO UPDATE SET
+                        market_url=excluded.market_url,
+                        installed_subscription_id=excluded.installed_subscription_id,
+                        installed_version=excluded.installed_version,
+                        installed_at=excluded.installed_at,
+                        auto_update=excluded.auto_update,
+                        metadata_json=excluded.metadata_json
+                    """,
+                    (package_id, market_url, sub_id, installed_version, now, auto_update, metadata_json),
+                )
+                return sub_id
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_install)
+
+
+async def uninstall_market_package_atomic(package_id: str) -> bool:
+    def _uninstall():
+        conn = _connect()
+        try:
+            with conn:
+                install = conn.execute(
+                    "SELECT installed_subscription_id FROM market_packages_installed WHERE package_id=?",
+                    (package_id,),
+                ).fetchone()
+                if not install:
+                    return False
+                sub_id = install['installed_subscription_id']
+                conn.execute("DELETE FROM market_packages_installed WHERE package_id=?", (package_id,))
+                if sub_id:
+                    conn.execute("DELETE FROM subscriptions WHERE id=?", (sub_id,))
+                return True
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_uninstall)
 
 
 def _apply_sub_fallbacks(rows: list[dict]) -> list[dict]:

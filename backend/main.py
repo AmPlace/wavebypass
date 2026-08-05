@@ -1536,6 +1536,12 @@ async def _refresh_regular_subscription(sub: dict) -> dict:
 
     channels = parse_m3u(resp.text)
     channels = deduplicate_channels(channels)
+    if not channels:
+        await db.update_subscription(sub['id'], valid=0)
+        raise HTTPException(
+            status_code=502,
+            detail="刷新结果未解析到任何频道，已保留旧数据",
+        )
     await db.add_channels_bulk(sub['id'], channels)
     await db.update_subscription(sub['id'], valid=1, channel_count=len(channels))
     # 频道数据变更后失效 Cover 缓存

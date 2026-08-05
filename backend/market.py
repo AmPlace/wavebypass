@@ -3,6 +3,7 @@ import hashlib
 import ipaddress
 import json
 import os
+import re
 import secrets
 import socket
 import time
@@ -70,12 +71,15 @@ _market_cache: dict[str, Any] = {
     "markets": [],
     "packages": [],
     "sources": [],
+    "source_entries": {},
     "fetched_at": 0,
     "stale": False,
     "last_error": "",
     "allow_private": ALLOW_PRIVATE_MARKET_URLS,
 }
 _preview_cache: dict[str, dict[str, Any]] = {}
+_package_update_locks: dict[str, asyncio.Lock] = {}
+_market_source_refresh_locks: dict[str, asyncio.Lock] = {}
 
 
 class MarketError(Exception):
@@ -319,6 +323,91 @@ def _attach_source(package: dict, source: dict, raw_id: str | None = None) -> di
     return result
 
 
+def _source_cache_key(source: dict | None) -> str:
+    source = source or {}
+    return str(source.get("source_key") or source.get("id") or "").strip()
+
+
+def _source_fetch_revision(source: dict | None) -> tuple[int, str, bool, bool]:
+    source = source or {}
+    return (
+        int(source.get("id") or 0),
+        str(source.get("url") or ""),
+        bool(source.get("enabled")),
+        bool(source.get("allow_private")),
+    )
+
+
+def _source_entries() -> dict[str, dict[str, Any]]:
+    entries = _market_cache.get("source_entries")
+    if not isinstance(entries, dict):
+        entries = {}
+        _market_cache["source_entries"] = entries
+    return entries
+
+
+def _rebuild_market_cache(sources: list[dict], *, extra_errors: list[str] | None = None) -> None:
+    entries = _source_entries()
+    active_sources = [source for source in sources if source.get("enabled")]
+    active_by_key = {_source_cache_key(source): source for source in active_sources}
+
+    for key in list(entries):
+        source = active_by_key.get(key)
+        entry = entries.get(key) or {}
+        if not source or str(entry.get("source_url") or "") != str(source.get("url") or ""):
+            entries.pop(key, None)
+
+    markets: list[dict] = []
+    packages: list[dict] = []
+    errors = list(extra_errors or [])
+    stale = False
+    for source in active_sources:
+        key = _source_cache_key(source)
+        entry = entries.get(key)
+        if not entry:
+            continue
+        public_source = _source_public(source)
+        market_doc = deepcopy(entry.get("market") or {})
+        if market_doc:
+            market_doc["_source"] = public_source
+            markets.append(market_doc)
+        for package in entry.get("packages") or []:
+            item = deepcopy(package)
+            item["market_source"] = public_source
+            packages.append(item)
+        if entry.get("stale"):
+            stale = True
+            if entry.get("last_error"):
+                errors.append(f"{source.get('name') or source.get('url')}: {entry['last_error']}")
+
+    error_text = "; ".join(dict.fromkeys(error for error in errors if error))
+    _market_cache.update({
+        "market_url": ", ".join(str(source.get("url") or "") for source in active_sources),
+        "market": markets[0] if markets else {"schema_version": SCHEMA_VERSION, "packages": []},
+        "markets": markets,
+        "packages": packages,
+        "sources": sources,
+        "fetched_at": time.time(),
+        "stale": bool(stale or error_text),
+        "last_error": error_text,
+        "allow_private": any(bool(source.get("allow_private")) for source in active_sources),
+    })
+
+
+async def _sync_source_cache_after_mutation(source_id: int | None = None, *, invalidate: bool = False) -> None:
+    sources = await db.list_market_sources()
+    if source_id is not None and invalidate:
+        source = next((item for item in sources if int(item.get("id") or 0) == int(source_id)), None)
+        key = _source_cache_key(source)
+        if key:
+            _source_entries().pop(key, None)
+        else:
+            for cached_key, entry in list(_source_entries().items()):
+                if int(entry.get("source_id") or 0) == int(source_id):
+                    _source_entries().pop(cached_key, None)
+    _rebuild_market_cache(sources)
+
+
 async def create_source(name: str, url: str, enabled: bool = True, allow_private: bool = False) -> dict:
     key = f"custom-{secrets.token_hex(4)}"
     source_id = await db.create_market_source(
@@ -329,6 +418,7 @@ async def create_source(name: str, url: str, enabled: bool = True, allow_private
         allow_private=1 if allow_private else 0,
     )
     source = await db.get_market_source(source_id)
+    await _sync_source_cache_after_mutation()
     return _source_public(source)
 
 
@@ -347,14 +437,26 @@ async def update_source(source_id: int, data: dict) -> dict:
         raise MarketError("内置 Market 源 URL 不能为空", 400)
     await db.update_market_source(source_id, **updates)
     updated = await db.get_market_source(source_id)
+    invalidate = (
+        str(updated.get("url") or "") != str(source.get("url") or "")
+        or not bool(updated.get("enabled"))
+    )
+    await _sync_source_cache_after_mutation(source_id, invalidate=invalidate)
     return _source_public(updated)
 
 
 async def delete_source(source_id: int) -> dict:
+    source = await db.get_market_source(source_id)
+    if not source:
+        raise MarketError("Market 源不存在", 404)
     try:
         await db.delete_market_source(source_id)
     except ValueError as exc:
         raise MarketError(str(exc), 400) from exc
+    key = _source_cache_key(source)
+    if key:
+        _source_entries().pop(key, None)
+    await _sync_source_cache_after_mutation()
     return {"ok": True}
 
 
@@ -533,7 +635,14 @@ def _cache_package(package: dict) -> None:
     for index, item in enumerate(packages):
         if item.get("id") == package_id:
             packages[index] = package
-            return
+            break
+    source_key = _source_cache_key(package.get("market_source"))
+    entry = _source_entries().get(source_key)
+    if entry:
+        for index, item in enumerate(entry.get("packages") or []):
+            if item.get("id") == package_id:
+                entry["packages"][index] = deepcopy(package)
+                break
 
 
 async def _resolve_package_manifest(package: dict) -> dict:
@@ -625,9 +734,9 @@ async def refresh_market(
     allow_private: bool = False,
     source_id: int | None = None,
 ) -> dict:
-    sources = await ensure_market_sources()
+    all_sources = await ensure_market_sources()
     if market_url:
-        source = next((item for item in sources if item.get("source_key") == "custom"), None)
+        source = next((item for item in all_sources if item.get("source_key") == "custom"), None)
         if not source:
             custom_id = await db.create_market_source(
                 name="自定义 Market",
@@ -640,22 +749,27 @@ async def refresh_market(
         else:
             await db.update_market_source(source["id"], url=market_url.strip(), enabled=1, allow_private=1 if allow_private else 0)
             source = await db.get_market_source(source["id"])
-        sources = [source] if source else []
+        targets = [source] if source else []
     elif source_id:
         source = await db.get_market_source(source_id)
         if not source:
             raise MarketError("Market 源不存在", 404)
-        sources = [source]
+        targets = [source]
     else:
-        sources = [source for source in sources if source.get("enabled")]
+        targets = [source for source in all_sources if source.get("enabled")]
 
-    if not sources:
+    if not targets:
+        sources_latest = await db.list_market_sources()
+        _rebuild_market_cache(sources_latest)
+        if any(source.get("enabled") for source in sources_latest):
+            return market_summary()
         _market_cache.update({
             "market_url": "",
             "market": {"schema_version": SCHEMA_VERSION, "packages": []},
             "markets": [],
             "packages": [],
-            "sources": await db.list_market_sources(),
+            "sources": sources_latest,
+            "source_entries": {},
             "fetched_at": time.time(),
             "stale": False,
             "last_error": "",
@@ -663,50 +777,67 @@ async def refresh_market(
         })
         return market_summary()
 
-    markets = []
-    packages = []
-    source_errors = []
-    try:
-        for source in sources:
+    source_errors: list[str] = []
+    successful = 0
+    entries = _source_entries()
+    for source in targets:
+        key = _source_cache_key(source)
+        lock = _market_source_refresh_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            current = await db.get_market_source(source["id"])
+            if not current or _source_fetch_revision(current) != _source_fetch_revision(source):
+                continue
             try:
                 market, source_packages = await _load_source_packages(source)
-                markets.append(market)
-                packages.extend(source_packages)
-                await db.update_market_source(
-                    source["id"],
-                    last_fetched_at=_now_iso(),
-                    last_status="ok",
-                    last_error="",
-                )
             except Exception as exc:
+                current = await db.get_market_source(source["id"])
+                if not current or _source_fetch_revision(current) != _source_fetch_revision(source):
+                    continue
                 source_errors.append(f"{source.get('name') or source.get('url')}: {exc}")
+                cached = entries.get(key)
+                if not cached or str(cached.get("source_url") or "") != str(source.get("url") or ""):
+                    cached = {
+                        "source_id": source.get("id"),
+                        "source_url": source.get("url", ""),
+                        "market": {},
+                        "packages": [],
+                        "fetched_at": time.time(),
+                    }
+                    entries[key] = cached
+                cached["stale"] = True
+                cached["last_error"] = str(exc)
                 await db.update_market_source(
                     source["id"],
                     last_fetched_at=_now_iso(),
                     last_status="error",
                     last_error=str(exc),
                 )
+                continue
 
-        if not markets and source_errors:
-            raise MarketError("; ".join(source_errors), 502)
+            current = await db.get_market_source(source["id"])
+            if not current or _source_fetch_revision(current) != _source_fetch_revision(source):
+                continue
+            entries[key] = {
+                "source_id": source.get("id"),
+                "source_url": source.get("url", ""),
+                "market": market,
+                "packages": source_packages,
+                "fetched_at": time.time(),
+                "stale": False,
+                "last_error": "",
+            }
+            successful += 1
+            await db.update_market_source(
+                source["id"],
+                last_fetched_at=_now_iso(),
+                last_status="ok",
+                last_error="",
+            )
 
-        sources_latest = await db.list_market_sources()
-        _market_cache.update({
-            "market_url": ", ".join([str(item.get("url") or "") for item in sources]),
-            "market": markets[0] if markets else {"schema_version": SCHEMA_VERSION, "packages": []},
-            "markets": markets,
-            "packages": packages,
-            "sources": sources_latest,
-            "fetched_at": time.time(),
-            "stale": False,
-            "last_error": "; ".join(source_errors),
-            "allow_private": any(bool(source.get("allow_private")) for source in sources_latest),
-        })
-    except Exception as exc:
-        _market_cache["stale"] = bool(_market_cache.get("packages"))
-        _market_cache["last_error"] = str(exc)
-        if not _market_cache.get("packages"):
-            raise
+    sources_latest = await db.list_market_sources()
+    _rebuild_market_cache(sources_latest, extra_errors=source_errors)
+    if not successful and source_errors and not _market_cache.get("packages"):
+        raise MarketError("; ".join(source_errors) or "Market 刷新失败", 502)
     return market_summary()
 
 
@@ -772,19 +903,44 @@ def _installed_metadata(install: dict | None) -> dict:
         return {}
 
 
+_NUMERIC_VERSION_RE = re.compile(r"^[vV]?(\d+(?:[._-]\d+)*)$")
+
+
+def _numeric_version(value: str) -> tuple[int, ...] | None:
+    match = _NUMERIC_VERSION_RE.fullmatch((value or "").strip())
+    if not match:
+        return None
+    return tuple(int(part) for part in re.split(r"[._-]", match.group(1)))
+
+
+def _version_status(current_version: str, installed_version: str) -> str:
+    current = str(current_version or "").strip()
+    installed = str(installed_version or "").strip()
+    if not current or not installed:
+        return "unknown"
+    if current == installed:
+        return "same"
+    current_numeric = _numeric_version(current)
+    installed_numeric = _numeric_version(installed)
+    if current_numeric is None or installed_numeric is None:
+        return "different"
+    width = max(len(current_numeric), len(installed_numeric))
+    current_padded = current_numeric + (0,) * (width - len(current_numeric))
+    installed_padded = installed_numeric + (0,) * (width - len(installed_numeric))
+    if current_padded > installed_padded:
+        return "upgrade"
+    if current_padded < installed_padded:
+        return "downgrade"
+    return "same"
+
+
 def _update_available(package: dict, install: dict | None) -> bool:
     if not install:
         return False
-    current_version = str(package.get("version") or "").strip()
-    installed_version = str(install.get("installed_version") or "").strip()
-    if current_version and installed_version:
-        return current_version != installed_version
-
-    current_updated_at = str(package.get("updated_at") or "").strip()
-    installed_updated_at = str(_installed_metadata(install).get("updated_at") or "").strip()
-    if current_updated_at and installed_updated_at:
-        return current_updated_at != installed_updated_at
-    return False
+    return _version_status(
+        package.get("version", ""),
+        install.get("installed_version", ""),
+    ) == "upgrade"
 
 
 async def list_packages(filters: dict[str, str | bool]) -> list[dict]:
@@ -831,6 +987,10 @@ async def list_packages(filters: dict[str, str | bool]) -> list[dict]:
         item["installed_version"] = install.get("installed_version", "") if install else ""
         item["installed_subscription_id"] = install.get("installed_subscription_id") if install else None
         item["auto_update"] = bool(install.get("auto_update")) if install else False
+        item["version_status"] = _version_status(
+            package.get("version", ""),
+            install.get("installed_version", "") if install else "",
+        )
         item["update_available"] = _update_available(package, install)
         packages.append(item)
     return packages
@@ -846,6 +1006,7 @@ def _package_card(package: dict) -> dict:
         "previewable", "supported_in_v1", "unsupported_reason", "schema_warnings",
         "manifest_url", "market_url", "market_source", "display", "installed",
         "installed_version", "auto_update", "update_available",
+        "version_status",
     ]
     return {key: deepcopy(package.get(key)) for key in keys if key in package}
 
@@ -871,21 +1032,19 @@ async def get_package(package_id: str) -> dict:
     result["installed_version"] = install.get("installed_version", "") if install else ""
     result["installed_subscription_id"] = install.get("installed_subscription_id") if install else None
     result["auto_update"] = bool(install.get("auto_update")) if install else False
+    result["version_status"] = _version_status(
+        package.get("version", ""),
+        install.get("installed_version", "") if install else "",
+    )
     result["update_available"] = _update_available(package, install)
     return result
 
 
 async def uninstall_package(package_id: str) -> dict:
-    installed = await db.get_market_install(package_id)
-    if not installed:
-        return {"ok": True, "uninstalled": False}
-    sub_id = installed.get("installed_subscription_id")
-    if sub_id:
-        sub = await db.get_subscription(sub_id)
-        if sub:
-            await db.delete_subscription(sub_id)
-    await db.delete_market_install(package_id)
-    return {"ok": True, "uninstalled": True}
+    lock = _package_update_locks.setdefault(package_id, asyncio.Lock())
+    async with lock:
+        uninstalled = await db.uninstall_market_package_atomic(package_id)
+    return {"ok": True, "uninstalled": uninstalled}
 
 
 async def update_install_config(package_id: str, *, auto_update: bool | None = None) -> dict:
@@ -915,6 +1074,10 @@ async def update_installed_package(package_id: str) -> dict:
 async def run_installed_updates(auto_update_only: bool = False) -> dict:
     await ensure_market_loaded()
     rows = await db.list_market_installs()
+    packages = {
+        str(package.get("id") or ""): package
+        for package in (_market_cache.get("packages") or [])
+    }
     results: list[dict[str, Any]] = []
     updated = 0
     skipped = 0
@@ -930,6 +1093,29 @@ async def run_installed_updates(auto_update_only: bool = False) -> dict:
                 "package_id": package_id,
                 "status": "skipped",
                 "reason": "auto_update disabled",
+            })
+            continue
+        package = packages.get(package_id)
+        if not package:
+            skipped += 1
+            results.append({
+                "package_id": package_id,
+                "status": "skipped",
+                "reason": "package missing from current market",
+                "version_status": "unknown",
+            })
+            continue
+        version_status = _version_status(
+            package.get("version", ""),
+            install.get("installed_version", ""),
+        )
+        if version_status != "upgrade":
+            skipped += 1
+            results.append({
+                "package_id": package_id,
+                "status": "skipped",
+                "reason": f"version status: {version_status}",
+                "version_status": version_status,
             })
             continue
         sub_id = install.get("installed_subscription_id")
@@ -952,6 +1138,7 @@ async def run_installed_updates(auto_update_only: bool = False) -> dict:
                 "subscription_id": result.get("subscription_id"),
                 "channel_count": result.get("channel_count", 0),
                 "source_count": result.get("source_count", 0),
+                "version_status": version_status,
             })
         except Exception as exc:
             failed += 1
@@ -1216,6 +1403,22 @@ async def import_package(
     prefer_cached_preview: bool = True,
     reinstall: bool = False,
 ) -> dict:
+    lock = _package_update_locks.setdefault(package_id, asyncio.Lock())
+    async with lock:
+        return await _import_package_locked(
+            package_id,
+            preview_id=preview_id,
+            prefer_cached_preview=prefer_cached_preview,
+            reinstall=reinstall,
+        )
+
+
+async def _import_package_locked(
+    package_id: str,
+    preview_id: str = "",
+    prefer_cached_preview: bool = True,
+    reinstall: bool = False,
+) -> dict:
     package = await get_package(package_id)
     if not package.get("importable"):
         raise MarketError(package.get("unsupported_reason") or "该包当前版本不可导入", 400)
@@ -1241,13 +1444,6 @@ async def import_package(
     if not channels:
         raise MarketError("没有可导入的频道源", 400)
 
-    if installed and reinstall:
-        sub_id = installed.get("installed_subscription_id")
-        sub = await db.get_subscription(sub_id) if sub_id else None
-        if sub:
-            await db.delete_subscription(sub["id"])
-        await db.delete_market_install(package_id)
-
     # subscription 级属性只允许来自 manifest 明确声明，不得从子 source 聚合。
     # 一个 source 因 Referer/headers 需要代理，不能影响同包其他 source。
     # defaults.source.requires_proxy 是 source 级默认值，在 _normalize_source() 中
@@ -1262,28 +1458,8 @@ async def import_package(
         return str(v).strip().lower() not in ("", "0", "false", "no", "off", "none", "null")
 
     force_proxy = 1 if _truthy(package.get("requires_proxy")) else 0
-    # custom_ua 同理：只取 manifest 明确声明的订阅级 UA，不从子 source 聚合。
     subscription_custom_ua = str(package.get("custom_ua") or "").strip()
-    if not subscription_custom_ua:
-        custom_uas = sorted({str(ch.get("custom_ua") or "").strip() for ch in channels if ch.get("custom_ua")})
-        if custom_uas:
-            subscription_custom_ua = custom_uas[0]
-            if len(custom_uas) > 1:
-                preview.setdefault("warnings", []).append(
-                    "V1 仅支持订阅级 User-Agent；检测到多个 UA，导入时使用第一个。"
-                )
     url = f"market://{package_id}"
-    try:
-        sub_id = await db.add_subscription(
-            title=package.get("name") or package_id,
-            url=url,
-            channel_count=len(channels),
-            custom_ua=subscription_custom_ua,
-            force_proxy=force_proxy,
-        )
-    except db.DuplicateSubscriptionError as exc:
-        raise MarketError("Market 包已安装", 409) from exc
-    await db.add_channels_bulk(sub_id, channels)
 
     metadata = {
         "name": package.get("name"),
@@ -1296,14 +1472,21 @@ async def import_package(
         "warnings": preview.get("warnings", []),
         "imported_at": _now_iso(),
     }
-    await db.upsert_market_install(
-        package_id=package_id,
-        market_url=package.get("market_url") or _market_cache.get("market_url", ""),
-        installed_subscription_id=sub_id,
-        installed_version=package.get("version", ""),
-        metadata_json=json.dumps(metadata, ensure_ascii=False),
-        auto_update=preserved_auto_update,
-    )
+    try:
+        sub_id = await db.install_market_package_atomic(
+            package_id=package_id,
+            market_url=package.get("market_url") or _market_cache.get("market_url", ""),
+            title=package.get("name") or package_id,
+            subscription_url=url,
+            channels=channels,
+            installed_version=package.get("version", ""),
+            metadata_json=json.dumps(metadata, ensure_ascii=False),
+            custom_ua=subscription_custom_ua,
+            force_proxy=force_proxy,
+            auto_update=preserved_auto_update,
+        )
+    except db.DuplicateSubscriptionError as exc:
+        raise MarketError("Market 包已安装", 409) from exc
     return {
         "ok": True,
         "subscription_id": sub_id,
