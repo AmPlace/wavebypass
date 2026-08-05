@@ -31,6 +31,7 @@ from adapters import (
 )
 from iptv_probe import probe_channel_source
 from media_tools import media_tool_bin
+from market_tasks import create_market_automation_service
 from ssrf_guard import UnsafeTargetError, assert_safe_target_url, assert_safe_host_ips
 from core.config import get_settings
 from core.settings_service import get_effective_settings
@@ -649,23 +650,35 @@ def _load_tingfm_streams():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await database.initialize()
-    _clear_stale_rtsp_hls_dirs()
-    asyncio.create_task(refresh_tokens_task())
-    asyncio.create_task(_yunting_refresh_task())
-    asyncio.create_task(_myradio_refresh_task())
-    asyncio.create_task(_epg_refresh_loop())
-    asyncio.create_task(_prefetch_rb())
-    asyncio.create_task(_rtsp_hls_cleanup_task())
-    # logo 模板：本地兜底已在 import 时加载完成，这里启动后异步拉一次远程覆盖；
-    # 拉失败就维持本地，按用户要求不重试。后续接入设置页后再做定时刷新 / 手动刷新。
-    asyncio.create_task(refresh_logo_template_from_remote(http_client))
-    # 加载 tingfm HK 电台流地址
-    _load_tingfm_streams()
-    yield
-    await _stop_all_rtsp_sessions()
-    await http_client.aclose()
-    await yunting_client.aclose()
+    automation_service = None
+    app.state.automation_service = None
+    try:
+        await database.initialize()
+        automation_service = create_market_automation_service()
+        app.state.automation_service = automation_service
+        await automation_service.start()
+        _clear_stale_rtsp_hls_dirs()
+        asyncio.create_task(refresh_tokens_task())
+        asyncio.create_task(_yunting_refresh_task())
+        asyncio.create_task(_myradio_refresh_task())
+        asyncio.create_task(_epg_refresh_loop())
+        asyncio.create_task(_prefetch_rb())
+        asyncio.create_task(_rtsp_hls_cleanup_task())
+        # logo 模板：本地兜底已在 import 时加载完成，这里启动后异步拉一次远程覆盖；
+        # 拉失败就维持本地，按用户要求不重试。后续接入设置页后再做定时刷新 / 手动刷新。
+        asyncio.create_task(refresh_logo_template_from_remote(http_client))
+        # 加载 tingfm HK 电台流地址
+        _load_tingfm_streams()
+        yield
+    finally:
+        try:
+            if automation_service is not None:
+                await automation_service.stop()
+        finally:
+            app.state.automation_service = None
+            await _stop_all_rtsp_sessions()
+            await http_client.aclose()
+            await yunting_client.aclose()
 
 app = FastAPI(
     title="WaveFlow",

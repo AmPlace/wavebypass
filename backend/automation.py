@@ -627,6 +627,27 @@ class AutomationEventWaiter:
             await asyncio.gather(*tasks, return_exceptions=True)
 
 
+def _validate_schedule_config(
+    definition: AutomationTaskDefinition,
+    config: AutomationTaskConfig,
+) -> None:
+    if config.conflict_group != definition.conflict_group:
+        raise AutomationConfigurationError(
+            f"任务 conflict_group 与数据库配置不一致: {definition.task_id}"
+        )
+    if config.interval_seconds < definition.minimum_interval_seconds:
+        raise AutomationConfigurationError(
+            f"任务 interval_seconds 小于定义下限: {definition.task_id}"
+        )
+    if (
+        definition.maximum_interval_seconds is not None
+        and config.interval_seconds > definition.maximum_interval_seconds
+    ):
+        raise AutomationConfigurationError(
+            f"任务 interval_seconds 大于定义上限: {definition.task_id}"
+        )
+
+
 class AutomationScheduler:
     """调度一个任务；不 claim、不直接执行 handler，也不拥有长期 task handle。"""
 
@@ -717,21 +738,7 @@ class AutomationScheduler:
 
     async def _load_config(self) -> AutomationTaskConfig:
         config = await self.repository.ensure_config(self.definition)
-        if config.conflict_group != self.definition.conflict_group:
-            raise AutomationConfigurationError(
-                f"任务 conflict_group 与数据库配置不一致: {self.definition.task_id}"
-            )
-        if config.interval_seconds < self.definition.minimum_interval_seconds:
-            raise AutomationConfigurationError(
-                f"任务 interval_seconds 小于定义下限: {self.definition.task_id}"
-            )
-        if (
-            self.definition.maximum_interval_seconds is not None
-            and config.interval_seconds > self.definition.maximum_interval_seconds
-        ):
-            raise AutomationConfigurationError(
-                f"任务 interval_seconds 大于定义上限: {self.definition.task_id}"
-            )
+        _validate_schedule_config(self.definition, config)
         return config
 
     async def _wait_initial_delay(self) -> AutomationWaitOutcome:
@@ -802,9 +809,15 @@ class AutomationService:
             self._tasks.clear()
             self._scheduler_errors.clear()
             recovered_count = await self.repository.recover_interrupted()
-            for definition in self.registry.list_definitions():
-                if not definition.allow_automatic_scheduling:
-                    continue
+            definitions = tuple(
+                definition
+                for definition in self.registry.list_definitions()
+                if definition.allow_automatic_scheduling
+            )
+            for definition in definitions:
+                config = await self.repository.ensure_config(definition)
+                _validate_schedule_config(definition, config)
+            for definition in definitions:
                 waiter = self._waiter_factory(definition)
                 scheduler = self._scheduler_factory(
                     definition,

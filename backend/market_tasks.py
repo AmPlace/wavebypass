@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 import database as db
 import market
 from automation import (
+    AutomationEventWaiter,
     AutomationHandlerResult,
     AutomationRegistry,
+    AutomationRepository,
+    AutomationRunner,
+    AutomationScheduler,
+    AutomationService,
     AutomationTaskContext,
     AutomationTaskDefinition,
 )
@@ -46,6 +51,25 @@ def register_market_task(registry: AutomationRegistry) -> AutomationTaskDefiniti
     definition = create_market_task_definition()
     registry.register(definition)
     return definition
+
+
+def create_market_automation_service(
+    *,
+    repository: AutomationRepository | None = None,
+    waiter_factory: Callable[[AutomationTaskDefinition], AutomationEventWaiter] | None = None,
+    scheduler_factory: Callable[..., AutomationScheduler] | None = None,
+) -> AutomationService:
+    registry = AutomationRegistry()
+    register_market_task(registry)
+    repository = repository or AutomationRepository(db)
+    runner = AutomationRunner(registry, repository)
+    return AutomationService(
+        registry=registry,
+        repository=repository,
+        runner=runner,
+        waiter_factory=waiter_factory,
+        scheduler_factory=scheduler_factory,
+    )
 
 
 def _package_source_key(package_id: str) -> str:
