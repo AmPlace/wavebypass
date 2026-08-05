@@ -4,6 +4,24 @@ import os
 import json
 from datetime import datetime, timezone
 
+
+AUTOMATION_ERROR_MAX_LENGTH = 2048
+AUTOMATION_STATUSES = {
+    'never_run',
+    'running',
+    'success',
+    'partial',
+    'failed',
+    'cancelled',
+    'interrupted',
+}
+AUTOMATION_FINAL_STATUSES = AUTOMATION_STATUSES - {'never_run', 'running'}
+MARKET_VERSION_STATUSES = {'same', 'upgrade', 'downgrade', 'different', 'unknown'}
+MARKET_UPDATE_FINAL_STATUSES = {'success', 'failed', 'cancelled', 'interrupted'}
+MARKET_AUTOMATION_TASK_ID = 'market_auto_update'
+MARKET_AUTOMATION_CONFLICT_GROUP = 'market'
+MARKET_AUTOMATION_INTERVAL_SECONDS = 86400
+
 DB_PATH_RAW = (
     os.environ.get('WAVEFLOW_DB_PATH')
     or os.path.join(os.path.dirname(__file__), 'data', 'waveflow.db')
@@ -26,6 +44,38 @@ CREATE TABLE IF NOT EXISTS app_settings (
     updated_at TEXT NOT NULL,
     updated_by INTEGER
 );
+
+CREATE TABLE IF NOT EXISTS automation_task_config (
+    task_id          TEXT PRIMARY KEY,
+    conflict_group   TEXT NOT NULL,
+    enabled          INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
+    interval_seconds INTEGER NOT NULL CHECK(interval_seconds > 0),
+    updated_at       TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS automation_task_state (
+    task_id          TEXT PRIMARY KEY,
+    conflict_group   TEXT NOT NULL,
+    task_type        TEXT DEFAULT '',
+    run_token        TEXT DEFAULT '',
+    last_started_at  TEXT DEFAULT '',
+    last_finished_at TEXT DEFAULT '',
+    last_status      TEXT NOT NULL DEFAULT 'never_run'
+                     CHECK(last_status IN (
+                         'never_run', 'running', 'success', 'partial',
+                         'failed', 'cancelled', 'interrupted'
+                     )),
+    checked_count    INTEGER NOT NULL DEFAULT 0 CHECK(checked_count >= 0),
+    updated_count    INTEGER NOT NULL DEFAULT 0 CHECK(updated_count >= 0),
+    skipped_count    INTEGER NOT NULL DEFAULT 0 CHECK(skipped_count >= 0),
+    failed_count     INTEGER NOT NULL DEFAULT 0 CHECK(failed_count >= 0),
+    last_error       TEXT DEFAULT '',
+    FOREIGN KEY (task_id) REFERENCES automation_task_config(task_id) ON DELETE CASCADE
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_running_conflict_group
+ON automation_task_state(conflict_group)
+WHERE last_status = 'running';
 
 CREATE TABLE IF NOT EXISTS subscriptions (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -136,6 +186,14 @@ CREATE TABLE IF NOT EXISTS market_packages_installed (
     installed_at              TEXT NOT NULL,
     auto_update               INTEGER DEFAULT 0,
     metadata_json             TEXT DEFAULT '',
+    last_checked_at           TEXT DEFAULT '',
+    remote_version            TEXT DEFAULT '',
+    version_status            TEXT DEFAULT 'unknown',
+    last_update_started_at    TEXT DEFAULT '',
+    last_update_finished_at   TEXT DEFAULT '',
+    last_update_status        TEXT DEFAULT 'never_run',
+    last_update_error         TEXT DEFAULT '',
+    last_update_run_token     TEXT DEFAULT '',
     FOREIGN KEY (installed_subscription_id) REFERENCES subscriptions(id) ON DELETE SET NULL
 );
 
@@ -207,6 +265,68 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _normalize_identifier(value, field: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f'{field} 必须是字符串')
+    normalized = value.strip()
+    if not normalized:
+        raise ValueError(f'{field} 不能为空')
+    return normalized
+
+
+def _normalize_interval_seconds(value) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError('interval_seconds 必须是正整数')
+    if value <= 0:
+        raise ValueError('interval_seconds 必须大于 0')
+    return value
+
+
+def _normalize_enabled(value) -> int:
+    if isinstance(value, bool):
+        return 1 if value else 0
+    if isinstance(value, int) and value in {0, 1}:
+        return value
+    raise ValueError('enabled 必须是布尔值或 0/1')
+
+
+def _normalize_timestamp(value: str | None, field: str) -> str:
+    if value is None:
+        return _utc_now()
+    if not isinstance(value, str):
+        raise TypeError(f'{field} 必须是 UTC ISO 时间字符串')
+    normalized = value.strip()
+    if not normalized:
+        raise ValueError(f'{field} 不能为空')
+    try:
+        parsed = datetime.fromisoformat(normalized.replace('Z', '+00:00'))
+    except ValueError as exc:
+        raise ValueError(f'{field} 必须是有效的 ISO 时间字符串') from exc
+    if parsed.tzinfo is None:
+        raise ValueError(f'{field} 必须包含时区')
+    return parsed.astimezone(timezone.utc).isoformat()
+
+
+def _normalize_error(value: str | None) -> str:
+    if value is None:
+        return ''
+    if not isinstance(value, str):
+        raise TypeError('error 必须是字符串')
+    return value.replace('\x00', '').strip()[:AUTOMATION_ERROR_MAX_LENGTH]
+
+
+def _normalize_count(value, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f'{field} 必须是非负整数')
+    if value < 0:
+        raise ValueError(f'{field} 不能小于 0')
+    return value
+
+
 async def initialize():
     def _init():
         conn = _connect()
@@ -267,6 +387,46 @@ async def initialize():
                 conn.execute(f"ALTER TABLE market_sources ADD COLUMN {col} {typ} DEFAULT {default}")
             except sqlite3.OperationalError:
                 pass
+        for col, typ, default in [
+            ('last_checked_at', 'TEXT', "''"),
+            ('remote_version', 'TEXT', "''"),
+            ('version_status', 'TEXT', "'unknown'"),
+            ('last_update_started_at', 'TEXT', "''"),
+            ('last_update_finished_at', 'TEXT', "''"),
+            ('last_update_status', 'TEXT', "'never_run'"),
+            ('last_update_error', 'TEXT', "''"),
+            ('last_update_run_token', 'TEXT', "''"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE market_packages_installed ADD COLUMN {col} {typ} DEFAULT {default}")
+            except sqlite3.OperationalError:
+                pass
+        now = _utc_now()
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO automation_task_config(
+                task_id, conflict_group, enabled, interval_seconds, updated_at
+            ) VALUES(?, ?, 1, ?, ?)
+            """,
+            (
+                MARKET_AUTOMATION_TASK_ID,
+                MARKET_AUTOMATION_CONFLICT_GROUP,
+                MARKET_AUTOMATION_INTERVAL_SECONDS,
+                now,
+            ),
+        )
+        market_config = conn.execute(
+            "SELECT conflict_group FROM automation_task_config WHERE task_id=?",
+            (MARKET_AUTOMATION_TASK_ID,),
+        ).fetchone()
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO automation_task_state(task_id, conflict_group, last_status)
+            VALUES(?, ?, 'never_run')
+            """,
+            (MARKET_AUTOMATION_TASK_ID, market_config['conflict_group']),
+        )
+        conn.commit()
         conn.close()
     await asyncio.to_thread(_init)
 
@@ -329,6 +489,373 @@ async def set_app_settings(values: dict, updated_by: int | None = None) -> None:
         conn.commit()
         conn.close()
     await asyncio.to_thread(_set)
+
+
+# ── Automation task persistence ──
+
+async def ensure_automation_task_config(
+    task_id: str,
+    conflict_group: str,
+    enabled: bool | int,
+    interval_seconds: int,
+) -> dict:
+    task_id = _normalize_identifier(task_id, 'task_id')
+    conflict_group = _normalize_identifier(conflict_group, 'conflict_group')
+    enabled_value = _normalize_enabled(enabled)
+    interval_value = _normalize_interval_seconds(interval_seconds)
+
+    def _ensure():
+        conn = _connect()
+        try:
+            with conn:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO automation_task_config(
+                        task_id, conflict_group, enabled, interval_seconds, updated_at
+                    ) VALUES(?, ?, ?, ?, ?)
+                    """,
+                    (task_id, conflict_group, enabled_value, interval_value, _utc_now()),
+                )
+                config = conn.execute(
+                    "SELECT * FROM automation_task_config WHERE task_id=?",
+                    (task_id,),
+                ).fetchone()
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO automation_task_state(task_id, conflict_group, last_status)
+                    VALUES(?, ?, 'never_run')
+                    """,
+                    (task_id, config['conflict_group']),
+                )
+                return dict(config)
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_ensure)
+
+
+async def get_automation_task_config(task_id: str) -> dict | None:
+    task_id = _normalize_identifier(task_id, 'task_id')
+
+    def _get():
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM automation_task_config WHERE task_id=?",
+                (task_id,),
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_get)
+
+
+async def list_automation_task_configs() -> list[dict]:
+    def _list():
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM automation_task_config ORDER BY task_id"
+            ).fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_list)
+
+
+async def update_automation_task_config(
+    task_id: str,
+    *,
+    enabled: bool | int | None = None,
+    interval_seconds: int | None = None,
+) -> dict | None:
+    task_id = _normalize_identifier(task_id, 'task_id')
+    updates = {}
+    if enabled is not None:
+        updates['enabled'] = _normalize_enabled(enabled)
+    if interval_seconds is not None:
+        updates['interval_seconds'] = _normalize_interval_seconds(interval_seconds)
+    if not updates:
+        return await get_automation_task_config(task_id)
+    updates['updated_at'] = _utc_now()
+
+    def _update():
+        conn = _connect()
+        try:
+            with conn:
+                assignments = ', '.join(f'{key}=?' for key in updates)
+                cursor = conn.execute(
+                    f"UPDATE automation_task_config SET {assignments} WHERE task_id=?",
+                    (*updates.values(), task_id),
+                )
+                if cursor.rowcount != 1:
+                    return None
+                row = conn.execute(
+                    "SELECT * FROM automation_task_config WHERE task_id=?",
+                    (task_id,),
+                ).fetchone()
+                return dict(row)
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_update)
+
+
+async def get_automation_task_state(task_id: str) -> dict | None:
+    task_id = _normalize_identifier(task_id, 'task_id')
+
+    def _get():
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM automation_task_state WHERE task_id=?",
+                (task_id,),
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_get)
+
+
+async def get_automation_conflict_group_state(conflict_group: str) -> dict | None:
+    conflict_group = _normalize_identifier(conflict_group, 'conflict_group')
+
+    def _get():
+        conn = _connect()
+        try:
+            row = conn.execute(
+                """
+                SELECT * FROM automation_task_state
+                WHERE conflict_group=? AND last_status='running'
+                ORDER BY last_started_at DESC
+                LIMIT 1
+                """,
+                (conflict_group,),
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_get)
+
+
+async def claim_automation_task(
+    *,
+    task_id: str,
+    conflict_group: str,
+    task_type: str,
+    run_token: str,
+    started_at: str | None = None,
+) -> dict:
+    task_id = _normalize_identifier(task_id, 'task_id')
+    conflict_group = _normalize_identifier(conflict_group, 'conflict_group')
+    task_type = _normalize_identifier(task_type, 'task_type')
+    run_token = _normalize_identifier(run_token, 'run_token')
+    started_at_value = _normalize_timestamp(started_at, 'started_at')
+
+    def _claim():
+        conn = _connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            config = conn.execute(
+                "SELECT * FROM automation_task_config WHERE task_id=?",
+                (task_id,),
+            ).fetchone()
+            if config is None:
+                raise KeyError(f'未知自动任务: {task_id}')
+            if config['conflict_group'] != conflict_group:
+                raise ValueError('conflict_group 与任务配置不一致')
+
+            current = conn.execute(
+                """
+                SELECT * FROM automation_task_state
+                WHERE conflict_group=? AND last_status='running'
+                LIMIT 1
+                """,
+                (conflict_group,),
+            ).fetchone()
+            if current is not None:
+                conn.rollback()
+                return {'claimed': False, 'current': dict(current)}
+
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO automation_task_state(
+                        task_id, conflict_group, task_type, run_token,
+                        last_started_at, last_finished_at, last_status,
+                        checked_count, updated_count, skipped_count, failed_count,
+                        last_error
+                    ) VALUES(?, ?, ?, ?, ?, '', 'running', 0, 0, 0, 0, '')
+                    ON CONFLICT(task_id) DO UPDATE SET
+                        conflict_group=excluded.conflict_group,
+                        task_type=excluded.task_type,
+                        run_token=excluded.run_token,
+                        last_started_at=excluded.last_started_at,
+                        last_finished_at='',
+                        last_status='running',
+                        checked_count=0,
+                        updated_count=0,
+                        skipped_count=0,
+                        failed_count=0,
+                        last_error=''
+                    """,
+                    (task_id, conflict_group, task_type, run_token, started_at_value),
+                )
+            except sqlite3.IntegrityError:
+                current = conn.execute(
+                    """
+                    SELECT * FROM automation_task_state
+                    WHERE conflict_group=? AND last_status='running'
+                    LIMIT 1
+                    """,
+                    (conflict_group,),
+                ).fetchone()
+                conn.rollback()
+                if current is not None:
+                    return {'claimed': False, 'current': dict(current)}
+                raise
+
+            state = conn.execute(
+                "SELECT * FROM automation_task_state WHERE task_id=?",
+                (task_id,),
+            ).fetchone()
+            conn.commit()
+            return {'claimed': True, 'state': dict(state)}
+        except Exception:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_claim)
+
+
+async def update_automation_task_progress(
+    task_id: str,
+    run_token: str,
+    *,
+    checked_count: int | None = None,
+    updated_count: int | None = None,
+    skipped_count: int | None = None,
+    failed_count: int | None = None,
+    error: str | None = None,
+) -> bool:
+    task_id = _normalize_identifier(task_id, 'task_id')
+    run_token = _normalize_identifier(run_token, 'run_token')
+    updates = {}
+    for field, value in (
+        ('checked_count', checked_count),
+        ('updated_count', updated_count),
+        ('skipped_count', skipped_count),
+        ('failed_count', failed_count),
+    ):
+        if value is not None:
+            updates[field] = _normalize_count(value, field)
+    if error is not None:
+        updates['last_error'] = _normalize_error(error)
+    if not updates:
+        return False
+
+    def _update():
+        conn = _connect()
+        try:
+            with conn:
+                assignments = ', '.join(f'{key}=?' for key in updates)
+                cursor = conn.execute(
+                    f"""
+                    UPDATE automation_task_state SET {assignments}
+                    WHERE task_id=? AND run_token=? AND last_status='running'
+                    """,
+                    (*updates.values(), task_id, run_token),
+                )
+                return cursor.rowcount == 1
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_update)
+
+
+async def complete_automation_task(
+    task_id: str,
+    run_token: str,
+    *,
+    status: str,
+    finished_at: str | None = None,
+    checked_count: int | None = None,
+    updated_count: int | None = None,
+    skipped_count: int | None = None,
+    failed_count: int | None = None,
+    error: str | None = '',
+) -> bool:
+    task_id = _normalize_identifier(task_id, 'task_id')
+    run_token = _normalize_identifier(run_token, 'run_token')
+    if status not in AUTOMATION_FINAL_STATUSES:
+        raise ValueError(f'非法自动任务完成状态: {status}')
+    updates = {
+        'last_finished_at': _normalize_timestamp(finished_at, 'finished_at'),
+        'last_status': status,
+        'last_error': _normalize_error(error),
+    }
+    for field, value in (
+        ('checked_count', checked_count),
+        ('updated_count', updated_count),
+        ('skipped_count', skipped_count),
+        ('failed_count', failed_count),
+    ):
+        if value is not None:
+            updates[field] = _normalize_count(value, field)
+
+    def _complete():
+        conn = _connect()
+        try:
+            with conn:
+                assignments = ', '.join(f'{key}=?' for key in updates)
+                cursor = conn.execute(
+                    f"""
+                    UPDATE automation_task_state SET {assignments}
+                    WHERE task_id=? AND run_token=? AND last_status='running'
+                    """,
+                    (*updates.values(), task_id, run_token),
+                )
+                return cursor.rowcount == 1
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_complete)
+
+
+async def recover_interrupted_automation_tasks(
+    *,
+    finished_at: str | None = None,
+    error: str | None = '服务启动时检测到上次自动任务运行被中断',
+) -> int:
+    finished_at_value = _normalize_timestamp(finished_at, 'finished_at')
+    error_value = _normalize_error(error)
+
+    def _recover():
+        conn = _connect()
+        try:
+            with conn:
+                cursor = conn.execute(
+                    """
+                    UPDATE automation_task_state SET
+                        last_finished_at=?,
+                        last_status='interrupted',
+                        last_error=?
+                    WHERE last_status='running'
+                    """,
+                    (finished_at_value, error_value),
+                )
+                return cursor.rowcount
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_recover)
 
 
 # ── Subscriptions ──
@@ -766,6 +1293,113 @@ async def list_market_installs() -> list[dict]:
         conn.close()
         return [dict(r) for r in rows]
     return await asyncio.to_thread(_list)
+
+
+async def update_market_install_check_state(
+    package_id: str,
+    *,
+    checked_at: str | None = None,
+    remote_version: str = '',
+    version_status: str,
+) -> bool:
+    package_id = _normalize_identifier(package_id, 'package_id')
+    if version_status not in MARKET_VERSION_STATUSES:
+        raise ValueError(f'非法 Market 版本状态: {version_status}')
+    if not isinstance(remote_version, str):
+        raise TypeError('remote_version 必须是字符串')
+    checked_at_value = _normalize_timestamp(checked_at, 'checked_at')
+    remote_version_value = remote_version.strip()[:256]
+
+    def _update():
+        conn = _connect()
+        try:
+            with conn:
+                cursor = conn.execute(
+                    """
+                    UPDATE market_packages_installed SET
+                        last_checked_at=?,
+                        remote_version=?,
+                        version_status=?
+                    WHERE package_id=?
+                    """,
+                    (checked_at_value, remote_version_value, version_status, package_id),
+                )
+                return cursor.rowcount == 1
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_update)
+
+
+async def mark_market_install_update_started(
+    package_id: str,
+    *,
+    run_token: str,
+    started_at: str | None = None,
+) -> bool:
+    package_id = _normalize_identifier(package_id, 'package_id')
+    run_token = _normalize_identifier(run_token, 'run_token')
+    started_at_value = _normalize_timestamp(started_at, 'started_at')
+
+    def _start():
+        conn = _connect()
+        try:
+            with conn:
+                cursor = conn.execute(
+                    """
+                    UPDATE market_packages_installed SET
+                        last_update_started_at=?,
+                        last_update_finished_at='',
+                        last_update_status='running',
+                        last_update_error='',
+                        last_update_run_token=?
+                    WHERE package_id=?
+                    """,
+                    (started_at_value, run_token, package_id),
+                )
+                return cursor.rowcount == 1
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_start)
+
+
+async def complete_market_install_update(
+    package_id: str,
+    *,
+    run_token: str,
+    status: str,
+    finished_at: str | None = None,
+    error: str | None = '',
+) -> bool:
+    package_id = _normalize_identifier(package_id, 'package_id')
+    run_token = _normalize_identifier(run_token, 'run_token')
+    if status not in MARKET_UPDATE_FINAL_STATUSES:
+        raise ValueError(f'非法 Market 更新完成状态: {status}')
+    finished_at_value = _normalize_timestamp(finished_at, 'finished_at')
+    error_value = _normalize_error(error)
+
+    def _complete():
+        conn = _connect()
+        try:
+            with conn:
+                cursor = conn.execute(
+                    """
+                    UPDATE market_packages_installed SET
+                        last_update_finished_at=?,
+                        last_update_status=?,
+                        last_update_error=?
+                    WHERE package_id=?
+                      AND last_update_run_token=?
+                      AND last_update_status='running'
+                    """,
+                    (finished_at_value, status, error_value, package_id, run_token),
+                )
+                return cursor.rowcount == 1
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_complete)
 
 
 async def upsert_market_install(
