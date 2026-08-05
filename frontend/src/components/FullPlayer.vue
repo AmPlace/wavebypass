@@ -442,7 +442,9 @@ import { API_BASE } from '../apiBase'
 import { publicAsset } from '../publicAsset'
 import {
   extractSourceIdFromUrl,
+  channelIdentity,
   isChannelAllNotLive,
+  isChannelAllUnsupported,
   isChannelAllUrlsBlocked,
   isSourceExplicitlyDisabled,
   sourceRaceKey,
@@ -450,6 +452,7 @@ import {
   startupRaceCandidateKind,
 } from '../utils/sourceIdentity'
 import { useToastStore } from '../stores/toast'
+import { IPTV_CHANNEL_SORT_MODES, sortIptvChannels } from '../utils/iptvChannelList'
 
 const playerStore = usePlayerStore()
 const { isPlayerExpanded, currentStation, isPlaying, isLoading, volume, stationMap, stationList } = storeToRefs(playerStore)
@@ -474,7 +477,7 @@ const sourceMenuStyle = ref({
 const sourceMenuListMaxHeight = ref('260px')
 const iptvSourceRuntimeStatus = ref({})
 const activePlayerPanel = ref('channels')
-const channelSortMode = ref('original')  // 'original' | 'natural' | 'group' | 'live'
+const channelSortMode = computed(() => playerStore.iptvChannelSortMode)
 const mobileTabsRef = ref(null)
 const desktopTabsRef = ref(null)
 const tabIndicatorRevision = ref(0)
@@ -511,17 +514,11 @@ function scheduleTabIndicatorUpdate() {
   })
 }
 
-const SORT_MODES = [
-  { key: 'original', label: '默认' },
-  { key: 'natural', label: 'A-Z' },
-  { key: 'group', label: '分组' },
-  { key: 'live', label: '直播中' },
-]
 function nextSortMode() {
-  const idx = SORT_MODES.findIndex(m => m.key === channelSortMode.value)
-  channelSortMode.value = SORT_MODES[(idx + 1) % SORT_MODES.length].key
+  const idx = IPTV_CHANNEL_SORT_MODES.findIndex(m => m.key === channelSortMode.value)
+  playerStore.setIptvChannelSortMode(IPTV_CHANNEL_SORT_MODES[(idx + 1) % IPTV_CHANNEL_SORT_MODES.length].key)
 }
-const currentSortLabel = computed(() => SORT_MODES.find(m => m.key === channelSortMode.value)?.label || '默认')
+const currentSortLabel = computed(() => IPTV_CHANNEL_SORT_MODES.find(m => m.key === channelSortMode.value)?.label || '默认排序')
 const epgNow = ref(Date.now())
 const mobileOverlayVisible = ref(true)
 const mediaAspectRatio = ref(DEFAULT_MEDIA_ASPECT_RATIO)
@@ -791,6 +788,9 @@ const statusText = computed(() => {
 const channelList = computed(() => stationList.value)
 
 const iptvChannelList = ref([])
+const iptvChannelContext = computed(() => playerStore.iptvChannelContext)
+let iptvListRequestSeq = 0
+let iptvListController = null
 
 const currentArtworkUrl = computed(() => {
   if (displayIptvChannel.value) return displayIptvChannel.value.logo_url || ''
@@ -922,32 +922,21 @@ function channelRowSummary(ch, active) {
   return ch.group_name || '直播频道'
 }
 
-function naturalSort(a, b) {
-  return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' })
-}
-
 const displayChannelRows = computed(() => {
   if (isIptvMode.value) {
-    const allChannels = iptvChannelList.value.length
-      ? iptvChannelList.value
-      : (displayIptvChannel.value ? [displayIptvChannel.value] : [])
-    const currentGroup = normalizeGroupName(displayIptvChannel.value?.group_name)
-    const groupedChannels = currentGroup
-      ? allChannels.filter((ch) => normalizeGroupName(ch.group_name) === currentGroup)
-      : allChannels
-    const channels = (groupedChannels.length ? groupedChannels : allChannels)
-      .slice()
-    if (channelSortMode.value === 'natural') {
-      channels.sort((a, b) => naturalSort(a.name || '', b.name || ''))
-    } else if (channelSortMode.value === 'group') {
-      channels.sort((a, b) => naturalSort(a.group_name || '', b.group_name || '') || naturalSort(a.name || '', b.name || ''))
-    } else if (channelSortMode.value === 'live') {
-      channels.sort((a, b) => {
-        const aLive = isCurrentIptv(a) ? 1 : 0
-        const bLive = isCurrentIptv(b) ? 1 : 0
-        return bLive - aLive || naturalSort(a.name || '', b.name || '')
-      })
+    const context = iptvChannelContext.value
+    const allChannels = context
+      ? context.channels
+      : (iptvChannelList.value.length
+        ? iptvChannelList.value
+        : (displayIptvChannel.value ? [displayIptvChannel.value] : []))
+    let channels = allChannels.slice()
+    const current = displayIptvChannel.value
+    const currentIdentity = channelIdentity(current)
+    if (currentIdentity && !channels.some((ch) => channelIdentity(ch) === currentIdentity)) {
+      channels.unshift(current)
     }
+    channels = sortIptvChannels(channels, channelSortMode.value)
     return channels.map((ch, index) => {
       const active = isCurrentIptv(ch)
       const playing = active && isPlaybackConfirmed.value
@@ -1215,17 +1204,44 @@ const currentIptvSourceLabel = computed(() => {
 })
 
 async function loadIptvChannels() {
+  const seq = ++iptvListRequestSeq
+  if (iptvListController) iptvListController.abort()
+  const controller = new AbortController()
+  iptvListController = controller
+  const context = playerStore.iptvChannelContext
+  const contextToken = context?.token || 0
+  const currentGroup = String(displayIptvChannel.value?.group_name || '').trim()
+  const group = context ? context.group : currentGroup
+  const search = context ? context.search : ''
   try {
-    const data = await fetchAggregatedChannels()
+    let data = await fetchAggregatedChannels({ group, search, signal: controller.signal })
+    if (seq !== iptvListRequestSeq) return
+    if (!context && group && !(data.channels || []).length) {
+      data = await fetchAggregatedChannels({ signal: controller.signal })
+      if (seq !== iptvListRequestSeq) return
+    }
+    if (context) {
+      playerStore.refreshIptvChannelContext({
+        token: contextToken,
+        group,
+        search,
+        channels: data.channels || [],
+      })
+      return
+    }
+    if (playerStore.iptvChannelContext || seq !== iptvListRequestSeq) return
     iptvChannelList.value = data.channels || []
   } catch (e) {
+    if (seq !== iptvListRequestSeq || e?.name === 'AbortError' || e?.status === 0) return
     console.error('加载 IPTV 频道失败:', e)
+  } finally {
+    if (seq === iptvListRequestSeq) iptvListController = null
   }
 }
 
 function isCurrentIptv(ch) {
   const current = playerStore.pendingIptvChannel || playerStore.currentIptvChannel
-  return current && current.name === ch.name
+  return Boolean(current && channelIdentity(current) === channelIdentity(ch))
 }
 
 function isIptvAllNotLive(ch) {
@@ -1233,18 +1249,12 @@ function isIptvAllNotLive(ch) {
 }
 
 function isIptvUnavailable(ch) {
-  if (isChannelAllUrlsBlocked(ch)) return true
-  const urls = Array.isArray(ch?.urls) ? ch.urls : []
-  return urls.length > 0 && urls.every((entry) => {
-    if (isSourceExplicitlyDisabled(entry)) return true
-    const sourceType = String(entry?.source_type || entry?.transport || '').trim().toLowerCase()
-    return sourceType === 'unsupported' || sourceType === 'unsupported_youtube_url'
-  })
+  return isChannelAllUrlsBlocked(ch) || isChannelAllUnsupported(ch)
 }
 
 // 切换到 IPTV 模式时加载频道列表
 watch(isIptvMode, (isIptv) => {
-  if (isIptv && !iptvChannelList.value.length) loadIptvChannels()
+  if (isIptv) loadIptvChannels()
 })
 
 onMounted(() => {
@@ -3942,6 +3952,7 @@ watch(isPlayerExpanded, (expanded) => {
   if (!expanded) closeSourceMenu()
   if (expanded) {
     showMobileOverlayControls()
+    if (isIptvMode.value) loadIptvChannels()
     nextTick(() => {
       scheduleMediaFrameSizeUpdate()
       scheduleTabIndicatorUpdate()
@@ -4116,6 +4127,11 @@ onBeforeUnmount(() => {
   window.removeEventListener('orientationchange', updateSourceMenuPosition)
   window.removeEventListener('orientationchange', scheduleMediaFrameSizeUpdate)
   disposeIptvPlayback()
+  ++iptvListRequestSeq
+  if (iptvListController) {
+    iptvListController.abort()
+    iptvListController = null
+  }
   if (epgTickTimer) {
     clearInterval(epgTickTimer)
     epgTickTimer = null

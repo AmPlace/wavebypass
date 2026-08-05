@@ -120,7 +120,8 @@ import { useEpg } from '../composables/useEpg'
 import { useLogoVisual } from '../composables/useLogoVisual'
 import { loadCover, abortPendingCoverRequests } from '../composables/coverLoader'
 import TagFilterRow from '../components/TagFilterRow.vue'
-import { isChannelAllNotLive, isChannelAllUrlsBlocked } from '../utils/sourceIdentity'
+import { channelIdentity, isChannelAllNotLive, isChannelAllUnsupported, isChannelAllUrlsBlocked } from '../utils/sourceIdentity'
+import { IPTV_CHANNEL_SORT_MODES, sortIptvChannels } from '../utils/iptvChannelList'
 
 const playerStore = usePlayerStore()
 const toastStore = useToastStore()
@@ -151,7 +152,7 @@ function _isCurrentListRequest(seq) {
   return seq === activeRequestSeq && seq === requestSeq
 }
 const logoCandidateIndexes = ref({})
-const channelSortMode = ref('original')
+const channelSortMode = computed(() => playerStore.iptvChannelSortMode)
 const categoryTabs = computed(() => ['全部', ...allGroups.value])
 
 const YOUTUBE_THUMBNAIL_VARIANTS = ['maxresdefault', 'hq720', 'hqdefault']
@@ -205,22 +206,12 @@ const {
   fallbackName: '未知频道',
 })
 
-const SORT_MODES = [
-  { key: 'original', label: '默认排序' },
-  { key: 'natural', label: 'A-Z排序' },
-  { key: 'group', label: '分组排序' },
-]
-
-function naturalSort(a, b) {
-  return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' })
-}
-
 function nextSortMode() {
-  const idx = SORT_MODES.findIndex(m => m.key === channelSortMode.value)
-  channelSortMode.value = SORT_MODES[(idx + 1) % SORT_MODES.length].key
+  const idx = IPTV_CHANNEL_SORT_MODES.findIndex(m => m.key === channelSortMode.value)
+  playerStore.setIptvChannelSortMode(IPTV_CHANNEL_SORT_MODES[(idx + 1) % IPTV_CHANNEL_SORT_MODES.length].key)
 }
 
-const currentSortLabel = computed(() => SORT_MODES.find(m => m.key === channelSortMode.value)?.label || '默认排序')
+const currentSortLabel = computed(() => IPTV_CHANNEL_SORT_MODES.find(m => m.key === channelSortMode.value)?.label || '默认排序')
 
 function selectCategoryTab(tab) {
   abortPendingCoverRequests()
@@ -246,6 +237,11 @@ async function loadChannels() {
     const data = await fetchAggregatedChannels({ group, search, signal: ctrl.signal })
     if (!_isCurrentListRequest(seq)) return { applied: false }
     allChannels.value = data.channels || []
+    playerStore.refreshIptvChannelContext({
+      group,
+      search,
+      channels: allChannels.value,
+    })
     if (!group && !search) {
       allGroups.value = data.groups || []
     }
@@ -340,13 +336,7 @@ onUnmounted(() => {
 })
 
 const filteredChannels = computed(() => {
-  const list = allChannels.value.slice()
-  if (channelSortMode.value === 'natural') {
-    list.sort((a, b) => naturalSort(a.name || '', b.name || ''))
-  } else if (channelSortMode.value === 'group') {
-    list.sort((a, b) => naturalSort(a.group_name || '', b.group_name || '') || naturalSort(a.name || '', b.name || ''))
-  }
-  return list
+  return sortIptvChannels(allChannels.value, channelSortMode.value)
 })
 
 onMounted(loadChannels)
@@ -355,7 +345,7 @@ watch(searchQuery, () => { loadChannels() })
 
 function isCurrentChannel(ch) {
   const current = playerStore.pendingIptvChannel || playerStore.currentIptvChannel
-  return current && current.name === ch.name
+  return Boolean(current && channelIdentity(current) === channelIdentity(ch))
 }
 
 function isUntested(ch) {
@@ -374,8 +364,8 @@ function isAllNotLive(ch) {
 }
 
 function isUnavailable(ch) {
-  // 测速结果只影响排序和提示；只有配置明确禁用全部 source 时才禁止点击。
-  return isChannelAllUrlsBlocked(ch)
+  // 测速结果只影响排序和提示；明确禁用或全部 unsupported 才禁止点击。
+  return isChannelAllUrlsBlocked(ch) || isChannelAllUnsupported(ch)
 }
 
 function isAnyPlayable(ch) {
@@ -566,7 +556,14 @@ async function playChannel(ch) {
   }
   const videoEl = playerStore.iptvVideoEl
   if (videoEl) videoEl.play().catch(() => {})
-  await playerStore.playIptvChannel(ch)
+  await playerStore.playIptvChannel(ch, {
+    channelContext: {
+      origin: 'iptv-home',
+      group: selectedGroup.value,
+      search: searchQuery.value.trim(),
+      channels: allChannels.value,
+    },
+  })
 }
 
 const gridRef = ref(null)

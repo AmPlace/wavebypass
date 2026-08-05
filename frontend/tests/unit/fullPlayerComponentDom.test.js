@@ -10,11 +10,13 @@ const frontendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 
 let dom
 let builtComponentPath
 let FullPlayer
+let IptvHome
 let mount
 let createPinia
 let setActivePinia
 let usePlayerStore
 let flushPromises
+let vueRef
 const mountedWrappers = []
 
 const channel = (name, sourceId, extra = {}) => ({
@@ -67,8 +69,30 @@ function installDom() {
   for (const [key, value] of Object.entries(globals)) {
     Object.defineProperty(globalThis, key, { configurable: true, writable: true, value })
   }
+  Object.defineProperty(dom.window.HTMLElement.prototype, 'clientWidth', {
+    configurable: true,
+    get() { return 1024 },
+  })
+  dom.window.HTMLElement.prototype.getBoundingClientRect = function () {
+    return {
+      width: 100,
+      height: 44,
+      top: 0,
+      left: 0,
+      right: 100,
+      bottom: 44,
+      x: 0,
+      y: 0,
+      toJSON() {},
+    }
+  }
   globalThis.ResizeObserver = class {
     observe() {}
+    disconnect() {}
+  }
+  globalThis.IntersectionObserver = class {
+    observe() {}
+    unobserve() {}
     disconnect() {}
   }
   globalThis.requestAnimationFrame = (callback) => setTimeout(() => callback(Date.now()), 0)
@@ -194,7 +218,12 @@ async function loadComponent() {
   ])
   const tmpDir = path.resolve('/tmp/waveflow-full-player-dom-test')
   const tmpEntry = path.resolve('/tmp/waveflow-full-player-dom-entry.mjs')
-  fs.writeFileSync(tmpEntry, `import FullPlayer from ${JSON.stringify(path.join(frontendRoot, 'src/components/FullPlayer.vue'))}; export default FullPlayer\n`)
+  fs.writeFileSync(tmpEntry, `
+    import FullPlayer from ${JSON.stringify(path.join(frontendRoot, 'src/components/FullPlayer.vue'))}
+    import IptvHome from ${JSON.stringify(path.join(frontendRoot, 'src/views/IptvHome.vue'))}
+    export { IptvHome }
+    export default FullPlayer
+  `)
   const fakePlugin = {
     name: 'full-player-test-media-mocks',
     enforce: 'pre',
@@ -232,6 +261,7 @@ async function loadComponent() {
     },
   })
   const testUtils = await import('@vue/test-utils')
+  const vueRuntime = await import('vue')
   const pinia = await import('pinia')
   builtComponentPath = path.join(tmpDir, 'full-player-dom.js')
   const componentModule = await import(`${builtComponentPath}?dom-test=${Date.now()}`)
@@ -241,6 +271,8 @@ async function loadComponent() {
   setActivePinia = pinia.setActivePinia
   usePlayerStore = (await import('../../src/stores/player.js')).usePlayerStore
   FullPlayer = componentModule.default
+  IptvHome = componentModule.IptvHome
+  vueRef = vueRuntime.ref
 }
 
 let channels
@@ -254,7 +286,19 @@ function installFetch() {
     fetchCalls.push(url)
     const overrideResult = await fetchOverride?.(url, input)
     if (overrideResult) return overrideResult
-    if (url.includes('/api/iptv/channels')) return response({ channels })
+    if (url.includes('/api/iptv/channels')) {
+      const parsed = new URL(url, window.location.origin)
+      const group = parsed.searchParams.get('group') || ''
+      const search = parsed.searchParams.get('search') || ''
+      const filtered = channels.filter((item) => (
+        (!group || item.group_name === group)
+        && (!search || item.name.includes(search))
+      ))
+      return response({
+        channels: filtered,
+        groups: [...new Set(channels.map((item) => item.group_name).filter(Boolean))],
+      })
+    }
     if (url.includes('/api/iptv/epg/programs/')) {
       const date = new URL(url, window.location.origin).searchParams.get('date') || '2026-08-05'
       return response({
@@ -286,6 +330,50 @@ async function mountPlayer({ current = channels[0], expanded = true } = {}) {
   await flushPromises()
   await wrapper.vm.$nextTick()
   return { wrapper, store }
+}
+
+async function mountFullPlayerForStore(store, { expanded = true } = {}) {
+  store.isPlayerExpanded = expanded
+  store.activeMode = 'iptv'
+  const wrapper = mount(FullPlayer, { attachTo: document.body })
+  mountedWrappers.push(wrapper)
+  await flushPromises()
+  await wrapper.vm.$nextTick()
+  return wrapper
+}
+
+async function mountHome({ store = null, search = '' } = {}) {
+  if (!store) {
+    setActivePinia(createPinia())
+    store = usePlayerStore()
+  }
+  const searchQuery = vueRef(search)
+  const scrollRef = vueRef(document.documentElement)
+  const wrapper = mount(IptvHome, {
+    attachTo: document.body,
+    global: {
+      provide: { searchQuery, scrollRef },
+    },
+  })
+  mountedWrappers.push(wrapper)
+  await flushPromises()
+  await wrapper.vm.$nextTick()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  await flushPromises()
+  await wrapper.vm.$nextTick()
+  return { wrapper, store, searchQuery }
+}
+
+function buttonByText(selector, text) {
+  const buttons = domElements(selector)
+  const button = buttons.find((item) => item.textContent.trim().includes(text))
+  assert.ok(button, `找不到按钮: ${selector} / ${text}; 当前按钮=${buttons.map((item) => item.textContent.trim()).join('|')}`)
+  return button
+}
+
+async function clickButtonByText(selector, text) {
+  buttonByText(selector, text).dispatchEvent(new window.MouseEvent('click', { bubbles: true }))
+  await flushPromises()
 }
 
 function domElements(selector) {
@@ -339,6 +427,171 @@ afterEach(() => {
 
 after(async () => {
   dom?.window.close()
+})
+
+function desktopChannelNames() {
+  return domElements('.side-panel .channel-row .channel-title').map((element) => element.textContent.trim())
+}
+
+function mobileChannelNames() {
+  return domElements('.mobile-panel .channel-row .channel-title').map((element) => element.textContent.trim())
+}
+
+function homeChannelNames() {
+  return domElements('.channel-card').map((element) => String(element.getAttribute('aria-label') || '').replace(/^播放\s*/, ''))
+}
+
+test('IptvHome 从全部频道进入后 FullPlayer 继承全部集合和基础顺序', async () => {
+  channels = [
+    channel('Charlie', 'charlie', { group_name: '体育' }),
+    channel('Alpha', 'alpha', { group_name: '央视' }),
+    channel('Bravo', 'bravo', { group_name: '卫视' }),
+  ]
+  installFetch()
+  const { store } = await mountHome()
+  assert.deepEqual(homeChannelNames(), ['Charlie', 'Alpha', 'Bravo'])
+  await clickDom('.channel-card', 0)
+  assert.equal(store.iptvChannelContext.group, '')
+  assert.equal(store.iptvChannelContext.search, '')
+  assert.deepEqual(store.iptvChannelContext.channels.map((item) => item.name), ['Charlie', 'Alpha', 'Bravo'])
+  await mountFullPlayerForStore(store)
+  assert.deepEqual(desktopChannelNames(), ['Charlie', 'Alpha', 'Bravo'])
+  assert.deepEqual(mobileChannelNames(), desktopChannelNames())
+})
+
+test('IptvHome 从分组进入后 FullPlayer 只继承该分组', async () => {
+  channels = [
+    channel('CCTV-1', 'cctv-1', { group_name: '央视' }),
+    channel('CCTV-2', 'cctv-2', { group_name: '央视' }),
+    channel('湖南卫视', 'hunan', { group_name: '卫视' }),
+  ]
+  installFetch()
+  const { store } = await mountHome()
+  await clickButtonByText('.tag-filter-row button, header button', '央视')
+  assert.deepEqual(homeChannelNames(), ['CCTV-1', 'CCTV-2'])
+  await clickDom('.channel-card', 0)
+  assert.equal(store.iptvChannelContext.group, '央视')
+  await mountFullPlayerForStore(store)
+  assert.deepEqual(desktopChannelNames(), ['CCTV-1', 'CCTV-2'])
+})
+
+test('IptvHome 搜索以及分组加搜索的结果集合被 FullPlayer 原样继承', async () => {
+  channels = [
+    channel('福建新闻', 'fj-news', { group_name: '福建' }),
+    channel('福建综合', 'fj-main', { group_name: '福建' }),
+    channel('泉州新闻', 'qz-news', { group_name: '福建' }),
+    channel('央视新闻', 'cctv-news', { group_name: '央视' }),
+  ]
+  installFetch()
+  const first = await mountHome({ search: '新闻' })
+  assert.deepEqual(homeChannelNames(), ['福建新闻', '泉州新闻', '央视新闻'])
+  await clickDom('.channel-card', 0)
+  assert.equal(first.store.iptvChannelContext.search, '新闻')
+  await mountFullPlayerForStore(first.store)
+  assert.deepEqual(desktopChannelNames(), ['福建新闻', '泉州新闻', '央视新闻'])
+
+  for (const wrapper of mountedWrappers.splice(0)) {
+    if (wrapper.exists()) wrapper.unmount()
+  }
+  document.body.innerHTML = '<div id="app"></div>'
+  installFetch()
+  const second = await mountHome()
+  await clickButtonByText('.tag-filter-row button, header button', '福建')
+  second.searchQuery.value = '新闻'
+  await flushPromises()
+  await second.wrapper.vm.$nextTick()
+  assert.deepEqual(homeChannelNames(), ['福建新闻', '泉州新闻'])
+  await clickDom('.channel-card', 0)
+  assert.equal(second.store.iptvChannelContext.group, '福建')
+  assert.equal(second.store.iptvChannelContext.search, '新闻')
+  await mountFullPlayerForStore(second.store)
+  assert.deepEqual(desktopChannelNames(), ['福建新闻', '泉州新闻'])
+})
+
+test('首页和 FullPlayer 共用排序状态，默认基础顺序与双向切换保持一致', async () => {
+  channels = [
+    channel('Charlie', 'charlie', { group_name: '卫视' }),
+    channel('Alpha', 'alpha', { group_name: '央视' }),
+    channel('Bravo', 'bravo', { group_name: '央视' }),
+  ]
+  installFetch()
+  const { store } = await mountHome()
+  assert.equal(store.iptvChannelSortMode, 'original')
+  assert.match(buttonByText('.iptv-main header button', '默认排序').textContent, /默认排序/)
+  assert.deepEqual(homeChannelNames(), ['Charlie', 'Alpha', 'Bravo'])
+  await clickButtonByText('.iptv-main header button', '默认排序')
+  assert.equal(store.iptvChannelSortMode, 'natural')
+  assert.deepEqual(homeChannelNames(), ['Alpha', 'Bravo', 'Charlie'])
+  await clickDom('.channel-card', 0)
+  await mountFullPlayerForStore(store)
+  assert.deepEqual(desktopChannelNames(), ['Alpha', 'Bravo', 'Charlie'])
+  assert.match(domElement('.side-panel .sort-btn').textContent, /A-Z排序/)
+  await clickDom('.side-panel .sort-btn')
+  assert.equal(store.iptvChannelSortMode, 'group')
+  assert.deepEqual(desktopChannelNames(), ['Charlie', 'Alpha', 'Bravo'])
+  assert.deepEqual(homeChannelNames(), ['Charlie', 'Alpha', 'Bravo'])
+  assert.match(domElement('.side-panel .sort-btn').textContent, /分组排序/)
+  await clickDom('.side-panel .sort-btn')
+  assert.equal(store.iptvChannelSortMode, 'original')
+  assert.deepEqual(desktopChannelNames(), ['Charlie', 'Alpha', 'Bravo'])
+  assert.doesNotMatch(document.body.textContent, /直播中排序/)
+  store.setIptvChannelSortMode('group')
+  await flushPromises()
+  await clickDom('[aria-label="下一个"]')
+  assert.equal(store.currentIptvChannel.name, 'Bravo')
+})
+
+test('同名不同 canonical identity 只有当前频道行 active', async () => {
+  channels = [
+    channel('同名频道', 'same-a', { canonical_key: 'same-a' }),
+    channel('同名频道', 'same-b', { canonical_key: 'same-b' }),
+  ]
+  installFetch()
+  const { store } = await mountPlayer({ current: channels[1] })
+  store.setIptvChannelContext({ channels })
+  await flushPromises()
+  const rows = domElements('.side-panel .channel-row')
+  assert.equal(rows.length, 2)
+  assert.equal(rows.filter((row) => row.classList.contains('active')).length, 1)
+  assert.equal(rows[1].classList.contains('active'), true)
+})
+
+test('上下文刷新移除旧频道并加入新频道，当前被删除频道只临时置顶', async () => {
+  const alpha = channel('Alpha', 'alpha')
+  const bravo = channel('Bravo', 'bravo')
+  const charlie = channel('Charlie', 'charlie')
+  channels = [bravo, charlie]
+  installFetch()
+  setActivePinia(createPinia())
+  const store = usePlayerStore()
+  store.currentIptvChannel = alpha
+  store.iptvUrls = alpha.urls
+  store.isPlaying = true
+  store.setIptvChannelContext({ channels: [alpha, bravo] })
+  await mountFullPlayerForStore(store)
+  assert.deepEqual(desktopChannelNames(), ['Alpha', 'Bravo', 'Charlie'])
+  await clickDom('.side-panel .channel-row', 1)
+  assert.equal(store.currentIptvChannel.name, 'Bravo')
+  assert.deepEqual(desktopChannelNames(), ['Bravo', 'Charlie'])
+})
+
+test('无首页上下文时按当前频道分组兜底，分组不存在时回退全量', async () => {
+  const cctv = channel('CCTV-1', 'cctv', { group_name: '央视' })
+  const hunan = channel('湖南卫视', 'hunan', { group_name: '卫视' })
+  channels = [cctv, hunan]
+  installFetch()
+  const first = await mountPlayer({ current: cctv })
+  assert.equal(first.store.iptvChannelContext, null)
+  assert.deepEqual(desktopChannelNames(), ['CCTV-1'])
+
+  for (const wrapper of mountedWrappers.splice(0)) {
+    if (wrapper.exists()) wrapper.unmount()
+  }
+  document.body.innerHTML = '<div id="app"></div>'
+  const missing = channel('临时频道', 'temporary', { group_name: '不存在分组' })
+  installFetch()
+  await mountPlayer({ current: missing })
+  assert.deepEqual(desktopChannelNames(), ['临时频道', 'CCTV-1', '湖南卫视'])
 })
 
 test('桌面频道行点击 A→B，使用真实模板且只保留当前频道', async () => {
@@ -544,6 +797,7 @@ test('auth 停播后卸载资源，重新进入普通页面不会自动起播', 
   await wrapper.vm.$nextTick()
   wrapper.unmount()
   assert.equal(store.currentIptvChannel, null)
+  assert.equal(store.iptvChannelContext, null)
   assert.equal(store.iptvVideoEl, null)
   assert.equal(store.isPlaying, false)
   assert.equal(document.querySelectorAll('video, iframe').length, 0)

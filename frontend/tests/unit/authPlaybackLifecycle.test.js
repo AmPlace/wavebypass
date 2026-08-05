@@ -141,6 +141,11 @@ test('stopAndClearPlayback 清空选择和运行态，并阻止旧 adapter resol
   store.iptvUrlIndex = 3
   store.iptvVideoEl = { id: 'old-video' }
   store.currentEpgProgram = { title: 'old epg' }
+  store.setIptvChannelContext({
+    group: 'old-group',
+    search: 'old-search',
+    channels: [{ canonical_key: 'old', name: 'old' }],
+  })
   store.isPlayerExpanded = true
   store.isPlaying = true
   store.isLoading = true
@@ -172,9 +177,52 @@ test('stopAndClearPlayback 清空选择和运行态，并阻止旧 adapter resol
   assert.equal(store.iptvUrlIndex, 0)
   assert.equal(store.iptvVideoEl, null)
   assert.equal(store.currentEpgProgram, null)
+  assert.equal(store.iptvChannelContext, null)
   assert.equal(store.isPlayerExpanded, false)
   assert.equal(store.isPlaying, false)
   assert.equal(store.isLoading, false)
+  assert.equal(store.playbackError, '')
+})
+
+test('旧频道 selection 晚完成不能覆盖新频道和新列表上下文', async () => {
+  setActivePinia(createPinia())
+  const response = deferred()
+  globalThis.fetch = () => response.promise
+  const store = usePlayerStore()
+  const channelA = {
+    canonical_key: 'channel-a',
+    name: 'A',
+    urls: [{ url: 'huya://123', source_id: 'adapter-a', source_type: 'adapter' }],
+  }
+  const channelB = {
+    canonical_key: 'channel-b',
+    name: 'B',
+    urls: [{ url: 'https://media.example/b.m3u8', source_id: 'hls-b', source_type: 'hls' }],
+  }
+  const pendingA = store.playIptvChannel(channelA, {
+    channelContext: { group: 'A组', search: 'A', channels: [channelA] },
+  })
+  await store.playIptvChannel(channelB, {
+    channelContext: { group: 'B组', search: 'B', channels: [channelB] },
+  })
+
+  response.resolve({
+    ok: true,
+    json: async () => ({
+      ok: true,
+      url: 'https://late.example/a.m3u8',
+      source_type: 'hls',
+      direct_playable: true,
+    }),
+  })
+  await pendingA
+
+  assert.equal(store.currentIptvChannel?.canonical_key, 'channel-b')
+  assert.equal(store.pendingIptvChannel, null)
+  assert.equal(store.iptvUrls[0]?.source_id, 'hls-b')
+  assert.equal(store.iptvChannelContext?.group, 'B组')
+  assert.equal(store.iptvChannelContext?.search, 'B')
+  assert.deepEqual(store.iptvChannelContext?.channels.map((item) => item.canonical_key), ['channel-b'])
   assert.equal(store.playbackError, '')
 })
 

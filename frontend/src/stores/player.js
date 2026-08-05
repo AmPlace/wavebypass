@@ -1,6 +1,19 @@
 import { defineStore } from 'pinia'
 import { API_BASE } from '../apiBase.js'
-import { adapterNameFromUrl, buildChannelProxyUrl, isAdapterSchemeUrl, isSourceExplicitlyDisabled } from '../utils/sourceIdentity.js'
+import { adapterNameFromUrl, buildChannelProxyUrl, channelIdentity, isAdapterSchemeUrl, isSourceExplicitlyDisabled } from '../utils/sourceIdentity.js'
+import { normalizeIptvChannelSortMode } from '../utils/iptvChannelList.js'
+
+function normalizeChannelContextChannels(channels) {
+  const result = []
+  const seen = new Set()
+  for (const channel of Array.isArray(channels) ? channels : []) {
+    const identity = channelIdentity(channel)
+    if (!identity || seen.has(identity)) continue
+    seen.add(identity)
+    result.push(channel)
+  }
+  return result
+}
 
 export const usePlayerStore = defineStore('player', {
   state: () => ({
@@ -21,6 +34,9 @@ export const usePlayerStore = defineStore('player', {
     iptvSelectionToken: 0,      // 防止异步解析旧频道覆盖新频道
     iptvVideoEl: null,         // FullPlayer 中的 video 元素引用（iOS 同步播放用）
     currentEpgProgram: null,   // EPG: { title, start, stop, progress, remaining_minutes }
+    iptvChannelSortMode: 'original',
+    iptvChannelContext: null,  // { token, origin, group, search, channels }
+    iptvChannelContextToken: 0,
   }),
 
   actions: {
@@ -33,6 +49,8 @@ export const usePlayerStore = defineStore('player', {
       this.iptvUrlIndex = 0
       this.iptvVideoEl = null
       this.currentEpgProgram = null
+      this.iptvChannelContext = null
+      ++this.iptvChannelContextToken
       this.isPlayerExpanded = false
       this.isPlaying = false
       this.isLoading = false
@@ -126,8 +144,44 @@ export const usePlayerStore = defineStore('player', {
       this.activeMode = mode
     },
 
-    async playIptvChannel(channel) {
+    setIptvChannelSortMode(mode) {
+      this.iptvChannelSortMode = normalizeIptvChannelSortMode(mode)
+    },
+
+    setIptvChannelContext({ origin = 'iptv-home', group = '', search = '', channels = [] } = {}) {
+      const token = ++this.iptvChannelContextToken
+      this.iptvChannelContext = {
+        token,
+        origin: String(origin || 'iptv-home'),
+        group: String(group || ''),
+        search: String(search || ''),
+        channels: normalizeChannelContextChannels(channels),
+      }
+      return token
+    },
+
+    refreshIptvChannelContext({ token = 0, group = '', search = '', channels = [] } = {}) {
+      const current = this.iptvChannelContext
+      if (!current) return false
+      if (token && current.token !== token) return false
+      if (current.group !== String(group || '') || current.search !== String(search || '')) return false
+      this.iptvChannelContext = {
+        ...current,
+        channels: normalizeChannelContextChannels(channels),
+      }
+      return true
+    },
+
+    async playIptvChannel(channel, options = {}) {
       const selectionToken = ++this.iptvSelectionToken
+      if (Object.prototype.hasOwnProperty.call(options, 'channelContext')) {
+        const context = options.channelContext
+        if (context) this.setIptvChannelContext(context)
+        else {
+          this.iptvChannelContext = null
+          ++this.iptvChannelContextToken
+        }
+      }
       // 停止电台播放，触发 AudioEngine destroyHls
       this.currentStation = ''
       this.pendingIptvChannel = channel

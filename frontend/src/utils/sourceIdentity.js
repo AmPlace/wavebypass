@@ -42,6 +42,13 @@ export function sourceIdentity(entry) {
   return String(entry?.source_id || '').trim()
 }
 
+export function channelIdentity(channel) {
+  const canonicalKey = String(channel?.canonical_key || '').trim()
+  if (canonicalKey) return canonicalKey
+  const name = String(channel?.name || '').trim()
+  return name ? `name:${name}` : ''
+}
+
 export function sourceRaceKey(entry) {
   const sourceId = sourceIdentity(entry)
   if (sourceId) return `${sourceId}:${sourceTransport(entry)}`
@@ -107,6 +114,16 @@ export function isChannelAllUrlsBlocked(channel) {
   const urls = channel?.urls
   if (!Array.isArray(urls) || urls.length === 0) return false
   return urls.every(isSourceExplicitlyDisabled)
+}
+
+export function isChannelAllUnsupported(channel) {
+  const urls = channel?.urls
+  if (!Array.isArray(urls) || urls.length === 0) return false
+  return urls.every((entry) => {
+    if (isSourceExplicitlyDisabled(entry)) return true
+    const sourceType = String(entry?.source_type || entry?.transport || '').trim().toLowerCase()
+    return sourceType === 'unsupported' || sourceType === 'unsupported_youtube_url'
+  })
 }
 
 // 频道是否所有 source 都是 not_live。仅用于显示提示文案，不用于禁止点击。
