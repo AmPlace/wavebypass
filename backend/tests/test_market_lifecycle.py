@@ -249,8 +249,11 @@ class MarketLifecycleTest(unittest.IsolatedAsyncioTestCase):
                     "_load_source_packages",
                     side_effect=self.market.MarketError("first fetch failed", 502),
                 ):
-            with self.assertRaisesRegex(self.market.MarketError, "first fetch failed"):
-                await self.market.refresh_market()
+            result = await self.market.refresh_market()
+
+        self.assertEqual(result["refresh_status"], "failed")
+        self.assertEqual(result["source_results"][0]["status"], "failed")
+        self.assertFalse(result["source_results"][0]["usable_for_update"])
 
         self.assertTrue(self.market._market_cache["stale"])
         self.assertIn("first fetch failed", self.market._market_cache["last_error"])

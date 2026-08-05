@@ -64,6 +64,7 @@ MARKET_URL = os.environ.get("WAVEFLOW_MARKET_URL", DEFAULT_MARKET_URL).strip() o
 ALLOW_PRIVATE_MARKET_URLS = os.environ.get("WAVEFLOW_MARKET_ALLOW_PRIVATE", "").strip().lower() in {"1", "true", "yes", "on"}
 PREVIEW_TTL_SECONDS = 10 * 60
 MAX_FETCH_BYTES = 10 * 1024 * 1024
+MARKET_REFRESH_ERROR_MAX_LENGTH = 2048
 
 _market_cache: dict[str, Any] = {
     "market_url": MARKET_URL,
@@ -338,6 +339,120 @@ def _source_fetch_revision(source: dict | None) -> tuple[int, str, bool, bool]:
     )
 
 
+def _source_revision_value(source: dict | None) -> str:
+    source_id, url, enabled, allow_private = _source_fetch_revision(source)
+    return json.dumps(
+        {
+            "allow_private": allow_private,
+            "enabled": enabled,
+            "source_id": source_id,
+            "url": url,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _sanitize_refresh_error(value: Any) -> str:
+    text = str(value or "").replace("\x00", " ")
+    text = re.sub(r"\b[A-Za-z]:\\[^\s;]+", "[local-path]", text)
+    text = re.sub(
+        r"(?<!:)/(?:Users|home|private|tmp|var/folders|opt)/[^\s;]+",
+        "[local-path]",
+        text,
+    )
+    text = re.sub(r"<[^>]+ object at 0x[0-9a-fA-F]+>", "[internal-object]", text)
+    text = " ".join(text.split()).strip()
+    if len(text) > MARKET_REFRESH_ERROR_MAX_LENGTH:
+        return text[: MARKET_REFRESH_ERROR_MAX_LENGTH - 1].rstrip() + "…"
+    return text
+
+
+def _has_successful_source_cache(entry: dict | None, source: dict) -> bool:
+    if not entry or str(entry.get("source_url") or "") != str(source.get("url") or ""):
+        return False
+    if entry.get("has_successful_cache") is False:
+        return False
+    return bool(
+        entry.get("has_successful_cache")
+        or entry.get("last_success_at")
+        or entry.get("market")
+    )
+
+
+def _source_refresh_result(
+    source: dict,
+    *,
+    current: dict | None,
+    status: str,
+    error: Any = "",
+    cache_updated: bool = False,
+    packages: list[dict] | None = None,
+) -> dict:
+    accepted_packages = packages or []
+    return {
+        "source_id": int(source.get("id") or 0),
+        "source_key": _source_cache_key(source),
+        "source_name": str(source.get("name") or ""),
+        "requested_url": str(source.get("url") or ""),
+        "current_url": str((current or {}).get("url") or ""),
+        "source_revision": _source_revision_value(source),
+        "current_source_revision": _source_revision_value(current),
+        "status": status,
+        "usable_for_update": status == "success",
+        "stale": status == "stale",
+        "error": _sanitize_refresh_error(error),
+        "cache_updated": bool(cache_updated),
+        "package_count": len(accepted_packages),
+        "package_ids": [
+            str(package.get("id") or "")
+            for package in accepted_packages
+            if str(package.get("id") or "")
+        ],
+    }
+
+
+def _with_refresh_results(summary: dict, source_results: list[dict]) -> dict:
+    statuses = ("success", "stale", "failed", "revision_discarded", "disabled")
+    counts = {
+        status: sum(1 for result in source_results if result.get("status") == status)
+        for status in statuses
+    }
+    unsuccessful = counts["stale"] + counts["failed"] + counts["revision_discarded"]
+    if unsuccessful and counts["success"]:
+        refresh_status = "partial"
+    elif unsuccessful:
+        refresh_status = "failed"
+    else:
+        refresh_status = "success"
+
+    result = dict(summary)
+    result.update({
+        "refresh_status": refresh_status,
+        "source_results": source_results,
+        "source_result_counts": counts,
+        "successful_source_ids": [
+            item["source_id"] for item in source_results if item.get("status") == "success"
+        ],
+        "stale_source_ids": [
+            item["source_id"] for item in source_results if item.get("status") == "stale"
+        ],
+        "failed_source_ids": [
+            item["source_id"] for item in source_results if item.get("status") == "failed"
+        ],
+        "revision_discarded_source_ids": [
+            item["source_id"]
+            for item in source_results
+            if item.get("status") == "revision_discarded"
+        ],
+        "disabled_source_ids": [
+            item["source_id"] for item in source_results if item.get("status") == "disabled"
+        ],
+    })
+    return result
+
+
 def _source_entries() -> dict[str, dict[str, Any]]:
     entries = _market_cache.get("source_entries")
     if not isinstance(entries, dict):
@@ -380,7 +495,7 @@ def _rebuild_market_cache(sources: list[dict], *, extra_errors: list[str] | None
             if entry.get("last_error"):
                 errors.append(f"{source.get('name') or source.get('url')}: {entry['last_error']}")
 
-    error_text = "; ".join(dict.fromkeys(error for error in errors if error))
+    error_text = _sanitize_refresh_error("; ".join(dict.fromkeys(error for error in errors if error)))
     _market_cache.update({
         "market_url": ", ".join(str(source.get("url") or "") for source in active_sources),
         "market": markets[0] if markets else {"schema_version": SCHEMA_VERSION, "packages": []},
@@ -758,11 +873,12 @@ async def refresh_market(
     else:
         targets = [source for source in all_sources if source.get("enabled")]
 
+    source_results: list[dict] = []
     if not targets:
         sources_latest = await db.list_market_sources()
         _rebuild_market_cache(sources_latest)
         if any(source.get("enabled") for source in sources_latest):
-            return market_summary()
+            return _with_refresh_results(market_summary(), source_results)
         _market_cache.update({
             "market_url": "",
             "market": {"schema_version": SCHEMA_VERSION, "packages": []},
@@ -775,26 +891,47 @@ async def refresh_market(
             "last_error": "",
             "allow_private": bool(allow_private or ALLOW_PRIVATE_MARKET_URLS),
         })
-        return market_summary()
+        return _with_refresh_results(market_summary(), source_results)
 
     source_errors: list[str] = []
-    successful = 0
     entries = _source_entries()
     for source in targets:
+        if not source.get("enabled"):
+            current = await db.get_market_source(source["id"])
+            source_results.append(_source_refresh_result(
+                source,
+                current=current,
+                status="disabled",
+            ))
+            continue
         key = _source_cache_key(source)
         lock = _market_source_refresh_locks.setdefault(key, asyncio.Lock())
         async with lock:
             current = await db.get_market_source(source["id"])
             if not current or _source_fetch_revision(current) != _source_fetch_revision(source):
+                source_results.append(_source_refresh_result(
+                    source,
+                    current=current,
+                    status="revision_discarded",
+                    error="Market 来源在刷新开始前已变化，旧请求未执行",
+                ))
                 continue
             try:
                 market, source_packages = await _load_source_packages(source)
             except Exception as exc:
                 current = await db.get_market_source(source["id"])
                 if not current or _source_fetch_revision(current) != _source_fetch_revision(source):
+                    source_results.append(_source_refresh_result(
+                        source,
+                        current=current,
+                        status="revision_discarded",
+                        error="Market 来源在失败结果返回前已变化，旧结果已丢弃",
+                    ))
                     continue
-                source_errors.append(f"{source.get('name') or source.get('url')}: {exc}")
+                error = _sanitize_refresh_error(exc)
+                source_errors.append(f"{source.get('name') or source.get('url')}: {error}")
                 cached = entries.get(key)
+                has_successful_cache = _has_successful_source_cache(cached, source)
                 if not cached or str(cached.get("source_url") or "") != str(source.get("url") or ""):
                     cached = {
                         "source_id": source.get("id"),
@@ -802,43 +939,63 @@ async def refresh_market(
                         "market": {},
                         "packages": [],
                         "fetched_at": time.time(),
+                        "has_successful_cache": False,
                     }
                     entries[key] = cached
                 cached["stale"] = True
-                cached["last_error"] = str(exc)
+                cached["last_error"] = error
                 await db.update_market_source(
                     source["id"],
                     last_fetched_at=_now_iso(),
                     last_status="error",
-                    last_error=str(exc),
+                    last_error=error,
                 )
+                source_results.append(_source_refresh_result(
+                    source,
+                    current=current,
+                    status="stale" if has_successful_cache else "failed",
+                    error=error,
+                ))
                 continue
 
             current = await db.get_market_source(source["id"])
             if not current or _source_fetch_revision(current) != _source_fetch_revision(source):
+                source_results.append(_source_refresh_result(
+                    source,
+                    current=current,
+                    status="revision_discarded",
+                    error="Market 来源在成功结果返回前已变化，旧结果已丢弃",
+                ))
                 continue
+            success_at = time.time()
             entries[key] = {
                 "source_id": source.get("id"),
                 "source_url": source.get("url", ""),
                 "market": market,
                 "packages": source_packages,
-                "fetched_at": time.time(),
+                "fetched_at": success_at,
+                "last_success_at": success_at,
+                "has_successful_cache": True,
                 "stale": False,
                 "last_error": "",
             }
-            successful += 1
             await db.update_market_source(
                 source["id"],
                 last_fetched_at=_now_iso(),
                 last_status="ok",
                 last_error="",
             )
+            source_results.append(_source_refresh_result(
+                source,
+                current=current,
+                status="success",
+                cache_updated=True,
+                packages=source_packages,
+            ))
 
     sources_latest = await db.list_market_sources()
     _rebuild_market_cache(sources_latest, extra_errors=source_errors)
-    if not successful and source_errors and not _market_cache.get("packages"):
-        raise MarketError("; ".join(source_errors) or "Market 刷新失败", 502)
-    return market_summary()
+    return _with_refresh_results(market_summary(), source_results)
 
 
 def market_summary() -> dict:

@@ -183,3 +183,73 @@ enabled 首次启动
 ### 边界
 
 本批未实现 Market task handler、`market_tasks.py`、FastAPI lifespan、管理 API、前端设置页或旧 Radio/EPG 后台任务迁移。AutomationService 目前只是可复用通用底座，尚未在应用启动时创建，也不会自动执行任何业务任务。
+
+## M2A-3：Market 本轮来源刷新结果契约
+
+### 背景与成因
+
+M1 的来源级缓存允许远端 Market 暂时失败时继续展示上一次成功 package，这是正确的浏览降级行为。但原 `refresh_market()` 只返回合并后的 `market_summary()`，调用者无法区分“本轮真实成功”和“使用历史 stale cache”。如果自动更新据此判断来源资格，旧缓存会被误认为本轮成功数据；revision guard 丢弃的晚到请求也没有显式结果，下一阶段无法可靠计算 success、partial 或 failed。
+
+### 采用方案
+
+- 保留 `market_summary()` 的原有字段，在单次 `refresh_market()` 返回值中追加本轮局部结果，不使用模块级“最后一次刷新结果”。
+- 每个涉及来源返回 `source_id`、`source_key`、名称、请求 URL、当前 URL、请求/当前 revision、状态、更新资格、错误、cache 是否更新和本轮接受的 package identity。
+- 顶层追加 `refresh_status`、固定状态计数以及各状态的 source ID 集合。
+- 使用 `usable_for_update` 作为后续 Market Task Handler 的唯一来源更新资格，不允许从长期 cache 猜测。
+- 延续 `source_key::original_package_id` identity；官方来源继续使用原始 package ID。
+- 显式单源刷新 disabled 来源时返回 `disabled`，不执行网络请求；全量刷新仍只处理 enabled 来源。
+
+### 状态语义
+
+- `success`：本轮 fetch、schema/package 解析成功，前后 revision 一致，来源仍启用，结果已写入 cache；仅此状态 `usable_for_update=true`。
+- `stale`：本轮失败，但同 source、同 URL 存在历史成功 cache；旧数据继续用于浏览，本轮不具备更新资格。
+- `failed`：本轮失败且不存在历史成功 cache；返回结构化失败，不再只抛异常。
+- `revision_discarded`：请求开始前或结果返回时来源已删除、禁用、改 URL 或配置 revision；旧结果不写 cache，也不更新当前来源成功/失败状态。
+- `disabled`：显式请求了 disabled 来源，刷新未执行；作为非错误跳过返回，不能参与更新。
+
+顶层状态按本轮结果计算：存在 success 且另有 stale/failed/revision discarded 为 `partial`；没有 success 且存在上述失败状态为 `failed`；其余为 `success`。该状态是 Market 刷新契约，不复用 Automation 的持久化状态枚举。
+
+### 本轮结果与长期 cache 边界
+
+- source result 只存在于当前函数返回值，并发调用各自持有独立列表。
+- source result 的 `package_ids` 只包含本轮成功接受的数据；stale cache 中仍可浏览的旧 package 不会伪装为本轮 package。
+- 成功 cache 写入 `last_success_at` 和 `has_successful_cache=true`。
+- 首次失败创建的空错误 entry 标记 `has_successful_cache=false`，后续失败仍为 `failed`，不会错误升级为 `stale`。
+- 兼容 M1 旧成功 entry：同 URL 且存在历史 market 文档时仍识别为成功 cache。
+- cache rebuild、source CRUD、同来源锁和 revision guard 的既有语义保持不变。
+
+### 错误与所有权处理
+
+- 刷新错误统一去除 NUL、折叠空白、隐藏常见本地绝对路径和内部对象 repr，并限制为 2048 字符。
+- 净化后的错误同时用于 source result、来源 DB 状态和 stale cache，避免通过管理 API 暴露本地路径或超长远端响应。
+- revision discarded 不写当前来源状态，避免旧 URL 请求把新 revision 标成 ok 或 error。
+
+### 实际落地
+
+- 修改 `backend/market.py`：增加 source revision 序列化、错误净化、成功 cache 判定、source result 和顶层 refresh result 构造，并扩展 `refresh_market()`。
+- 新增 `backend/tests/test_market_refresh_results.py`。
+- 调整 `backend/tests/test_market_lifecycle.py` 中首次来源失败的旧异常断言，改为验证结构化 `failed` 结果及 cache 错误保留。
+- 未修改 `backend/automation.py`、`backend/database.py`、`backend/main.py` 或任何前端文件。
+
+### 测试先行证据
+
+1. 在生产代码修改前新增真实 `refresh_market()` 契约测试，只 mock 来源列表和远端 package 加载。
+2. 当前 HEAD 稳定得到 `12 failed, 2 passed`：返回值缺少 `refresh_status/source_results`，首次失败仍抛 `MarketError`，disabled 来源没有显式结果。
+3. 实现后来源结果定向测试为 `12 passed, 2 subtests passed`。
+4. 与既有 Market 生命周期测试组合为 `34 passed, 2 subtests passed`。
+
+### 验证范围
+
+测试覆盖成功、历史 cache stale、首次失败、URL/revision 变化、删除/禁用晚到结果、disabled 单源、官方/第三方相同原始 package ID、部分失败、单源隔离、并发调用结果隔离、同来源串行锁、错误净化、旧 summary 字段兼容，以及未引入 AutomationRunner 或 package 更新依赖。
+
+### 验证结果
+
+- 来源结果定向与 Market 生命周期组合：34 passed，2 subtests passed。
+- Market、数据库、订阅刷新和 media handle 定向回归：72 passed，2 subtests passed。
+- 后端全量：306 passed，56 subtests passed。
+- Python 编译检查和 `git diff --check` 通过。
+- 端口型 HLS 集成测试在允许绑定 localhost 的环境运行通过；沙箱内失败仍是 Uvicorn 无法绑定端口的环境限制。
+
+### 边界
+
+本批未创建 `backend/market_tasks.py`，未实现 Market handler、Runner 注册、Scheduler/lifespan 接入、管理 API、自动 package 更新或前端设置。`refresh_market()` 只提供 M2A-4 所需的可靠本轮输入。
