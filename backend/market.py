@@ -1018,6 +1018,10 @@ def market_summary() -> dict:
     }
 
 
+def market_packages_snapshot() -> list[dict]:
+    return deepcopy(_market_cache.get("packages") or [])
+
+
 async def ensure_market_loaded() -> None:
     if _market_cache.get("packages") or _market_cache.get("market") is not None:
         return
