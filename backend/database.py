@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 
 
 AUTOMATION_ERROR_MAX_LENGTH = 2048
+EPG_ERROR_MAX_LENGTH = 1024
 AUTOMATION_STATUSES = {
     'never_run',
     'running',
@@ -138,8 +139,16 @@ CREATE TABLE IF NOT EXISTS epg_sources (
     name            TEXT NOT NULL,
     url             TEXT NOT NULL UNIQUE,
     enabled         INTEGER DEFAULT 1,
+    revision        INTEGER NOT NULL DEFAULT 1,
     last_fetched_at TEXT DEFAULT '',
+    last_attempt_at TEXT DEFAULT '',
+    last_success_at TEXT DEFAULT '',
     last_status     TEXT DEFAULT '',
+    last_error      TEXT DEFAULT '',
+    channel_count   INTEGER NOT NULL DEFAULT 0,
+    programme_count INTEGER NOT NULL DEFAULT 0,
+    data_start_at   TEXT DEFAULT '',
+    data_end_at     TEXT DEFAULT '',
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL
 );
@@ -374,6 +383,54 @@ async def initialize():
                 pass  # 字段已存在
         conn.execute("CREATE INDEX IF NOT EXISTS idx_channels_market_pkg ON channels(market_package_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_channels_market_item ON channels(market_package_id, market_source_item_id)")
+        for col, typ, default in [
+            ('revision', 'INTEGER', '1'),
+            ('last_attempt_at', 'TEXT', "''"),
+            ('last_success_at', 'TEXT', "''"),
+            ('last_error', 'TEXT', "''"),
+            ('channel_count', 'INTEGER', '0'),
+            ('programme_count', 'INTEGER', '0'),
+            ('data_start_at', 'TEXT', "''"),
+            ('data_end_at', 'TEXT', "''"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE epg_sources ADD COLUMN {col} {typ} DEFAULT {default}")
+            except sqlite3.OperationalError:
+                pass
+        conn.execute("UPDATE epg_sources SET revision=1 WHERE revision IS NULL OR revision < 1")
+        conn.execute(
+            """
+            UPDATE epg_sources
+            SET last_attempt_at=last_fetched_at
+            WHERE last_attempt_at='' AND last_fetched_at<>''
+            """
+        )
+        conn.execute(
+            """
+            UPDATE epg_sources
+            SET last_success_at=last_fetched_at,
+                last_status='success'
+            WHERE last_success_at='' AND last_fetched_at<>'' AND last_status='ok'
+            """
+        )
+        conn.execute(
+            """
+            UPDATE epg_sources
+            SET channel_count=(
+                    SELECT COUNT(*) FROM epg_channels WHERE epg_channels.source_id=epg_sources.id
+                ),
+                programme_count=(
+                    SELECT COUNT(*) FROM epg_programs WHERE epg_programs.source_id=epg_sources.id
+                ),
+                data_start_at=COALESCE((
+                    SELECT MIN(start) FROM epg_programs WHERE epg_programs.source_id=epg_sources.id
+                ), ''),
+                data_end_at=COALESCE((
+                    SELECT MAX(stop) FROM epg_programs WHERE epg_programs.source_id=epg_sources.id
+                ), '')
+            WHERE channel_count=0 AND programme_count=0
+            """
+        )
         for col, typ, default in [
             ('source_key', 'TEXT', "''"),
             ('allow_private', 'INTEGER', '0'),
@@ -1740,6 +1797,17 @@ async def add_epg_source(name: str, url: str) -> int:
     return await asyncio.to_thread(_add)
 
 
+async def get_epg_source(source_id: int) -> dict | None:
+    def _get():
+        conn = _connect()
+        try:
+            row = conn.execute("SELECT * FROM epg_sources WHERE id=?", (source_id,)).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+    return await asyncio.to_thread(_get)
+
+
 async def get_epg_sources() -> list[dict]:
     def _get():
         conn = _connect()
@@ -1759,15 +1827,256 @@ async def delete_epg_source(source_id: int):
 
 
 async def update_epg_source(source_id: int, **kwargs):
+    allowed = {'name', 'url', 'enabled'}
+    unknown = set(kwargs) - allowed
+    if unknown:
+        raise ValueError(f"不支持的 EPG 来源字段: {', '.join(sorted(unknown))}")
+    if not kwargs:
+        return await get_epg_source(source_id)
+
     def _update():
         conn = _connect()
-        now = datetime.now(timezone.utc).isoformat()
-        kwargs['updated_at'] = now
-        sets = ', '.join(f"{k}=?" for k in kwargs)
-        conn.execute(f"UPDATE epg_sources SET {sets} WHERE id=?", (*kwargs.values(), source_id))
-        conn.commit()
-        conn.close()
-    await asyncio.to_thread(_update)
+        try:
+            with conn:
+                current = conn.execute("SELECT * FROM epg_sources WHERE id=?", (source_id,)).fetchone()
+                if current is None:
+                    return None
+                updates = dict(kwargs)
+                if 'enabled' in updates:
+                    updates['enabled'] = _normalize_enabled(updates['enabled'])
+                identity_changed = any(
+                    field in updates and updates[field] != current[field]
+                    for field in ('url', 'enabled')
+                )
+                if identity_changed:
+                    updates['revision'] = int(current['revision'] or 1) + 1
+                    updates['last_status'] = (
+                        'disabled' if updates.get('enabled', current['enabled']) == 0
+                        else 'revision_discarded'
+                    )
+                    updates['last_error'] = ''
+                updates['updated_at'] = _utc_now()
+                sets = ', '.join(f"{key}=?" for key in updates)
+                conn.execute(
+                    f"UPDATE epg_sources SET {sets} WHERE id=?",
+                    (*updates.values(), source_id),
+                )
+                row = conn.execute("SELECT * FROM epg_sources WHERE id=?", (source_id,)).fetchone()
+                return dict(row)
+        finally:
+            conn.close()
+    return await asyncio.to_thread(_update)
+
+
+def _normalize_epg_error(value: str | None) -> str:
+    if value is None:
+        return ''
+    if not isinstance(value, str):
+        raise TypeError('EPG error 必须是字符串')
+    return value.replace('\x00', '').strip()[:EPG_ERROR_MAX_LENGTH]
+
+
+async def begin_epg_source_refresh(
+    source_id: int,
+    expected_revision: int,
+    *,
+    attempted_at: str | None = None,
+) -> bool:
+    attempted = _normalize_timestamp(attempted_at, 'attempted_at')
+
+    def _begin():
+        conn = _connect()
+        try:
+            with conn:
+                cursor = conn.execute(
+                    """
+                    UPDATE epg_sources
+                    SET last_attempt_at=?, last_status='running', last_error='', updated_at=?
+                    WHERE id=? AND revision=? AND enabled=1
+                    """,
+                    (attempted, attempted, source_id, expected_revision),
+                )
+                return cursor.rowcount == 1
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_begin)
+
+
+async def record_epg_source_disabled(
+    source_id: int,
+    expected_revision: int,
+    *,
+    attempted_at: str | None = None,
+) -> bool:
+    attempted = _normalize_timestamp(attempted_at, 'attempted_at')
+
+    def _record():
+        conn = _connect()
+        try:
+            with conn:
+                cursor = conn.execute(
+                    """
+                    UPDATE epg_sources
+                    SET last_attempt_at=?, last_status='disabled', last_error='', updated_at=?
+                    WHERE id=? AND revision=? AND enabled=0
+                    """,
+                    (attempted, attempted, source_id, expected_revision),
+                )
+                return cursor.rowcount == 1
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_record)
+
+
+async def record_epg_source_refresh_failure(
+    source_id: int,
+    expected_revision: int,
+    *,
+    status: str,
+    attempted_at: str | None = None,
+    error: str = '',
+) -> bool:
+    if status not in {'stale', 'failed', 'cancelled'}:
+        raise ValueError('EPG 来源失败状态必须是 stale、failed 或 cancelled')
+    attempted = _normalize_timestamp(attempted_at, 'attempted_at')
+    normalized_error = _normalize_epg_error(error)
+
+    def _record():
+        conn = _connect()
+        try:
+            with conn:
+                cursor = conn.execute(
+                    """
+                    UPDATE epg_sources
+                    SET last_attempt_at=?, last_status=?, last_error=?, updated_at=?
+                    WHERE id=? AND revision=?
+                    """,
+                    (
+                        attempted,
+                        status,
+                        normalized_error,
+                        _utc_now(),
+                        source_id,
+                        expected_revision,
+                    ),
+                )
+                return cursor.rowcount == 1
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_record)
+
+
+async def has_epg_dataset(source_id: int) -> bool:
+    def _has():
+        conn = _connect()
+        try:
+            row = conn.execute(
+                """
+                SELECT EXISTS(SELECT 1 FROM epg_channels WHERE source_id=? LIMIT 1) AS has_channels,
+                       EXISTS(SELECT 1 FROM epg_programs WHERE source_id=? LIMIT 1) AS has_programmes
+                """,
+                (source_id, source_id),
+            ).fetchone()
+            return bool(row['has_channels'] and row['has_programmes'])
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_has)
+
+
+async def replace_epg_dataset_atomic(
+    source_id: int,
+    expected_revision: int,
+    channels: list[dict],
+    programmes: list[dict],
+    *,
+    stats: dict,
+) -> dict:
+    channel_count = _normalize_count(stats.get('channel_count'), 'channel_count')
+    programme_count = _normalize_count(stats.get('programme_count'), 'programme_count')
+    if channel_count != len(channels) or programme_count != len(programmes):
+        raise ValueError('EPG 数据集统计与实际记录数量不一致')
+    data_start_at = _normalize_timestamp(stats.get('data_start_at'), 'data_start_at')
+    data_end_at = _normalize_timestamp(stats.get('data_end_at'), 'data_end_at')
+    finished_at = _normalize_timestamp(stats.get('finished_at'), 'finished_at')
+    attempted_at = _normalize_timestamp(stats.get('attempted_at') or finished_at, 'attempted_at')
+
+    def _replace():
+        conn = _connect()
+        try:
+            conn.execute('BEGIN IMMEDIATE')
+            source = conn.execute("SELECT * FROM epg_sources WHERE id=?", (source_id,)).fetchone()
+            if source is None:
+                conn.rollback()
+                return {'committed': False, 'reason': 'revision_discarded', 'source': None}
+            if int(source['revision'] or 1) != expected_revision:
+                conn.rollback()
+                return {'committed': False, 'reason': 'revision_discarded', 'source': dict(source)}
+            if not source['enabled']:
+                conn.rollback()
+                return {'committed': False, 'reason': 'disabled', 'source': dict(source)}
+
+            conn.execute("DELETE FROM epg_channels WHERE source_id=?", (source_id,))
+            conn.execute("DELETE FROM epg_programs WHERE source_id=?", (source_id,))
+            conn.executemany(
+                "INSERT INTO epg_channels(source_id, channel_id, display_names, normalized_names) VALUES(?, ?, ?, ?)",
+                [
+                    (source_id, item['channel_id'], item['display_names'], item['normalized_names'])
+                    for item in channels
+                ],
+            )
+            conn.executemany(
+                "INSERT INTO epg_programs(source_id, channel_id, start, stop, title, description) VALUES(?, ?, ?, ?, ?, ?)",
+                [
+                    (
+                        source_id,
+                        item['channel_id'],
+                        item['start'],
+                        item['stop'],
+                        item['title'],
+                        item.get('description', ''),
+                    )
+                    for item in programmes
+                ],
+            )
+            cursor = conn.execute(
+                """
+                UPDATE epg_sources
+                SET last_fetched_at=?, last_attempt_at=?, last_success_at=?,
+                    last_status='success', last_error='', channel_count=?, programme_count=?,
+                    data_start_at=?, data_end_at=?, updated_at=?
+                WHERE id=? AND revision=? AND enabled=1
+                """,
+                (
+                    finished_at,
+                    attempted_at,
+                    finished_at,
+                    channel_count,
+                    programme_count,
+                    data_start_at,
+                    data_end_at,
+                    finished_at,
+                    source_id,
+                    expected_revision,
+                ),
+            )
+            if cursor.rowcount != 1:
+                conn.rollback()
+                return {'committed': False, 'reason': 'revision_discarded', 'source': None}
+            conn.commit()
+            current = conn.execute("SELECT * FROM epg_sources WHERE id=?", (source_id,)).fetchone()
+            return {'committed': True, 'reason': '', 'source': dict(current)}
+        except BaseException:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_replace)
 
 
 async def replace_epg_channels(source_id: int, channels: list[dict]):
