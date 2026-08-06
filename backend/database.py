@@ -2,6 +2,7 @@ import asyncio
 import sqlite3
 import os
 import json
+import uuid
 from datetime import datetime, timezone
 
 
@@ -133,6 +134,42 @@ CREATE TABLE IF NOT EXISTS channels (
 
 CREATE INDEX IF NOT EXISTS idx_channels_sub ON channels(subscription_id);
 CREATE INDEX IF NOT EXISTS idx_channels_name ON channels(name);
+
+CREATE TABLE IF NOT EXISTS iptv_logical_channels (
+    id            TEXT PRIMARY KEY,
+    canonical_key TEXT NOT NULL,
+    display_name  TEXT NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'active'
+                  CHECK(status IN ('active', 'orphaned', 'split_conflict', 'merge_conflict')),
+    created_at    TEXT NOT NULL,
+    updated_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_iptv_logical_channels_key
+ON iptv_logical_channels(canonical_key);
+CREATE INDEX IF NOT EXISTS idx_iptv_logical_channels_status
+ON iptv_logical_channels(status);
+
+CREATE TABLE IF NOT EXISTS iptv_logical_channel_members (
+    logical_channel_id    TEXT NOT NULL,
+    channel_id            INTEGER NOT NULL UNIQUE,
+    membership_reason     TEXT NOT NULL DEFAULT 'normalized_name',
+    membership_confidence INTEGER NOT NULL DEFAULT 100
+                          CHECK(membership_confidence BETWEEN 0 AND 100),
+    variant_type          TEXT NOT NULL DEFAULT 'unknown'
+                          CHECK(variant_type IN (
+                              'unknown', 'standard', 'hd', '4k', 'delayed',
+                              'region', 'international'
+                          )),
+    created_at            TEXT NOT NULL,
+    updated_at            TEXT NOT NULL,
+    PRIMARY KEY(logical_channel_id, channel_id),
+    FOREIGN KEY(logical_channel_id) REFERENCES iptv_logical_channels(id) ON DELETE CASCADE,
+    FOREIGN KEY(channel_id) REFERENCES channels(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_iptv_logical_members_logical
+ON iptv_logical_channel_members(logical_channel_id);
+CREATE INDEX IF NOT EXISTS idx_iptv_logical_members_channel
+ON iptv_logical_channel_members(channel_id);
 
 CREATE TABLE IF NOT EXISTS epg_sources (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1327,6 +1364,298 @@ async def get_aggregated_channels(group: str = '', search: str = '') -> list[dic
         conn.close()
         return _apply_sub_fallbacks([dict(r) for r in rows])
     return await asyncio.to_thread(_get)
+
+
+def _new_iptv_logical_channel_id() -> str:
+    return f'lc_{uuid.uuid4().hex}'
+
+
+async def get_iptv_logical_channels() -> list[dict]:
+    def _get():
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM iptv_logical_channels ORDER BY created_at, id"
+            ).fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_get)
+
+
+async def get_iptv_logical_channel_members() -> list[dict]:
+    def _get():
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM iptv_logical_channel_members ORDER BY logical_channel_id, channel_id"
+            ).fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_get)
+
+
+async def sync_iptv_logical_channel_shadow_atomic(groups: list[dict]) -> dict:
+    """Atomically reconcile the persisted IPTV logical-channel shadow model.
+
+    ``groups`` is a projection input produced from the current raw channel
+    rows.  Membership uniqueness is enforced by SQLite so a partial write can
+    never leave one raw channel attached to two logical channels.
+    """
+
+    if not isinstance(groups, list):
+        raise TypeError('groups 必须是列表')
+
+    def _sync():
+        conn = _connect()
+        now = _utc_now()
+        created_logical_count = 0
+        reused_logical_count = 0
+        updated_logical_count = 0
+        created_member_count = 0
+        removed_member_count = 0
+        split_conflicts: list[dict] = []
+        merge_conflicts: list[dict] = []
+        try:
+            conn.execute('BEGIN IMMEDIATE')
+            raw_ids = {
+                int(row['id'])
+                for row in conn.execute('SELECT id FROM channels').fetchall()
+            }
+
+            normalized_groups = []
+            seen_group_keys = set()
+            seen_channel_ids = set()
+            for group in groups:
+                if not isinstance(group, dict):
+                    raise TypeError('logical channel group 必须是对象')
+                canonical_key = str(group.get('canonical_key') or '').strip()
+                display_name = str(group.get('display_name') or '').strip()
+                channel_ids = [int(channel_id) for channel_id in (group.get('channel_ids') or [])]
+                if not canonical_key or not display_name:
+                    raise ValueError('logical channel group 缺少 canonical_key 或 display_name')
+                if canonical_key in seen_group_keys:
+                    raise ValueError(f'重复 logical canonical_key: {canonical_key}')
+                seen_group_keys.add(canonical_key)
+                current_channel_ids = [channel_id for channel_id in channel_ids if channel_id in raw_ids]
+                cross_group_duplicates = set(current_channel_ids) & seen_channel_ids
+                if cross_group_duplicates:
+                    duplicate_ids = ', '.join(str(channel_id) for channel_id in sorted(cross_group_duplicates))
+                    raise ValueError(f'同一 raw channel 不能属于多个 logical group: {duplicate_ids}')
+                seen_channel_ids.update(current_channel_ids)
+                if not current_channel_ids:
+                    # A stale caller projection may contain only rows deleted
+                    # after it was read. Do not materialize a new orphan row
+                    # for such an empty target group.
+                    continue
+                normalized_groups.append({
+                    'canonical_key': canonical_key,
+                    'display_name': display_name,
+                    'channel_ids': current_channel_ids,
+                })
+
+            # Foreign keys remove most stale rows automatically, but this
+            # explicit cleanup also repairs databases created before the
+            # shadow table existed.
+            stale_cursor = conn.execute(
+                """
+                DELETE FROM iptv_logical_channel_members
+                WHERE channel_id NOT IN (SELECT id FROM channels)
+                """
+            )
+            removed_member_count += stale_cursor.rowcount
+
+            logical_rows = conn.execute(
+                "SELECT * FROM iptv_logical_channels ORDER BY created_at, id"
+            ).fetchall()
+            logical_by_id = {row['id']: dict(row) for row in logical_rows}
+            member_rows = conn.execute(
+                "SELECT * FROM iptv_logical_channel_members ORDER BY logical_channel_id, channel_id"
+            ).fetchall()
+            members_by_logical: dict[str, set[int]] = {logical_id: set() for logical_id in logical_by_id}
+            logical_by_channel: dict[int, str] = {}
+            for row in member_rows:
+                channel_id = int(row['channel_id'])
+                logical_id = row['logical_channel_id']
+                members_by_logical.setdefault(logical_id, set()).add(channel_id)
+                logical_by_channel[channel_id] = logical_id
+
+            target_key_by_channel = {
+                channel_id: group['canonical_key']
+                for group in normalized_groups
+                for channel_id in group['channel_ids']
+            }
+            # The input projection is authoritative for current membership. A
+            # raw row omitted from every target group is no longer groupable
+            # (for example, its name normalized to an empty key), so detach it
+            # before evaluating split conflicts and orphan state.
+            for channel_id, logical_id in list(logical_by_channel.items()):
+                if channel_id in target_key_by_channel:
+                    continue
+                conn.execute(
+                    'DELETE FROM iptv_logical_channel_members WHERE channel_id=?',
+                    (channel_id,),
+                )
+                members_by_logical.setdefault(logical_id, set()).discard(channel_id)
+                del logical_by_channel[channel_id]
+                removed_member_count += 1
+
+            logical_target_keys: dict[str, set[str]] = {}
+            for logical_id, channel_ids in members_by_logical.items():
+                logical_target_keys[logical_id] = {
+                    target_key_by_channel[channel_id]
+                    for channel_id in channel_ids
+                    if channel_id in target_key_by_channel
+                }
+            split_ids = {
+                logical_id
+                for logical_id, target_keys in logical_target_keys.items()
+                if len(target_keys) > 1
+            }
+            for logical_id in sorted(split_ids):
+                row = logical_by_id[logical_id]
+                split_conflicts.append({
+                    'logical_channel_id': logical_id,
+                    'canonical_key': row['canonical_key'],
+                    'channel_ids': sorted(members_by_logical.get(logical_id, set())),
+                    'target_keys': sorted(logical_target_keys[logical_id]),
+                })
+
+            handled_logical_ids: set[str] = set()
+            touched_logical_ids: set[str] = set()
+
+            def _create_logical(group: dict, status: str) -> str:
+                nonlocal created_logical_count
+                logical_id = _new_iptv_logical_channel_id()
+                conn.execute(
+                    """
+                    INSERT INTO iptv_logical_channels(
+                        id, canonical_key, display_name, status, created_at, updated_at
+                    ) VALUES(?, ?, ?, ?, ?, ?)
+                    """,
+                    (logical_id, group['canonical_key'], group['display_name'], status, now, now),
+                )
+                logical_by_id[logical_id] = {
+                    'id': logical_id,
+                    'canonical_key': group['canonical_key'],
+                    'display_name': group['display_name'],
+                    'status': status,
+                }
+                members_by_logical[logical_id] = set()
+                created_logical_count += 1
+                return logical_id
+
+            def _update_logical(logical_id: str, group: dict, status: str) -> None:
+                nonlocal updated_logical_count
+                old = logical_by_id[logical_id]
+                if (
+                    old['canonical_key'] != group['canonical_key']
+                    or old['display_name'] != group['display_name']
+                    or old['status'] != status
+                ):
+                    conn.execute(
+                        """
+                        UPDATE iptv_logical_channels
+                        SET canonical_key=?, display_name=?, status=?, updated_at=?
+                        WHERE id=?
+                        """,
+                        (group['canonical_key'], group['display_name'], status, now, logical_id),
+                    )
+                    logical_by_id[logical_id].update(
+                        canonical_key=group['canonical_key'],
+                        display_name=group['display_name'],
+                        status=status,
+                    )
+                    updated_logical_count += 1
+
+            def _add_members(logical_id: str, channel_ids: list[int]) -> None:
+                nonlocal created_member_count
+                for channel_id in channel_ids:
+                    conn.execute(
+                        """
+                        INSERT INTO iptv_logical_channel_members(
+                            logical_channel_id, channel_id, membership_reason,
+                            membership_confidence, variant_type, created_at, updated_at
+                        ) VALUES(?, ?, 'normalized_name', 100, 'unknown', ?, ?)
+                        """,
+                        (logical_id, channel_id, now, now),
+                    )
+                    members_by_logical.setdefault(logical_id, set()).add(channel_id)
+                    logical_by_channel[channel_id] = logical_id
+                    created_member_count += 1
+
+            for group in normalized_groups:
+                channel_ids = group['channel_ids']
+                candidates = sorted({logical_by_channel[channel_id] for channel_id in channel_ids if channel_id in logical_by_channel})
+                unassigned = [channel_id for channel_id in channel_ids if channel_id not in logical_by_channel]
+
+                if len(candidates) > 1:
+                    for logical_id in candidates:
+                        _update_logical(logical_id, logical_by_id[logical_id], 'merge_conflict')
+                        touched_logical_ids.add(logical_id)
+                    merge_conflicts.append({
+                        'canonical_key': group['canonical_key'],
+                        'logical_channel_ids': candidates,
+                        'channel_ids': sorted(channel_ids),
+                    })
+                    if unassigned:
+                        new_id = _create_logical(group, 'merge_conflict')
+                        _add_members(new_id, unassigned)
+                        touched_logical_ids.add(new_id)
+                    continue
+
+                if len(candidates) == 1 and candidates[0] not in split_ids:
+                    logical_id = candidates[0]
+                    _update_logical(logical_id, group, 'active')
+                    reused_logical_count += 1
+                    handled_logical_ids.add(logical_id)
+                    touched_logical_ids.add(logical_id)
+                    if unassigned:
+                        _add_members(logical_id, unassigned)
+                    continue
+
+                if len(candidates) == 1 and candidates[0] in split_ids:
+                    logical_id = candidates[0]
+                    _update_logical(logical_id, logical_by_id[logical_id], 'split_conflict')
+                    touched_logical_ids.add(logical_id)
+                    if unassigned:
+                        new_id = _create_logical(group, 'split_conflict')
+                        _add_members(new_id, unassigned)
+                        touched_logical_ids.add(new_id)
+                    continue
+
+                new_id = _create_logical(group, 'active')
+                _add_members(new_id, channel_ids)
+                touched_logical_ids.add(new_id)
+
+            for logical_id, row in logical_by_id.items():
+                member_count = len(members_by_logical.get(logical_id, set()))
+                if member_count == 0:
+                    _update_logical(logical_id, row, 'orphaned')
+                elif logical_id in split_ids and logical_id not in touched_logical_ids:
+                    _update_logical(logical_id, row, 'split_conflict')
+
+            conn.commit()
+            return {
+                'created_logical_count': created_logical_count,
+                'reused_logical_count': reused_logical_count,
+                'updated_logical_count': updated_logical_count,
+                'created_member_count': created_member_count,
+                'removed_member_count': removed_member_count,
+                'split_conflicts': split_conflicts,
+                'merge_conflicts': merge_conflicts,
+            }
+        except BaseException:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_sync)
 
 
 # ── Market install state ──
