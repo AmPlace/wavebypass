@@ -2685,6 +2685,21 @@ async def get_epg_programs(source_id: int, channel_id: str, start_after: str = '
 
 async def batch_get_current_programs(canonical_keys: list[str]) -> dict:
     """批量查当前节目：返回 {canonical_key: {current, next}} 或 {}"""
+    try:
+        from epg_read_resolver import (
+            emit_epg_read_diagnostic,
+            emit_epg_read_resolver_error,
+            resolve_epg_read_many,
+        )
+        comparisons = await resolve_epg_read_many(canonical_keys)
+        for comparison in comparisons.values():
+            emit_epg_read_diagnostic(comparison, context='batch-current')
+    except Exception as exc:
+        # EPG-2F-a only compares the shadow path. The original legacy query is
+        # the unconditional fallback and remains the sole source of results.
+        from epg_read_resolver import emit_epg_read_resolver_error
+        emit_epg_read_resolver_error(context='batch-current', error=exc)
+
     def _get():
         conn = _connect()
         now = datetime.now(timezone.utc).isoformat()

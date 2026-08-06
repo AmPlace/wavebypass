@@ -23,6 +23,7 @@ from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt, model_validat
 from contextlib import asynccontextmanager
 from fetchers import STATION_FETCHER_MAP, yunting
 import database
+import epg_read_resolver
 from adapters import (
     AdapterResolveError,
     adapter_capabilities_map,
@@ -3920,6 +3921,16 @@ def _epg_nearest_date(requested_date: str, available_dates: list[str]) -> str:
 @app.get("/api/iptv/epg/programs/{canonical_key}", dependencies=[Depends(require_browse_access)])
 async def get_epg_programs(canonical_key: str, date: str = '', tz: str = ''):
     em = await db.get_channel_epg_map(canonical_key)
+    try:
+        comparison = await epg_read_resolver.resolve_epg_read(
+            canonical_key,
+            legacy_mapping=em,
+        )
+        epg_read_resolver.emit_epg_read_diagnostic(comparison, context='programme')
+    except Exception as exc:
+        # EPG-2F-a is diagnostic-only. Shadow resolution must never alter or
+        # break the legacy production programme path.
+        epg_read_resolver.emit_epg_read_resolver_error(context='programme', error=exc)
     if not em or not em.get('epg_channel_id'):
         tzinfo = _epg_zoneinfo(tz)
         return {
