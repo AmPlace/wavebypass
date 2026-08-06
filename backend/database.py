@@ -1398,6 +1398,43 @@ async def get_iptv_logical_channel_members() -> list[dict]:
     return await asyncio.to_thread(_get)
 
 
+async def get_iptv_logical_channel_hint_rows(logical_channel_id: str | None = None) -> list[dict]:
+    """Read raw, non-secret membership fields for EPG-2B hint aggregation."""
+
+    def _get():
+        conn = _connect()
+        try:
+            query = """
+                SELECT
+                    lc.id AS logical_channel_id,
+                    lc.canonical_key AS canonical_key,
+                    lc.display_name AS display_name,
+                    lc.status AS logical_status,
+                    m.channel_id AS member_channel_id,
+                    m.membership_reason AS membership_reason,
+                    m.membership_confidence AS membership_confidence,
+                    m.variant_type AS variant_type,
+                    c.name AS raw_name,
+                    c.tvg_id AS raw_tvg_id,
+                    c.tvg_name AS raw_tvg_name
+                FROM iptv_logical_channels AS lc
+                LEFT JOIN iptv_logical_channel_members AS m
+                    ON m.logical_channel_id = lc.id
+                LEFT JOIN channels AS c ON c.id = m.channel_id
+            """
+            params: tuple[object, ...] = ()
+            if logical_channel_id is not None:
+                query += " WHERE lc.id=?"
+                params = (logical_channel_id,)
+            query += " ORDER BY lc.id, m.channel_id"
+            rows = conn.execute(query, params).fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_get)
+
+
 async def sync_iptv_logical_channel_shadow_atomic(groups: list[dict]) -> dict:
     """Atomically reconcile the persisted IPTV logical-channel shadow model.
 
@@ -2432,6 +2469,86 @@ async def replace_epg_programs(source_id: int, programs: list[dict]):
         conn.commit()
         conn.close()
     await asyncio.to_thread(_replace)
+
+
+async def list_epg_channel_catalog_rows() -> list[dict]:
+    """Return safe source-aware EPG channel rows for the shadow catalog.
+
+    The query deliberately omits source URLs and all other source
+    configuration.  Ordering is explicit so callers do not depend on SQLite
+    insertion order, while the composite source/channel identity remains the
+    only lookup key.
+    """
+
+    def _list():
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                """
+                SELECT
+                    s.id AS source_id,
+                    s.name AS source_name,
+                    s.enabled AS source_enabled,
+                    s.last_status AS source_status,
+                    c.channel_id AS channel_id,
+                    c.display_names AS display_names,
+                    c.normalized_names AS normalized_names
+                FROM epg_channels AS c
+                JOIN epg_sources AS s ON s.id = c.source_id
+                ORDER BY s.id, c.channel_id, c.id
+                """
+            ).fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_list)
+
+
+async def get_epg_channel_catalog_row(source_id: int, channel_id: str) -> dict | None:
+    """Read exactly one EPG channel by its composite source-aware identity."""
+
+    def _get():
+        conn = _connect()
+        try:
+            row = conn.execute(
+                """
+                SELECT
+                    s.id AS source_id,
+                    s.name AS source_name,
+                    s.enabled AS source_enabled,
+                    s.last_status AS source_status,
+                    c.channel_id AS channel_id,
+                    c.display_names AS display_names,
+                    c.normalized_names AS normalized_names
+                FROM epg_channels AS c
+                JOIN epg_sources AS s ON s.id = c.source_id
+                WHERE c.source_id=? AND c.channel_id=?
+                """,
+                (source_id, channel_id),
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_get)
+
+
+async def epg_channel_identity_exists(source_id: int, channel_id: str) -> bool:
+    """Check the exact ``(source_id, channel_id)`` identity without guessing."""
+
+    def _exists():
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM epg_channels WHERE source_id=? AND channel_id=? LIMIT 1",
+                (source_id, channel_id),
+            ).fetchone()
+            return row is not None
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_exists)
 
 
 async def get_epg_channels(source_id: int) -> list[dict]:

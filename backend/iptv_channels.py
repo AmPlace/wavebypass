@@ -185,3 +185,59 @@ async def validate_iptv_logical_channel_projection(
         'logical_channel_count': len(logical_rows),
         'orphaned_logical_count': sum(row['status'] == 'orphaned' for row in logical_rows),
     }
+
+
+async def get_iptv_logical_channel_hints(logical_channel_id: str | None = None) -> list[dict]:
+    """Return read-only raw hints for future source-aware EPG matching.
+
+    This helper intentionally aggregates persisted membership metadata only. It
+    does not inspect stream URLs, choose an EPG candidate, or create a binding.
+    """
+
+    rows = await db.get_iptv_logical_channel_hint_rows(logical_channel_id)
+    grouped: dict[str, dict] = {}
+
+    for row in rows:
+        logical_id = str(row['logical_channel_id'])
+        hint = grouped.setdefault(
+            logical_id,
+            {
+                'logical_channel_id': logical_id,
+                'canonical_key': str(row.get('canonical_key') or ''),
+                'display_name': str(row.get('display_name') or ''),
+                'status': str(row.get('logical_status') or ''),
+                'member_channel_ids': [],
+                'raw_tvg_ids': [],
+                'raw_tvg_names': [],
+                'raw_display_names': [],
+                'variant_hints': [],
+            },
+        )
+        member_id = row.get('member_channel_id')
+        if member_id is None:
+            continue
+        member_id = int(member_id)
+        hint['member_channel_ids'].append(member_id)
+        for field, output_key in (
+            ('raw_tvg_id', 'raw_tvg_ids'),
+            ('raw_tvg_name', 'raw_tvg_names'),
+            ('raw_name', 'raw_display_names'),
+        ):
+            value = str(row.get(field) or '').strip()
+            if value and value not in hint[output_key]:
+                hint[output_key].append(value)
+        hint['variant_hints'].append({
+            'channel_id': member_id,
+            'membership_reason': str(row.get('membership_reason') or ''),
+            'membership_confidence': int(row.get('membership_confidence') or 0),
+            'variant_type': str(row.get('variant_type') or ''),
+        })
+
+    result = []
+    for hint in grouped.values():
+        hint['member_channel_ids'] = sorted(set(hint['member_channel_ids']))
+        hint['variant_hints'] = sorted(hint['variant_hints'], key=lambda item: item['channel_id'])
+        hint['has_conflicting_tvg_ids'] = len(hint['raw_tvg_ids']) > 1
+        hint['has_membership_conflict'] = hint['status'] in {'split_conflict', 'merge_conflict'}
+        result.append(hint)
+    return result
