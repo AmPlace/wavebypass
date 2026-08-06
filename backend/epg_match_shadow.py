@@ -223,77 +223,7 @@ def _load_snapshot_sync() -> EpgMatchShadowSnapshot:
     conn = db._connect()
     try:
         conn.execute('BEGIN')
-        hint_rows = [dict(row) for row in conn.execute(
-            """
-            SELECT lc.id AS logical_channel_id, lc.canonical_key, lc.display_name,
-                   lc.status AS logical_status, m.channel_id AS member_channel_id,
-                   c.name AS raw_name, c.tvg_id AS raw_tvg_id, c.tvg_name AS raw_tvg_name
-            FROM iptv_logical_channels AS lc
-            LEFT JOIN iptv_logical_channel_members AS m ON m.logical_channel_id = lc.id
-            LEFT JOIN channels AS c ON c.id = m.channel_id
-            ORDER BY lc.id, m.channel_id
-            """
-        ).fetchall()]
-        catalog_rows = [dict(row) for row in conn.execute(
-            """
-            SELECT s.id AS source_id, s.name AS source_name, s.enabled AS source_enabled,
-                   s.last_status AS source_status, c.channel_id, c.display_names,
-                   c.normalized_names
-            FROM epg_channels AS c
-            JOIN epg_sources AS s ON s.id = c.source_id
-            ORDER BY s.id, c.channel_id, c.id
-            """
-        ).fetchall()]
-        source_rows = [dict(row) for row in conn.execute(
-            """
-            SELECT id, revision, enabled, last_status
-            FROM epg_sources ORDER BY id
-            """
-        ).fetchall()]
-        binding_rows = [dict(row) for row in conn.execute(
-            """
-            SELECT b.logical_channel_id, b.epg_source_id, b.epg_channel_id,
-                   b.status, b.match_type, b.confidence, b.locked, b.origin
-            FROM iptv_logical_channel_epg_bindings AS b
-            ORDER BY b.logical_channel_id
-            """
-        ).fetchall()]
-        target_rows = conn.execute(
-            "SELECT source_id, channel_id FROM epg_channels"
-        ).fetchall()
-        targets = {(int(row['source_id']), str(row['channel_id'])) for row in target_rows}
-        hints = _group_hints(hint_rows)
-        catalog = build_epg_channel_catalog_from_rows(catalog_rows)
-        existing: dict[str, ExistingBindingSnapshot] = {}
-        hint_ids = {hint.logical_channel_id for hint in hints}
-        for row in binding_rows:
-            target = EpgChannelIdentity(int(row['epg_source_id']), str(row['epg_channel_id']))
-            if str(row['logical_channel_id']) in hint_ids:
-                existing[str(row['logical_channel_id'])] = ExistingBindingSnapshot(
-                    target=target,
-                    locked=bool(row['locked']),
-                    status=str(row['status'] or ''),
-                    match_type=str(row['match_type'] or ''),
-                    confidence=int(row['confidence'] or 0),
-                    origin=str(row['origin'] or ''),
-                )
-        snapshot = EpgMatchShadowSnapshot(
-            hints=hints,
-            catalog=catalog,
-            existing_bindings=existing,
-            logical_channel_count=len(hints),
-            raw_member_count=sum(len(hint.member_channel_ids) for hint in hints),
-            epg_source_count=len(source_rows),
-            catalog_channel_count=len(catalog.entries),
-            existing_binding_count=len(binding_rows),
-            source_revision_summary=tuple({
-                'source_id': int(row['id']),
-                'revision': int(row['revision'] or 0),
-                'enabled': bool(row['enabled']),
-                'last_status': str(row['last_status'] or ''),
-            } for row in source_rows),
-            created_at=_now(),
-        )
+        snapshot = _snapshot_from_connection(conn)
         conn.commit()
         return snapshot
     except BaseException:
@@ -772,3 +702,279 @@ async def compare_shadow_decisions_with_legacy(run_id: str | None = None) -> dic
         'counts': counts,
         'samples': samples,
     }
+
+# EPG-2D-b2: safe, opt-in application of deterministic shadow decisions.
+# This entry point deliberately lives beside the shadow executor and does not
+# participate in production matching, refresh, or API paths.
+_APPLY_LOGICAL_CONFLICT_STATUSES = frozenset({'split_conflict', 'merge_conflict'})
+_APPLY_ELIGIBLE_STATUS = 'matched'
+
+
+def _snapshot_from_connection(conn: sqlite3.Connection) -> EpgMatchShadowSnapshot:
+    """Build the current matcher inputs from one already-open read/write connection."""
+    hint_rows = [dict(row) for row in conn.execute(
+        """
+        SELECT lc.id AS logical_channel_id, lc.canonical_key, lc.display_name,
+               lc.status AS logical_status, m.channel_id AS member_channel_id,
+               c.name AS raw_name, c.tvg_id AS raw_tvg_id, c.tvg_name AS raw_tvg_name
+        FROM iptv_logical_channels AS lc
+        LEFT JOIN iptv_logical_channel_members AS m ON m.logical_channel_id = lc.id
+        LEFT JOIN channels AS c ON c.id = m.channel_id
+        ORDER BY lc.id, m.channel_id
+        """
+    ).fetchall()]
+    catalog_rows = [dict(row) for row in conn.execute(
+        """
+        SELECT s.id AS source_id, s.name AS source_name, s.enabled AS source_enabled,
+               s.last_status AS source_status, c.channel_id, c.display_names,
+               c.normalized_names
+        FROM epg_channels AS c
+        JOIN epg_sources AS s ON s.id = c.source_id
+        ORDER BY s.id, c.channel_id, c.id
+        """
+    ).fetchall()]
+    source_rows = [dict(row) for row in conn.execute(
+        'SELECT id, revision, enabled, last_status FROM epg_sources ORDER BY id'
+    ).fetchall()]
+    binding_rows = [dict(row) for row in conn.execute(
+        """
+        SELECT b.logical_channel_id, b.epg_source_id, b.epg_channel_id,
+               b.status, b.match_type, b.confidence, b.locked, b.origin
+        FROM iptv_logical_channel_epg_bindings AS b
+        ORDER BY b.logical_channel_id
+        """
+    ).fetchall()]
+    hints = _group_hints(hint_rows)
+    catalog = build_epg_channel_catalog_from_rows(catalog_rows)
+    hint_ids = {hint.logical_channel_id for hint in hints}
+    existing: dict[str, ExistingBindingSnapshot] = {}
+    for row in binding_rows:
+        logical_id = str(row['logical_channel_id'])
+        if logical_id in hint_ids:
+            existing[logical_id] = ExistingBindingSnapshot(
+                target=EpgChannelIdentity(int(row['epg_source_id']), str(row['epg_channel_id'])),
+                locked=bool(row['locked']),
+                status=str(row['status'] or ''),
+                match_type=str(row['match_type'] or ''),
+                confidence=int(row['confidence'] or 0),
+                origin=str(row['origin'] or ''),
+            )
+    return EpgMatchShadowSnapshot(
+        hints=hints,
+        catalog=catalog,
+        existing_bindings=existing,
+        logical_channel_count=len(hints),
+        raw_member_count=sum(len(hint.member_channel_ids) for hint in hints),
+        epg_source_count=len(source_rows),
+        catalog_channel_count=len(catalog.entries),
+        existing_binding_count=len(binding_rows),
+        source_revision_summary=tuple({
+            'source_id': int(row['id']),
+            'revision': int(row['revision'] or 0),
+            'enabled': bool(row['enabled']),
+            'last_status': str(row['last_status'] or ''),
+        } for row in source_rows),
+        created_at=_now(),
+    )
+
+
+def _apply_result(run_id: str, started_at: str) -> dict[str, Any]:
+    return {
+        'run_id': run_id,
+        'run_status': '',
+        'eligible_decision_count': 0,
+        'applied_count': 0,
+        'already_bound_count': 0,
+        'skipped_status_count': 0,
+        'stale_decision_count': 0,
+        'revalidation_mismatch_count': 0,
+        'target_missing_count': 0,
+        'logical_missing_count': 0,
+        'logical_conflict_count': 0,
+        'locked_conflict_count': 0,
+        'existing_conflict_count': 0,
+        'rollback': False,
+        'error': '',
+        'started_at': started_at,
+        'finished_at': '',
+    }
+
+
+def _binding_row_for_logical(conn: sqlite3.Connection, logical_channel_id: str):
+    return conn.execute(
+        """
+        SELECT id, logical_channel_id, epg_source_id, epg_channel_id,
+               status, match_type, confidence, locked, origin
+        FROM iptv_logical_channel_epg_bindings
+        WHERE logical_channel_id=?
+        """,
+        (logical_channel_id,),
+    ).fetchone()
+
+
+def _apply_epg_match_shadow_run_sync(run_id: str, started_at: str) -> dict[str, Any]:
+    result = _apply_result(run_id, started_at)
+    conn = db._connect()
+    try:
+        # BEGIN IMMEDIATE makes the revalidation and all inserts one serialized
+        # operation. No shadow/legacy table is changed until every check passes.
+        conn.execute('BEGIN IMMEDIATE')
+        run_row = conn.execute(
+            'SELECT * FROM epg_match_shadow_runs WHERE run_id=?', (run_id,)
+        ).fetchone()
+        if run_row is None:
+            result['error'] = 'shadow run 不存在'
+            result['finished_at'] = _now()
+            conn.rollback()
+            return result
+        result['run_status'] = str(run_row['status'])
+        if result['run_status'] != 'success':
+            result['error'] = f"shadow run 状态不可应用: {result['run_status']}"
+            result['finished_at'] = _now()
+            conn.rollback()
+            return result
+
+        decision_rows = [dict(row) for row in conn.execute(
+            """
+            SELECT * FROM epg_match_shadow_decisions
+            WHERE run_id=? ORDER BY logical_channel_id
+            """,
+            (run_id,),
+        ).fetchall()]
+        eligible: list[dict[str, Any]] = []
+        for row in decision_rows:
+            selected_source = row['selected_epg_source_id']
+            selected_channel = row['selected_epg_channel_id']
+            if (
+                str(row['status']) == _APPLY_ELIGIBLE_STATUS
+                and selected_source is not None
+                and selected_channel not in (None, '')
+            ):
+                eligible.append(row)
+            else:
+                result['skipped_status_count'] += 1
+        result['eligible_decision_count'] = len(eligible)
+
+        snapshot = _snapshot_from_connection(conn)
+        hints = {hint.logical_channel_id: hint for hint in snapshot.hints}
+        for row in eligible:
+            logical_id = str(row['logical_channel_id'])
+            selected = EpgChannelIdentity(int(row['selected_epg_source_id']), str(row['selected_epg_channel_id']))
+            logical = conn.execute(
+                'SELECT id, status FROM iptv_logical_channels WHERE id=?', (logical_id,)
+            ).fetchone()
+            if logical is None:
+                result['logical_missing_count'] += 1
+                continue
+            if str(logical['status'] or '') in _APPLY_LOGICAL_CONFLICT_STATUSES:
+                result['logical_conflict_count'] += 1
+                continue
+            if str(logical['status'] or '') != 'active':
+                result['stale_decision_count'] += 1
+                continue
+            hint = hints.get(logical_id)
+            if hint is None:
+                result['stale_decision_count'] += 1
+                continue
+            if hint.status in _APPLY_LOGICAL_CONFLICT_STATUSES:
+                result['logical_conflict_count'] += 1
+                continue
+
+            target = conn.execute(
+                """
+                SELECT s.enabled, s.last_status
+                FROM epg_channels AS c
+                JOIN epg_sources AS s ON s.id=c.source_id
+                WHERE c.source_id=? AND c.channel_id=?
+                LIMIT 1
+                """,
+                (selected.source_id, selected.channel_id),
+            ).fetchone()
+            if target is None:
+                result['target_missing_count'] += 1
+                continue
+            if not bool(target['enabled']) or str(target['last_status'] or '') != 'success':
+                result['stale_decision_count'] += 1
+                continue
+            catalog_entry = snapshot.catalog.get(selected)
+            if catalog_entry is None:
+                result['target_missing_count'] += 1
+                continue
+
+            try:
+                current_decision = match_logical_channel(
+                    hint,
+                    snapshot.catalog,
+                    existing_binding=None,
+                )
+            except Exception as exc:
+                raise RuntimeError(f'当前 Matcher 重验证失败 ({logical_id}): {_safe_error(exc)}') from exc
+            current_selected = current_decision.selected_identity
+            if current_decision.status != 'matched' or current_selected != selected:
+                result['revalidation_mismatch_count'] += 1
+                continue
+
+            current_binding = _binding_row_for_logical(conn, logical_id)
+            if current_binding is not None:
+                current_target = EpgChannelIdentity(
+                    int(current_binding['epg_source_id']), str(current_binding['epg_channel_id'])
+                )
+                if current_target == selected:
+                    result['already_bound_count'] += 1
+                elif bool(current_binding['locked']):
+                    result['locked_conflict_count'] += 1
+                else:
+                    result['existing_conflict_count'] += 1
+                continue
+
+            now = db._utc_now()
+            conn.execute(
+                """
+                INSERT INTO iptv_logical_channel_epg_bindings(
+                    logical_channel_id, epg_source_id, epg_channel_id,
+                    status, match_type, confidence, locked, origin,
+                    shadow_run_id, legacy_canonical_key, created_at, updated_at
+                ) VALUES(?, ?, ?, 'matched', ?, ?, 0, 'automatic', ?, '', ?, ?)
+                """,
+                (
+                    logical_id,
+                    selected.source_id,
+                    selected.channel_id,
+                    _safe_text(row['match_type']),
+                    max(0, min(100, int(row['confidence'] or 0))),
+                    run_id,
+                    now,
+                    now,
+                ),
+            )
+            result['applied_count'] += 1
+        conn.commit()
+        result['finished_at'] = _now()
+        return result
+    except asyncio.CancelledError:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+    except BaseException as exc:
+        if conn.in_transaction:
+            conn.rollback()
+        result['rollback'] = True
+        result['error'] = _safe_error(exc)
+        result['finished_at'] = _now()
+        return result
+    finally:
+        conn.close()
+
+
+async def apply_epg_match_shadow_run(run_id: str) -> dict[str, Any]:
+    """Safely apply eligible deterministic decisions from one successful run.
+
+    This is an explicit b2 operation. It never updates or deletes an existing
+    binding, never touches ``channel_epg_map``, and is not called by startup or
+    any production matcher path.
+    """
+    run_id = _safe_text(run_id)
+    if not run_id:
+        raise ValueError('run_id 不能为空')
+    started_at = _now()
+    return await asyncio.to_thread(_apply_epg_match_shadow_run_sync, run_id, started_at)

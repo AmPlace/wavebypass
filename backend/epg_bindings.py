@@ -42,6 +42,7 @@ class EpgLogicalChannelBinding:
     legacy_canonical_key: str
     created_at: str
     updated_at: str
+    shadow_run_id: str | None = None
 
     @property
     def epg_source_id(self) -> int:
@@ -66,13 +67,14 @@ class EpgLogicalChannelBinding:
             'legacy_canonical_key': self.legacy_canonical_key,
             'created_at': self.created_at,
             'updated_at': self.updated_at,
+            'shadow_run_id': self.shadow_run_id,
         }
 
 
 _BINDING_SELECT = """
     SELECT id, logical_channel_id, epg_source_id, epg_channel_id,
            status, match_type, confidence, locked, origin,
-           legacy_canonical_key, created_at, updated_at
+           legacy_canonical_key, created_at, updated_at, shadow_run_id
     FROM iptv_logical_channel_epg_bindings
 """
 
@@ -90,6 +92,7 @@ def _binding_from_row(row: Mapping[str, object]) -> EpgLogicalChannelBinding:
         legacy_canonical_key=str(row.get('legacy_canonical_key') or ''),
         created_at=str(row.get('created_at') or ''),
         updated_at=str(row.get('updated_at') or ''),
+        shadow_run_id=(str(row['shadow_run_id']) if row.get('shadow_run_id') else None),
     )
 
 
@@ -193,6 +196,7 @@ async def create_matched_epg_binding(
     locked: bool = False,
     origin: str = 'manual',
     legacy_canonical_key: str = '',
+    shadow_run_id: str | None = None,
 ) -> EpgLogicalChannelBinding:
     logical_channel_id = _validate_text(logical_channel_id, 'logical_channel_id')
     target = EpgChannelIdentity(int(epg_source_id), _validate_text(epg_channel_id, 'epg_channel_id'))
@@ -201,6 +205,10 @@ async def create_matched_epg_binding(
     origin = _validate_origin(origin)
     if not isinstance(locked, bool) and locked not in (0, 1):
         raise TypeError('locked 必须是布尔值')
+    if shadow_run_id is not None and shadow_run_id != '':
+        shadow_run_id = _validate_text(str(shadow_run_id), 'shadow_run_id')
+    else:
+        shadow_run_id = None
     if legacy_canonical_key is None or legacy_canonical_key == '':
         legacy_canonical_key = ''
     else:
@@ -231,8 +239,8 @@ async def create_matched_epg_binding(
                 INSERT INTO iptv_logical_channel_epg_bindings(
                     logical_channel_id, epg_source_id, epg_channel_id,
                     status, match_type, confidence, locked, origin,
-                    legacy_canonical_key, created_at, updated_at
-                ) VALUES(?, ?, ?, 'matched', ?, ?, ?, ?, ?, ?, ?)
+                    legacy_canonical_key, shadow_run_id, created_at, updated_at
+                ) VALUES(?, ?, ?, 'matched', ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     logical_channel_id,
@@ -243,6 +251,7 @@ async def create_matched_epg_binding(
                     int(bool(locked)),
                     origin,
                     legacy_canonical_key,
+                    shadow_run_id,
                     now,
                     now,
                 ),

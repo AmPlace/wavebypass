@@ -188,6 +188,7 @@ CREATE TABLE IF NOT EXISTS iptv_logical_channel_epg_bindings (
                         CHECK(locked IN (0, 1)),
     origin              TEXT NOT NULL DEFAULT 'manual'
                         CHECK(origin IN ('legacy_migrated', 'automatic', 'manual')),
+    shadow_run_id       TEXT DEFAULT NULL,
     legacy_canonical_key TEXT NOT NULL DEFAULT '',
     created_at          TEXT NOT NULL,
     updated_at          TEXT NOT NULL,
@@ -199,7 +200,6 @@ CREATE INDEX IF NOT EXISTS idx_iptv_logical_epg_bindings_target
 ON iptv_logical_channel_epg_bindings(epg_source_id, epg_channel_id);
 CREATE INDEX IF NOT EXISTS idx_iptv_logical_epg_bindings_status
 ON iptv_logical_channel_epg_bindings(status);
-
 CREATE TABLE IF NOT EXISTS epg_match_shadow_runs (
     run_id                       TEXT PRIMARY KEY,
     status                       TEXT NOT NULL
@@ -531,6 +531,14 @@ async def initialize():
                 conn.execute(f"ALTER TABLE epg_sources ADD COLUMN {col} {typ} DEFAULT {default}")
             except sqlite3.OperationalError:
                 pass
+        for col, typ, default in [
+            ('shadow_run_id', 'TEXT', 'NULL'),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE iptv_logical_channel_epg_bindings ADD COLUMN {col} {typ} DEFAULT {default}")
+            except sqlite3.OperationalError:
+                pass
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_iptv_logical_epg_bindings_shadow_run ON iptv_logical_channel_epg_bindings(shadow_run_id)")
         conn.execute("UPDATE epg_sources SET revision=1 WHERE revision IS NULL OR revision < 1")
         conn.execute(
             """
