@@ -171,6 +171,103 @@ ON iptv_logical_channel_members(logical_channel_id);
 CREATE INDEX IF NOT EXISTS idx_iptv_logical_members_channel
 ON iptv_logical_channel_members(channel_id);
 
+CREATE TABLE IF NOT EXISTS iptv_logical_channel_epg_bindings (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    logical_channel_id  TEXT NOT NULL,
+    epg_source_id       INTEGER NOT NULL,
+    epg_channel_id      TEXT NOT NULL,
+    status              TEXT NOT NULL DEFAULT 'matched'
+                        CHECK(status IN (
+                            'matched', 'ambiguous', 'unmatched',
+                            'not_applicable', 'conflict', 'orphan_target'
+                        )),
+    match_type          TEXT NOT NULL DEFAULT '',
+    confidence          INTEGER NOT NULL DEFAULT 0
+                        CHECK(confidence BETWEEN 0 AND 100),
+    locked              INTEGER NOT NULL DEFAULT 0
+                        CHECK(locked IN (0, 1)),
+    origin              TEXT NOT NULL DEFAULT 'manual'
+                        CHECK(origin IN ('legacy_migrated', 'automatic', 'manual')),
+    legacy_canonical_key TEXT NOT NULL DEFAULT '',
+    created_at          TEXT NOT NULL,
+    updated_at          TEXT NOT NULL,
+    UNIQUE(logical_channel_id),
+    FOREIGN KEY(logical_channel_id)
+        REFERENCES iptv_logical_channels(id)
+);
+CREATE INDEX IF NOT EXISTS idx_iptv_logical_epg_bindings_target
+ON iptv_logical_channel_epg_bindings(epg_source_id, epg_channel_id);
+CREATE INDEX IF NOT EXISTS idx_iptv_logical_epg_bindings_status
+ON iptv_logical_channel_epg_bindings(status);
+
+CREATE TABLE IF NOT EXISTS epg_match_shadow_runs (
+    run_id                       TEXT PRIMARY KEY,
+    status                       TEXT NOT NULL
+                                 CHECK(status IN (
+                                     'running', 'success', 'partial',
+                                     'failed', 'cancelled'
+                                 )),
+    started_at                   TEXT NOT NULL,
+    finished_at                  TEXT DEFAULT '',
+    logical_channel_count       INTEGER NOT NULL DEFAULT 0 CHECK(logical_channel_count >= 0),
+    raw_member_count            INTEGER NOT NULL DEFAULT 0 CHECK(raw_member_count >= 0),
+    epg_source_count            INTEGER NOT NULL DEFAULT 0 CHECK(epg_source_count >= 0),
+    catalog_channel_count       INTEGER NOT NULL DEFAULT 0 CHECK(catalog_channel_count >= 0),
+    existing_binding_count      INTEGER NOT NULL DEFAULT 0 CHECK(existing_binding_count >= 0),
+    matched_count               INTEGER NOT NULL DEFAULT 0 CHECK(matched_count >= 0),
+    ambiguous_count             INTEGER NOT NULL DEFAULT 0 CHECK(ambiguous_count >= 0),
+    unmatched_count             INTEGER NOT NULL DEFAULT 0 CHECK(unmatched_count >= 0),
+    conflict_count              INTEGER NOT NULL DEFAULT 0 CHECK(conflict_count >= 0),
+    not_applicable_count        INTEGER NOT NULL DEFAULT 0 CHECK(not_applicable_count >= 0),
+    locked_preserved_count      INTEGER NOT NULL DEFAULT 0 CHECK(locked_preserved_count >= 0),
+    existing_preserved_count    INTEGER NOT NULL DEFAULT 0 CHECK(existing_preserved_count >= 0),
+    stale_only_count            INTEGER NOT NULL DEFAULT 0 CHECK(stale_only_count >= 0),
+    candidate_count             INTEGER NOT NULL DEFAULT 0 CHECK(candidate_count >= 0),
+    source_revision_summary_json TEXT NOT NULL DEFAULT '[]',
+    error                       TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_epg_match_shadow_runs_status_finished
+ON epg_match_shadow_runs(status, finished_at);
+
+CREATE TABLE IF NOT EXISTS epg_match_shadow_decisions (
+    run_id                     TEXT NOT NULL,
+    logical_channel_id         TEXT NOT NULL,
+    status                     TEXT NOT NULL,
+    selected_epg_source_id     INTEGER,
+    selected_epg_channel_id    TEXT,
+    match_type                 TEXT NOT NULL DEFAULT '',
+    confidence                 INTEGER NOT NULL DEFAULT 0 CHECK(confidence BETWEEN 0 AND 100),
+    existing_binding_action    TEXT NOT NULL DEFAULT 'none',
+    reasons_json               TEXT NOT NULL DEFAULT '[]',
+    hint_conflicts_json        TEXT NOT NULL DEFAULT '[]',
+    candidate_count            INTEGER NOT NULL DEFAULT 0 CHECK(candidate_count >= 0),
+    error                      TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY(run_id, logical_channel_id),
+    FOREIGN KEY(run_id) REFERENCES epg_match_shadow_runs(run_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_epg_match_shadow_decisions_status
+ON epg_match_shadow_decisions(run_id, status);
+CREATE INDEX IF NOT EXISTS idx_epg_match_shadow_decisions_logical
+ON epg_match_shadow_decisions(logical_channel_id, run_id);
+
+CREATE TABLE IF NOT EXISTS epg_match_shadow_candidates (
+    run_id              TEXT NOT NULL,
+    logical_channel_id  TEXT NOT NULL,
+    rank                INTEGER NOT NULL CHECK(rank > 0),
+    epg_source_id       INTEGER NOT NULL,
+    epg_channel_id      TEXT NOT NULL,
+    match_type          TEXT NOT NULL DEFAULT '',
+    confidence          INTEGER NOT NULL DEFAULT 0 CHECK(confidence BETWEEN 0 AND 100),
+    source_status       TEXT NOT NULL DEFAULT '',
+    source_enabled      INTEGER NOT NULL DEFAULT 0 CHECK(source_enabled IN (0, 1)),
+    auto_applicable     INTEGER NOT NULL DEFAULT 0 CHECK(auto_applicable IN (0, 1)),
+    evidence_json       TEXT NOT NULL DEFAULT '[]',
+    PRIMARY KEY(run_id, logical_channel_id, rank),
+    FOREIGN KEY(run_id) REFERENCES epg_match_shadow_runs(run_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_epg_match_shadow_candidates_identity
+ON epg_match_shadow_candidates(run_id, epg_source_id, epg_channel_id);
+
 CREATE TABLE IF NOT EXISTS epg_sources (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     name            TEXT NOT NULL,
