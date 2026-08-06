@@ -578,11 +578,22 @@ async def run_epg_match_shadow(stop: object | None = None) -> dict[str, Any]:
         run = await asyncio.to_thread(_persist_metadata_sync, run_id, 'cancelled', started_at, _now(), 'stopped before persistence')
         return run.as_dict()
 
+    error_summary = '; '.join(f'{key}: {value}' for key, value in sorted(errors.items()))
+    # A partial run must contain at least one valid decision.  If every logical
+    # channel failed before producing a decision, retain only failed run metadata
+    # rather than presenting an empty result set as a usable partial run.
+    if errors and not decisions:
+        run = await asyncio.to_thread(
+            _persist_metadata_sync, run_id, 'failed', started_at, _now(),
+            f'matching failed: {error_summary}',
+        )
+        return run.as_dict()
+
     status = 'partial' if errors else 'success'
     try:
         run = await asyncio.to_thread(
             _persist_run_sync, snapshot, run_id, status, started_at, _now(), tuple(decisions), errors,
-            '; '.join(f'{key}: {value}' for key, value in sorted(errors.items())),
+            error_summary,
         )
         return run.as_dict()
     except asyncio.CancelledError:

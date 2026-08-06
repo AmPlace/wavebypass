@@ -243,6 +243,25 @@ class EpgMatchShadowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(error_decision.status, 'error')
         self.assertIn('synthetic', error_decision.error)
 
+    async def test_all_channel_errors_are_failed_without_partial_decisions(self):
+        await self._source('one', [('A', ('A',)), ('B', ('B',))])
+        await self._logical('logical-a', key='a', name='A', tvg_id='A', raw_name='A')
+        await self._logical('logical-b', key='b', name='B', tvg_id='B', raw_name='B')
+
+        with mock.patch.object(
+            self.shadow,
+            'match_logical_channel',
+            side_effect=RuntimeError('synthetic all-channel failure'),
+        ):
+            result = await self.shadow.run_epg_match_shadow()
+
+        self.assertEqual(result['status'], 'failed')
+        self.assertIn('synthetic all-channel failure', result['error'])
+        counts = self._counts()
+        self.assertEqual(counts['epg_match_shadow_runs'], 1)
+        self.assertEqual(counts['epg_match_shadow_decisions'], 0)
+        self.assertEqual(counts['epg_match_shadow_candidates'], 0)
+
     async def test_persistence_failure_rolls_back_decisions_and_candidates(self):
         await self._source('one', [('A', ('A',))])
         await self._logical(tvg_id='A', raw_name='A')
