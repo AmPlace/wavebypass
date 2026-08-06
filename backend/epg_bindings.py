@@ -14,6 +14,7 @@ from typing import Iterable, Mapping
 
 import database as db
 from epg_catalog import EpgChannelIdentity, build_epg_channel_catalog
+from m3u8_parser import normalize_channel_name
 
 
 BINDING_STATUSES = {
@@ -225,6 +226,8 @@ async def create_matched_epg_binding(
                 raise ValueError('logical channel 不存在')
             if logical['status'] in LOGICAL_CONFLICT_STATUSES:
                 raise ValueError('logical channel 处于 conflict 状态')
+            if origin == 'automatic' and logical['status'] != 'active':
+                raise ValueError(f"automatic binding 仅允许 active logical channel（当前 {logical['status']}）")
             if not _target_exists(conn, target):
                 raise ValueError('EPG composite target 不存在')
             existing = conn.execute(
@@ -665,3 +668,264 @@ async def validate_epg_binding_shadow() -> dict:
             conn.close()
 
     return await asyncio.to_thread(_validate)
+
+# EPG-2E: read-only lifecycle reconciliation for logical-channel changes.
+RECONCILIATION_CATEGORIES = (
+    'unchanged',
+    'logical_orphan',
+    'split_no_inherit',
+    'merge_no_binding',
+    'merge_single_binding',
+    'merge_same_target',
+    'merge_conflicting_targets',
+    'locked_conflict',
+)
+
+
+def _reconciliation_binding_payload(row: Mapping[str, object]) -> dict:
+    # Keep this contract deliberately limited to identity and binding
+    # metadata. In particular, it never exposes source URLs or playback data.
+    return {
+        'id': int(row['id']),
+        'logical_channel_id': str(row['logical_channel_id']),
+        'epg_source_id': int(row['epg_source_id']),
+        'epg_channel_id': str(row['epg_channel_id']),
+        'status': str(row.get('status') or ''),
+        'match_type': str(row.get('match_type') or ''),
+        'confidence': int(row.get('confidence') or 0),
+        'locked': bool(row.get('locked')),
+        'origin': str(row.get('origin') or ''),
+        'shadow_run_id': str(row['shadow_run_id']) if row.get('shadow_run_id') else None,
+    }
+
+
+def _reconciliation_binding_target(row: Mapping[str, object]) -> EpgChannelIdentity:
+    return EpgChannelIdentity(int(row['epg_source_id']), str(row['epg_channel_id']))
+
+
+def _reconciliation_item(category: str, logical_ids: Iterable[str], bindings: list[Mapping[str, object]], **extra: object) -> dict:
+    item = {
+        'category': category,
+        'logical_channel_ids': sorted({str(value) for value in logical_ids}),
+        'binding_count': len(bindings),
+        'bindings': [_reconciliation_binding_payload(row) for row in bindings],
+    }
+    item.update(extra)
+    return item
+
+
+def _merge_groups_from_sync_result(sync_result: Mapping[str, object] | None) -> list[dict]:
+    if not isinstance(sync_result, Mapping):
+        return []
+    raw_groups = sync_result.get('merge_conflicts') or []
+    groups = []
+    for raw_group in raw_groups:
+        if not isinstance(raw_group, Mapping):
+            continue
+        logical_ids = sorted({str(value) for value in (raw_group.get('logical_channel_ids') or []) if str(value)})
+        if logical_ids:
+            groups.append({
+                'logical_channel_ids': logical_ids,
+                'canonical_key': str(raw_group.get('canonical_key') or ''),
+                'inferred': False,
+            })
+    return groups
+
+
+def _inferred_merge_groups(
+    logical_rows: Iterable[Mapping[str, object]],
+    member_rows: Iterable[Mapping[str, object]],
+) -> list[dict]:
+    """Infer independent merge groups from the current raw member projection.
+
+    A sync result is the authoritative source for merge-group membership when
+    available. Without one, group only merge-conflict logical IDs whose
+    current members share the same production normalization key. Ambiguous or
+    empty projections remain isolated rather than being merged by database
+    order or by the fact that they share a status.
+    """
+    merge_ids = sorted(
+        str(row['id'])
+        for row in logical_rows
+        if str(row.get('status') or '') == 'merge_conflict'
+    )
+    if not merge_ids:
+        return []
+    merge_id_set = set(merge_ids)
+    keys_by_logical: dict[str, set[str]] = defaultdict(set)
+    for row in member_rows:
+        logical_id = str(row.get('logical_channel_id') or '')
+        if logical_id not in merge_id_set:
+            continue
+        raw_name = str(row.get('raw_name') or '')
+        key = normalize_channel_name(raw_name) if raw_name else ''
+        if key:
+            keys_by_logical[logical_id].add(key)
+
+    grouped: dict[str, set[str]] = defaultdict(set)
+    singleton_ids: set[str] = set()
+    for logical_id in merge_ids:
+        keys = keys_by_logical.get(logical_id, set())
+        if len(keys) == 1:
+            grouped[next(iter(keys))].add(logical_id)
+        else:
+            # There is insufficient continuity evidence to safely join this
+            # logical ID to another inferred group.
+            singleton_ids.add(logical_id)
+
+    groups = [
+        {
+            'logical_channel_ids': sorted(logical_ids),
+            'canonical_key': key,
+            'inferred': True,
+        }
+        for key, logical_ids in grouped.items()
+    ]
+    groups.extend(
+        {
+            'logical_channel_ids': [logical_id],
+            'canonical_key': '',
+            'inferred': True,
+        }
+        for logical_id in sorted(singleton_ids)
+    )
+    return sorted(groups, key=lambda group: (group['canonical_key'], group['logical_channel_ids']))
+
+
+async def preview_epg_binding_reconciliation(sync_result: Mapping[str, object] | None = None) -> dict:
+    """Return a read-only binding lifecycle reconciliation preview.
+
+    ``sync_result`` may be the result of ``sync_iptv_logical_channels``. Its
+    merge groups provide the strongest available continuity evidence. When it
+    is omitted, current merge-conflict members are grouped by their shared
+    production normalization key; insufficient evidence remains isolated.
+    No binding is copied, moved, updated, or deleted.
+    """
+    def _preview():
+        conn = db._connect()
+        try:
+            logical_rows = [dict(row) for row in conn.execute(
+                'SELECT id, canonical_key, display_name, status FROM iptv_logical_channels ORDER BY id'
+            ).fetchall()]
+            binding_rows = [dict(row) for row in conn.execute(
+                _BINDING_SELECT + ' ORDER BY logical_channel_id, id'
+            ).fetchall()]
+            member_rows = [dict(row) for row in conn.execute(
+                """
+                SELECT m.logical_channel_id, c.name AS raw_name
+                FROM iptv_logical_channel_members AS m
+                JOIN channels AS c ON c.id = m.channel_id
+                ORDER BY m.logical_channel_id, m.channel_id
+                """
+            ).fetchall()]
+        finally:
+            conn.close()
+
+        logical_by_id = {str(row['id']): row for row in logical_rows}
+        bindings_by_logical: dict[str, list[dict]] = defaultdict(list)
+        for row in binding_rows:
+            bindings_by_logical[str(row['logical_channel_id'])].append(row)
+
+        counts = {category: 0 for category in RECONCILIATION_CATEGORIES}
+        items: list[dict] = []
+        handled: set[str] = set()
+
+        def add(category: str, logical_ids: Iterable[str], bindings: list[Mapping[str, object]], **extra: object) -> None:
+            counts[category] += 1
+            items.append(_reconciliation_item(category, logical_ids, bindings, **extra))
+
+        # A split is never inherited. Report the logical channel even when it
+        # has no binding, because the absence of inheritance is itself the
+        # auditable decision.
+        split_ids = {
+            str(row['id']) for row in logical_rows
+            if str(row['status'] or '') == 'split_conflict'
+        }
+        if isinstance(sync_result, Mapping):
+            for raw_group in sync_result.get('split_conflicts') or []:
+                if isinstance(raw_group, Mapping):
+                    value = raw_group.get('logical_channel_id')
+                    if value:
+                        split_ids.add(str(value))
+        for logical_id in sorted(split_ids):
+            if logical_id not in logical_by_id:
+                continue
+            handled.add(logical_id)
+            add(
+                'split_no_inherit',
+                [logical_id],
+                bindings_by_logical.get(logical_id, []),
+                logical_status=logical_by_id[logical_id]['status'],
+                inheritance='none',
+            )
+
+        merge_groups = _merge_groups_from_sync_result(sync_result)
+        if not merge_groups:
+            merge_groups = _inferred_merge_groups(logical_rows, member_rows)
+        for group in merge_groups:
+            logical_ids = group['logical_channel_ids']
+            group_bindings = [
+                binding
+                for logical_id in logical_ids
+                for binding in bindings_by_logical.get(logical_id, [])
+            ]
+            for logical_id in logical_ids:
+                handled.add(logical_id)
+            targets = {_reconciliation_binding_target(row) for row in group_bindings}
+            locked = any(bool(row.get('locked')) for row in group_bindings)
+            if not group_bindings:
+                category = 'merge_no_binding'
+            elif len(group_bindings) == 1:
+                category = 'merge_single_binding'
+            elif len(targets) == 1:
+                category = 'merge_same_target'
+            elif locked:
+                category = 'locked_conflict'
+            else:
+                category = 'merge_conflicting_targets'
+            # A single binding is deliberately conservative and is not an
+            # inheritance instruction; it remains attached to its old ID.
+            add(
+                category,
+                logical_ids,
+                group_bindings,
+                canonical_key=group.get('canonical_key', ''),
+                inferred=bool(group.get('inferred')),
+                safe_same_target=(category == 'merge_same_target'),
+                automatic_action='none',
+            )
+
+        # Orphaned logical IDs retain their bindings, but cannot receive new
+        # automatic bindings. This is separate from split/merge handling.
+        for row in logical_rows:
+            logical_id = str(row['id'])
+            if logical_id in handled:
+                continue
+            if str(row['status'] or '') == 'orphaned':
+                handled.add(logical_id)
+                add(
+                    'logical_orphan',
+                    [logical_id],
+                    bindings_by_logical.get(logical_id, []),
+                    logical_status='orphaned',
+                    automatic_action='forbidden',
+                )
+
+        # Existing active bindings are unchanged by this preview. Logical
+        # channels without a binding have no binding lifecycle action to report.
+        for logical_id in sorted(bindings_by_logical):
+            if logical_id in handled or logical_id not in logical_by_id:
+                continue
+            if str(logical_by_id[logical_id]['status'] or '') == 'active':
+                add('unchanged', [logical_id], bindings_by_logical[logical_id], automatic_action='none')
+                handled.add(logical_id)
+
+        return {
+            'readonly': True,
+            'logical_channel_count': len(logical_rows),
+            'binding_count': len(binding_rows),
+            'counts': counts,
+            'items': items,
+        }
+
+    return await asyncio.to_thread(_preview)
