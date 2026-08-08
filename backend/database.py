@@ -287,6 +287,34 @@ CREATE TABLE IF NOT EXISTS epg_sources (
     updated_at      TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS epg_source_preference_evidence (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    subscription_id     INTEGER,
+    logical_channel_id  TEXT NOT NULL DEFAULT '',
+    origin              TEXT NOT NULL CHECK(origin IN ('manual', 'subscription', 'market', 'url_tvg')),
+    epg_source_id       INTEGER,
+    hint_fingerprint    TEXT NOT NULL DEFAULT '',
+    hint_summary        TEXT NOT NULL DEFAULT '',
+    resolution_status   TEXT NOT NULL CHECK(resolution_status IN ('resolved', 'unresolved', 'ambiguous_source', 'manual')),
+    evidence_json       TEXT NOT NULL DEFAULT '{}',
+    valid               INTEGER NOT NULL DEFAULT 1 CHECK(valid IN (0, 1)),
+    current             INTEGER NOT NULL DEFAULT 1 CHECK(current IN (0, 1)),
+    created_at          TEXT NOT NULL,
+    updated_at          TEXT NOT NULL,
+    FOREIGN KEY(subscription_id) REFERENCES subscriptions(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_epg_preference_evidence_subscription
+ON epg_source_preference_evidence(subscription_id, origin, current);
+CREATE INDEX IF NOT EXISTS idx_epg_preference_evidence_source
+ON epg_source_preference_evidence(epg_source_id, current);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_epg_preference_evidence_derived_unique
+ON epg_source_preference_evidence(subscription_id, origin, hint_fingerprint, logical_channel_id)
+WHERE origin <> 'manual';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_epg_preference_evidence_manual_unique
+ON epg_source_preference_evidence(
+    COALESCE(subscription_id, -1), logical_channel_id, epg_source_id
+) WHERE origin = 'manual';
+
 CREATE TABLE IF NOT EXISTS epg_channels (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
     source_id        INTEGER NOT NULL REFERENCES epg_sources(id) ON DELETE CASCADE,

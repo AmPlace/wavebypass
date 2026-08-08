@@ -1476,7 +1476,7 @@ async def _epg_refresh_loop() -> None:
 # IPTV 订阅管理
 # =====================================================================
 
-from m3u8_parser import parse_m3u, deduplicate_channels
+from m3u8_parser import parse_m3u_document, deduplicate_channels
 from logo_template import refresh_logo_template_from_remote
 import database as db
 import market as _market
@@ -1493,6 +1493,17 @@ async def _run_channel_binding_maintenance(trigger: str) -> None:
         raise
     except Exception as error:
         logger.warning('EPG binding maintenance trigger failed: %s', type(error).__name__)
+
+
+async def _run_epg_preference_maintenance(subscription_id: int, hints: tuple[tuple[str, str], ...]) -> None:
+    """Persist derived M3U evidence after subscription data has committed."""
+    try:
+        from epg_preference_evidence import replace_subscription_url_tvg_evidence
+        await replace_subscription_url_tvg_evidence(subscription_id, hints)
+    except asyncio.CancelledError:
+        raise
+    except Exception as error:
+        logger.warning('EPG preference evidence maintenance failed: %s', type(error).__name__)
 
 @app.post("/api/admin/subscriptions", dependencies=[Depends(require_admin)])
 async def add_subscription(request: Request):
@@ -1520,7 +1531,8 @@ async def add_subscription(request: Request):
         raise HTTPException(status_code=502, detail=f"拉取订阅源失败: {exc}") from exc
 
     # 解析
-    channels = parse_m3u(resp.text)
+    document = parse_m3u_document(resp.text)
+    channels = list(document.channels)
     if not channels:
         raise HTTPException(status_code=400, detail="未解析到任何频道")
 
@@ -1535,6 +1547,7 @@ async def add_subscription(request: Request):
     except db.DuplicateSubscriptionError as exc:
         raise HTTPException(status_code=409, detail="订阅源已存在") from exc
     await db.add_channels_bulk(sub_id, channels)
+    await _run_epg_preference_maintenance(sub_id, document.epg_url_hints)
     await _run_channel_binding_maintenance('subscription_add')
     # 频道数据变更后失效 Cover 缓存
     from core.cover_cache import invalidate_all_covers
@@ -1578,7 +1591,8 @@ async def _refresh_regular_subscription(sub: dict) -> dict:
         await db.update_subscription(sub['id'], valid=0)
         raise HTTPException(status_code=502, detail=f"刷新失败: {exc}") from exc
 
-    channels = parse_m3u(resp.text)
+    document = parse_m3u_document(resp.text)
+    channels = list(document.channels)
     channels = deduplicate_channels(channels)
     if not channels:
         await db.update_subscription(sub['id'], valid=0)
@@ -1588,6 +1602,7 @@ async def _refresh_regular_subscription(sub: dict) -> dict:
         )
     await db.add_channels_bulk(sub['id'], channels)
     await db.update_subscription(sub['id'], valid=1, channel_count=len(channels))
+    await _run_epg_preference_maintenance(sub['id'], document.epg_url_hints)
     await _run_channel_binding_maintenance('subscription_refresh')
     # 频道数据变更后失效 Cover 缓存
     from core.cover_cache import invalidate_all_covers

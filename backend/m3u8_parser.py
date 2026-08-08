@@ -1,5 +1,6 @@
 import re
 import os
+from dataclasses import dataclass
 from typing import Optional
 from urllib.parse import parse_qs, urlparse
 from alias import Alias, format_name
@@ -36,6 +37,48 @@ _EXTGRP_RE = re.compile(r'#EXTGRP:\s*(.+)')
 _EXTVLCOPT_RE = re.compile(r'#EXTVLCOPT:\s*([\w\-]+)\s*=\s*(.*)')
 _KODIPROP_RE = re.compile(r'#KODIPROP:\s*([\w.\-]+)\s*=\s*(.*)')
 _WAVEFLOW_RE = re.compile(r'#WAVEFLOW:\s*(.+)')
+_EPG_HEADER_KEYS = ('url-tvg', 'x-tvg-url', 'tvg-url')
+
+
+@dataclass(frozen=True)
+class M3uDocument:
+    channels: tuple[dict, ...]
+    epg_url_hints: tuple[tuple[str, str], ...]
+
+
+def _split_epg_header_value(value: str) -> tuple[str, ...]:
+    values = re.split(r'\s*,\s*|\s+(?=https?://)', value.strip())
+    result = []
+    for item in values:
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            parsed = urlparse(item)
+        except ValueError:
+            continue
+        if parsed.scheme.lower() not in {'http', 'https'} or not parsed.hostname or parsed.username or parsed.password:
+            continue
+        result.append(item)
+    return tuple(result)
+
+
+def parse_m3u_header_epg_hints(text: str) -> tuple[tuple[str, str], ...]:
+    """Parse EPG URL evidence from the first EXTM3U header without fetching it."""
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if not line.startswith('#EXTM3U'):
+            return ()
+        attrs = _parse_attrs(line[len('#EXTM3U'):])
+        hints = {
+            (key, hint)
+            for key in _EPG_HEADER_KEYS
+            for hint in _split_epg_header_value(attrs.get(key, ''))
+        }
+        return tuple(sorted(hints))
+    return ()
 
 
 def _strip_header_value(v: str) -> str:
@@ -317,6 +360,11 @@ def parse_m3u(text: str) -> list[dict]:
             })
 
     return channels
+
+
+def parse_m3u_document(text: str) -> M3uDocument:
+    """Return channels plus header-level EPG evidence; keeps parse_m3u stable."""
+    return M3uDocument(tuple(parse_m3u(text)), parse_m3u_header_epg_hints(text))
 
 
 def _is_youtube_host(host: str) -> bool:
