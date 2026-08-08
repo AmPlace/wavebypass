@@ -1,9 +1,8 @@
 """Read-only comparison between legacy EPG mappings and shadow bindings.
 
-EPG-2F-a deliberately keeps the legacy mapping authoritative.  This module
-only resolves the two identities, classifies their relationship, and records
-why the legacy target remains effective.  It never writes either mapping or
-binding table and it never selects a shadow-only target for production reads.
+EPG read resolution compares the legacy mapping with the source-aware
+shadow binding without writing either table.  The effective target policy is
+kept here so programme and batch reads cannot diverge.
 """
 
 from __future__ import annotations
@@ -26,6 +25,7 @@ _DIAGNOSTIC_STATUSES = {
     'logical_ambiguous',
     'logical_conflict',
     'shadow_orphan_target',
+    'migrated_target_mismatch',
 }
 
 
@@ -73,6 +73,7 @@ class EpgReadResolution:
     shadow_target: EpgReadTarget | None
     comparison_status: str
     effective_target: EpgReadTarget | None
+    effective_source: str
     fallback_reason: str
     legacy_mapping: dict | None
     shadow_binding: dict | None
@@ -86,6 +87,7 @@ class EpgReadResolution:
             'shadow_target': self.shadow_target.as_dict() if self.shadow_target else None,
             'comparison_status': self.comparison_status,
             'effective_target': self.effective_target.as_dict() if self.effective_target else None,
+            'effective_source': self.effective_source,
             'fallback_reason': self.fallback_reason,
             'legacy_mapping': self.legacy_mapping,
             'shadow_binding': self.shadow_binding,
@@ -152,18 +154,53 @@ def resolve_epg_read_snapshot(
     binding_rows: Iterable[Mapping[str, object]],
     target_rows: Iterable[Mapping[str, object]],
 ) -> EpgReadResolution:
-    """Resolve and compare targets using caller-provided read snapshots.
-
-    The effective target is intentionally always the legacy target.  This pure
-    entry point is used by tests and by the async database loader so a shadow
-    result cannot accidentally become production behaviour.
-    """
-    canonical_key = str(canonical_key)
-    logical_candidates = sorted(
-        (dict(row) for row in logical_rows
-         if str(row.get('canonical_key') or '') == canonical_key),
-        key=lambda row: str(row.get('id') or ''),
+    """Resolve and select a read target from caller-provided snapshots."""
+    indexes = _build_snapshot_indexes(logical_rows, binding_rows, target_rows)
+    return _resolve_epg_read_indexed(
+        canonical_key,
+        legacy_mapping=legacy_mapping,
+        indexes=indexes,
     )
+
+
+def _build_snapshot_indexes(
+    logical_rows: Iterable[Mapping[str, object]],
+    binding_rows: Iterable[Mapping[str, object]],
+    target_rows: Iterable[Mapping[str, object]],
+) -> dict[str, dict]:
+    """Build deterministic in-memory indexes for one read snapshot."""
+    logical_by_key: dict[str, list[dict]] = {}
+    for row in logical_rows:
+        item = dict(row)
+        key = str(item.get('canonical_key') or '')
+        logical_by_key.setdefault(key, []).append(item)
+    for rows in logical_by_key.values():
+        rows.sort(key=lambda row: str(row.get('id') or ''))
+
+    target_by_identity: dict[EpgChannelIdentity, Mapping[str, object]] = {}
+    for row in target_rows:
+        target_by_identity[EpgChannelIdentity(int(row['source_id']), str(row['channel_id']))] = row
+
+    binding_by_logical: dict[str, dict] = {}
+    for row in binding_rows:
+        binding_by_logical[str(row.get('logical_channel_id') or '')] = dict(row)
+
+    return {
+        'logical_by_key': logical_by_key,
+        'binding_by_logical': binding_by_logical,
+        'target_by_identity': target_by_identity,
+    }
+
+
+def _resolve_epg_read_indexed(
+    canonical_key: str,
+    *,
+    legacy_mapping: Mapping[str, object] | None,
+    indexes: Mapping[str, Mapping],
+) -> EpgReadResolution:
+    """Resolve one key against indexes built from a single snapshot."""
+    canonical_key = str(canonical_key)
+    logical_candidates = list(indexes['logical_by_key'].get(canonical_key, ()))
     logical_ids = tuple(str(row.get('id') or '') for row in logical_candidates)
     logical_channel_id: str | None = None
     logical_status = ''
@@ -172,16 +209,10 @@ def resolve_epg_read_snapshot(
         logical_status = str(logical_candidates[0].get('status') or '')
 
     legacy_identity = _identity_from_mapping(legacy_mapping)
-    target_by_identity = {
-        EpgChannelIdentity(int(row['source_id']), str(row['channel_id'])): row
-        for row in target_rows
-    }
+    target_by_identity = indexes['target_by_identity']
     legacy_target = _target_from_identity(legacy_identity, target_by_identity)
 
-    binding_by_logical = {
-        str(row.get('logical_channel_id') or ''): dict(row)
-        for row in binding_rows
-    }
+    binding_by_logical = indexes['binding_by_logical']
     binding = None
     shadow_target = None
     if len(logical_candidates) == 1 and logical_status == 'active':
@@ -208,19 +239,43 @@ def resolve_epg_read_snapshot(
     elif binding is not None and shadow_target is not None:
         if legacy_target is None:
             comparison_status = 'shadow_only'
-            fallback_reason = 'legacy_mapping_missing_shadow_not_used'
+            fallback_reason = 'legacy_mapping_missing_shadow'
         elif legacy_target.identity == shadow_target.identity:
             comparison_status = 'same_target'
-            fallback_reason = 'legacy_target_preserved'
+            fallback_reason = 'shadow_target_preferred'
         else:
             comparison_status = 'target_changed'
-            fallback_reason = 'legacy_target_preserved'
+            origin = str(binding.get('origin') or '')
+            if bool(binding.get('locked')) or origin == 'manual':
+                fallback_reason = 'trusted_shadow_binding'
+            elif origin == 'automatic' and binding.get('shadow_run_id'):
+                fallback_reason = 'trusted_shadow_binding'
+            elif origin == 'legacy_migrated':
+                fallback_reason = 'migrated_target_mismatch'
+            else:
+                fallback_reason = 'unknown_shadow_origin'
     elif legacy_target is not None:
         comparison_status = 'legacy_only'
         fallback_reason = 'shadow_binding_unavailable'
     else:
         comparison_status = 'neither'
         fallback_reason = 'no_legacy_or_shadow_target'
+
+    effective_target = legacy_target
+    effective_source = 'legacy' if legacy_target is not None else 'none'
+    if shadow_target is not None and shadow_target.readable:
+        if comparison_status in {'same_target', 'shadow_only'}:
+            effective_target = shadow_target
+            effective_source = 'shadow'
+        elif comparison_status == 'target_changed':
+            origin = str((binding or {}).get('origin') or '')
+            if (
+                bool((binding or {}).get('locked'))
+                or origin == 'manual'
+                or (origin == 'automatic' and (binding or {}).get('shadow_run_id'))
+            ):
+                effective_target = shadow_target
+                effective_source = 'shadow'
 
     return EpgReadResolution(
         canonical_key=canonical_key,
@@ -229,7 +284,8 @@ def resolve_epg_read_snapshot(
         legacy_target=legacy_target,
         shadow_target=shadow_target,
         comparison_status=comparison_status,
-        effective_target=legacy_target,
+        effective_target=effective_target,
+        effective_source=effective_source,
         fallback_reason=fallback_reason,
         legacy_mapping=_safe_legacy_mapping(legacy_mapping),
         shadow_binding=_safe_shadow_binding(binding),
@@ -244,15 +300,23 @@ def _diagnostic_payload(resolution: EpgReadResolution | Mapping[str, object], *,
         data = dict(resolution)
     legacy = data.get('legacy_target') or {}
     shadow = data.get('shadow_target') or {}
+    comparison_status = str(data.get('comparison_status') or '')
+    fallback_reason = str(data.get('fallback_reason') or '')
+    diagnostic_status = (
+        'migrated_target_mismatch'
+        if fallback_reason == 'migrated_target_mismatch'
+        else comparison_status
+    )
     return {
         'context': context,
-        'status': str(data.get('comparison_status') or ''),
+        'status': diagnostic_status,
+        'comparison_status': comparison_status,
         'canonical_key': str(data.get('canonical_key') or ''),
         'logical_channel_id': data.get('logical_channel_id'),
         'logical_channel_count': len(data.get('logical_channel_ids') or []),
         'legacy_target': (legacy.get('source_id'), legacy.get('channel_id')) if legacy else None,
         'shadow_target': (shadow.get('source_id'), shadow.get('channel_id')) if shadow else None,
-        'fallback_reason': str(data.get('fallback_reason') or ''),
+        'fallback_reason': fallback_reason,
     }
 
 def emit_epg_read_diagnostic(
@@ -295,7 +359,7 @@ async def resolve_epg_read(
     *,
     legacy_mapping: Mapping[str, object] | None | object = _UNSET,
 ) -> dict:
-    """Return one read comparison while preserving the legacy effective target."""
+    """Resolve one production EPG read target with legacy fallback."""
     if legacy_mapping is _UNSET:
         legacy_mapping = await db.get_channel_epg_map(canonical_key)
     legacy_mappings, logical_rows, binding_rows, target_rows = await _load_snapshot({canonical_key: legacy_mapping})
@@ -314,13 +378,12 @@ async def resolve_epg_read_many(canonical_keys: Iterable[str]) -> dict[str, dict
     legacy_rows = await db.get_all_channel_epg_maps()
     legacy_by_key = {str(row.get('canonical_key') or ''): row for row in legacy_rows}
     _, logical_rows, binding_rows, target_rows = await _load_snapshot(legacy_by_key)
+    indexes = _build_snapshot_indexes(logical_rows, binding_rows, target_rows)
     return {
-        key: resolve_epg_read_snapshot(
+        key: _resolve_epg_read_indexed(
             key,
             legacy_mapping=legacy_by_key.get(key),
-            logical_rows=logical_rows,
-            binding_rows=binding_rows,
-            target_rows=target_rows,
+            indexes=indexes,
         ).as_dict()
         for key in keys
     }

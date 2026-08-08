@@ -2684,7 +2684,9 @@ async def get_epg_programs(source_id: int, channel_id: str, start_after: str = '
 
 
 async def batch_get_current_programs(canonical_keys: list[str]) -> dict:
-    """批量查当前节目：返回 {canonical_key: {current, next}} 或 {}"""
+    """批量查当前节目：返回 {canonical_key: {current, next}} 或 {}。"""
+    comparisons: dict[str, dict] = {}
+    resolver_succeeded = False
     try:
         from epg_read_resolver import (
             emit_epg_read_diagnostic,
@@ -2692,57 +2694,115 @@ async def batch_get_current_programs(canonical_keys: list[str]) -> dict:
             resolve_epg_read_many,
         )
         comparisons = await resolve_epg_read_many(canonical_keys)
+        resolver_succeeded = True
         for comparison in comparisons.values():
             emit_epg_read_diagnostic(comparison, context='batch-current')
     except Exception as exc:
-        # EPG-2F-a only compares the shadow path. The original legacy query is
-        # the unconditional fallback and remains the sole source of results.
+        # The original legacy mapping remains the unconditional fallback.
         from epg_read_resolver import emit_epg_read_resolver_error
         emit_epg_read_resolver_error(context='batch-current', error=exc)
+        comparisons = {}
 
     def _get():
         conn = _connect()
-        now = datetime.now(timezone.utc).isoformat()
-        result = {}
-        for key in canonical_keys:
-            row = conn.execute(
-                "SELECT epg_source_id, epg_channel_id FROM channel_epg_map WHERE canonical_key=? AND match_status IN ('matched','locked')",
-                (key,),
-            ).fetchone()
-            if not row:
-                result[key] = None
-                continue
-            sid = row['epg_source_id']
-            cid = row['epg_channel_id']
-            current = conn.execute(
-                "SELECT title, start, stop, description FROM epg_programs WHERE source_id=? AND channel_id=? AND start <= ? AND stop > ? ORDER BY start LIMIT 1",
-                (sid, cid, now, now),
-            ).fetchone()
-            if current:
-                c = dict(current)
-                c['start_ts'] = c['start']
-                c['stop_ts'] = c['stop']
-                now_ts = datetime.now(timezone.utc)
-                try:
-                    start_dt = datetime.fromisoformat(c['start'])
-                    stop_dt = datetime.fromisoformat(c['stop'])
-                    total = (stop_dt - start_dt).total_seconds()
-                    elapsed = (now_ts - start_dt).total_seconds()
-                    c['progress'] = max(0, min(1, elapsed / total)) if total > 0 else 0
-                    c['remaining_minutes'] = max(0, int((stop_dt - now_ts).total_seconds() / 60))
-                except Exception:
-                    c['progress'] = 0
-                    c['remaining_minutes'] = 0
-            next_prog = conn.execute(
-                "SELECT title, start, stop FROM epg_programs WHERE source_id=? AND channel_id=? AND start >= ? ORDER BY start LIMIT 1",
-                (sid, cid, now),
-            ).fetchone()
-            result[key] = {
-                'current': dict(current) if current else None,
-                'next': dict(next_prog) if next_prog else None,
+        try:
+            now = datetime.now(timezone.utc).isoformat()
+            keys = list(dict.fromkeys(str(key) for key in canonical_keys))
+            if not keys:
+                return {}
+
+            if resolver_succeeded:
+                legacy_by_key = {
+                    key: comparison.get('legacy_mapping')
+                    for key, comparison in comparisons.items()
+                }
+            else:
+                legacy_rows = []
+                for offset in range(0, len(keys), 800):
+                    chunk = keys[offset:offset + 800]
+                    placeholders = ','.join('?' for _ in chunk)
+                    legacy_rows.extend(conn.execute(
+                        f"""SELECT canonical_key, epg_source_id, epg_channel_id, match_status
+                            FROM channel_epg_map
+                            WHERE canonical_key IN ({placeholders})""",
+                        chunk,
+                    ).fetchall())
+                legacy_by_key = {str(row['canonical_key']): row for row in legacy_rows}
+
+            targets: dict[str, tuple[int, str] | None] = {}
+            for key in keys:
+                comparison = comparisons.get(key)
+                effective = comparison.get('effective_target') if comparison else None
+                effective_source = str(comparison.get('effective_source') or '') if comparison else ''
+                legacy = legacy_by_key.get(key)
+                if effective and effective_source == 'shadow':
+                    targets[key] = (int(effective['source_id']), str(effective['channel_id']))
+                elif (
+                    effective
+                    and effective_source == 'legacy'
+                    and legacy is not None
+                    and str(legacy['match_status']) in {'matched', 'locked'}
+                ):
+                    targets[key] = (int(effective['source_id']), str(effective['channel_id']))
+                elif (
+                    comparison is None
+                    and legacy is not None
+                    and str(legacy['match_status']) in {'matched', 'locked'}
+                    and legacy['epg_source_id'] is not None
+                    and legacy['epg_channel_id']
+                ):
+                    targets[key] = (int(legacy['epg_source_id']), str(legacy['epg_channel_id']))
+                else:
+                    targets[key] = None
+
+            target_pairs = sorted({target for target in targets.values() if target is not None})
+            programs_by_target: dict[tuple[int, str], list[dict]] = {
+                target: [] for target in target_pairs
             }
-        conn.close()
-        return result
+            # Keep each SQLite statement below the default variable limit while
+            # remaining independent of the number of requested canonical keys.
+            for offset in range(0, len(target_pairs), 400):
+                chunk = target_pairs[offset:offset + 400]
+                conditions = ' OR '.join('(source_id=? AND channel_id=?)' for _ in chunk)
+                params: list[object] = [now]
+                for source_id, channel_id in chunk:
+                    params.extend((source_id, channel_id))
+                rows = conn.execute(
+                    f"""SELECT source_id, channel_id, title, start, stop, description
+                        FROM epg_programs
+                        WHERE stop > ? AND ({conditions})
+                        ORDER BY source_id, channel_id, start""",
+                    params,
+                ).fetchall()
+                for row in rows:
+                    programs_by_target[(int(row['source_id']), str(row['channel_id']))].append(dict(row))
+
+            result: dict[str, dict | None] = {}
+            for key in canonical_keys:
+                target = targets.get(str(key))
+                if target is None:
+                    result[key] = None
+                    continue
+                current = None
+                next_prog = None
+                for program in programs_by_target.get(target, []):
+                    if current is None and program['start'] <= now < program['stop']:
+                        current = {
+                            field: program[field]
+                            for field in ('title', 'start', 'stop', 'description')
+                        }
+                    if next_prog is None and program['start'] >= now:
+                        next_prog = {
+                            field: program[field]
+                            for field in ('title', 'start', 'stop')
+                        }
+                    if current is not None and next_prog is not None:
+                        break
+                result[key] = {'current': current, 'next': next_prog}
+            return result
+        finally:
+            conn.close()
+
     return await asyncio.to_thread(_get)
 
 

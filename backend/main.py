@@ -3921,6 +3921,7 @@ def _epg_nearest_date(requested_date: str, available_dates: list[str]) -> str:
 @app.get("/api/iptv/epg/programs/{canonical_key}", dependencies=[Depends(require_browse_access)])
 async def get_epg_programs(canonical_key: str, date: str = '', tz: str = ''):
     em = await db.get_channel_epg_map(canonical_key)
+    comparison = None
     try:
         comparison = await epg_read_resolver.resolve_epg_read(
             canonical_key,
@@ -3928,10 +3929,20 @@ async def get_epg_programs(canonical_key: str, date: str = '', tz: str = ''):
         )
         epg_read_resolver.emit_epg_read_diagnostic(comparison, context='programme')
     except Exception as exc:
-        # EPG-2F-a is diagnostic-only. Shadow resolution must never alter or
-        # break the legacy production programme path.
+        # Shadow resolution must never alter or break the legacy production
+        # programme path.  The original mapping remains the fallback.
         epg_read_resolver.emit_epg_read_resolver_error(context='programme', error=exc)
-    if not em or not em.get('epg_channel_id'):
+
+    effective_target = comparison.get('effective_target') if comparison else None
+    if effective_target and effective_target.get('channel_id'):
+        sid = effective_target['source_id']
+        cid = effective_target['channel_id']
+        effective_match_status = em.get('match_status') if em else 'matched'
+    elif em and em.get('epg_channel_id'):
+        sid = em['epg_source_id']
+        cid = em['epg_channel_id']
+        effective_match_status = em.get('match_status', 'unmatched')
+    else:
         tzinfo = _epg_zoneinfo(tz)
         return {
             "canonical_key": canonical_key,
@@ -3944,9 +3955,6 @@ async def get_epg_programs(canonical_key: str, date: str = '', tz: str = ''):
             "tz": str(tzinfo),
             "available_dates": [],
         }
-
-    sid = em['epg_source_id']
-    cid = em['epg_channel_id']
     tzinfo = _epg_zoneinfo(tz)
     requested_date = _epg_date_from_query(date, tzinfo)
     now = datetime.now(timezone.utc).isoformat()
@@ -3994,7 +4002,7 @@ async def get_epg_programs(canonical_key: str, date: str = '', tz: str = ''):
 
     return {
         "canonical_key": canonical_key, "epg_source_id": sid, "epg_channel_id": cid,
-        "match_status": em.get('match_status', 'unmatched'),
+        "match_status": effective_match_status,
         "current": current, "next": next_prog, "programs": schedule,
         "date": selected_date, "requested_date": requested_date, "tz": str(tzinfo),
         "available_dates": available_dates,
