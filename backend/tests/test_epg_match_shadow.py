@@ -113,6 +113,33 @@ class EpgMatchShadowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(candidates[0].identity, self.catalog_module.EpgChannelIdentity(source, 'CCTV1'))
         self.assertEqual(candidates[0].rank, 1)
 
+    async def test_preference_snapshot_can_disambiguate_same_tier_and_is_persisted(self):
+        source_a = await self._source('source-a', [('CCTV1', ('CCTV1',))])
+        source_b = await self._source('source-b', [('CCTV1', ('CCTV1',))])
+        await self._logical(tvg_id='CCTV1')
+        now = '2026-08-06T00:00:00+00:00'
+        conn = self._connect()
+        try:
+            conn.execute(
+                """INSERT INTO epg_source_preference_evidence(
+                    logical_channel_id, origin, epg_source_id, resolution_status,
+                    evidence_json, created_at, updated_at
+                ) VALUES('logical-1', 'manual', ?, 'manual', '{\"explicit\":true}', ?, ?)""",
+                (source_a, now, now),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        result = await self.shadow.run_epg_match_shadow()
+        self.assertEqual(result['status'], 'success')
+        self.assertEqual(result['matched_count'], 1)
+        self.assertTrue(result['preference_snapshot_fingerprint'])
+        decision = await self.shadow.get_shadow_decision(result['run_id'], 'logical-1')
+        self.assertEqual(decision.selected_identity, self.catalog_module.EpgChannelIdentity(source_a, 'CCTV1'))
+        self.assertIn('preference_applied', decision.reasons)
+        self.assertNotEqual(source_a, source_b)
+
     async def test_ambiguous_unmatched_and_conflict_are_success_not_partial(self):
         await self._source('a', [('CCTV1', ('CCTV1',))])
         await self._source('b', [('CCTV1', ('CCTV1',))])

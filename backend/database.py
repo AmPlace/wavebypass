@@ -224,6 +224,7 @@ CREATE TABLE IF NOT EXISTS epg_match_shadow_runs (
     stale_only_count            INTEGER NOT NULL DEFAULT 0 CHECK(stale_only_count >= 0),
     candidate_count             INTEGER NOT NULL DEFAULT 0 CHECK(candidate_count >= 0),
     source_revision_summary_json TEXT NOT NULL DEFAULT '[]',
+    preference_snapshot_fingerprint TEXT NOT NULL DEFAULT '',
     error                       TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_epg_match_shadow_runs_status_finished
@@ -566,6 +567,12 @@ async def initialize():
                 conn.execute(f"ALTER TABLE iptv_logical_channel_epg_bindings ADD COLUMN {col} {typ} DEFAULT {default}")
             except sqlite3.OperationalError:
                 pass
+        try:
+            conn.execute(
+                "ALTER TABLE epg_match_shadow_runs ADD COLUMN preference_snapshot_fingerprint TEXT NOT NULL DEFAULT ''"
+            )
+        except sqlite3.OperationalError:
+            pass
         conn.execute("CREATE INDEX IF NOT EXISTS idx_iptv_logical_epg_bindings_shadow_run ON iptv_logical_channel_epg_bindings(shadow_run_id)")
         conn.execute("UPDATE epg_sources SET revision=1 WHERE revision IS NULL OR revision < 1")
         conn.execute(

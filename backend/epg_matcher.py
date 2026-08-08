@@ -12,6 +12,7 @@ from types import MappingProxyType
 from typing import Callable, Iterable, Mapping
 
 from epg_catalog import EpgChannelCatalog, EpgChannelIdentity, EpgCatalogEntry
+from epg_source_preference import EpgSourcePreferenceResolution
 from m3u8_parser import normalize_channel_name
 
 
@@ -71,6 +72,7 @@ class LogicalChannelHintSnapshot:
     raw_tvg_ids: tuple[str, ...]
     raw_tvg_names: tuple[str, ...]
     raw_display_names: tuple[str, ...]
+    subscription_ids: tuple[int, ...] = ()
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, object]) -> 'LogicalChannelHintSnapshot':
@@ -91,6 +93,7 @@ class LogicalChannelHintSnapshot:
             raw_tvg_ids=strings('raw_tvg_ids'),
             raw_tvg_names=strings('raw_tvg_names'),
             raw_display_names=strings('raw_display_names'),
+            subscription_ids=tuple(sorted({int(item) for item in (value.get('subscription_ids') or ())})),
         )
 
 
@@ -404,6 +407,7 @@ def match_logical_channel(
     existing_binding: ExistingBindingSnapshot | Mapping[str, object] | object | None = None,
     applicability: str = 'unknown',
     alias_resolver: Callable[[str], str] | None = None,
+    preference: EpgSourcePreferenceResolution | None = None,
 ) -> EpgMatchDecision:
     """Return one deterministic decision without reading or writing external state."""
 
@@ -539,6 +543,29 @@ def match_logical_channel(
         reasons = ['multiple_composite_candidates']
         if len(sources) > 1:
             reasons.append('multi_source_collision')
+        if preference is not None and preference.status == 'preferred':
+            preferred = tuple(
+                candidate for candidate in top_candidates
+                if candidate.source_id == preference.preferred_source_id
+                and candidate.auto_applicable
+            )
+            if len(preferred) == 1:
+                selected = preferred[0]
+                return _decision(
+                    hint,
+                    status='matched',
+                    selected_identity=selected.identity,
+                    match_type=selected.match_type,
+                    confidence=selected.confidence,
+                    candidates=candidates,
+                    reasons=(
+                        'unique_current_success_candidate',
+                        'preference_applied',
+                        f'preferred_source_id:{selected.source_id}',
+                        f'preference_origin:{preference.origin or ""}',
+                        f'preference_candidate_count:{len(top_candidates)}',
+                    ),
+                )
         return _decision(
             hint,
             status='ambiguous',

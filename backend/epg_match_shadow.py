@@ -9,6 +9,7 @@ three shadow tables in one transaction.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import json
 import sqlite3
@@ -27,6 +28,13 @@ from epg_matcher import (
     match_logical_channel,
     summarize_match_decisions,
 )
+from epg_source_preference import (
+    EpgSourcePreference,
+    EpgSourcePreferenceResolution,
+    EpgSourceState,
+    resolve_logical_channel_source_preference,
+)
+from epg_preference_evidence import _resolution_for_row
 
 MAX_JSON_LENGTH = 16384
 MAX_ERROR_LENGTH = 1024
@@ -46,6 +54,9 @@ class EpgMatchShadowSnapshot:
     catalog_channel_count: int
     existing_binding_count: int
     source_revision_summary: tuple[dict[str, Any], ...]
+    preferences: Mapping[str, EpgSourcePreferenceResolution]
+    preference_snapshot_fingerprint: str
+    preference_evidence_count: int
     created_at: str
 
 
@@ -70,6 +81,7 @@ class ShadowRun:
     stale_only_count: int
     candidate_count: int
     source_revision_summary: tuple[dict[str, Any], ...]
+    preference_snapshot_fingerprint: str = ''
     error: str = ''
 
     def as_dict(self) -> dict[str, Any]:
@@ -198,10 +210,14 @@ def _group_hints(rows: Iterable[Mapping[str, Any]]) -> tuple[LogicalChannelHintS
             'raw_tvg_ids': [],
             'raw_tvg_names': [],
             'raw_display_names': [],
+            'subscription_ids': [],
         })
         member_id = _row_value(row, 'member_channel_id')
         if member_id is not None:
             item['member_channel_ids'].append(int(member_id))
+        subscription_id = _row_value(row, 'subscription_id')
+        if subscription_id is not None:
+            item['subscription_ids'].append(int(subscription_id))
         for field, output in (
             ('raw_tvg_id', 'raw_tvg_ids'),
             ('raw_tvg_name', 'raw_tvg_names'),
@@ -312,7 +328,8 @@ def _run_params(snapshot: EpgMatchShadowSnapshot, run_id: str, status: str, star
         counts.get('conflict_count', 0), counts.get('not_applicable_count', 0),
         counts.get('locked_preserved_count', 0), counts.get('existing_preserved_count', 0),
         counts.get('stale_only_count', 0), counts.get('candidate_count', 0),
-        _safe_json(snapshot.source_revision_summary), _safe_error(error),
+        _safe_json(snapshot.source_revision_summary), snapshot.preference_snapshot_fingerprint,
+        _safe_error(error),
     )
 
 
@@ -340,8 +357,8 @@ def _persist_run_sync(
                 existing_binding_count, matched_count, ambiguous_count,
                 unmatched_count, conflict_count, not_applicable_count,
                 locked_preserved_count, existing_preserved_count, stale_only_count,
-                candidate_count, source_revision_summary_json, error
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                candidate_count, source_revision_summary_json, preference_snapshot_fingerprint, error
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             _run_params(snapshot, run_id, status, started_at, finished_at, counts, error),
         )
@@ -440,6 +457,7 @@ def _run_from_row(row: sqlite3.Row | Mapping[str, Any] | None) -> ShadowRun:
         existing_preserved_count=int(row['existing_preserved_count'] or 0), stale_only_count=int(row['stale_only_count'] or 0),
         candidate_count=int(row['candidate_count'] or 0),
         source_revision_summary=tuple(json.loads(row['source_revision_summary_json'] or '[]')),
+        preference_snapshot_fingerprint=str(row['preference_snapshot_fingerprint'] or ''),
         error=str(row['error'] or ''),
     )
 
@@ -499,6 +517,7 @@ async def run_epg_match_shadow(stop: object | None = None) -> dict[str, Any]:
                 hint,
                 snapshot.catalog,
                 existing_binding=snapshot.existing_bindings.get(hint.logical_channel_id),
+                preference=snapshot.preferences.get(hint.logical_channel_id),
             ))
         except asyncio.CancelledError:
             raise
@@ -716,7 +735,8 @@ def _snapshot_from_connection(conn: sqlite3.Connection) -> EpgMatchShadowSnapsho
         """
         SELECT lc.id AS logical_channel_id, lc.canonical_key, lc.display_name,
                lc.status AS logical_status, m.channel_id AS member_channel_id,
-               c.name AS raw_name, c.tvg_id AS raw_tvg_id, c.tvg_name AS raw_tvg_name
+               c.name AS raw_name, c.tvg_id AS raw_tvg_id, c.tvg_name AS raw_tvg_name,
+               c.subscription_id AS subscription_id
         FROM iptv_logical_channels AS lc
         LEFT JOIN iptv_logical_channel_members AS m ON m.logical_channel_id = lc.id
         LEFT JOIN channels AS c ON c.id = m.channel_id
@@ -734,7 +754,7 @@ def _snapshot_from_connection(conn: sqlite3.Connection) -> EpgMatchShadowSnapsho
         """
     ).fetchall()]
     source_rows = [dict(row) for row in conn.execute(
-        'SELECT id, revision, enabled, last_status FROM epg_sources ORDER BY id'
+        'SELECT id, url, revision, enabled, last_status FROM epg_sources ORDER BY id'
     ).fetchall()]
     binding_rows = [dict(row) for row in conn.execute(
         """
@@ -746,6 +766,36 @@ def _snapshot_from_connection(conn: sqlite3.Connection) -> EpgMatchShadowSnapsho
     ).fetchall()]
     hints = _group_hints(hint_rows)
     catalog = build_epg_channel_catalog_from_rows(catalog_rows)
+    source_states = tuple(
+        EpgSourceState(int(row['id']), bool(row['enabled']), str(row['last_status'] or ''))
+        for row in source_rows
+    )
+    evidence_rows = [dict(row) for row in conn.execute(
+        'SELECT * FROM epg_source_preference_evidence WHERE valid=1 AND current=1 ORDER BY subscription_id, id'
+    ).fetchall()]
+    all_preferences: list[EpgSourcePreference] = []
+    fingerprint_rows = []
+    for row in evidence_rows:
+        preferences, _invalid_reason = _resolution_for_row(row, source_rows)
+        for preference in preferences:
+            all_preferences.append(preference)
+        fingerprint_rows.append({
+            'id': int(row['id']), 'subscription_id': row['subscription_id'],
+            'logical_channel_id': row['logical_channel_id'], 'origin': row['origin'],
+            'source_id': row['epg_source_id'], 'hint_fingerprint': row['hint_fingerprint'],
+            'resolution_status': row['resolution_status'],
+        })
+    preference_digest = hashlib.sha256(
+        json.dumps(fingerprint_rows, sort_keys=True, separators=(',', ':')).encode()
+    ).hexdigest()
+    preference_map = {}
+    for hint in hints:
+        preference_map[hint.logical_channel_id] = resolve_logical_channel_source_preference(
+            logical_channel_id=hint.logical_channel_id,
+            subscription_ids=hint.subscription_ids,
+            available_sources=source_states,
+            preferences=all_preferences,
+        )
     hint_ids = {hint.logical_channel_id for hint in hints}
     existing: dict[str, ExistingBindingSnapshot] = {}
     for row in binding_rows:
@@ -774,6 +824,9 @@ def _snapshot_from_connection(conn: sqlite3.Connection) -> EpgMatchShadowSnapsho
             'enabled': bool(row['enabled']),
             'last_status': str(row['last_status'] or ''),
         } for row in source_rows),
+        preferences=preference_map,
+        preference_snapshot_fingerprint=preference_digest,
+        preference_evidence_count=len(evidence_rows),
         created_at=_now(),
     )
 
@@ -906,6 +959,7 @@ def _apply_epg_match_shadow_run_sync(run_id: str, started_at: str) -> dict[str, 
                     hint,
                     snapshot.catalog,
                     existing_binding=None,
+                    preference=snapshot.preferences.get(logical_id),
                 )
             except Exception as exc:
                 raise RuntimeError(f'当前 Matcher 重验证失败 ({logical_id}): {_safe_error(exc)}') from exc

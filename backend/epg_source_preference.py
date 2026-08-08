@@ -262,6 +262,50 @@ def resolve_epg_source_preference(
     )
 
 
+def resolve_logical_channel_source_preference(
+    *,
+    logical_channel_id: str,
+    subscription_ids: Iterable[int] = (),
+    available_sources: Iterable[EpgSourceState] = (),
+    preferences: Iterable[EpgSourcePreference] = (),
+) -> EpgSourcePreferenceResolution:
+    """Resolve all evidence attached to one logical channel deterministically.
+
+    Subscription-scoped evidence is included only when its subscription is a
+    current member of the logical channel.  The lower-level resolver remains
+    the single source of precedence and conflict semantics.
+    """
+    member_subscriptions = {int(value) for value in subscription_ids}
+    applicable = tuple(
+        item for item in preferences
+        if (not item.logical_channel_id or item.logical_channel_id == logical_channel_id)
+        and (item.subscription_id is None or item.subscription_id in member_subscriptions)
+    )
+    normalized = tuple(
+        EpgSourcePreference(
+            epg_source_id=item.epg_source_id,
+            origin=item.origin,
+            evidence=item.evidence,
+            logical_channel_id=logical_channel_id,
+            subscription_id=None,
+            # The member subscription itself is the context proof.  Once its
+            # evidence is aggregated for this logical channel, retaining a
+            # narrower context key would make the lower-level resolver discard
+            # otherwise applicable evidence because no single member context
+            # is selected here.
+            context_key="",
+            valid=item.valid,
+            current=item.current,
+        )
+        for item in applicable
+    )
+    return resolve_epg_source_preference(
+        logical_channel_id=logical_channel_id,
+        available_sources=available_sources,
+        preferences=normalized,
+    )
+
+
 __all__ = [
     "EpgSourcePreference",
     "EpgSourcePreferenceResolution",
@@ -269,5 +313,6 @@ __all__ = [
     "PREFERENCE_ORIGINS",
     "PREFERENCE_STATUSES",
     "resolve_epg_source_preference",
+    "resolve_logical_channel_source_preference",
     "sanitize_evidence",
 ]

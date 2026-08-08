@@ -10,7 +10,7 @@ from unittest import mock
 
 
 def _clear_modules():
-    for name in ('epg_match_shadow', 'epg_matcher', 'epg_catalog', 'epg_bindings', 'iptv_channels', 'database'):
+    for name in ('epg_match_shadow', 'epg_matcher', 'epg_catalog', 'epg_bindings', 'epg_preference_evidence', 'epg_source_preference', 'iptv_channels', 'database'):
         sys.modules.pop(name, None)
 
 
@@ -24,6 +24,7 @@ class EpgMatchShadowApplyTest(unittest.IsolatedAsyncioTestCase):
         self.db = importlib.import_module('database')
         self.shadow = importlib.import_module('epg_match_shadow')
         self.bindings = importlib.import_module('epg_bindings')
+        self.preference_evidence = importlib.import_module('epg_preference_evidence')
         await self.db.initialize()
 
     async def asyncTearDown(self):
@@ -233,6 +234,28 @@ class EpgMatchShadowApplyTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['applied_count'], 0)
         self.assertEqual(len(self._binding_rows()), 0)
         self.assertNotEqual(source_a, source_b)
+
+    async def test_revalidation_uses_current_preference_and_rejects_changed_target(self):
+        source_a = await self._source('source-a', 'CCTV1')
+        source_b = await self._source('source-b', 'CCTV1')
+        await self._logical(tvg_id='CCTV1')
+        await self.preference_evidence.set_manual_source_preference(
+            epg_source_id=source_a, logical_channel_id='logical-1'
+        )
+        run = await self.shadow.run_epg_match_shadow()
+        decision = await self.shadow.get_shadow_decision(run['run_id'], 'logical-1')
+        self.assertEqual(decision.selected_identity, self.shadow.EpgChannelIdentity(source_a, 'CCTV1'))
+
+        await self.preference_evidence.delete_manual_source_preference(
+            epg_source_id=source_a, logical_channel_id='logical-1'
+        )
+        await self.preference_evidence.set_manual_source_preference(
+            epg_source_id=source_b, logical_channel_id='logical-1'
+        )
+        result = await self.shadow.apply_epg_match_shadow_run(run['run_id'])
+        self.assertEqual(result['revalidation_mismatch_count'], 1)
+        self.assertEqual(result['applied_count'], 0)
+        self.assertEqual(self._binding_rows(), [])
 
     async def test_existing_binding_is_never_overwritten(self):
         run, source = await self._successful_run()
