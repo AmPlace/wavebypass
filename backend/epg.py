@@ -774,7 +774,8 @@ async def refresh_epg_sources(
         client = httpx.AsyncClient(timeout=EPG_DOWNLOAD_TIMEOUT_SECONDS, follow_redirects=True)
 
     source_results: list[dict] = []
-    matching_error = ''
+    maintenance_error = ''
+    maintenance_result = None
     try:
         sources = await db.get_epg_sources()
         if not sources:
@@ -793,19 +794,25 @@ async def refresh_epg_sources(
         success_count = sum(result['status'] == 'success' for result in source_results)
         if success_count:
             try:
-                await run_epg_matching()
+                from epg_maintenance import run_epg_binding_maintenance
+                maintenance_result = await run_epg_binding_maintenance(
+                    sync_logical=True,
+                    trigger='epg_refresh',
+                )
+                if maintenance_result['status'] != 'success':
+                    maintenance_error = maintenance_result['error']
             except asyncio.CancelledError:
                 raise
             except Exception as error:
-                matching_error = f'EPG matching 失败: {_sanitize_error(error)}'
-                logger.warning(matching_error)
+                maintenance_error = f'EPG binding maintenance 失败: {_sanitize_error(error)}'
+                logger.warning(maintenance_error)
 
         statuses = ('success', 'stale', 'failed', 'revision_discarded', 'disabled')
         counts = {
             status: sum(result['status'] == status for result in source_results)
             for status in statuses
         }
-        if source_results and success_count == len(source_results) and not matching_error:
+        if source_results and success_count == len(source_results):
             refresh_status = 'success'
         elif success_count > 0:
             refresh_status = 'partial'
@@ -815,12 +822,13 @@ async def refresh_epg_sources(
         errors = [result['error'] for result in source_results if result['error']]
         if not source_results:
             errors.append('没有可刷新的 EPG 来源')
-        if matching_error:
-            errors.append(matching_error)
+        if maintenance_error:
+            logger.warning('EPG binding maintenance deferred: %s', maintenance_error)
         return {
             'refresh_status': refresh_status,
             'source_results': source_results,
             'source_result_counts': counts,
+            'binding_maintenance': maintenance_result,
             **{
                 f'{status}_source_ids': [
                     result['source_id'] for result in source_results if result['status'] == status

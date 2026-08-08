@@ -265,7 +265,10 @@ class EpgRefreshTest(unittest.IsolatedAsyncioTestCase):
     async def test_full_refresh_with_only_disabled_sources_does_not_add_default_or_request(self):
         source = await self._source('Disabled', 'https://example.test/disabled.xml', enabled=False)
         client = mock.AsyncMock()
-        with mock.patch.object(self.epg, 'run_epg_matching', return_value=None):
+        with mock.patch(
+            'epg_maintenance.run_epg_binding_maintenance',
+            return_value={'status': 'success'},
+        ) as maintenance:
             result = await self.epg.refresh_epg_sources(client)
         self.assertEqual(result['refresh_status'], 'failed')
         self.assertEqual(result['source_results'], [])
@@ -377,43 +380,57 @@ class EpgRefreshTest(unittest.IsolatedAsyncioTestCase):
             return httpx.Response(500, content=b'failed')
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-            with mock.patch.object(
-                self.epg,
-                'run_epg_matching',
-                return_value=None,
-            ) as matching:
+            with mock.patch(
+                'epg_maintenance.run_epg_binding_maintenance',
+                return_value={'status': 'success'},
+            ) as maintenance:
                 result = await self.epg.refresh_epg_sources(client)
         self.assertEqual(result['refresh_status'], 'partial')
         self.assertEqual(result['source_result_counts']['success'], 1)
         self.assertEqual(result['source_result_counts']['failed'], 1)
         self.assertEqual(result['channel_count'], 1)
         self.assertEqual(result['programme_count'], 1)
-        matching.assert_awaited_once()
+        maintenance.assert_awaited_once_with(sync_logical=True, trigger='epg_refresh')
 
     async def test_all_failed_does_not_run_matching(self):
         await self._source()
         async with self._client(b'failed', status=500) as client:
-            with mock.patch.object(
-                self.epg,
-                'run_epg_matching',
-                return_value=None,
-            ) as matching:
+            with mock.patch(
+                'epg_maintenance.run_epg_binding_maintenance',
+                return_value={'status': 'success'},
+            ) as maintenance:
                 result = await self.epg.refresh_epg_sources(client)
         self.assertEqual(result['refresh_status'], 'failed')
-        matching.assert_not_awaited()
+        maintenance.assert_not_awaited()
 
     async def test_matching_failure_returns_partial_after_dataset_commit(self):
         source = await self._source()
         async with self._client(xml_payload()) as client:
-            with mock.patch.object(
-                self.epg,
-                'run_epg_matching',
-                side_effect=RuntimeError('matching failed'),
+            with mock.patch(
+                'epg_maintenance.run_epg_binding_maintenance',
+                side_effect=RuntimeError('maintenance failed'),
             ):
                 result = await self.epg.refresh_epg_sources(client)
-        self.assertEqual(result['refresh_status'], 'partial')
-        self.assertIn('matching', result['error'])
+        self.assertEqual(result['refresh_status'], 'success')
+        self.assertEqual(result['binding_maintenance'], None)
         self.assertEqual(len(await self.db.get_epg_programs(source['id'], 'cctv1')), 1)
+
+    async def test_maintenance_failure_result_does_not_change_refresh_status(self):
+        source = await self._source()
+        async with self._client(xml_payload()) as client:
+            with mock.patch(
+                'epg_maintenance.run_epg_binding_maintenance',
+                return_value={
+                    'status': 'failed',
+                    'error': 'temporary maintenance failure',
+                },
+            ) as maintenance:
+                result = await self.epg.refresh_epg_sources(client)
+
+        self.assertEqual(result['refresh_status'], 'success')
+        self.assertEqual(result['binding_maintenance']['status'], 'failed')
+        self.assertEqual(len(await self.db.get_epg_programs(source['id'], 'cctv1')), 1)
+        maintenance.assert_awaited_once_with(sync_logical=True, trigger='epg_refresh')
 
     async def test_stop_event_cancels_before_next_source(self):
         first = await self._source('First', 'https://example.test/first.xml')

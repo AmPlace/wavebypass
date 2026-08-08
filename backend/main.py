@@ -1481,6 +1481,19 @@ from logo_template import refresh_logo_template_from_remote
 import database as db
 import market as _market
 
+
+async def _run_channel_binding_maintenance(trigger: str) -> None:
+    """Refresh the logical projection after a committed channel update."""
+    try:
+        from epg_maintenance import run_epg_binding_maintenance
+        result = await run_epg_binding_maintenance(sync_logical=True, trigger=trigger)
+        if result['status'] != 'success':
+            logger.warning('EPG binding maintenance deferred: %s', result['error'])
+    except asyncio.CancelledError:
+        raise
+    except Exception as error:
+        logger.warning('EPG binding maintenance trigger failed: %s', type(error).__name__)
+
 @app.post("/api/admin/subscriptions", dependencies=[Depends(require_admin)])
 async def add_subscription(request: Request):
     body = await request.json()
@@ -1522,6 +1535,7 @@ async def add_subscription(request: Request):
     except db.DuplicateSubscriptionError as exc:
         raise HTTPException(status_code=409, detail="订阅源已存在") from exc
     await db.add_channels_bulk(sub_id, channels)
+    await _run_channel_binding_maintenance('subscription_add')
     # 频道数据变更后失效 Cover 缓存
     from core.cover_cache import invalidate_all_covers
     invalidate_all_covers()
@@ -1548,6 +1562,7 @@ async def delete_subscription(sub_id: int):
     if not sub:
         raise HTTPException(status_code=404, detail="订阅不存在")
     await db.delete_subscription(sub_id)
+    await _run_channel_binding_maintenance('subscription_delete')
     # 频道数据变更后失效 Cover 缓存
     from core.cover_cache import invalidate_all_covers
     invalidate_all_covers()
@@ -1573,6 +1588,7 @@ async def _refresh_regular_subscription(sub: dict) -> dict:
         )
     await db.add_channels_bulk(sub['id'], channels)
     await db.update_subscription(sub['id'], valid=1, channel_count=len(channels))
+    await _run_channel_binding_maintenance('subscription_refresh')
     # 频道数据变更后失效 Cover 缓存
     from core.cover_cache import invalidate_all_covers
     invalidate_all_covers()

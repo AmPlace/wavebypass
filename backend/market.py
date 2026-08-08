@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import ipaddress
 import json
+import logging
 import os
 import re
 import secrets
@@ -65,6 +66,8 @@ ALLOW_PRIVATE_MARKET_URLS = os.environ.get("WAVEFLOW_MARKET_ALLOW_PRIVATE", "").
 PREVIEW_TTL_SECONDS = 10 * 60
 MAX_FETCH_BYTES = 10 * 1024 * 1024
 MARKET_REFRESH_ERROR_MAX_LENGTH = 2048
+
+logger = logging.getLogger(__name__)
 
 _market_cache: dict[str, Any] = {
     "market_url": MARKET_URL,
@@ -1201,10 +1204,41 @@ async def get_package(package_id: str) -> dict:
     return result
 
 
+async def _run_epg_binding_maintenance(trigger: str) -> None:
+    """Run post-commit EPG maintenance without changing Market outcomes."""
+    try:
+        from epg_maintenance import run_epg_binding_maintenance
+        result = await run_epg_binding_maintenance(sync_logical=True, trigger=trigger)
+        if result.get('status') != 'success':
+            logger.warning(
+                'market_epg_binding_maintenance_deferred',
+                extra={
+                    'epg_binding_maintenance': {
+                        'trigger': trigger,
+                        'error': str(result.get('error') or '')[:512],
+                    }
+                },
+            )
+    except asyncio.CancelledError:
+        raise
+    except Exception as error:
+        logger.warning(
+            'market_epg_binding_maintenance_trigger_failed',
+            extra={
+                'epg_binding_maintenance': {
+                    'trigger': trigger,
+                    'error_type': type(error).__name__,
+                }
+            },
+        )
+
+
 async def uninstall_package(package_id: str) -> dict:
     lock = _package_update_locks.setdefault(package_id, asyncio.Lock())
     async with lock:
         uninstalled = await db.uninstall_market_package_atomic(package_id)
+    if uninstalled:
+        await _run_epg_binding_maintenance('market_uninstall')
     return {"ok": True, "uninstalled": uninstalled}
 
 
@@ -1648,6 +1682,7 @@ async def _import_package_locked(
         )
     except db.DuplicateSubscriptionError as exc:
         raise MarketError("Market 包已安装", 409) from exc
+    await _run_epg_binding_maintenance('market_install')
     return {
         "ok": True,
         "subscription_id": sub_id,
