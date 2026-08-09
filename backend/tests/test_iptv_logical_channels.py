@@ -77,7 +77,9 @@ class IptvLogicalChannelsTest(unittest.IsolatedAsyncioTestCase):
             conn.close()
         self.assertIn('iptv_logical_channels', tables)
         self.assertIn('iptv_logical_channel_members', tables)
-        self.assertTrue({'id', 'canonical_key', 'display_name', 'status'}.issubset(logical_columns))
+        self.assertTrue({
+            'id', 'canonical_key', 'display_name', 'status', 'orphaned_at',
+        }.issubset(logical_columns))
         self.assertTrue({
             'logical_channel_id', 'channel_id', 'membership_reason',
             'membership_confidence', 'variant_type',

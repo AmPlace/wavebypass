@@ -149,6 +149,7 @@ CREATE TABLE IF NOT EXISTS iptv_logical_channels (
     display_name  TEXT NOT NULL,
     status        TEXT NOT NULL DEFAULT 'active'
                   CHECK(status IN ('active', 'orphaned', 'split_conflict', 'merge_conflict')),
+    orphaned_at   TEXT DEFAULT NULL,
     created_at    TEXT NOT NULL,
     updated_at    TEXT NOT NULL
 );
@@ -289,6 +290,8 @@ CREATE TABLE IF NOT EXISTS epg_match_shadow_candidates (
 );
 CREATE INDEX IF NOT EXISTS idx_epg_match_shadow_candidates_identity
 ON epg_match_shadow_candidates(run_id, epg_source_id, epg_channel_id);
+CREATE INDEX IF NOT EXISTS idx_epg_match_shadow_candidates_logical
+ON epg_match_shadow_candidates(logical_channel_id, run_id);
 
 CREATE TABLE IF NOT EXISTS epg_sources (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -336,6 +339,8 @@ CREATE INDEX IF NOT EXISTS idx_epg_preference_evidence_subscription
 ON epg_source_preference_evidence(subscription_id, origin, current);
 CREATE INDEX IF NOT EXISTS idx_epg_preference_evidence_source
 ON epg_source_preference_evidence(epg_source_id, current);
+CREATE INDEX IF NOT EXISTS idx_epg_preference_evidence_logical
+ON epg_source_preference_evidence(logical_channel_id, origin);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_epg_preference_evidence_derived_unique
 ON epg_source_preference_evidence(subscription_id, origin, hint_fingerprint, logical_channel_id)
 WHERE origin <> 'manual';
@@ -574,6 +579,38 @@ async def initialize():
                 pass  # 字段已存在
         conn.execute("CREATE INDEX IF NOT EXISTS idx_channels_market_pkg ON channels(market_package_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_channels_market_item ON channels(market_package_id, market_source_item_id)")
+        try:
+            conn.execute(
+                "ALTER TABLE iptv_logical_channels ADD COLUMN orphaned_at TEXT DEFAULT NULL"
+            )
+        except sqlite3.OperationalError:
+            pass
+        # Existing installations predate a reliable orphan transition time.
+        # Give historical orphan rows one explicit upgrade-time baseline so
+        # startup never treats them as immediately expired. Repeated startup
+        # preserves that baseline.
+        orphan_baseline = _utc_now()
+        conn.execute(
+            """
+            UPDATE iptv_logical_channels
+            SET orphaned_at=?
+            WHERE status='orphaned' AND orphaned_at IS NULL
+            """,
+            (orphan_baseline,),
+        )
+        conn.execute(
+            """
+            UPDATE iptv_logical_channels
+            SET orphaned_at=NULL
+            WHERE status<>'orphaned' AND orphaned_at IS NOT NULL
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_iptv_logical_channels_orphaned_at
+            ON iptv_logical_channels(status, orphaned_at)
+            """
+        )
         for col, typ, default in [
             ('revision', 'INTEGER', '1'),
             ('last_attempt_at', 'TEXT', "''"),
@@ -1817,6 +1854,7 @@ async def sync_iptv_logical_channel_shadow_atomic(groups: list[dict]) -> dict:
                     'canonical_key': group['canonical_key'],
                     'display_name': group['display_name'],
                     'status': status,
+                    'orphaned_at': None,
                 }
                 members_by_logical[logical_id] = set()
                 created_logical_count += 1
@@ -1825,23 +1863,37 @@ async def sync_iptv_logical_channel_shadow_atomic(groups: list[dict]) -> dict:
             def _update_logical(logical_id: str, group: dict, status: str) -> None:
                 nonlocal updated_logical_count
                 old = logical_by_id[logical_id]
+                old_status = str(old['status'] or '')
+                old_orphaned_at = old.get('orphaned_at')
+                orphaned_at = (
+                    old_orphaned_at
+                    if status == 'orphaned' and old_status == 'orphaned' and old_orphaned_at
+                    else now if status == 'orphaned'
+                    else None
+                )
                 if (
                     old['canonical_key'] != group['canonical_key']
                     or old['display_name'] != group['display_name']
                     or old['status'] != status
+                    or old_orphaned_at != orphaned_at
                 ):
                     conn.execute(
                         """
                         UPDATE iptv_logical_channels
-                        SET canonical_key=?, display_name=?, status=?, updated_at=?
+                        SET canonical_key=?, display_name=?, status=?,
+                            orphaned_at=?, updated_at=?
                         WHERE id=?
                         """,
-                        (group['canonical_key'], group['display_name'], status, now, logical_id),
+                        (
+                            group['canonical_key'], group['display_name'],
+                            status, orphaned_at, now, logical_id,
+                        ),
                     )
                     logical_by_id[logical_id].update(
                         canonical_key=group['canonical_key'],
                         display_name=group['display_name'],
                         status=status,
+                        orphaned_at=orphaned_at,
                     )
                     updated_logical_count += 1
 

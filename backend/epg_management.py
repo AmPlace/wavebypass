@@ -1,9 +1,12 @@
 """Read-only projections for the EPG management UI.
 
-The management contract is deliberately built from logical channels, logical
-bindings, source-aware catalog identities, preference evidence and persisted
-matcher diagnostics.  It never falls back to ``channel_epg_map`` and none of
-the entry points run sync, migration, matching, refresh or maintenance.
+The management classification is deliberately built from logical channels,
+logical bindings, source-aware catalog identities, preference evidence and
+persisted matcher diagnostics.  It never counts ``channel_epg_map`` as a
+binding authority.  Detail reads may report that the production programme
+resolver is currently using the legacy fallback, but do not expose or promote
+that mapping as a logical binding.  None of the entry points run sync,
+migration, matching, refresh or maintenance.
 """
 
 from __future__ import annotations
@@ -31,6 +34,7 @@ from epg_tasks import list_epg_automation_status
 MATCHING_SCOPES = frozenset({
     "all", "bound", "unbound", "not_applicable", "needs_attention",
 })
+LOGICAL_SCOPES = frozenset({"active", "history", "all"})
 DIAGNOSTIC_STATUSES = frozenset({
     "healthy_bound",
     "unmatched",
@@ -209,7 +213,7 @@ def _load_management_snapshot_sync(
             "SELECT * FROM epg_sources ORDER BY id"
         ).fetchall())
         logical_channels = tuple(dict(row) for row in conn.execute(
-            "SELECT id, display_name, status FROM iptv_logical_channels ORDER BY display_name, id"
+            "SELECT id, canonical_key, display_name, status FROM iptv_logical_channels ORDER BY display_name, id"
         ).fetchall())
         members = tuple(dict(row) for row in conn.execute(
             """
@@ -555,6 +559,7 @@ async def list_epg_matching_channels(
     page: int = 1,
     page_size: int = 50,
     scope: str = "all",
+    logical_scope: str = "active",
     diagnostic_status: str = "",
     source_id: int | None = None,
     text: str = "",
@@ -562,6 +567,8 @@ async def list_epg_matching_channels(
     page, page_size = _validate_pagination(page, page_size)
     if scope not in MATCHING_SCOPES:
         raise ValueError("不支持的匹配状态筛选")
+    if logical_scope not in LOGICAL_SCOPES:
+        raise ValueError("不支持的逻辑频道范围")
     if diagnostic_status and diagnostic_status not in DIAGNOSTIC_STATUSES:
         raise ValueError("不支持的诊断状态筛选")
     if source_id is not None and (isinstance(source_id, bool) or source_id <= 0):
@@ -572,6 +579,11 @@ async def list_epg_matching_channels(
     query = text.strip().casefold()[:256]
     filtered = []
     for item in items:
+        logical_active = item["channel"]["state"] == "active"
+        if logical_scope == "active" and not logical_active:
+            continue
+        if logical_scope == "history" and logical_active:
+            continue
         if scope != "all" and item["binding"]["status"] != scope:
             continue
         if diagnostic_status and item["diagnostic"]["status"] != diagnostic_status:
@@ -594,6 +606,7 @@ async def list_epg_matching_channels(
         "page": page,
         "page_size": page_size,
         "total": len(filtered),
+        "logical_scope": logical_scope,
     }
 
 
@@ -647,6 +660,16 @@ async def get_epg_matching_detail(
     ), None)
     if item is None:
         return None
+
+    logical = next(
+        row for row in snapshot.logical_channels
+        if str(row["id"]) == logical_channel_id
+    )
+    production_read = (
+        await _production_read_projection(str(logical.get("canonical_key") or ""))
+        if item["channel"]["state"] == "active"
+        else {"status": "not_applicable", "uses_legacy_fallback": False}
+    )
 
     sources_by_id = {int(row["id"]): row for row in snapshot.sources}
     catalog_by_identity = {
@@ -702,8 +725,29 @@ async def get_epg_matching_detail(
         **item,
         "binding_source_health": _source_health(binding_source) if item["binding"]["epg_source_id"] else "",
         "latest_matcher_decision": decision_projection,
+        "production_read": production_read,
         "candidates": candidates,
         "candidate_limit": candidate_limit,
+    }
+
+
+async def _production_read_projection(canonical_key: str) -> dict[str, str | bool]:
+    """Report read authority without exposing the legacy mapping itself."""
+    try:
+        from epg_read_resolver import resolve_epg_read
+
+        resolution = await resolve_epg_read(canonical_key)
+    except Exception:
+        return {"status": "unavailable", "uses_legacy_fallback": False}
+
+    effective_source = str(resolution.get("effective_source") or "none")
+    status = {
+        "legacy": "legacy_fallback",
+        "shadow": "logical_binding",
+    }.get(effective_source, "none")
+    return {
+        "status": status,
+        "uses_legacy_fallback": status == "legacy_fallback",
     }
 
 
@@ -806,6 +850,7 @@ async def search_epg_catalog(
 __all__ = [
     "CATALOG_AVAILABILITY",
     "DIAGNOSTIC_STATUSES",
+    "LOGICAL_SCOPES",
     "MATCHING_SCOPES",
     "MAX_CANDIDATES",
     "MAX_PAGE_SIZE",

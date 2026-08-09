@@ -20,6 +20,7 @@ def _clear_modules():
                 "main", "automation", "database", "epg", "epg_management",
                 "epg_binding_management", "epg_bindings", "epg_catalog",
                 "epg_maintenance", "epg_match_shadow", "epg_matcher",
+                "iptv_logical_gc",
                 "epg_read_resolver",
                 "epg_tasks", "epg_preference_evidence", "epg_source_preference",
                 "epg_source_management", "epg_source_model",
@@ -450,15 +451,36 @@ class EpgManagementApiTest(unittest.IsolatedAsyncioTestCase):
         self._binding("lc-z", source, "shared", origin="manual", locked=True)
         self._logical("lc-a", "Alpha")
         self._logical("lc-m", "Middle")
+        self._logical("lc-history-a", "Aardvark history", status="orphaned", source_count=0)
+        self._logical("lc-history-z", "Zulu history", status="orphaned", source_count=0)
 
         first_page = await self.management.list_epg_matching_channels(page=1, page_size=2)
         second_page = await self.management.list_epg_matching_channels(page=2, page_size=2)
         self.assertEqual(first_page["total"], 3)
+        self.assertEqual(first_page["logical_scope"], "active")
         self.assertEqual(
             [item["channel"]["display_name"] for item in first_page["items"]],
             ["Alpha", "Middle"],
         )
+        self.assertTrue(all(item["channel"]["state"] == "active" for item in first_page["items"]))
         self.assertEqual(second_page["items"][0]["channel"]["display_name"], "Zulu")
+        history = await self.management.list_epg_matching_channels(logical_scope="history")
+        self.assertEqual(history["total"], 2)
+        self.assertTrue(all(item["channel"]["state"] != "active" for item in history["items"]))
+        all_rows = await self.management.list_epg_matching_channels(logical_scope="all")
+        self.assertEqual(all_rows["total"], 5)
+        api_default = (await self.client.get(
+            "/api/admin/epg/matching?page=1&page_size=2"
+        )).json()
+        self.assertEqual(api_default["total"], 3)
+        self.assertEqual(api_default["logical_scope"], "active")
+        self.assertTrue(all(
+            item["channel"]["state"] == "active" for item in api_default["items"]
+        ))
+        api_history = (await self.client.get(
+            "/api/admin/epg/matching?logical_scope=history"
+        )).json()
+        self.assertEqual(api_history["total"], 2)
         bound = await self.management.list_epg_matching_channels(scope="bound")
         self.assertEqual(bound["total"], 1)
         self.assertEqual(bound["items"][0]["binding"]["epg_source_id"], source)
@@ -474,6 +496,50 @@ class EpgManagementApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(unmatched["total"], 2)
         self.assertNotIn("canonical_key", json.dumps(first_page))
         self.assertNotIn("shadow_run_id", json.dumps(first_page))
+
+    async def test_detail_explains_legacy_programme_fallback_without_counting_it_as_bound(self):
+        source = await self._source(
+            "LegacyGuide", channel_id="legacy-target", channel_name="Legacy Target"
+        )
+        self._logical("lc-legacy", "Legacy fallback")
+        self._logical(
+            "lc-legacy-history", "Legacy fallback history",
+            status="orphaned", source_count=0,
+        )
+        conn = self._connect()
+        try:
+            conn.execute(
+                "UPDATE iptv_logical_channels SET canonical_key=? WHERE id=?",
+                ("key-lc-legacy", "lc-legacy-history"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        await self.db.upsert_channel_epg_map(
+            "key-lc-legacy",
+            epg_source_id=source,
+            epg_channel_id="legacy-target",
+            match_type="exact_tvg_id",
+            confidence=100,
+            match_status="matched",
+            match_detail="legacy fallback fixture",
+        )
+
+        overview = await self.management.get_epg_management_overview()
+        detail = await self.management.get_epg_matching_detail("lc-legacy")
+        history_detail = await self.management.get_epg_matching_detail(
+            "lc-legacy-history"
+        )
+
+        self.assertEqual(overview["logical_channels"]["bound"], 0)
+        self.assertEqual(overview["logical_channels"]["unbound"], 1)
+        self.assertEqual(detail["binding"]["status"], "unbound")
+        self.assertEqual(detail["production_read"], {
+            "status": "legacy_fallback",
+            "uses_legacy_fallback": True,
+        })
+        self.assertEqual(history_detail["production_read"]["status"], "not_applicable")
+        self.assertNotIn("legacy_mapping", json.dumps(detail))
 
     async def test_composite_identity_keeps_same_channel_id_sources_distinct(self):
         first = await self._source("First", channel_id="shared", channel_name="First Shared")
@@ -597,6 +663,10 @@ class EpgManagementApiTest(unittest.IsolatedAsyncioTestCase):
         self.main.app.dependency_overrides[self.main.require_admin] = admin_override
         self.assertEqual(
             (await self.client.get("/api/admin/epg/matching?scope=invalid")).status_code,
+            400,
+        )
+        self.assertEqual(
+            (await self.client.get("/api/admin/epg/matching?logical_scope=invalid")).status_code,
             400,
         )
         self.assertEqual(

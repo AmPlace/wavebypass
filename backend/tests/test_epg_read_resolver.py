@@ -14,7 +14,8 @@ def _clear_modules():
         'main', 'epg_binding_management', 'epg_read_resolver',
         'epg_bindings', 'epg_catalog', 'epg_maintenance',
         'epg_match_shadow', 'epg_matcher',
-        'iptv_channels', 'database', 'security.source_ids', 'security.secrets',
+        'iptv_channels', 'iptv_logical_gc', 'database',
+        'security.source_ids', 'security.secrets',
         'core.config',
     ):
         sys.modules.pop(name, None)
@@ -462,6 +463,95 @@ class EpgReadResolverTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ambiguous.comparison_status, 'logical_ambiguous')
         self.assertEqual(conflict.comparison_status, 'logical_conflict')
         self.assertIsNone(conflict.shadow_target)
+
+    async def test_unique_active_logical_ignores_one_orphan_with_same_key(self):
+        target = {'source_id': 1, 'channel_id': 'one', 'source_enabled': 1, 'source_status': 'success'}
+        result = self.resolver.resolve_epg_read_snapshot(
+            'demo',
+            legacy_mapping=None,
+            logical_rows=[
+                {'id': 'logical-active', 'canonical_key': 'demo', 'status': 'active'},
+                {'id': 'logical-old', 'canonical_key': 'demo', 'status': 'orphaned'},
+            ],
+            binding_rows=[{
+                'logical_channel_id': 'logical-active', 'epg_source_id': 1,
+                'epg_channel_id': 'one', 'status': 'matched',
+            }],
+            target_rows=[target],
+        )
+        self.assertEqual(result.logical_channel_id, 'logical-active')
+        self.assertEqual(result.comparison_status, 'shadow_only')
+        self.assertEqual(result.effective_source, 'shadow')
+
+    async def test_unique_active_logical_ignores_multiple_historical_rows_with_same_key(self):
+        target = {'source_id': 1, 'channel_id': 'one', 'source_enabled': 1, 'source_status': 'success'}
+        result = self.resolver.resolve_epg_read_snapshot(
+            'demo',
+            legacy_mapping=None,
+            logical_rows=[
+                {'id': 'logical-old-merge', 'canonical_key': 'demo', 'status': 'merge_conflict'},
+                {'id': 'logical-active', 'canonical_key': 'demo', 'status': 'active'},
+                {'id': 'logical-old-orphan', 'canonical_key': 'demo', 'status': 'orphaned'},
+            ],
+            binding_rows=[{
+                'logical_channel_id': 'logical-active', 'epg_source_id': 1,
+                'epg_channel_id': 'one', 'status': 'matched',
+            }],
+            target_rows=[target],
+        )
+        self.assertEqual(result.logical_channel_id, 'logical-active')
+        self.assertEqual(result.comparison_status, 'shadow_only')
+        self.assertEqual(result.effective_source, 'shadow')
+
+    async def test_multiple_active_logicals_remain_ambiguous_even_with_history(self):
+        target = {'source_id': 1, 'channel_id': 'one', 'source_enabled': 1, 'source_status': 'success'}
+        result = self.resolver.resolve_epg_read_snapshot(
+            'demo',
+            legacy_mapping={'canonical_key': 'demo', 'epg_source_id': 1, 'epg_channel_id': 'one'},
+            logical_rows=[
+                {'id': 'logical-active-a', 'canonical_key': 'demo', 'status': 'active'},
+                {'id': 'logical-old', 'canonical_key': 'demo', 'status': 'orphaned'},
+                {'id': 'logical-active-b', 'canonical_key': 'demo', 'status': 'active'},
+            ],
+            binding_rows=[],
+            target_rows=[target],
+        )
+        self.assertIsNone(result.logical_channel_id)
+        self.assertEqual(result.comparison_status, 'logical_ambiguous')
+        self.assertEqual(result.effective_source, 'legacy')
+
+    async def test_orphan_only_is_conflict_not_active_ambiguity(self):
+        target = {'source_id': 1, 'channel_id': 'one', 'source_enabled': 1, 'source_status': 'success'}
+        result = self.resolver.resolve_epg_read_snapshot(
+            'demo',
+            legacy_mapping={'canonical_key': 'demo', 'epg_source_id': 1, 'epg_channel_id': 'one'},
+            logical_rows=[
+                {'id': 'logical-old', 'canonical_key': 'demo', 'status': 'orphaned'},
+            ],
+            binding_rows=[],
+            target_rows=[target],
+        )
+        self.assertEqual(result.logical_channel_id, 'logical-old')
+        self.assertEqual(result.comparison_status, 'logical_conflict')
+        self.assertEqual(result.fallback_reason, 'logical_channel_orphaned')
+        self.assertEqual(result.effective_source, 'legacy')
+
+    async def test_multiple_orphans_without_active_are_conflict_not_ambiguous(self):
+        target = {'source_id': 1, 'channel_id': 'one', 'source_enabled': 1, 'source_status': 'success'}
+        result = self.resolver.resolve_epg_read_snapshot(
+            'demo',
+            legacy_mapping={'canonical_key': 'demo', 'epg_source_id': 1, 'epg_channel_id': 'one'},
+            logical_rows=[
+                {'id': 'logical-old-a', 'canonical_key': 'demo', 'status': 'orphaned'},
+                {'id': 'logical-old-b', 'canonical_key': 'demo', 'status': 'orphaned'},
+            ],
+            binding_rows=[],
+            target_rows=[target],
+        )
+        self.assertIsNone(result.logical_channel_id)
+        self.assertEqual(result.comparison_status, 'logical_conflict')
+        self.assertEqual(result.fallback_reason, 'logical_channel_historical')
+        self.assertEqual(result.effective_source, 'legacy')
 
     async def test_shadow_orphan_target_and_stale_disabled_failed_are_readable(self):
         common = dict(

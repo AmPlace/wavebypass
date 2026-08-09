@@ -17,6 +17,7 @@ def _clear_modules():
                 "main", "automation", "database", "epg", "epg_management",
                 "epg_binding_management", "epg_bindings", "epg_catalog",
                 "epg_maintenance", "epg_match_shadow", "epg_matcher",
+                "iptv_logical_gc",
                 "epg_read_resolver",
                 "epg_preference_evidence", "epg_source_management",
                 "epg_source_model", "epg_source_preference", "epg_tasks",

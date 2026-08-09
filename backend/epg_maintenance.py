@@ -14,6 +14,7 @@ from typing import Any
 
 import epg_bindings
 import epg_match_shadow
+import iptv_logical_gc
 import iptv_channels
 
 
@@ -48,6 +49,7 @@ async def run_epg_binding_maintenance(
         'started_at': started_at,
         'finished_at': '',
         'logical_sync': None,
+        'logical_gc': None,
         'bootstrap': None,
         'shadow_run': None,
         'apply': None,
@@ -57,6 +59,7 @@ async def run_epg_binding_maintenance(
         try:
             if sync_logical:
                 result['logical_sync'] = await iptv_channels.sync_iptv_logical_channels()
+            result['logical_gc'] = await iptv_logical_gc.garbage_collect_iptv_logical_channels()
             result['bootstrap'] = await epg_bindings.migrate_legacy_epg_bindings_shadow()
             result['shadow_run'] = await epg_match_shadow.run_epg_match_shadow()
             shadow_run = result['shadow_run']

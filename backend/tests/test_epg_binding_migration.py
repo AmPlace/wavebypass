@@ -238,6 +238,36 @@ class EpgBindingMigrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(binding.locked)
         self.assertEqual(binding.match_type, 'manual')
 
+    async def test_legacy_fallback_with_active_and_orphan_identity_is_not_auto_migrated(self):
+        source_id = await self._seed_source(
+            'source', 'https://source.example/epg.xml', 'CCTV1'
+        )
+        logical_id = await self._seed_logical('known', 'Known')
+        conn = self._connect()
+        try:
+            conn.execute(
+                """
+                INSERT INTO iptv_logical_channels(
+                    id, canonical_key, display_name, status, created_at, updated_at
+                ) VALUES('lc-old-known', 'known', 'Known history', 'orphaned', ?, ?)
+                """,
+                ('2026-08-06T00:00:00+00:00', '2026-08-06T00:00:00+00:00'),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        await self._legacy('known', source_id, 'CCTV1')
+        before = await self.db.get_all_channel_epg_maps()
+
+        preview = await self.bindings.preview_legacy_epg_binding_migration()
+        result = await self.bindings.migrate_legacy_epg_bindings_shadow()
+
+        self.assertEqual(preview['eligible_count'], 0)
+        self.assertEqual(preview['ambiguous_logical_count'], 1)
+        self.assertEqual(result['created_count'], 0)
+        self.assertIsNone(await self.bindings.get_epg_binding(logical_id))
+        self.assertEqual(await self.db.get_all_channel_epg_maps(), before)
+
     async def test_existing_binding_different_target_is_never_overwritten(self):
         source_a = await self._seed_source('A', 'https://a.example/epg.xml', 'A')
         source_b = await self._seed_source('B', 'https://b.example/epg.xml', 'B')

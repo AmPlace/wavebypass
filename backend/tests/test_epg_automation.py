@@ -17,6 +17,7 @@ def _clear_modules():
             "database",
             "epg",
             "epg_maintenance",
+            "iptv_logical_gc",
             "epg_preference_evidence",
             "epg_source_management",
             "epg_source_model",

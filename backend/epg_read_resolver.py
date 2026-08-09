@@ -15,7 +15,6 @@ import database as db
 from epg_catalog import EpgChannelIdentity
 
 
-LOGICAL_CONFLICT_STATUSES = {'orphaned', 'split_conflict', 'merge_conflict'}
 READABLE_BINDING_STATUSES = {'matched'}
 _UNSET = object()
 
@@ -216,10 +215,17 @@ def _resolve_epg_read_indexed(
     """Resolve one key against indexes built from a single snapshot."""
     canonical_key = str(canonical_key)
     logical_candidates = list(indexes['logical_by_key'].get(canonical_key, ()))
+    active_candidates = [
+        row for row in logical_candidates
+        if str(row.get('status') or '') == 'active'
+    ]
     logical_ids = tuple(str(row.get('id') or '') for row in logical_candidates)
     logical_channel_id: str | None = None
     logical_status = ''
-    if len(logical_candidates) == 1:
+    if len(active_candidates) == 1:
+        logical_channel_id = str(active_candidates[0].get('id') or '')
+        logical_status = 'active'
+    elif not active_candidates and len(logical_candidates) == 1:
         logical_channel_id = logical_ids[0]
         logical_status = str(logical_candidates[0].get('status') or '')
 
@@ -233,7 +239,7 @@ def _resolve_epg_read_indexed(
     )
     binding = None
     shadow_target = None
-    if len(logical_candidates) == 1 and logical_status == 'active':
+    if logical_channel_id and logical_status == 'active':
         candidate_binding = binding_by_logical.get(logical_channel_id or '')
         if (
             candidate_binding is not None
@@ -248,12 +254,16 @@ def _resolve_epg_read_indexed(
     elif not logical_candidates:
         comparison_status = 'logical_missing'
         fallback_reason = 'logical_channel_missing'
-    elif len(logical_candidates) != 1:
+    elif len(active_candidates) > 1:
         comparison_status = 'logical_ambiguous'
         fallback_reason = 'multiple_logical_channels'
-    elif logical_status in LOGICAL_CONFLICT_STATUSES:
+    elif not active_candidates:
         comparison_status = 'logical_conflict'
-        fallback_reason = f'logical_channel_{logical_status}'
+        fallback_reason = (
+            f'logical_channel_{logical_status}'
+            if logical_status
+            else 'logical_channel_historical'
+        )
     elif binding is not None and shadow_target is not None and not shadow_target.exists:
         comparison_status = 'shadow_orphan_target'
         fallback_reason = 'shadow_target_missing'
