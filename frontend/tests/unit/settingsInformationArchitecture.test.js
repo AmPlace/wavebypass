@@ -115,6 +115,9 @@ test('未知 Settings child 有确定 fallback', async () => {
 test('Desktop 和 Mobile 共用可滚动横向 tabs，不引入 Settings sidebar', () => {
   const settings = source('src/views/settings/SettingsView.vue')
   const epg = source('src/views/settings/EpgSettingsView.vue')
+  const market = source('src/views/MarketView.vue')
+  assert.match(market, /market-main min-h-screen w-full px-5[\s\S]*sm:px-8 lg:px-10/)
+  assert.match(settings, /settings-page min-h-screen w-full px-5[\s\S]*sm:px-8 lg:px-10/)
   assert.match(settings, /settings-primary-tabs[\s\S]*overflow-x-auto/)
   assert.match(settings, /settings-primary-tab[\s\S]*rounded-full[\s\S]*border-\[var\(--border\)\][\s\S]*bg-\[var\(--surface\)\]/)
   assert.doesNotMatch(settings, />WaveFlow<|>设置<|管理直播来源、节目单与访问方式/)
@@ -124,6 +127,8 @@ test('Desktop 和 Mobile 共用可滚动横向 tabs，不引入 Settings sidebar
   assert.match(settings, /focus-visible:ring-2/)
   assert.doesNotMatch(settings, /<aside|sidebar/i)
   assert.match(epg, /settings-secondary-tabs[\s\S]*overflow-x-auto/)
+  assert.match(epg, /mx-auto w-full max-w-7xl/)
+  assert.match(epg, /settings-secondary-header[\s\S]*epg-settings-actions/)
   assert.match(epg, /aria-label="EPG 设置分类"/)
   assert.match(epg, /settings-secondary-tab::after/)
   assert.doesNotMatch(epg, /<aside|sidebar/i)
@@ -174,11 +179,15 @@ test('安全设置只复用既有 API 并保留 forced 字段语义', () => {
   assert.match(security, />重试</)
 })
 
-test('EPG section 仅提供正式 shell，不提前接入 EPG-6 API', () => {
+test('EPG 来源接入 EPG-6A，频道匹配仍保持后续阶段占位', () => {
   const placeholder = source('src/views/settings/EpgSettingsPlaceholder.vue')
+  const sources = source('src/views/settings/EpgSourcesSettings.vue')
   const routes = source('src/router/routes.js')
-  assert.match(routes, /节目单来源/)
+  assert.match(routes, /settings-epg-sources[\s\S]*EpgSourcesSettings\.vue/)
   assert.match(routes, /频道匹配/)
+  assert.match(routes, /settings-epg-matching[\s\S]*EpgSettingsPlaceholder\.vue/)
+  assert.match(sources, /fetchEpgSources/)
+  assert.match(sources, /添加节目单来源/)
   assert.match(placeholder, /将在后续 EPG 管理阶段提供/)
   assert.doesNotMatch(placeholder, /fetch\(|\/api\/admin\/epg|manual bind|lock|no_epg/i)
 })

@@ -28,12 +28,7 @@ export const appRoutes = [
           {
             path: 'sources',
             name: 'settings-epg-sources',
-            component: () => import('../views/settings/EpgSettingsPlaceholder.vue'),
-            props: {
-              section: 'sources',
-              title: '节目单来源',
-              description: '管理 XMLTV 节目单来源',
-            },
+            component: () => import('../views/settings/EpgSourcesSettings.vue'),
           },
           {
             path: 'matching',
