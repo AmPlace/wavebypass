@@ -1,185 +1,168 @@
 <template>
-  <main
-    class="mx-auto flex min-h-screen w-full max-w-4xl flex-col px-5 pt-[calc(env(safe-area-inset-top)+3.5rem)] pb-36 sm:px-8">
-
-    <header class="mb-6 flex items-center justify-between">
-      <div class="flex items-center gap-3">
-        <button type="button"
-          class="flex size-8 items-center justify-center rounded-full text-neutral-500 transition-colors hover:bg-neutral-200/60 dark:hover:bg-neutral-700/60"
-          @click="$router.push('/iptv')">
-          <svg class="size-4" viewBox="0 0 24 24" fill="none">
-            <path d="M19 12H5M12 5l-7 7 7 7" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-              stroke-linejoin="round" />
-          </svg>
-        </button>
-        <h1 class="text-sm font-semibold text-neutral-800 dark:text-neutral-200">订阅管理</h1>
+  <section aria-labelledby="live-sources-title">
+    <header class="mb-6 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+      <div>
+        <h2 id="live-sources-title" class="text-xl font-semibold tracking-[-0.015em] text-[var(--text-primary)]">直播源</h2>
+        <p class="mt-1.5 text-sm leading-6 text-[var(--text-secondary)]">添加和维护 M3U/M3U8 订阅，管理测速与导出</p>
       </div>
-      <div class="flex items-center gap-2">
-        <button type="button"
-          class="rounded-full border border-neutral-200 bg-white/70 px-3 py-1.5 text-xs font-medium text-neutral-600 backdrop-blur-xl transition-all hover:scale-[1.03] active:scale-95 dark:border-neutral-700 dark:bg-neutral-800/70 dark:text-neutral-300"
-          @click="$router.push('/market')">
-          Market
-        </button>
-        <button type="button"
-          class="rounded-full border border-neutral-200 bg-white/70 px-3 py-1.5 text-xs font-medium text-neutral-600 backdrop-blur-xl transition-all hover:scale-[1.03] active:scale-95 dark:border-neutral-700 dark:bg-neutral-800/70 dark:text-neutral-300"
+      <div class="scrollbar-hide flex max-w-full gap-2 overflow-x-auto pb-1 sm:justify-end">
+        <button
+          type="button"
+          class="flex min-h-10 shrink-0 items-center rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3.5 text-sm font-medium text-[var(--text-secondary)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--border-strong)] disabled:opacity-50"
           :disabled="refreshRunning"
-          @click="handleRefreshAll">
-          {{ refreshRunning ? '刷新中' : '全部刷新' }}
+          @click="handleRefreshAll"
+        >
+          {{ refreshRunning ? '刷新中…' : '全部刷新' }}
         </button>
-        <button type="button"
-          class="rounded-full border border-neutral-200 bg-white/70 px-3 py-1.5 text-xs font-medium text-neutral-600 backdrop-blur-xl transition-all hover:scale-[1.03] active:scale-95 dark:border-neutral-700 dark:bg-neutral-800/70 dark:text-neutral-300"
-          @click="handleTestAll">
+        <button
+          type="button"
+          class="flex min-h-10 shrink-0 items-center rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3.5 text-sm font-medium text-[var(--text-secondary)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--border-strong)] disabled:opacity-50"
+          :disabled="testRunning"
+          @click="handleTestAll"
+        >
           {{ testRunning ? `测速中 ${testProgress.tested}/${testProgress.total}` : '全部测速' }}
         </button>
-        <button v-if="testRunning" type="button"
-          class="rounded-full border border-red-200 bg-red-50/80 px-3 py-1.5 text-xs font-medium text-red-500 backdrop-blur-xl transition-all hover:scale-[1.03] active:scale-95 dark:border-red-900/60 dark:bg-red-950/30 dark:text-red-300"
-          @click="handleCancelTest">
-          取消测速
-        </button>
-        <button type="button"
-          class="rounded-full bg-neutral-950 px-3 py-1.5 text-xs font-medium text-white transition-all hover:scale-[1.03] active:scale-95 dark:bg-white dark:text-black"
-          @click="openExportDialog">
+        <button
+          type="button"
+          class="flex min-h-10 shrink-0 items-center rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3.5 text-sm font-medium text-[var(--text-secondary)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--border-strong)]"
+          @click="openExportDialog"
+        >
           导出 M3U8
         </button>
       </div>
     </header>
 
-    <!-- 测速进度条 -->
-    <div v-if="testRunning" class="mb-4 h-1.5 overflow-hidden rounded-full bg-neutral-200 dark:bg-neutral-700">
-      <div class="h-full rounded-full bg-emerald-500 transition-all duration-300"
-        :style="{ width: `${(testProgress.tested / testProgress.total * 100) || 0}%` }"></div>
-    </div>
+    <section v-if="testRunning" class="mb-5 rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4" aria-live="polite">
+      <div class="mb-3 flex flex-wrap items-center justify-between gap-3 text-xs text-[var(--text-secondary)]">
+        <span>正在测速 · {{ testProgress.tested }}/{{ testProgress.total }}</span>
+        <button
+          type="button"
+          class="min-h-9 rounded-xl px-3 text-xs font-medium text-red-500 transition-colors hover:bg-red-500/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400"
+          @click="handleCancelTest"
+        >
+          取消测速
+        </button>
+      </div>
+      <div class="h-1.5 overflow-hidden rounded-full bg-[var(--surface-strong)]">
+        <div class="h-full rounded-full bg-emerald-500 transition-all duration-300" :style="{ width: `${testPercent}%` }"></div>
+      </div>
+      <div class="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-[var(--text-tertiary)]">
+        <span>可用 {{ testProgress.working }}</span>
+        <span>不可用 {{ testProgress.failed }}</span>
+        <span v-if="testProgress.not_live">未开播 {{ testProgress.not_live }}</span>
+        <span v-if="testProgress.untested">未测试 {{ testProgress.untested }}</span>
+        <span v-if="testProgress.current" class="max-w-full truncate">当前 {{ testProgress.current }}</span>
+      </div>
+    </section>
 
-    <div v-if="testRunning" class="mb-4 flex gap-4 text-xs text-neutral-400 dark:text-neutral-500">
-      <span>可用: {{ testProgress.working }}</span>
-      <span>不可用: {{ testProgress.failed }}</span>
-      <span v-if="testProgress.not_live">未开播: {{ testProgress.not_live }}</span>
-      <span v-if="testProgress.untested">未测试: {{ testProgress.untested }}</span>
-      <span>剩余: {{ Math.max(0, testProgress.total - testProgress.tested) }}</span>
-      <span v-if="testProgress.phase">阶段: {{ testProgress.phase }}</span>
-      <span v-if="testProgress.current">当前: {{ testProgress.current }}</span>
-    </div>
-
-    <!-- 添加订阅 -->
-    <div class="mb-6 space-y-2">
-      <div class="flex gap-2">
-        <input v-model="addUrl" type="url" placeholder="输入 M3U/M3U8 订阅链接…"
-          class="min-w-0 flex-1 rounded-xl border border-neutral-200 bg-white/70 px-4 py-2.5 text-sm text-neutral-800 outline-none backdrop-blur-xl transition-colors focus:border-neutral-400 dark:border-neutral-600 dark:bg-neutral-800/70 dark:text-neutral-200 dark:focus:border-neutral-500"
-          @keydown.enter="handleAdd" />
-        <button type="button"
-          class="shrink-0 rounded-xl bg-neutral-950 px-4 py-2.5 text-sm font-medium text-white transition-all hover:scale-[1.03] active:scale-95 disabled:opacity-50 dark:bg-white dark:text-black"
-          :disabled="!addUrl.trim() || addLoading" @click="handleAdd">
+    <section class="mb-6 rounded-3xl border border-[var(--border)] bg-[var(--card-bg)] p-4 sm:p-5" aria-labelledby="add-source-title">
+      <div class="mb-4">
+        <h3 id="add-source-title" class="text-sm font-semibold text-[var(--text-primary)]">添加直播源</h3>
+        <p class="mt-1 text-xs leading-5 text-[var(--text-secondary)]">支持标准 M3U/M3U8 订阅地址</p>
+      </div>
+      <div class="flex flex-col gap-3 sm:flex-row">
+        <label class="min-w-0 flex-1">
+          <span class="sr-only">M3U/M3U8 订阅链接</span>
+          <input
+            v-model="addUrl"
+            type="url"
+            placeholder="输入 M3U/M3U8 订阅链接"
+            class="min-h-11 w-full rounded-xl border border-[var(--border)] bg-[var(--bg-soft)] px-3.5 text-sm text-[var(--text-primary)] outline-none transition-colors placeholder:text-[var(--text-tertiary)] focus:border-[var(--border-strong)] focus:ring-2 focus:ring-[var(--surface-strong)]"
+            @keydown.enter="handleAdd"
+          />
+        </label>
+        <button
+          type="button"
+          class="min-h-11 shrink-0 rounded-xl bg-[var(--text-primary)] px-5 text-sm font-semibold text-[var(--bg)] transition-transform hover:-translate-y-px focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--border-strong)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--bg)] active:translate-y-0 disabled:cursor-not-allowed disabled:opacity-50"
+          :disabled="!addUrl.trim() || addLoading"
+          @click="handleAdd"
+        >
           {{ addLoading ? '解析中…' : '添加' }}
         </button>
       </div>
-      <div class="flex items-center gap-2">
-        <input v-model="addUa" type="text" placeholder="自定义 User-Agent（可选）"
-          class="min-w-0 flex-1 rounded-xl border border-neutral-200 bg-white/70 px-4 py-2 text-xs text-neutral-600 outline-none backdrop-blur-xl transition-colors focus:border-neutral-400 dark:border-neutral-600 dark:bg-neutral-800/70 dark:text-neutral-300 dark:focus:border-neutral-500" />
-        <label class="flex items-center gap-1.5 text-xs text-neutral-500 dark:text-neutral-400 cursor-pointer">
-          <input v-model="addForceProxy" type="checkbox"
-            class="size-3.5 rounded accent-neutral-950 dark:accent-white" />
+      <div class="mt-3 grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+        <label>
+          <span class="sr-only">自定义 User-Agent</span>
+          <input
+            v-model="addUa"
+            type="text"
+            placeholder="自定义 User-Agent（可选）"
+            class="min-h-10 w-full rounded-xl border border-[var(--border)] bg-[var(--bg-soft)] px-3.5 text-xs text-[var(--text-primary)] outline-none transition-colors placeholder:text-[var(--text-tertiary)] focus:border-[var(--border-strong)] focus:ring-2 focus:ring-[var(--surface-strong)]"
+          />
+        </label>
+        <label class="flex min-h-10 items-center gap-2 rounded-xl border border-[var(--border)] px-3 text-xs text-[var(--text-secondary)]">
+          <input v-model="addForceProxy" type="checkbox" class="size-4 rounded accent-neutral-950 dark:accent-white" />
           强制中转
         </label>
       </div>
-    </div>
-
-    <p v-if="addError" class="mb-4 text-xs text-red-500">{{ addError }}</p>
-
-    <section
-      class="mb-6 rounded-2xl border border-black/5 bg-white/80 p-4 shadow-sm backdrop-blur-xl dark:border-white/10 dark:bg-neutral-800/50">
-      <div class="mb-4 flex items-center justify-between gap-3">
-        <h2 class="text-sm font-semibold text-neutral-800 dark:text-neutral-200">安全设置</h2>
-        <button type="button"
-          class="rounded-lg bg-neutral-100 px-2.5 py-1 text-xs text-neutral-600 transition-colors hover:bg-neutral-200 disabled:opacity-50 dark:bg-neutral-700 dark:text-neutral-300 dark:hover:bg-neutral-600"
-          :disabled="securitySaving || !securityLoaded" @click="saveSecuritySettings">
-          {{ securitySaving ? '保存中' : '保存' }}
-        </button>
-      </div>
-
-      <div class="grid gap-3 sm:grid-cols-2">
-        <label v-for="item in securityToggleItems" :key="item.key"
-          class="flex items-center justify-between gap-3 rounded-xl border border-neutral-200 bg-white/60 px-3 py-2.5 text-sm dark:border-neutral-700 dark:bg-neutral-900/40">
-          <span class="min-w-0">
-            <span class="block font-medium text-neutral-700 dark:text-neutral-200">{{ item.label }}</span>
-            <span v-if="isSecurityForced(item.key)" class="mt-0.5 block text-xs text-neutral-400">环境变量锁定</span>
-          </span>
-          <input v-model="securityDraft[item.key]" type="checkbox"
-            class="size-4 rounded accent-neutral-950 disabled:opacity-40 dark:accent-white"
-            :disabled="!securityLoaded || isSecurityForced(item.key)" />
-        </label>
-      </div>
-
-      <div class="mt-3 grid gap-3 sm:grid-cols-2">
-        <label v-for="item in securityNumberItems" :key="item.key"
-          class="block rounded-xl border border-neutral-200 bg-white/60 px-3 py-2.5 text-sm dark:border-neutral-700 dark:bg-neutral-900/40">
-          <span class="mb-1 block font-medium text-neutral-700 dark:text-neutral-200">{{ item.label }}</span>
-          <input v-model.number="securityDraft[item.key]" type="number" :min="item.min" :max="item.max"
-            class="w-full rounded-lg border border-neutral-200 bg-white px-3 py-1.5 text-sm text-neutral-700 outline-none focus:border-neutral-400 disabled:opacity-40 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-200"
-            :disabled="!securityLoaded || isSecurityForced(item.key)" />
-        </label>
-      </div>
-
-      <p v-if="securityError" class="mt-3 text-xs text-red-500">{{ securityError }}</p>
+      <p v-if="addError" class="mt-3 text-xs leading-5 text-red-500" role="alert">{{ addError }}</p>
     </section>
 
-    <!-- 订阅列表 -->
-    <div class="space-y-3">
-      <div v-for="sub in subscriptions" :key="sub.id"
-        class="rounded-2xl border border-black/5 bg-white/80 p-4 shadow-sm backdrop-blur-xl dark:border-white/10 dark:bg-neutral-800/50">
-        <div class="mb-2 flex items-start justify-between">
+    <div v-if="loadError" class="rounded-2xl border border-red-500/20 bg-red-500/5 px-5 py-6 text-center" role="alert">
+      <p class="text-sm font-medium text-[var(--text-primary)]">直播源加载失败</p>
+      <p class="mt-1 text-xs text-[var(--text-secondary)]">{{ loadError }}</p>
+      <button type="button" class="mt-4 min-h-10 rounded-xl border border-[var(--border)] px-4 text-sm font-medium text-[var(--text-primary)] hover:bg-[var(--surface-hover)]" @click="loadSubscriptions">重试</button>
+    </div>
+
+    <div v-else-if="loading" class="grid gap-3" aria-label="正在加载直播源" aria-busy="true">
+      <div v-for="index in 3" :key="index" class="h-28 animate-pulse rounded-3xl border border-[var(--border)] bg-[var(--surface)]"></div>
+    </div>
+
+    <div v-else-if="subscriptions.length" class="grid gap-3">
+      <article
+        v-for="sub in subscriptions"
+        :key="sub.id"
+        class="rounded-3xl border border-[var(--border)] bg-[var(--card-bg)] p-4 sm:p-5"
+      >
+        <div class="flex min-w-0 flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div class="min-w-0 flex-1">
-            <h3 class="truncate text-sm font-semibold text-neutral-800 dark:text-neutral-200">{{ sub.title }}</h3>
-            <div class="mt-1 flex items-center gap-3 text-xs text-neutral-400 dark:text-neutral-500">
-              <span class="flex items-center gap-1">
-                <span class="size-1.5 rounded-full" :class="sub.valid ? 'bg-emerald-400' : 'bg-red-400'"></span>
-                {{ sub.channel_count }} 个频道
-              </span>
-              <span v-if="sub.last_tested">测速 {{ formatTime(sub.last_tested) }}</span>
+            <div class="flex min-w-0 items-center gap-2">
+              <span class="size-2 shrink-0 rounded-full" :class="sub.valid ? 'bg-emerald-500' : 'bg-red-400'"></span>
+              <h3 class="truncate text-sm font-semibold text-[var(--text-primary)]" :title="sub.title">{{ sub.title }}</h3>
+            </div>
+            <div class="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[var(--text-tertiary)]">
+              <span>{{ sub.channel_count }} 个频道</span>
+              <span v-if="sub.last_tested">测速于 {{ formatTime(sub.last_tested) }}</span>
               <span v-else-if="sub.last_updated">更新于 {{ formatTime(sub.last_updated) }}</span>
+              <span v-if="sub.custom_ua">自定义 UA</span>
+              <span v-if="sub.force_proxy">强制中转</span>
             </div>
           </div>
+          <div class="scrollbar-hide flex max-w-full gap-1 overflow-x-auto sm:justify-end">
+            <button type="button" class="min-h-10 shrink-0 rounded-xl px-3 text-xs font-medium text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--border-strong)]" @click="handleRefresh(sub)">刷新</button>
+            <button type="button" class="min-h-10 shrink-0 rounded-xl px-3 text-xs font-medium text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--border-strong)]" @click="handleTestSub(sub)">测速</button>
+            <button type="button" class="min-h-10 shrink-0 rounded-xl px-3 text-xs font-medium text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--border-strong)]" @click="openExportDialog">导出</button>
+            <button type="button" class="min-h-10 shrink-0 rounded-xl px-3 text-xs font-medium text-red-500 hover:bg-red-500/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400" @click="handleDelete(sub)">删除</button>
+          </div>
         </div>
-        <div class="flex items-center gap-2 border-t border-black/5 pt-3 dark:border-white/5">
-          <button type="button"
-            class="rounded-lg bg-neutral-100 px-2.5 py-1 text-xs text-neutral-600 transition-colors hover:bg-neutral-200 dark:bg-neutral-700 dark:text-neutral-300 dark:hover:bg-neutral-600"
-            @click="handleRefresh(sub)">
-            刷新
-          </button>
-          <button type="button"
-            class="rounded-lg bg-neutral-100 px-2.5 py-1 text-xs text-neutral-600 transition-colors hover:bg-neutral-200 dark:bg-neutral-700 dark:text-neutral-300 dark:hover:bg-neutral-600"
-            @click="handleTestSub(sub)">
-            测速
-          </button>
-          <button type="button"
-            class="rounded-lg px-2.5 py-1 text-xs text-red-400 transition-colors hover:bg-red-50 dark:hover:bg-red-900/20"
-            @click="handleDelete(sub)">
-            删除
-          </button>
-          <button type="button"
-            class="rounded-lg px-2.5 py-1 text-xs text-neutral-400 transition-colors hover:bg-neutral-100 dark:hover:bg-neutral-700"
-            @click="openExportDialog">
-            导出
-          </button>
-        </div>
-      </div>
-
-      <p v-if="subscriptions.length === 0 && !loading"
-        class="py-10 text-center text-sm text-neutral-400 dark:text-neutral-500">
-        暂无订阅源，在上方输入链接添加
-      </p>
+      </article>
     </div>
-  </main>
+
+    <section v-else class="rounded-3xl border border-dashed border-[var(--border-strong)] bg-[var(--surface)] px-6 py-12 text-center">
+      <span class="mx-auto flex size-11 items-center justify-center rounded-2xl border border-[var(--border)] bg-[var(--bg-soft)] text-[var(--text-secondary)]">
+        <svg class="size-5" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h10" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+      </span>
+      <h3 class="mt-4 text-sm font-semibold text-[var(--text-primary)]">还没有直播源</h3>
+      <p class="mt-2 text-sm leading-6 text-[var(--text-secondary)]">在上方粘贴 M3U/M3U8 地址即可开始。</p>
+    </section>
+  </section>
 
   <Teleport to="body">
     <div v-if="exportDialogOpen"
       class="fixed inset-0 z-[80] flex items-center justify-center bg-neutral-950/35 px-4 py-8 backdrop-blur-md"
       @click.self="closeExportDialog">
       <section
-        class="max-h-full w-full max-w-xl overflow-y-auto rounded-3xl border border-white/60 bg-white/95 p-6 shadow-2xl shadow-neutral-950/20 dark:border-white/10 dark:bg-neutral-900/95">
+        ref="dialogRef"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="export-dialog-title"
+        tabindex="-1"
+        class="max-h-full w-full max-w-xl overflow-y-auto rounded-3xl border border-white/60 bg-white/95 p-6 shadow-2xl shadow-neutral-950/20 dark:border-white/10 dark:bg-neutral-900/95"
+        @keydown.esc.prevent="closeExportDialog">
         <div class="mb-5 relative flex items-center justify-center">
 
           <div class="text-center">
-            <h2 class="text-lg font-semibold text-neutral-900 dark:text-neutral-50">订阅导出</h2>
+            <h2 id="export-dialog-title" class="text-lg font-semibold text-neutral-900 dark:text-neutral-50">订阅导出</h2>
           </div>
 
           <button type="button"
@@ -336,21 +319,25 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onBeforeUnmount } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import {
-  fetchSubscriptions, addSubscription, deleteSubscription, refreshSubscription, refreshAllSubscriptions,
-  testAllChannels, testAllGlobal, fetchGlobalTestStatus, cancelTest,
-} from '../api/iptv'
-import { fetchSecuritySettings, updateSecuritySettings } from '../api/settings'
-import { API_BASE } from '../apiBase'
-import { useAuthStore } from '../stores/auth'
-import { useToastStore } from '../stores/toast'
+  addSubscription,
+  cancelTest,
+  deleteSubscription,
+  fetchGlobalTestStatus,
+  fetchSubscriptions,
+  refreshAllSubscriptions,
+  refreshSubscription,
+  testAllChannels,
+  testAllGlobal,
+} from '../../api/iptv'
+import { API_BASE } from '../../apiBase'
+import { useToastStore } from '../../stores/toast'
 
 const toastStore = useToastStore()
-const authStore = useAuthStore()
-
 const subscriptions = ref([])
 const loading = ref(false)
+const loadError = ref('')
 const addUrl = ref('')
 const addUa = ref('')
 const addForceProxy = ref(false)
@@ -358,147 +345,38 @@ const addError = ref('')
 const addLoading = ref(false)
 const refreshRunning = ref(false)
 const testRunning = ref(false)
-const emptyTestProgress = (total = 0) => ({
-  total,
-  tested: 0,
-  working: 0,
-  failed: 0,
-  not_live: 0,
-  untested: 0,
-  phase: '',
-  current: '',
-  cancelled: false,
-})
+const emptyTestProgress = (total = 0) => ({ total, tested: 0, working: 0, failed: 0, not_live: 0, untested: 0, phase: '', current: '', cancelled: false })
 const testProgress = ref(emptyTestProgress())
+const testPercent = computed(() => testProgress.value.total ? Math.min(100, Math.round((testProgress.value.tested / testProgress.value.total) * 100)) : 0)
 const exportDialogOpen = ref(false)
+const dialogRef = ref(null)
 const advancedOpen = ref(false)
 const copiedMode = ref('')
 const copyError = ref('')
-const exportOptions = ref({
-  healthyOnly: true,
-  includeRtsp: false,
-  includeEpg: true,
-  includeLogo: true,
-  groups: '',
-})
-const securityLoaded = ref(false)
-const securitySaving = ref(false)
-const securityError = ref('')
-const securityForced = ref(new Set())
-const securityDraft = ref({
-  anonymous_browse: true,
-  anonymous_playback: true,
-  allow_private: false,
-  allow_loopback: true,
-  session_max_age_days: 14,
-  media_credential_default_ttl_days: 90,
-})
-const securityToggleItems = [
-  { key: 'anonymous_browse', label: '匿名浏览' },
-  { key: 'anonymous_playback', label: '匿名播放' },
-  { key: 'allow_private', label: '允许私有地址源' },
-  { key: 'allow_loopback', label: '允许回环地址源' },
-]
-const securityNumberItems = [
-  { key: 'session_max_age_days', label: '登录有效天数', min: 1, max: 365 },
-  { key: 'media_credential_default_ttl_days', label: '播放凭证有效天数', min: 1, max: 3650 },
-]
-
+const exportOptions = ref({ healthyOnly: true, includeRtsp: false, includeEpg: true, includeLogo: true, groups: '' })
 const exportModes = [
-  {
-    id: 'hybrid',
-    title: '混合',
-    subtitle: '直链优先 + 代理备选',
-    detail: '默认推荐，部分流量走服务器',
-    badge: '推荐',
-  },
-  {
-    id: 'smart',
-    title: 'Smart',
-    subtitle: '每频道一条智能链接',
-    detail: '后端选择当前可用源',
-    badge: 'Beta',
-  },
-  {
-    id: 'proxy',
-    title: '代理',
-    subtitle: '所有频道使用代理',
-    detail: '网络受限时更稳定',
-    badge: '',
-  },
-  {
-    id: 'direct',
-    title: '直链',
-    subtitle: '所有频道使用直链',
-    detail: '最省服务器流量',
-    badge: '',
-  },
+  { id: 'hybrid', title: '混合', subtitle: '直链优先 + 代理备选', badge: '推荐' },
+  { id: 'smart', title: 'Smart', subtitle: '每频道一条智能链接', badge: 'Beta' },
+  { id: 'proxy', title: '代理', subtitle: '所有频道使用代理', badge: '' },
+  { id: 'direct', title: '直链', subtitle: '所有频道使用直链', badge: '' },
 ]
-
 let testTimer = null
 
 async function loadSubscriptions() {
   loading.value = true
+  loadError.value = ''
   try {
     subscriptions.value = await fetchSubscriptions()
-  } catch (e) {
-    console.error('加载订阅失败:', e)
-  }
-  loading.value = false
-}
-
-function applySecuritySettings(data) {
-  const settings = data?.settings || {}
-  securityForced.value = new Set(data?.forced || [])
-  securityDraft.value = {
-    ...securityDraft.value,
-    ...settings,
-  }
-  if (settings.anonymous_browse !== undefined) {
-    authStore.setup.anonymousBrowse = Boolean(settings.anonymous_browse)
-  }
-  if (settings.anonymous_playback !== undefined) {
-    authStore.setup.anonymousPlayback = Boolean(settings.anonymous_playback)
-  }
-  securityLoaded.value = true
-}
-
-function isSecurityForced(key) {
-  return securityForced.value.has(key)
-}
-
-async function loadSecuritySettings() {
-  securityError.value = ''
-  try {
-    applySecuritySettings(await fetchSecuritySettings())
-  } catch (e) {
-    securityError.value = e?.message || '安全设置加载失败'
-  }
-}
-
-async function saveSecuritySettings() {
-  if (!securityLoaded.value || securitySaving.value) return
-  securitySaving.value = true
-  securityError.value = ''
-  const payload = {}
-  for (const item of [...securityToggleItems, ...securityNumberItems]) {
-    if (!isSecurityForced(item.key)) {
-      payload[item.key] = securityDraft.value[item.key]
-    }
-  }
-  try {
-    applySecuritySettings(await updateSecuritySettings(payload))
-    toastStore.success('安全设置已保存')
-  } catch (e) {
-    securityError.value = e?.message || '安全设置保存失败'
+  } catch (error) {
+    loadError.value = error?.message || '暂时无法读取直播源'
   } finally {
-    securitySaving.value = false
+    loading.value = false
   }
 }
 
 async function handleAdd() {
   const url = addUrl.value.trim()
-  if (!url) return
+  if (!url || addLoading.value) return
   addLoading.value = true
   addError.value = ''
   try {
@@ -507,26 +385,23 @@ async function handleAdd() {
     addUa.value = ''
     addForceProxy.value = false
     await loadSubscriptions()
-  } catch (e) {
-    addError.value = e.message
+    toastStore.success('直播源已添加')
+  } catch (error) {
+    addError.value = error?.message || '添加直播源失败'
+  } finally {
+    addLoading.value = false
   }
-  addLoading.value = false
 }
 
 async function handleDelete(sub) {
-  const ok = await toastStore.askConfirm({
-    message: `确定删除「${sub.title}」？`,
-    confirmText: '删除',
-    danger: true,
-  })
-  if (!ok) return
+  const confirmed = await toastStore.askConfirm({ message: `确定删除「${sub.title}」？`, confirmText: '删除', danger: true })
+  if (!confirmed) return
   try {
     await deleteSubscription(sub.id)
     await loadSubscriptions()
     toastStore.success('已删除')
-  } catch (e) {
-    console.error('删除失败:', e)
-    toastStore.error('删除失败: ' + e.message)
+  } catch (error) {
+    toastStore.error(`删除失败: ${error.message}`)
   }
 }
 
@@ -534,8 +409,9 @@ async function handleRefresh(sub) {
   try {
     await refreshSubscription(sub.id)
     await loadSubscriptions()
-  } catch (e) {
-    toastStore.error(`刷新失败: ${e.message}`)
+    toastStore.success('直播源已刷新')
+  } catch (error) {
+    toastStore.error(`刷新失败: ${error.message}`)
   }
 }
 
@@ -545,86 +421,77 @@ async function handleRefreshAll() {
   try {
     const result = await refreshAllSubscriptions()
     await loadSubscriptions()
-    if (result.failed) {
-      toastStore.warning(`已刷新 ${result.updated || 0} 个订阅，${result.failed} 个失败`)
-    } else {
-      toastStore.success(`已刷新 ${result.updated || 0} 个订阅`)
-    }
-  } catch (e) {
-    toastStore.error(`全部刷新失败: ${e.message}`)
+    if (result.failed) toastStore.warning(`已刷新 ${result.updated || 0} 个订阅，${result.failed} 个失败`)
+    else toastStore.success(`已刷新 ${result.updated || 0} 个订阅`)
+  } catch (error) {
+    toastStore.error(`全部刷新失败: ${error.message}`)
   } finally {
     refreshRunning.value = false
   }
 }
 
 async function handleTestSub(sub) {
-  if (testRunning.value) {
-    toastStore.warning('已有测速任务正在进行中')
-    return
-  }
+  if (testRunning.value) return toastStore.warning('已有测速任务正在进行中')
   try {
-    const data = await testAllChannels(sub.id)
-    testRunning.value = true
-    testProgress.value = emptyTestProgress(data.total || 0)
-    testTimer = setInterval(pollTestStatus, 1000)
-  } catch (e) {
-    toastStore.error(`测速失败: ${e.message}`)
+    const result = await testAllChannels(sub.id)
+    startTestPolling(result.total || 0)
+  } catch (error) {
+    toastStore.error(`测速失败: ${error.message}`)
   }
 }
 
 async function handleTestAll() {
-  if (testRunning.value) {
-    toastStore.warning('已有测速任务正在进行中')
-    return
-  }
+  if (testRunning.value) return
   try {
-    const res = await testAllGlobal()
-    testRunning.value = true
-    testProgress.value = emptyTestProgress(res.total || 0)
-    testTimer = setInterval(pollTestStatus, 1000)
-  } catch (e) {
-    toastStore.error(`启动测速失败: ${e.message}`)
+    const result = await testAllGlobal()
+    startTestPolling(result.total || 0)
+  } catch (error) {
+    toastStore.error(`启动测速失败: ${error.message}`)
   }
+}
+
+function startTestPolling(total) {
+  testRunning.value = true
+  testProgress.value = emptyTestProgress(total)
+  if (testTimer) clearInterval(testTimer)
+  testTimer = setInterval(pollTestStatus, 1000)
 }
 
 async function handleCancelTest() {
   try {
     await cancelTest()
     testProgress.value = { ...testProgress.value, cancelled: true, phase: 'cancelled' }
-  } catch (e) {
-    toastStore.error(`取消测速失败: ${e.message}`)
+  } catch (error) {
+    toastStore.error(`取消测速失败: ${error.message}`)
     return
   }
-  testRunning.value = false
-  if (testTimer) {
-    clearInterval(testTimer)
-    testTimer = null
-  }
+  stopTestPolling()
 }
 
 async function pollTestStatus() {
   try {
     const status = await fetchGlobalTestStatus()
     testProgress.value = { ...emptyTestProgress(), ...status }
-    if (status.cancelled || (status.tested >= status.total && status.total > 0)) {
-      testRunning.value = false
-      clearInterval(testTimer)
-      testTimer = null
-    }
-  } catch { }
+    if (status.cancelled || (status.tested >= status.total && status.total > 0)) stopTestPolling()
+  } catch {}
 }
 
-function formatTime(iso) {
-  if (!iso) return ''
-  try {
-    return new Date(iso).toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' })
-  } catch { return iso }
+function stopTestPolling() {
+  testRunning.value = false
+  if (testTimer) clearInterval(testTimer)
+  testTimer = null
+}
+
+function formatTime(value) {
+  if (!value) return ''
+  try { return new Date(value).toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' }) } catch { return value }
 }
 
 function openExportDialog() {
   copyError.value = ''
   copiedMode.value = ''
   exportDialogOpen.value = true
+  nextTick(() => dialogRef.value?.focus())
 }
 
 function closeExportDialog() {
@@ -644,47 +511,36 @@ function buildSubscriptionUrl(mode) {
 }
 
 function fallbackCopyText(text) {
-  const el = document.createElement('textarea')
-  el.value = text
-  el.setAttribute('readonly', '')
-  el.style.position = 'fixed'
-  el.style.opacity = '0'
-  document.body.appendChild(el)
-  el.select()
-  const ok = document.execCommand('copy')
-  el.remove()
-  if (!ok) throw new Error('复制失败')
+  const element = document.createElement('textarea')
+  element.value = text
+  element.setAttribute('readonly', '')
+  element.style.position = 'fixed'
+  element.style.opacity = '0'
+  document.body.appendChild(element)
+  element.select()
+  const copied = document.execCommand('copy')
+  element.remove()
+  if (!copied) throw new Error('复制失败')
 }
 
 async function copySubscriptionUrl(mode) {
   const url = buildSubscriptionUrl(mode)
   copyError.value = ''
   try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(url)
-    } else {
-      fallbackCopyText(url)
-    }
+    if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(url)
+    else fallbackCopyText(url)
     copiedMode.value = mode
-    window.setTimeout(() => {
-      if (copiedMode.value === mode) copiedMode.value = ''
-    }, 1800)
-  } catch (e) {
+    window.setTimeout(() => { if (copiedMode.value === mode) copiedMode.value = '' }, 1800)
+  } catch (error) {
     try {
       fallbackCopyText(url)
       copiedMode.value = mode
     } catch {
-      copyError.value = e?.message || '复制失败，请手动复制链接'
+      copyError.value = error?.message || '复制失败，请手动复制链接'
     }
   }
 }
 
-onMounted(() => {
-  loadSubscriptions()
-  loadSecuritySettings()
-})
-
-onBeforeUnmount(() => {
-  if (testTimer) clearInterval(testTimer)
-})
+onMounted(loadSubscriptions)
+onBeforeUnmount(() => { if (testTimer) clearInterval(testTimer) })
 </script>

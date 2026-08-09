@@ -105,7 +105,7 @@
           <button v-show="activeMode === 'iptv'" type="button" class="mobile-action-btn" aria-label="订阅源" @click="router.push('/market')">
             <svg class="size-5" viewBox="0 0 24 24" fill="none"><path d="M4 8.4 12 4l8 4.4-8 4.4L4 8.4Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M4 12.2 12 16.6l8-4.4M4 16l8 4.4L20 16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
           </button>
-          <button v-show="activeMode === 'iptv'" type="button" class="mobile-action-btn" aria-label="设置" @click="router.push('/admin')">
+          <button v-show="activeMode === 'iptv'" type="button" class="mobile-action-btn" aria-label="设置" @click="router.push('/settings/sources')">
             <svg class="size-5" viewBox="0 0 24 24" fill="none"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="1.8"/></svg>
           </button>
           <div class="relative flex items-center rounded-full border border-[var(--border)] bg-[var(--bg-soft)]/70 shadow-sm shadow-black/[0.04] backdrop-blur-xl transition-all duration-300 ease-out" :class="searchExpanded ? 'w-48 sm:w-56' : 'size-10'">
@@ -216,7 +216,7 @@ const primaryNavItems = computed(() => [
 ])
 const secondaryNavItems = computed(() => [
   { label: 'Market', icon: 'layers', route: '/market', active: route.path === '/market' },
-  { label: '设置', icon: 'settings', route: '/admin', active: route.path === '/admin' },
+  { label: '设置', icon: 'settings', route: '/settings/sources', active: route.path.startsWith('/settings') },
   { label: '关于', icon: 'info', route: '', active: false },
 ])
 const THEME_CHROME_COLORS = {
@@ -229,7 +229,7 @@ const THEME_STATUS_BAR = {
 }
 
 watch(() => route.path, (path) => {
-  playerStore.setActiveMode(path.startsWith('/iptv') || path.startsWith('/admin') || path.startsWith('/market') ? 'iptv' : 'radio')
+  playerStore.setActiveMode(path.startsWith('/iptv') || path.startsWith('/admin') || path.startsWith('/settings') || path.startsWith('/market') ? 'iptv' : 'radio')
 }, { immediate: true })
 
 watch(showAppShell, (visible) => {

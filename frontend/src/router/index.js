@@ -1,53 +1,11 @@
 import { createRouter, createWebHashHistory } from 'vue-router'
 
 import { useAuthStore } from '../stores/auth'
-
-const routes = [
-  {
-    path: '/',
-    name: 'radio',
-    component: () => import('../views/Home.vue'),
-  },
-  {
-    path: '/iptv',
-    name: 'iptv',
-    component: () => import('../views/IptvHome.vue'),
-  },
-  {
-    path: '/admin',
-    name: 'admin',
-    component: () => import('../views/AdminView.vue'),
-    meta: { requiresAdmin: true },
-  },
-  {
-    path: '/market',
-    name: 'market',
-    component: () => import('../views/MarketView.vue'),
-    meta: { requiresAdmin: true },
-  },
-  {
-    path: '/admin/epg',
-    name: 'epg-debug',
-    component: () => import('../views/EpgDebug.vue'),
-    meta: { requiresAdmin: true },
-  },
-  {
-    path: '/setup',
-    name: 'setup',
-    component: () => import('../views/SetupView.vue'),
-    meta: { authPage: true },
-  },
-  {
-    path: '/login',
-    name: 'login',
-    component: () => import('../views/LoginView.vue'),
-    meta: { authPage: true },
-  },
-]
+import { appRoutes } from './routes'
 
 const router = createRouter({
   history: createWebHashHistory(),
-  routes,
+  routes: appRoutes,
 })
 
 router.beforeEach(async (to) => {
