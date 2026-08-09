@@ -75,6 +75,7 @@ class EpgReadResolution:
     effective_target: EpgReadTarget | None
     effective_source: str
     fallback_reason: str
+    management_mode: str
     legacy_mapping: dict | None
     shadow_binding: dict | None
 
@@ -89,6 +90,7 @@ class EpgReadResolution:
             'effective_target': self.effective_target.as_dict() if self.effective_target else None,
             'effective_source': self.effective_source,
             'fallback_reason': self.fallback_reason,
+            'management_mode': self.management_mode,
             'legacy_mapping': self.legacy_mapping,
             'shadow_binding': self.shadow_binding,
         }
@@ -153,9 +155,15 @@ def resolve_epg_read_snapshot(
     logical_rows: Iterable[Mapping[str, object]],
     binding_rows: Iterable[Mapping[str, object]],
     target_rows: Iterable[Mapping[str, object]],
+    policy_rows: Iterable[Mapping[str, object]] = (),
 ) -> EpgReadResolution:
     """Resolve and select a read target from caller-provided snapshots."""
-    indexes = _build_snapshot_indexes(logical_rows, binding_rows, target_rows)
+    indexes = _build_snapshot_indexes(
+        logical_rows,
+        binding_rows,
+        target_rows,
+        policy_rows,
+    )
     return _resolve_epg_read_indexed(
         canonical_key,
         legacy_mapping=legacy_mapping,
@@ -167,6 +175,7 @@ def _build_snapshot_indexes(
     logical_rows: Iterable[Mapping[str, object]],
     binding_rows: Iterable[Mapping[str, object]],
     target_rows: Iterable[Mapping[str, object]],
+    policy_rows: Iterable[Mapping[str, object]] = (),
 ) -> dict[str, dict]:
     """Build deterministic in-memory indexes for one read snapshot."""
     logical_by_key: dict[str, list[dict]] = {}
@@ -185,10 +194,16 @@ def _build_snapshot_indexes(
     for row in binding_rows:
         binding_by_logical[str(row.get('logical_channel_id') or '')] = dict(row)
 
+    policy_by_logical = {
+        str(row.get('logical_channel_id') or ''): str(row.get('mode') or '')
+        for row in policy_rows
+    }
+
     return {
         'logical_by_key': logical_by_key,
         'binding_by_logical': binding_by_logical,
         'target_by_identity': target_by_identity,
+        'policy_by_logical': policy_by_logical,
     }
 
 
@@ -213,6 +228,9 @@ def _resolve_epg_read_indexed(
     legacy_target = _target_from_identity(legacy_identity, target_by_identity)
 
     binding_by_logical = indexes['binding_by_logical']
+    management_mode = str(
+        indexes.get('policy_by_logical', {}).get(logical_channel_id or '', '')
+    )
     binding = None
     shadow_target = None
     if len(logical_candidates) == 1 and logical_status == 'active':
@@ -224,7 +242,10 @@ def _resolve_epg_read_indexed(
             binding = candidate_binding
             shadow_target = _target_from_identity(_identity_from_mapping(binding), target_by_identity)
 
-    if not logical_candidates:
+    if management_mode == 'no_epg':
+        comparison_status = 'not_applicable'
+        fallback_reason = 'explicit_no_epg'
+    elif not logical_candidates:
         comparison_status = 'logical_missing'
         fallback_reason = 'logical_channel_missing'
     elif len(logical_candidates) != 1:
@@ -277,6 +298,19 @@ def _resolve_epg_read_indexed(
                 effective_target = shadow_target
                 effective_source = 'shadow'
 
+    # An explicit management policy means the logical binding system has been
+    # selected over historical compatibility state. ``no_epg`` always reads
+    # nothing. Explicit ``automatic`` may use a current shadow binding, but it
+    # must not resurrect a stale legacy answer when Matcher safely returns no
+    # binding.
+    if management_mode == 'no_epg':
+        effective_target = None
+        effective_source = 'none'
+    elif management_mode == 'automatic' and effective_source == 'legacy':
+        effective_target = None
+        effective_source = 'none'
+        fallback_reason = 'explicit_automatic_without_shadow'
+
     return EpgReadResolution(
         canonical_key=canonical_key,
         logical_channel_ids=logical_ids,
@@ -287,6 +321,7 @@ def _resolve_epg_read_indexed(
         effective_target=effective_target,
         effective_source=effective_source,
         fallback_reason=fallback_reason,
+        management_mode=management_mode,
         legacy_mapping=_safe_legacy_mapping(legacy_mapping),
         shadow_binding=_safe_shadow_binding(binding),
     )
@@ -348,10 +383,11 @@ async def _load_snapshot(legacy_mappings: Mapping[str, Mapping[str, object] | No
         }
     logical_rows = await db.get_iptv_logical_channels()
     target_rows = await db.list_epg_channel_catalog_rows()
-    from epg_bindings import list_epg_bindings
+    from epg_bindings import list_epg_binding_policies, list_epg_bindings
 
     bindings = [binding.as_dict() for binding in await list_epg_bindings()]
-    return legacy_mappings, logical_rows, bindings, target_rows
+    policies = [policy.as_dict() for policy in await list_epg_binding_policies()]
+    return legacy_mappings, logical_rows, bindings, target_rows, policies
 
 
 async def resolve_epg_read(
@@ -362,13 +398,20 @@ async def resolve_epg_read(
     """Resolve one production EPG read target with legacy fallback."""
     if legacy_mapping is _UNSET:
         legacy_mapping = await db.get_channel_epg_map(canonical_key)
-    legacy_mappings, logical_rows, binding_rows, target_rows = await _load_snapshot({canonical_key: legacy_mapping})
+    (
+        legacy_mappings,
+        logical_rows,
+        binding_rows,
+        target_rows,
+        policy_rows,
+    ) = await _load_snapshot({canonical_key: legacy_mapping})
     return resolve_epg_read_snapshot(
         canonical_key,
         legacy_mapping=legacy_mappings.get(canonical_key),
         logical_rows=logical_rows,
         binding_rows=binding_rows,
         target_rows=target_rows,
+        policy_rows=policy_rows,
     ).as_dict()
 
 
@@ -377,8 +420,15 @@ async def resolve_epg_read_many(canonical_keys: Iterable[str]) -> dict[str, dict
     keys = [str(key) for key in canonical_keys]
     legacy_rows = await db.get_all_channel_epg_maps()
     legacy_by_key = {str(row.get('canonical_key') or ''): row for row in legacy_rows}
-    _, logical_rows, binding_rows, target_rows = await _load_snapshot(legacy_by_key)
-    indexes = _build_snapshot_indexes(logical_rows, binding_rows, target_rows)
+    _, logical_rows, binding_rows, target_rows, policy_rows = await _load_snapshot(
+        legacy_by_key
+    )
+    indexes = _build_snapshot_indexes(
+        logical_rows,
+        binding_rows,
+        target_rows,
+        policy_rows,
+    )
     return {
         key: _resolve_epg_read_indexed(
             key,

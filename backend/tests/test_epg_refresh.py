@@ -11,7 +11,11 @@ import httpx
 
 
 def _clear_modules():
-    for name in ('database', 'epg'):
+    for name in (
+        'automation', 'database', 'epg', 'epg_preference_evidence',
+        'epg_source_management', 'epg_source_model', 'epg_source_preference',
+        'epg_tasks',
+    ):
         sys.modules.pop(name, None)
 
 
@@ -51,6 +55,11 @@ class EpgRefreshTest(unittest.IsolatedAsyncioTestCase):
         if not enabled:
             await self.db.update_epg_source(source_id, enabled=0)
         return await self.db.get_epg_source(source_id)
+
+    async def _disable_builtin(self):
+        builtin = (await self.epg.ensure_default_epg_sources())[0]
+        await self.db.update_epg_source(builtin['id'], enabled=0)
+        return builtin
 
     def _client(self, payload: bytes, *, status=200, headers=None):
         transport = httpx.MockTransport(lambda request: httpx.Response(
@@ -262,7 +271,8 @@ class EpgRefreshTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result['usable_dataset'])
         client.stream.assert_not_called()
 
-    async def test_full_refresh_with_only_disabled_sources_does_not_add_default_or_request(self):
+    async def test_full_refresh_skips_disabled_builtin_and_custom_without_request(self):
+        builtin = await self._disable_builtin()
         source = await self._source('Disabled', 'https://example.test/disabled.xml', enabled=False)
         client = mock.AsyncMock()
         with mock.patch(
@@ -272,7 +282,9 @@ class EpgRefreshTest(unittest.IsolatedAsyncioTestCase):
             result = await self.epg.refresh_epg_sources(client)
         self.assertEqual(result['refresh_status'], 'failed')
         self.assertEqual(result['source_results'], [])
-        self.assertEqual(await self.db.get_epg_sources(), [await self.db.get_epg_source(source['id'])])
+        sources = await self.db.get_epg_sources()
+        self.assertEqual({item['id'] for item in sources}, {builtin['id'], source['id']})
+        self.assertTrue(all(not item['enabled'] for item in sources))
         client.stream.assert_not_called()
 
     async def test_url_change_delete_and_disable_discard_late_result(self):
@@ -371,6 +383,7 @@ class EpgRefreshTest(unittest.IsolatedAsyncioTestCase):
                 await asyncio.gather(one, two)
 
     async def test_full_refresh_reports_partial_and_matching_boundaries(self):
+        await self._disable_builtin()
         await self._source('Good', 'https://example.test/good.xml')
         await self._source('Bad', 'https://example.test/bad.xml')
 
@@ -393,6 +406,7 @@ class EpgRefreshTest(unittest.IsolatedAsyncioTestCase):
         maintenance.assert_awaited_once_with(sync_logical=True, trigger='epg_refresh')
 
     async def test_all_failed_does_not_run_matching(self):
+        await self._disable_builtin()
         await self._source()
         async with self._client(b'failed', status=500) as client:
             with mock.patch(
@@ -404,6 +418,7 @@ class EpgRefreshTest(unittest.IsolatedAsyncioTestCase):
         maintenance.assert_not_awaited()
 
     async def test_matching_failure_returns_partial_after_dataset_commit(self):
+        await self._disable_builtin()
         source = await self._source()
         async with self._client(xml_payload()) as client:
             with mock.patch(
@@ -416,6 +431,7 @@ class EpgRefreshTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(await self.db.get_epg_programs(source['id'], 'cctv1')), 1)
 
     async def test_maintenance_failure_result_does_not_change_refresh_status(self):
+        await self._disable_builtin()
         source = await self._source()
         async with self._client(xml_payload()) as client:
             with mock.patch(
@@ -433,6 +449,7 @@ class EpgRefreshTest(unittest.IsolatedAsyncioTestCase):
         maintenance.assert_awaited_once_with(sync_logical=True, trigger='epg_refresh')
 
     async def test_stop_event_cancels_before_next_source(self):
+        await self._disable_builtin()
         first = await self._source('First', 'https://example.test/first.xml')
         await self._source('Second', 'https://example.test/second.xml')
         stop_event = asyncio.Event()

@@ -55,6 +55,7 @@ class EpgMatchShadowSnapshot:
     existing_binding_count: int
     source_revision_summary: tuple[dict[str, Any], ...]
     preferences: Mapping[str, EpgSourcePreferenceResolution]
+    applicability: Mapping[str, str]
     preference_snapshot_fingerprint: str
     preference_evidence_count: int
     created_at: str
@@ -517,6 +518,10 @@ async def run_epg_match_shadow(stop: object | None = None) -> dict[str, Any]:
                 hint,
                 snapshot.catalog,
                 existing_binding=snapshot.existing_bindings.get(hint.logical_channel_id),
+                applicability=snapshot.applicability.get(
+                    hint.logical_channel_id,
+                    'unknown',
+                ),
                 preference=snapshot.preferences.get(hint.logical_channel_id),
             ))
         except asyncio.CancelledError:
@@ -773,6 +778,13 @@ def _snapshot_from_connection(conn: sqlite3.Connection) -> EpgMatchShadowSnapsho
     evidence_rows = [dict(row) for row in conn.execute(
         'SELECT * FROM epg_source_preference_evidence WHERE valid=1 AND current=1 ORDER BY subscription_id, id'
     ).fetchall()]
+    policy_rows = [dict(row) for row in conn.execute(
+        """
+        SELECT logical_channel_id, mode
+        FROM iptv_logical_channel_epg_policies
+        ORDER BY logical_channel_id
+        """
+    ).fetchall()]
     all_preferences: list[EpgSourcePreference] = []
     fingerprint_rows = []
     for row in evidence_rows:
@@ -825,6 +837,14 @@ def _snapshot_from_connection(conn: sqlite3.Connection) -> EpgMatchShadowSnapsho
             'last_status': str(row['last_status'] or ''),
         } for row in source_rows),
         preferences=preference_map,
+        applicability={
+            str(row['logical_channel_id']): (
+                'not_applicable'
+                if str(row['mode']) == 'no_epg'
+                else 'unknown'
+            )
+            for row in policy_rows
+        },
         preference_snapshot_fingerprint=preference_digest,
         preference_evidence_count=len(evidence_rows),
         created_at=_now(),
@@ -959,6 +979,10 @@ def _apply_epg_match_shadow_run_sync(run_id: str, started_at: str) -> dict[str, 
                     hint,
                     snapshot.catalog,
                     existing_binding=None,
+                    applicability=snapshot.applicability.get(
+                        logical_id,
+                        'unknown',
+                    ),
                     preference=snapshot.preferences.get(logical_id),
                 )
             except Exception as exc:

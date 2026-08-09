@@ -1,35 +1,63 @@
 import asyncio
+import importlib
 import os
 import sqlite3
+import sys
 import tempfile
 import unittest
 from unittest.mock import AsyncMock, patch
 
-_DB_PATH = tempfile.NamedTemporaryFile(suffix='.db', delete=False).name
-os.environ['WAVEFLOW_DB_PATH'] = _DB_PATH
 
-from m3u8_parser import parse_m3u_document
-from epg_preference_evidence import (
-    build_epg_source_preference_snapshot,
-    delete_manual_source_preference,
-    normalize_epg_source_url,
-    replace_subscription_url_tvg_evidence,
-    resolve_url_hint_to_sources,
-    set_manual_source_preference,
-)
-
-import database as db
+def _clear_modules():
+    for name in (
+        'database', 'epg_preference_evidence', 'epg_source_model',
+        'epg_source_preference',
+    ):
+        sys.modules.pop(name, None)
 
 
 class EpgPreferenceEvidenceTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.path = _DB_PATH
+        global db
+        global parse_m3u_document
+        global build_epg_source_preference_snapshot
+        global delete_manual_source_preference
+        global normalize_epg_source_url
+        global replace_subscription_url_tvg_evidence
+        global resolve_url_hint_to_sources
+        global set_manual_source_preference
+
+        cls.old_db_path = os.environ.get('WAVEFLOW_DB_PATH')
+        cls.path = tempfile.NamedTemporaryFile(suffix='.db', delete=False).name
+        os.environ['WAVEFLOW_DB_PATH'] = cls.path
+        _clear_modules()
+        db = importlib.import_module('database')
+        parser_module = importlib.import_module('m3u8_parser')
+        evidence_module = importlib.import_module('epg_preference_evidence')
+        parse_m3u_document = parser_module.parse_m3u_document
+        build_epg_source_preference_snapshot = (
+            evidence_module.build_epg_source_preference_snapshot
+        )
+        delete_manual_source_preference = (
+            evidence_module.delete_manual_source_preference
+        )
+        normalize_epg_source_url = evidence_module.normalize_epg_source_url
+        replace_subscription_url_tvg_evidence = (
+            evidence_module.replace_subscription_url_tvg_evidence
+        )
+        resolve_url_hint_to_sources = evidence_module.resolve_url_hint_to_sources
+        set_manual_source_preference = evidence_module.set_manual_source_preference
         asyncio.run(db.initialize())
 
     @classmethod
     def tearDownClass(cls):
         os.unlink(cls.path)
+        if cls.old_db_path is None:
+            os.environ.pop('WAVEFLOW_DB_PATH', None)
+        else:
+            os.environ['WAVEFLOW_DB_PATH'] = cls.old_db_path
+        _clear_modules()
 
     def setUp(self):
         conn = sqlite3.connect(self.path)

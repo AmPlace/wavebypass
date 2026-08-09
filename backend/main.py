@@ -23,7 +23,10 @@ from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt, model_validat
 from contextlib import asynccontextmanager
 from fetchers import STATION_FETCHER_MAP, yunting
 import database
+import epg_binding_management
+import epg_management
 import epg_read_resolver
+import epg_source_management
 from adapters import (
     AdapterResolveError,
     adapter_capabilities_map,
@@ -51,6 +54,7 @@ from epg_tasks import (
     create_production_automation_service,
     reconcile_epg_tasks_after_source_change,
     run_epg_refresh_now,
+    run_epg_source_refresh_now,
 )
 from ssrf_guard import UnsafeTargetError, assert_safe_target_url, assert_safe_host_ips
 from core.config import get_settings
@@ -3849,66 +3853,466 @@ def config_rtsp_proxy_enabled() -> bool:
 import epg as _epg
 
 
+async def _epg_source_request_body(
+    request: Request,
+    *,
+    allowed_fields: set[str],
+) -> dict:
+    try:
+        body = await request.json()
+    except Exception as error:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "invalid_request", "message": "请求体必须是 JSON 对象"},
+        ) from error
+    if not isinstance(body, dict):
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "invalid_request", "message": "请求体必须是 JSON 对象"},
+        )
+    unknown = sorted(set(body) - allowed_fields)
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "invalid_request",
+                "message": "请求包含不支持的字段",
+                "fields": unknown,
+            },
+        )
+    return body
+
+
+def _raise_epg_source_management_error(
+    error: epg_source_management.EpgSourceManagementError,
+) -> None:
+    raise HTTPException(
+        status_code=error.status_code,
+        detail=error.as_dict(),
+    ) from error
+
+
+def _raise_epg_binding_management_error(
+    error: epg_binding_management.EpgBindingManagementError,
+) -> None:
+    raise HTTPException(
+        status_code=error.status_code,
+        detail=error.as_dict(),
+    ) from error
+
+
+def _raise_unexpected_epg_binding_error(
+    error: BaseException,
+    *,
+    operation: str,
+) -> None:
+    logger.warning(
+        "epg_binding_management_unavailable",
+        extra={
+            "epg_binding_management": {
+                "operation": operation,
+                "error_type": type(error).__name__,
+            }
+        },
+    )
+    raise HTTPException(
+        status_code=500,
+        detail={
+            "code": "binding_write_failed",
+            "message": "EPG binding 操作失败",
+        },
+    ) from error
+
+
+async def _epg_source_projection(request: Request, source_id: int) -> dict:
+    rows = await epg_management.list_epg_source_statuses(
+        getattr(request.app.state, "automation_service", None)
+    )
+    source = next((row for row in rows if row["id"] == source_id), None)
+    if source is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "source_not_found", "message": "EPG 来源不存在"},
+        )
+    return source
+
+
 @app.post("/api/admin/epg/sources", dependencies=[Depends(require_admin)])
 async def add_epg_source(request: Request):
-    body = await request.json()
-    url = (body.get('url') or '').strip()
-    name = (body.get('name') or '').strip() or url
-    if not url:
-        raise HTTPException(status_code=400, detail="缺少 url")
+    body = await _epg_source_request_body(
+        request,
+        allowed_fields={"name", "url", "enabled"},
+    )
     try:
-        sid = await db.add_epg_source(name, url)
-        await reconcile_epg_tasks_after_source_change(
+        source, preference_reconciled = (
+            await epg_source_management.create_custom_epg_source(
+                name=body.get("name"),
+                url=body.get("url"),
+                enabled=body.get("enabled", True),
+            )
+        )
+        source_id = int(source["id"])
+        automation_reconciled = await reconcile_epg_tasks_after_source_change(
             getattr(request.app.state, "automation_service", None),
             http_client,
-            source_id=sid,
+            source_id=source_id,
             operation="create",
         )
-        return {"id": sid, "name": name, "url": url}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        return {
+            "source": await _epg_source_projection(request, source_id),
+            "automation_reconciled": automation_reconciled,
+            "preference_reconciled": preference_reconciled,
+        }
+    except epg_source_management.EpgSourceManagementError as error:
+        _raise_epg_source_management_error(error)
 
 
 @app.get("/api/admin/epg/sources", dependencies=[Depends(require_admin)])
-async def list_epg_sources():
-    return await db.get_epg_sources()
+async def list_epg_sources(request: Request):
+    return await epg_management.list_epg_source_statuses(
+        getattr(request.app.state, "automation_service", None)
+    )
+
+
+@app.get("/api/admin/epg/overview", dependencies=[Depends(require_admin)])
+async def get_epg_management_overview():
+    return await epg_management.get_epg_management_overview()
+
+
+@app.get("/api/admin/epg/matching", dependencies=[Depends(require_admin)])
+async def list_epg_matching_channels(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=epg_management.MAX_PAGE_SIZE),
+    scope: str = Query("all"),
+    diagnostic_status: str = Query(""),
+    source_id: int | None = Query(None, ge=1),
+    q: str = Query("", max_length=256),
+):
+    try:
+        return await epg_management.list_epg_matching_channels(
+            page=page,
+            page_size=page_size,
+            scope=scope,
+            diagnostic_status=diagnostic_status,
+            source_id=source_id,
+            text=q,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.get("/api/admin/epg/matching/{logical_channel_id}", dependencies=[Depends(require_admin)])
+async def get_epg_matching_detail(
+    logical_channel_id: str,
+    candidate_limit: int = Query(10, ge=1, le=epg_management.MAX_CANDIDATES),
+):
+    try:
+        detail = await epg_management.get_epg_matching_detail(
+            logical_channel_id,
+            candidate_limit=candidate_limit,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    if detail is None:
+        raise HTTPException(status_code=404, detail="逻辑频道不存在")
+    return detail
+
+
+@app.get("/api/admin/epg/catalog", dependencies=[Depends(require_admin)])
+async def search_epg_catalog(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=epg_management.MAX_PAGE_SIZE),
+    q: str = Query("", max_length=256),
+    source_id: int | None = Query(None, ge=1),
+    availability: str = Query("all"),
+):
+    try:
+        return await epg_management.search_epg_catalog(
+            page=page,
+            page_size=page_size,
+            text=q,
+            source_id=source_id,
+            availability=availability,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.put(
+    "/api/admin/epg/logical-channels/{logical_channel_id}/binding",
+    dependencies=[Depends(require_admin)],
+)
+async def set_logical_epg_binding(logical_channel_id: str, request: Request):
+    body = await _epg_source_request_body(
+        request,
+        allowed_fields={"epg_source_id", "epg_channel_id"},
+    )
+    try:
+        return await epg_binding_management.bind_manual_epg_target(
+            logical_channel_id=logical_channel_id,
+            epg_source_id=body.get("epg_source_id"),
+            epg_channel_id=body.get("epg_channel_id"),
+        )
+    except epg_binding_management.EpgBindingManagementError as error:
+        _raise_epg_binding_management_error(error)
+    except Exception as error:
+        _raise_unexpected_epg_binding_error(error, operation="manual_bind")
+
+
+@app.put(
+    "/api/admin/epg/logical-channels/{logical_channel_id}/binding/lock",
+    dependencies=[Depends(require_admin)],
+)
+async def lock_logical_epg_binding(logical_channel_id: str):
+    try:
+        return await epg_binding_management.set_logical_epg_binding_lock(
+            logical_channel_id=logical_channel_id,
+            locked=True,
+        )
+    except epg_binding_management.EpgBindingManagementError as error:
+        _raise_epg_binding_management_error(error)
+    except Exception as error:
+        _raise_unexpected_epg_binding_error(error, operation="lock")
+
+
+@app.delete(
+    "/api/admin/epg/logical-channels/{logical_channel_id}/binding/lock",
+    dependencies=[Depends(require_admin)],
+)
+async def unlock_logical_epg_binding(logical_channel_id: str):
+    try:
+        return await epg_binding_management.set_logical_epg_binding_lock(
+            logical_channel_id=logical_channel_id,
+            locked=False,
+        )
+    except epg_binding_management.EpgBindingManagementError as error:
+        _raise_epg_binding_management_error(error)
+    except Exception as error:
+        _raise_unexpected_epg_binding_error(error, operation="unlock")
+
+
+@app.post(
+    "/api/admin/epg/logical-channels/{logical_channel_id}/restore-automatic",
+    dependencies=[Depends(require_admin)],
+)
+async def restore_logical_epg_automatic(logical_channel_id: str):
+    try:
+        return await epg_binding_management.restore_logical_epg_automatic(
+            logical_channel_id=logical_channel_id,
+        )
+    except epg_binding_management.EpgBindingManagementError as error:
+        _raise_epg_binding_management_error(error)
+    except Exception as error:
+        _raise_unexpected_epg_binding_error(
+            error,
+            operation="restore_automatic",
+        )
+
+
+@app.put(
+    "/api/admin/epg/logical-channels/{logical_channel_id}/no-epg",
+    dependencies=[Depends(require_admin)],
+)
+async def disable_logical_channel_epg(logical_channel_id: str):
+    try:
+        return await epg_binding_management.disable_logical_epg(
+            logical_channel_id=logical_channel_id,
+        )
+    except epg_binding_management.EpgBindingManagementError as error:
+        _raise_epg_binding_management_error(error)
+    except Exception as error:
+        _raise_unexpected_epg_binding_error(error, operation="disable_epg")
+
+
+@app.put(
+    "/api/admin/epg/subscriptions/{subscription_id}/source-preference",
+    dependencies=[Depends(require_admin)],
+)
+async def set_subscription_epg_source_preference(
+    subscription_id: int,
+    request: Request,
+):
+    body = await _epg_source_request_body(
+        request,
+        allowed_fields={"epg_source_id"},
+    )
+    try:
+        return await epg_binding_management.set_subscription_epg_source_preference(
+            subscription_id=subscription_id,
+            epg_source_id=body.get("epg_source_id"),
+        )
+    except epg_binding_management.EpgBindingManagementError as error:
+        _raise_epg_binding_management_error(error)
+    except Exception as error:
+        _raise_unexpected_epg_binding_error(
+            error,
+            operation="set_source_preference",
+        )
+
+
+@app.delete(
+    "/api/admin/epg/subscriptions/{subscription_id}/source-preference",
+    dependencies=[Depends(require_admin)],
+)
+async def clear_subscription_epg_source_preference(subscription_id: int):
+    try:
+        return await epg_binding_management.clear_subscription_epg_source_preference(
+            subscription_id=subscription_id,
+        )
+    except epg_binding_management.EpgBindingManagementError as error:
+        _raise_epg_binding_management_error(error)
+    except Exception as error:
+        _raise_unexpected_epg_binding_error(
+            error,
+            operation="clear_source_preference",
+        )
 
 
 @app.patch("/api/admin/epg/sources/{source_id}", dependencies=[Depends(require_admin)])
 async def update_epg_source(source_id: int, request: Request):
-    body = await request.json()
-    if not isinstance(body, dict):
-        raise HTTPException(status_code=400, detail="请求体必须是对象")
-    updates = {
-        key: body[key]
-        for key in ("name", "url", "enabled")
-        if key in body
-    }
-    try:
-        source = await db.update_epg_source(source_id, **updates)
-    except (TypeError, ValueError) as error:
-        raise HTTPException(status_code=400, detail=str(error)) from error
-    if source is None:
-        raise HTTPException(status_code=404, detail="EPG 来源不存在")
-    await reconcile_epg_tasks_after_source_change(
-        getattr(request.app.state, "automation_service", None),
-        http_client,
-        source_id=source_id,
-        operation="update",
+    body = await _epg_source_request_body(
+        request,
+        allowed_fields={"name", "url", "enabled"},
     )
-    return source
+    try:
+        _source, preference_reconciled = (
+            await epg_source_management.update_managed_epg_source(
+                source_id,
+                **body,
+            )
+        )
+        automation_reconciled = await reconcile_epg_tasks_after_source_change(
+            getattr(request.app.state, "automation_service", None),
+            http_client,
+            source_id=source_id,
+            operation="update",
+        )
+        return {
+            "source": await _epg_source_projection(request, source_id),
+            "automation_reconciled": automation_reconciled,
+            "preference_reconciled": preference_reconciled,
+        }
+    except epg_source_management.EpgSourceManagementError as error:
+        _raise_epg_source_management_error(error)
+
+
+@app.get(
+    "/api/admin/epg/sources/{source_id}/delete-impact",
+    dependencies=[Depends(require_admin)],
+)
+async def preview_epg_source_delete(source_id: int):
+    try:
+        return await epg_source_management.preview_epg_source_delete(source_id)
+    except epg_source_management.EpgSourceManagementError as error:
+        _raise_epg_source_management_error(error)
 
 
 @app.delete("/api/admin/epg/sources/{source_id}", dependencies=[Depends(require_admin)])
-async def delete_epg_source(source_id: int, request: Request):
-    await db.delete_epg_source(source_id)
-    await reconcile_epg_tasks_after_source_change(
-        getattr(request.app.state, "automation_service", None),
-        http_client,
-        source_id=source_id,
-        operation="delete",
-    )
-    return {"ok": True}
+async def delete_epg_source(
+    source_id: int,
+    request: Request,
+    confirm: bool = False,
+):
+    try:
+        result, preference_reconciled = (
+            await epg_source_management.delete_custom_epg_source(
+                source_id,
+                confirm=confirm,
+            )
+        )
+        automation_reconciled = await reconcile_epg_tasks_after_source_change(
+            getattr(request.app.state, "automation_service", None),
+            http_client,
+            source_id=source_id,
+            operation="delete",
+        )
+        return {
+            **result,
+            "automation_reconciled": automation_reconciled,
+            "preference_reconciled": preference_reconciled,
+        }
+    except epg_source_management.EpgSourceManagementError as error:
+        _raise_epg_source_management_error(error)
+
+
+@app.post(
+    "/api/admin/epg/sources/{source_id}/refresh",
+    dependencies=[Depends(require_admin)],
+)
+async def refresh_single_epg_source(source_id: int, request: Request):
+    source = await db.get_epg_source(source_id)
+    if source is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "source_not_found", "message": "EPG 来源不存在"},
+        )
+    if not bool(source.get("enabled")):
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "source_disabled", "message": "请先启用该 EPG 来源"},
+        )
+    service = getattr(request.app.state, "automation_service", None)
+    if service is None:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "automation_unavailable",
+                "message": "EPG 自动任务服务暂不可用",
+            },
+        )
+    try:
+        result = await run_epg_source_refresh_now(
+            service,
+            http_client,
+            source_id=source_id,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as error:
+        logger.warning(
+            "epg_single_source_refresh_unavailable",
+            extra={
+                "epg_source_management": {
+                    "source_id": source_id,
+                    "error_type": type(error).__name__,
+                }
+            },
+        )
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "refresh_unavailable",
+                "message": "EPG 来源刷新暂不可用",
+            },
+        ) from error
+    if isinstance(result, AutomationBusy):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "source_refresh_busy",
+                "message": "该 EPG 来源正在刷新",
+            },
+        )
+    failure_categories = {
+        "partial": "refresh_partial",
+        "failed": "refresh_failed",
+        "cancelled": "refresh_cancelled",
+    }
+    messages = {
+        "success": "EPG 来源刷新完成",
+        "partial": "EPG 数据已刷新，但后续维护未完全完成",
+        "failed": "EPG 来源刷新失败",
+        "cancelled": "EPG 来源刷新已取消",
+    }
+    return {
+        "source_id": source_id,
+        "status": result.status,
+        "updated": result.updated_count > 0,
+        "failure_category": failure_categories.get(result.status, ""),
+        "message": messages.get(result.status, "EPG 来源刷新结束"),
+        "started_at": result.started_at,
+        "finished_at": result.finished_at,
+    }
 
 
 async def _run_manual_epg_refresh(automation_service) -> None:
@@ -4014,7 +4418,7 @@ async def get_epg_programs(canonical_key: str, date: str = '', tz: str = ''):
         sid = effective_target['source_id']
         cid = effective_target['channel_id']
         effective_match_status = em.get('match_status') if em else 'matched'
-    elif em and em.get('epg_channel_id'):
+    elif comparison is None and em and em.get('epg_channel_id'):
         sid = em['epg_source_id']
         cid = em['epg_channel_id']
         effective_match_status = em.get('match_status', 'unmatched')

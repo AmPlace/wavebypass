@@ -17,6 +17,9 @@ def _clear_modules():
             "database",
             "epg",
             "epg_maintenance",
+            "epg_preference_evidence",
+            "epg_source_management",
+            "epg_source_model",
             "epg_tasks",
             "market",
             "market_tasks",
@@ -366,6 +369,8 @@ class EpgAutomationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(completed.status, "success")
 
     async def test_manual_run_now_targets_enabled_sources_without_duplicates(self):
+        builtin = (await self.epg.ensure_default_epg_sources())[0]
+        await self.db.update_epg_source(builtin["id"], enabled=0)
         enabled = await self._source("Enabled")
         await self._source("Disabled", enabled=False)
         service = self._service()
@@ -389,16 +394,58 @@ class EpgAutomationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request.task_id, self.epg_tasks.epg_task_id(enabled["id"]))
         self.assertEqual(request.trigger, "manual_api")
 
+    async def test_single_source_run_now_reuses_reconciled_automation_runner(self):
+        source = await self._source("Single")
+        service = self._service()
+        expected = self.automation.AutomationRunResult(
+            task_id=self.epg_tasks.epg_task_id(source["id"]),
+            task_type="refresh",
+            status="success",
+            checked_count=1,
+            updated_count=1,
+            skipped_count=0,
+            failed_count=0,
+            error="",
+            started_at="2026-08-09T00:00:00+00:00",
+            finished_at="2026-08-09T00:00:01+00:00",
+        )
+        with mock.patch.object(
+            self.epg_tasks,
+            "reconcile_epg_automation_tasks",
+            new=mock.AsyncMock(),
+        ) as reconcile, mock.patch.object(
+            service.runner,
+            "run",
+            new=mock.AsyncMock(return_value=expected),
+        ) as run:
+            result = await self.epg_tasks.run_epg_source_refresh_now(
+                service,
+                self.client,
+                source_id=source["id"],
+            )
+
+        self.assertIs(result, expected)
+        reconcile.assert_awaited_once_with(service, self.client)
+        request = run.await_args.args[0]
+        self.assertEqual(request.task_id, self.epg_tasks.epg_task_id(source["id"]))
+        self.assertEqual(request.task_type, "refresh")
+        self.assertEqual(request.trigger, "manual_api")
+
     async def test_production_factory_registers_market_and_all_sources(self):
         first = await self._source("First")
         second = await self._source("Second", enabled=False)
         service = await self.epg_tasks.create_production_automation_service(self.client)
         self.services.append(service)
+        builtin = next(
+            source for source in await self.db.get_epg_sources()
+            if source["source_origin"] == "builtin"
+        )
         task_ids = {item.task_id for item in service.registry.list_definitions()}
         self.assertEqual(
             task_ids,
             {
                 "market_auto_update",
+                self.epg_tasks.epg_task_id(builtin["id"]),
                 self.epg_tasks.epg_task_id(first["id"]),
                 self.epg_tasks.epg_task_id(second["id"]),
             },

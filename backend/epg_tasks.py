@@ -309,9 +309,38 @@ async def run_epg_refresh_now(
     return tuple(results)
 
 
-async def list_epg_automation_status(service: AutomationService) -> list[dict]:
+async def run_epg_source_refresh_now(
+    service: AutomationService,
+    client: httpx.AsyncClient,
+    *,
+    source_id: int,
+) -> AutomationRunResult | AutomationBusy:
+    """Run one source through the existing Automation-owned refresh handler."""
+    source_id = _normalize_source_id(source_id)
+    await reconcile_epg_automation_tasks(service, client)
+    return await service.runner.run(AutomationRunRequest(
+        task_id=epg_task_id(source_id),
+        task_type=EPG_TASK_TYPE,
+        trigger="manual_api",
+    ))
+
+
+async def list_epg_automation_status(
+    service: AutomationService,
+    *,
+    sources: list[dict] | None = None,
+) -> list[dict]:
     """Return bounded internal status without source URL or request metadata."""
-    sources = {int(source["id"]): source for source in await db.get_epg_sources()}
+    source_rows = sources if sources is not None else await db.get_epg_sources()
+    sources_by_id = {int(source["id"]): source for source in source_rows}
+    configs = {
+        config.task_id: config
+        for config in await service.repository.list_configs()
+    }
+    states = {
+        state.task_id: state
+        for state in await service.repository.list_states()
+    }
     rows: list[dict] = []
     for definition in sorted(
         service.registry.list_definitions(),
@@ -320,9 +349,9 @@ async def list_epg_automation_status(service: AutomationService) -> list[dict]:
         source_id = source_id_from_task_id(definition.task_id)
         if source_id is None:
             continue
-        config = await service.repository.get_config(definition.task_id)
-        state = await service.repository.get_state(definition.task_id)
-        source = sources.get(source_id)
+        config = configs.get(definition.task_id)
+        state = states.get(definition.task_id)
+        source = sources_by_id.get(source_id)
         next_run_at = ""
         if config and config.enabled and state and state.last_finished_at:
             try:
@@ -353,16 +382,17 @@ async def reconcile_epg_tasks_after_source_change(
     *,
     source_id: int,
     operation: str,
-) -> None:
+) -> bool:
     """Keep a committed CRUD operation successful if scheduling reconciliation degrades."""
     if service is None:
         logger.warning(
             "epg_automation_reconcile_deferred",
             extra={"epg_automation": {"source_id": source_id, "operation": operation, "error_type": "service_unavailable"}},
         )
-        return
+        return False
     try:
         await reconcile_epg_automation_tasks(service, client)
+        return True
     except asyncio.CancelledError:
         raise
     except Exception as error:
@@ -376,3 +406,4 @@ async def reconcile_epg_tasks_after_source_change(
                 }
             },
         )
+        return False

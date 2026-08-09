@@ -5,6 +5,14 @@ import json
 import uuid
 from datetime import datetime, timezone
 
+from epg_source_model import (
+    BUILTIN_CHINA_EPG_PRESET,
+    validate_builtin_key,
+    validate_epg_source_name,
+    validate_epg_source_origin,
+    validate_epg_source_url,
+)
+
 
 AUTOMATION_ERROR_MAX_LENGTH = 2048
 EPG_ERROR_MAX_LENGTH = 1024
@@ -200,6 +208,19 @@ CREATE INDEX IF NOT EXISTS idx_iptv_logical_epg_bindings_target
 ON iptv_logical_channel_epg_bindings(epg_source_id, epg_channel_id);
 CREATE INDEX IF NOT EXISTS idx_iptv_logical_epg_bindings_status
 ON iptv_logical_channel_epg_bindings(status);
+
+CREATE TABLE IF NOT EXISTS iptv_logical_channel_epg_policies (
+    logical_channel_id  TEXT PRIMARY KEY,
+    mode                TEXT NOT NULL
+                        CHECK(mode IN ('automatic', 'no_epg')),
+    created_at          TEXT NOT NULL,
+    updated_at          TEXT NOT NULL,
+    FOREIGN KEY(logical_channel_id)
+        REFERENCES iptv_logical_channels(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_iptv_logical_epg_policies_mode
+ON iptv_logical_channel_epg_policies(mode);
+
 CREATE TABLE IF NOT EXISTS epg_match_shadow_runs (
     run_id                       TEXT PRIMARY KEY,
     status                       TEXT NOT NULL
@@ -284,8 +305,15 @@ CREATE TABLE IF NOT EXISTS epg_sources (
     programme_count INTEGER NOT NULL DEFAULT 0,
     data_start_at   TEXT DEFAULT '',
     data_end_at     TEXT DEFAULT '',
+    source_origin   TEXT NOT NULL DEFAULT 'custom'
+                    CHECK(source_origin IN ('builtin', 'custom')),
+    builtin_key     TEXT DEFAULT NULL,
     created_at      TEXT NOT NULL,
-    updated_at      TEXT NOT NULL
+    updated_at      TEXT NOT NULL,
+    CHECK(
+        (source_origin='builtin' AND builtin_key IS NOT NULL AND builtin_key<>'')
+        OR (source_origin='custom' AND builtin_key IS NULL)
+    )
 );
 
 CREATE TABLE IF NOT EXISTS epg_source_preference_evidence (
@@ -555,11 +583,40 @@ async def initialize():
             ('programme_count', 'INTEGER', '0'),
             ('data_start_at', 'TEXT', "''"),
             ('data_end_at', 'TEXT', "''"),
+            ('source_origin', 'TEXT', "'custom'"),
+            ('builtin_key', 'TEXT', 'NULL'),
         ]:
             try:
                 conn.execute(f"ALTER TABLE epg_sources ADD COLUMN {col} {typ} DEFAULT {default}")
             except sqlite3.OperationalError:
                 pass
+        # One-time development migration for the exact pre-5B default row.
+        # Runtime product behavior never infers builtin identity from URL/name;
+        # all later reads and writes use the persisted builtin_key.
+        conn.execute(
+            """
+            UPDATE epg_sources
+            SET source_origin='builtin', builtin_key=?
+            WHERE source_origin='custom' AND builtin_key IS NULL
+              AND name=? AND url=?
+              AND NOT EXISTS (
+                  SELECT 1 FROM epg_sources AS existing
+                  WHERE existing.builtin_key=?
+              )
+            """,
+            (
+                BUILTIN_CHINA_EPG_PRESET.key,
+                BUILTIN_CHINA_EPG_PRESET.name,
+                BUILTIN_CHINA_EPG_PRESET.url,
+                BUILTIN_CHINA_EPG_PRESET.key,
+            ),
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_epg_sources_builtin_key
+            ON epg_sources(builtin_key) WHERE builtin_key IS NOT NULL
+            """
+        )
         for col, typ, default in [
             ('shadow_run_id', 'TEXT', 'NULL'),
         ]:
@@ -876,6 +933,22 @@ async def get_automation_task_state(task_id: str) -> dict | None:
             conn.close()
 
     return await asyncio.to_thread(_get)
+
+
+async def list_automation_task_states() -> list[dict]:
+    """Return the latest state for all automation tasks in one read query."""
+
+    def _list():
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM automation_task_state ORDER BY task_id"
+            ).fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_list)
 
 
 async def get_automation_conflict_group_state(conflict_group: str) -> dict | None:
@@ -2312,19 +2385,108 @@ async def reset_channel_statuses_all():
 
 # ── EPG ──
 
-async def add_epg_source(name: str, url: str) -> int:
+async def add_epg_source(
+    name: str,
+    url: str,
+    *,
+    enabled: bool | int = True,
+    source_origin: str = 'custom',
+    builtin_key: str | None = None,
+) -> int:
+    name = validate_epg_source_name(name)
+    url = validate_epg_source_url(url)
+    enabled_value = _normalize_enabled(enabled)
+    source_origin = validate_epg_source_origin(source_origin)
+    builtin_key = validate_builtin_key(
+        builtin_key,
+        required=source_origin == 'builtin',
+    )
+    if source_origin == 'custom' and builtin_key is not None:
+        raise ValueError('custom EPG 来源不能包含 builtin_key')
+
     def _add():
         conn = _connect()
-        now = datetime.now(timezone.utc).isoformat()
-        cur = conn.execute(
-            "INSERT INTO epg_sources(name, url, created_at, updated_at) VALUES(?, ?, ?, ?)",
-            (name, url, now, now),
-        )
-        conn.commit()
-        sid = cur.lastrowid
-        conn.close()
-        return sid
+        try:
+            now = datetime.now(timezone.utc).isoformat()
+            cur = conn.execute(
+                """
+                INSERT INTO epg_sources(
+                    name, url, enabled, source_origin, builtin_key,
+                    created_at, updated_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    name, url, enabled_value, source_origin, builtin_key,
+                    now, now,
+                ),
+            )
+            conn.commit()
+            return int(cur.lastrowid)
+        finally:
+            conn.close()
     return await asyncio.to_thread(_add)
+
+
+async def ensure_builtin_epg_source(
+    *,
+    builtin_key: str,
+    name: str,
+    url: str,
+) -> dict:
+    """Ensure one code-managed preset while preserving enabled/name choices."""
+    builtin_key = validate_builtin_key(builtin_key, required=True)
+    name = validate_epg_source_name(name)
+    url = validate_epg_source_url(url)
+
+    def _ensure():
+        conn = _connect()
+        try:
+            conn.execute('BEGIN IMMEDIATE')
+            row = conn.execute(
+                "SELECT * FROM epg_sources WHERE builtin_key=?",
+                (builtin_key,),
+            ).fetchone()
+            now = _utc_now()
+            if row is None:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO epg_sources(
+                        name, url, enabled, source_origin, builtin_key,
+                        created_at, updated_at
+                    ) VALUES(?, ?, 1, 'builtin', ?, ?, ?)
+                    """,
+                    (name, url, builtin_key, now, now),
+                )
+                source_id = int(cursor.lastrowid)
+            else:
+                source_id = int(row['id'])
+                if row['source_origin'] != 'builtin':
+                    raise ValueError('builtin_key 已被非 builtin EPG 来源占用')
+                if str(row['url']) != url:
+                    conn.execute(
+                        """
+                        UPDATE epg_sources
+                        SET url=?, revision=revision+1,
+                            last_status='revision_discarded', last_error='',
+                            updated_at=?
+                        WHERE id=?
+                        """,
+                        (url, now, source_id),
+                    )
+            current = conn.execute(
+                "SELECT * FROM epg_sources WHERE id=?",
+                (source_id,),
+            ).fetchone()
+            conn.commit()
+            return dict(current)
+        except BaseException:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_ensure)
 
 
 async def get_epg_source(source_id: int) -> dict | None:
@@ -2350,9 +2512,17 @@ async def get_epg_sources() -> list[dict]:
 async def delete_epg_source(source_id: int):
     def _delete():
         conn = _connect()
-        conn.execute("DELETE FROM epg_sources WHERE id=?", (source_id,))
-        conn.commit()
-        conn.close()
+        try:
+            with conn:
+                source = conn.execute(
+                    "SELECT source_origin FROM epg_sources WHERE id=?",
+                    (source_id,),
+                ).fetchone()
+                if source is not None and source['source_origin'] == 'builtin':
+                    raise ValueError('builtin EPG 来源不能删除')
+                conn.execute("DELETE FROM epg_sources WHERE id=?", (source_id,))
+        finally:
+            conn.close()
     await asyncio.to_thread(_delete)
 
 
@@ -2374,6 +2544,15 @@ async def update_epg_source(source_id: int, **kwargs):
                 updates = dict(kwargs)
                 if 'enabled' in updates:
                     updates['enabled'] = _normalize_enabled(updates['enabled'])
+                if 'name' in updates:
+                    updates['name'] = validate_epg_source_name(updates['name'])
+                if 'url' in updates:
+                    updates['url'] = validate_epg_source_url(updates['url'])
+                    if (
+                        current['source_origin'] == 'builtin'
+                        and updates['url'] != current['url']
+                    ):
+                        raise ValueError('builtin EPG 来源 URL 由 WaveFlow 管理')
                 identity_changed = any(
                     field in updates and updates[field] != current[field]
                     for field in ('url', 'enabled')

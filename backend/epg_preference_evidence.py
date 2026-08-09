@@ -20,6 +20,34 @@ from epg_source_preference import (
 )
 
 
+class EpgPreferenceEvidenceError(ValueError):
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+def _positive_id(value: object, field: str) -> int:
+    if isinstance(value, bool):
+        raise EpgPreferenceEvidenceError(
+            'preference_invalid',
+            f'{field} 必须是正整数',
+        )
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError) as error:
+        raise EpgPreferenceEvidenceError(
+            'preference_invalid',
+            f'{field} 必须是正整数',
+        ) from error
+    if normalized <= 0:
+        raise EpgPreferenceEvidenceError(
+            'preference_invalid',
+            f'{field} 必须是正整数',
+        )
+    return normalized
+
+
 def normalize_epg_source_url(value: str) -> str | None:
     """Normalize transport syntax while preserving path and complete query semantics."""
     try:
@@ -207,6 +235,225 @@ async def delete_manual_source_preference(*, epg_source_id: int, subscription_id
         finally:
             conn.close()
     await asyncio.to_thread(_delete)
+
+
+async def set_subscription_manual_source_preference(
+    *,
+    subscription_id: int,
+    epg_source_id: int,
+) -> dict:
+    """Replace one subscription-scoped manual preference atomically."""
+    subscription_id = _positive_id(subscription_id, 'subscription_id')
+    epg_source_id = _positive_id(epg_source_id, 'epg_source_id')
+
+    def _set():
+        conn = db._connect()
+        try:
+            conn.execute('BEGIN IMMEDIATE')
+            if conn.execute(
+                'SELECT 1 FROM subscriptions WHERE id=?',
+                (subscription_id,),
+            ).fetchone() is None:
+                raise EpgPreferenceEvidenceError(
+                    'preference_invalid',
+                    '直播源订阅不存在',
+                )
+            if conn.execute(
+                'SELECT 1 FROM epg_sources WHERE id=?',
+                (epg_source_id,),
+            ).fetchone() is None:
+                raise EpgPreferenceEvidenceError(
+                    'epg_source_not_found',
+                    'EPG 来源不存在',
+                )
+            now = datetime.now(timezone.utc).isoformat()
+            replaced_count = conn.execute(
+                """
+                DELETE FROM epg_source_preference_evidence
+                WHERE origin='manual' AND subscription_id=?
+                  AND logical_channel_id=''
+                """,
+                (subscription_id,),
+            ).rowcount
+            cursor = conn.execute(
+                """
+                INSERT INTO epg_source_preference_evidence(
+                    subscription_id, logical_channel_id, origin,
+                    epg_source_id, resolution_status, evidence_json,
+                    created_at, updated_at
+                ) VALUES(?, '', 'manual', ?, 'manual',
+                         '{"explicit":true,"scope":"subscription"}', ?, ?)
+                """,
+                (subscription_id, epg_source_id, now, now),
+            )
+            row = conn.execute(
+                """
+                SELECT id, subscription_id, logical_channel_id, origin,
+                       epg_source_id, resolution_status, valid, current,
+                       created_at, updated_at
+                FROM epg_source_preference_evidence WHERE id=?
+                """,
+                (cursor.lastrowid,),
+            ).fetchone()
+            conn.commit()
+            return {
+                **dict(row),
+                'replaced_manual_count': int(replaced_count),
+            }
+        except BaseException:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_set)
+
+
+async def clear_subscription_manual_source_preference(
+    *,
+    subscription_id: int,
+) -> dict:
+    """Clear only manual evidence; all derived evidence remains untouched."""
+    subscription_id = _positive_id(subscription_id, 'subscription_id')
+
+    def _clear():
+        conn = db._connect()
+        try:
+            conn.execute('BEGIN IMMEDIATE')
+            if conn.execute(
+                'SELECT 1 FROM subscriptions WHERE id=?',
+                (subscription_id,),
+            ).fetchone() is None:
+                raise EpgPreferenceEvidenceError(
+                    'preference_invalid',
+                    '直播源订阅不存在',
+                )
+            cleared_count = conn.execute(
+                """
+                DELETE FROM epg_source_preference_evidence
+                WHERE origin='manual' AND subscription_id=?
+                  AND logical_channel_id=''
+                """,
+                (subscription_id,),
+            ).rowcount
+            derived_count = int(conn.execute(
+                """
+                SELECT COUNT(*) FROM epg_source_preference_evidence
+                WHERE origin<>'manual' AND subscription_id=?
+                  AND valid=1 AND current=1
+                """,
+                (subscription_id,),
+            ).fetchone()[0])
+            conn.commit()
+            return {
+                'subscription_id': subscription_id,
+                'cleared_manual_count': int(cleared_count),
+                'preserved_derived_count': derived_count,
+            }
+        except BaseException:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_clear)
+
+
+async def reconcile_url_tvg_source_resolutions() -> dict:
+    """Re-resolve persisted URL fingerprints against the current source set.
+
+    This does not need the original secret-bearing URL: endpoint identity is
+    the persisted deterministic fingerprint. Manual evidence is deliberately
+    excluded so deleting a referenced source remains auditable as
+    ``missing_source`` instead of silently selecting another source.
+    """
+
+    def _reconcile():
+        conn = db._connect()
+        try:
+            conn.execute('BEGIN IMMEDIATE')
+            sources = [dict(row) for row in conn.execute(
+                'SELECT id, url FROM epg_sources ORDER BY id'
+            ).fetchall()]
+            sources_by_fingerprint: dict[str, list[int]] = {}
+            for source in sources:
+                fingerprint = _fingerprint(str(source.get('url') or ''))
+                if fingerprint:
+                    sources_by_fingerprint.setdefault(fingerprint, []).append(
+                        int(source['id'])
+                    )
+
+            rows = conn.execute(
+                """
+                SELECT * FROM epg_source_preference_evidence
+                WHERE origin='url_tvg' AND valid=1 AND current=1
+                ORDER BY id
+                """
+            ).fetchall()
+            changed_count = 0
+            counts = {'resolved': 0, 'unresolved': 0, 'ambiguous_source': 0}
+            now = datetime.now(timezone.utc).isoformat()
+            for row in rows:
+                matches = sorted(set(sources_by_fingerprint.get(
+                    str(row['hint_fingerprint'] or ''),
+                    (),
+                )))
+                evidence = {}
+                try:
+                    decoded = json.loads(row['evidence_json'] or '{}')
+                    if isinstance(decoded, dict):
+                        evidence = decoded
+                except json.JSONDecodeError:
+                    evidence = {}
+                evidence.pop('competing_source_ids', None)
+                if len(matches) == 1:
+                    status = 'resolved'
+                    source_id = matches[0]
+                elif len(matches) > 1:
+                    status = 'ambiguous_source'
+                    source_id = None
+                    evidence['competing_source_ids'] = matches[:16]
+                else:
+                    status = 'unresolved'
+                    source_id = None
+                encoded = json.dumps(
+                    evidence,
+                    ensure_ascii=False,
+                    separators=(',', ':'),
+                    sort_keys=True,
+                )
+                counts[status] += 1
+                if (
+                    row['epg_source_id'] != source_id
+                    or row['resolution_status'] != status
+                    or row['evidence_json'] != encoded
+                ):
+                    conn.execute(
+                        """
+                        UPDATE epg_source_preference_evidence
+                        SET epg_source_id=?, resolution_status=?,
+                            evidence_json=?, updated_at=?
+                        WHERE id=?
+                        """,
+                        (source_id, status, encoded, now, row['id']),
+                    )
+                    changed_count += 1
+            conn.commit()
+            return {
+                'evidence_count': len(rows),
+                'changed_count': changed_count,
+                **counts,
+            }
+        except BaseException:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_reconcile)
 
 
 @dataclass(frozen=True)

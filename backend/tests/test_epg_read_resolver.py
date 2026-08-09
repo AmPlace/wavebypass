@@ -11,7 +11,9 @@ from unittest import mock
 
 def _clear_modules():
     for name in (
-        'main', 'epg_read_resolver', 'epg_bindings', 'epg_catalog',
+        'main', 'epg_binding_management', 'epg_read_resolver',
+        'epg_bindings', 'epg_catalog', 'epg_maintenance',
+        'epg_match_shadow', 'epg_matcher',
         'iptv_channels', 'database', 'security.source_ids', 'security.secrets',
         'core.config',
     ):
@@ -221,6 +223,7 @@ class EpgReadResolverTest(unittest.IsolatedAsyncioTestCase):
             'logical': self.resolver.db.get_iptv_logical_channels,
             'catalog': self.resolver.db.list_epg_channel_catalog_rows,
             'bindings': bindings.list_epg_bindings,
+            'policies': bindings.list_epg_binding_policies,
         }
         calls = {key: 0 for key in originals}
 
@@ -240,11 +243,15 @@ class EpgReadResolverTest(unittest.IsolatedAsyncioTestCase):
         async def binding_rows(*args, **kwargs):
             return await counted('bindings', originals['bindings'], *args, **kwargs)
 
+        async def policy_rows(*args, **kwargs):
+            return await counted('policies', originals['policies'], *args, **kwargs)
+
         with (
             mock.patch.object(self.resolver.db, 'get_all_channel_epg_maps', legacy),
             mock.patch.object(self.resolver.db, 'get_iptv_logical_channels', logical),
             mock.patch.object(self.resolver.db, 'list_epg_channel_catalog_rows', catalog),
             mock.patch.object(bindings, 'list_epg_bindings', binding_rows),
+            mock.patch.object(bindings, 'list_epg_binding_policies', policy_rows),
         ):
             await self.resolver.resolve_epg_read_many(['key-1', 'key-2'])
             small_batch_calls = dict(calls)
@@ -252,9 +259,11 @@ class EpgReadResolverTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(small_batch_calls, {
             'legacy': 1, 'logical': 1, 'catalog': 1, 'bindings': 1,
+            'policies': 1,
         })
         self.assertEqual(calls, {
             'legacy': 2, 'logical': 2, 'catalog': 2, 'bindings': 2,
+            'policies': 2,
         })
 
     async def test_pure_same_target_uses_composite_identity(self):
@@ -272,6 +281,122 @@ class EpgReadResolverTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.comparison_status, 'same_target')
         self.assertEqual(result.effective_target.identity, result.legacy_target.identity)
         self.assertEqual(result.effective_source, 'shadow')
+
+    async def test_explicit_no_epg_suppresses_shadow_and_legacy_targets(self):
+        result = self.resolver.resolve_epg_read_snapshot(
+            'demo',
+            legacy_mapping={
+                'canonical_key': 'demo',
+                'epg_source_id': 1,
+                'epg_channel_id': 'legacy',
+            },
+            logical_rows=[{
+                'id': 'logical-1',
+                'canonical_key': 'demo',
+                'status': 'active',
+            }],
+            binding_rows=[{
+                'logical_channel_id': 'logical-1',
+                'epg_source_id': 2,
+                'epg_channel_id': 'shadow',
+                'status': 'matched',
+                'origin': 'manual',
+                'locked': 1,
+            }],
+            target_rows=[
+                {
+                    'source_id': 1,
+                    'channel_id': 'legacy',
+                    'source_enabled': 1,
+                    'source_status': 'success',
+                },
+                {
+                    'source_id': 2,
+                    'channel_id': 'shadow',
+                    'source_enabled': 1,
+                    'source_status': 'success',
+                },
+            ],
+            policy_rows=[{
+                'logical_channel_id': 'logical-1',
+                'mode': 'no_epg',
+            }],
+        )
+
+        self.assertEqual(result.comparison_status, 'not_applicable')
+        self.assertEqual(result.management_mode, 'no_epg')
+        self.assertEqual(result.fallback_reason, 'explicit_no_epg')
+        self.assertIsNone(result.effective_target)
+        self.assertEqual(result.effective_source, 'none')
+
+    async def test_explicit_automatic_without_binding_does_not_remigrate_legacy_read(self):
+        result = self.resolver.resolve_epg_read_snapshot(
+            'demo',
+            legacy_mapping={
+                'canonical_key': 'demo',
+                'epg_source_id': 1,
+                'epg_channel_id': 'legacy',
+            },
+            logical_rows=[{
+                'id': 'logical-1',
+                'canonical_key': 'demo',
+                'status': 'active',
+            }],
+            binding_rows=[],
+            target_rows=[{
+                'source_id': 1,
+                'channel_id': 'legacy',
+                'source_enabled': 1,
+                'source_status': 'success',
+            }],
+            policy_rows=[{
+                'logical_channel_id': 'logical-1',
+                'mode': 'automatic',
+            }],
+        )
+
+        self.assertEqual(result.comparison_status, 'legacy_only')
+        self.assertEqual(result.management_mode, 'automatic')
+        self.assertEqual(
+            result.fallback_reason,
+            'explicit_automatic_without_shadow',
+        )
+        self.assertIsNone(result.effective_target)
+        self.assertEqual(result.effective_source, 'none')
+
+    async def test_explicit_automatic_still_reads_current_shadow_binding(self):
+        result = self.resolver.resolve_epg_read_snapshot(
+            'demo',
+            legacy_mapping=None,
+            logical_rows=[{
+                'id': 'logical-1',
+                'canonical_key': 'demo',
+                'status': 'active',
+            }],
+            binding_rows=[{
+                'logical_channel_id': 'logical-1',
+                'epg_source_id': 2,
+                'epg_channel_id': 'shadow',
+                'status': 'matched',
+                'origin': 'automatic',
+                'shadow_run_id': 'run-1',
+            }],
+            target_rows=[{
+                'source_id': 2,
+                'channel_id': 'shadow',
+                'source_enabled': 0,
+                'source_status': 'failed',
+            }],
+            policy_rows=[{
+                'logical_channel_id': 'logical-1',
+                'mode': 'automatic',
+            }],
+        )
+
+        self.assertEqual(result.comparison_status, 'shadow_only')
+        self.assertEqual(result.management_mode, 'automatic')
+        self.assertEqual(result.effective_source, 'shadow')
+        self.assertEqual(result.effective_target.identity.source_id, 2)
         self.assertNotIn('secret', repr(result.as_dict()))
 
     async def test_composite_target_changed_when_bare_channel_id_matches(self):

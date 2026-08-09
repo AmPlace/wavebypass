@@ -368,6 +368,10 @@ class AutomationRepository:
         row = await self._database.get_automation_task_state(task_id)
         return _state_from_row(row) if row else None
 
+    async def list_states(self) -> list[AutomationTaskState]:
+        rows = await self._database.list_automation_task_states()
+        return [_state_from_row(row) for row in rows]
+
     async def get_busy(self, conflict_group: str) -> AutomationTaskState | None:
         row = await self._database.get_automation_conflict_group_state(conflict_group)
         return _state_from_row(row) if row else None

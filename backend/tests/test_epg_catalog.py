@@ -315,7 +315,11 @@ class EpgCatalogTest(unittest.IsolatedAsyncioTestCase):
         epg_source = (backend_dir / 'epg.py').read_text(encoding='utf-8')
         main_source = (backend_dir / 'main.py').read_text(encoding='utf-8')
         self.assertNotIn('epg_catalog', epg_source)
-        self.assertNotIn('epg_catalog', main_source)
+        # Read-only management catalog search may legitimately be routed from
+        # main.  The production matcher boundary is that main does not import
+        # or call the EPG-2B catalog domain directly.
+        self.assertNotIn('import epg_catalog', main_source)
+        self.assertNotIn('from epg_catalog', main_source)
         self.assertNotIn('channel_epg_bindings', epg_source + main_source)
 
 

@@ -28,6 +28,16 @@ BINDING_STATUSES = {
 BINDING_ORIGINS = {'legacy_migrated', 'automatic', 'manual'}
 MIGRATABLE_MATCH_STATUSES = {'matched', 'locked'}
 LOGICAL_CONFLICT_STATUSES = {'split_conflict', 'merge_conflict'}
+EPG_POLICY_MODES = {'automatic', 'no_epg'}
+
+
+class EpgBindingOperationError(ValueError):
+    """Stable domain failure for product-facing logical binding operations."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+        self.message = message
 
 
 @dataclass(frozen=True)
@@ -72,11 +82,32 @@ class EpgLogicalChannelBinding:
         }
 
 
+@dataclass(frozen=True)
+class EpgLogicalChannelPolicy:
+    logical_channel_id: str
+    mode: str
+    created_at: str
+    updated_at: str
+
+    def as_dict(self) -> dict:
+        return {
+            'logical_channel_id': self.logical_channel_id,
+            'mode': self.mode,
+            'created_at': self.created_at,
+            'updated_at': self.updated_at,
+        }
+
+
 _BINDING_SELECT = """
     SELECT id, logical_channel_id, epg_source_id, epg_channel_id,
            status, match_type, confidence, locked, origin,
            legacy_canonical_key, created_at, updated_at, shadow_run_id
     FROM iptv_logical_channel_epg_bindings
+"""
+
+_POLICY_SELECT = """
+    SELECT logical_channel_id, mode, created_at, updated_at
+    FROM iptv_logical_channel_epg_policies
 """
 
 
@@ -94,6 +125,15 @@ def _binding_from_row(row: Mapping[str, object]) -> EpgLogicalChannelBinding:
         created_at=str(row.get('created_at') or ''),
         updated_at=str(row.get('updated_at') or ''),
         shadow_run_id=(str(row['shadow_run_id']) if row.get('shadow_run_id') else None),
+    )
+
+
+def _policy_from_row(row: Mapping[str, object]) -> EpgLogicalChannelPolicy:
+    return EpgLogicalChannelPolicy(
+        logical_channel_id=str(row['logical_channel_id']),
+        mode=str(row['mode']),
+        created_at=str(row.get('created_at') or ''),
+        updated_at=str(row.get('updated_at') or ''),
     )
 
 
@@ -127,6 +167,24 @@ def _validate_origin(origin: str) -> str:
     return origin
 
 
+def _validate_policy_mode(mode: str) -> str:
+    if mode not in EPG_POLICY_MODES:
+        raise ValueError(f'非法 EPG policy mode: {mode}')
+    return mode
+
+
+def _validate_source_id(value: object) -> int:
+    if isinstance(value, bool):
+        raise TypeError('epg_source_id 必须是正整数')
+    try:
+        source_id = int(value)
+    except (TypeError, ValueError) as error:
+        raise TypeError('epg_source_id 必须是正整数') from error
+    if source_id <= 0:
+        raise ValueError('epg_source_id 必须是正整数')
+    return source_id
+
+
 def _target_exists(conn, target: EpgChannelIdentity) -> bool:
     row = conn.execute(
         "SELECT 1 FROM epg_channels WHERE source_id=? AND channel_id=? LIMIT 1",
@@ -140,6 +198,79 @@ def _logical_row(conn, logical_channel_id: str):
         "SELECT id, canonical_key, status FROM iptv_logical_channels WHERE id=?",
         (logical_channel_id,),
     ).fetchone()
+
+
+def _manageable_logical_row(conn, logical_channel_id: str):
+    logical = _logical_row(conn, logical_channel_id)
+    if logical is None:
+        raise EpgBindingOperationError(
+            'logical_channel_not_found',
+            '逻辑频道不存在',
+        )
+    status = str(logical['status'] or '')
+    if status in LOGICAL_CONFLICT_STATUSES:
+        raise EpgBindingOperationError(
+            'logical_channel_conflict',
+            '逻辑频道处于 split/merge conflict 状态',
+        )
+    if status != 'active':
+        raise EpgBindingOperationError(
+            'logical_channel_inactive',
+            '逻辑频道当前不可管理',
+        )
+    return logical
+
+
+def _validate_management_target(conn, target: EpgChannelIdentity) -> None:
+    source = conn.execute(
+        'SELECT id FROM epg_sources WHERE id=?',
+        (target.source_id,),
+    ).fetchone()
+    if source is None:
+        raise EpgBindingOperationError(
+            'epg_source_not_found',
+            'EPG 来源不存在',
+        )
+    if _target_exists(conn, target):
+        return
+    same_channel_elsewhere = conn.execute(
+        'SELECT 1 FROM epg_channels WHERE channel_id=? LIMIT 1',
+        (target.channel_id,),
+    ).fetchone()
+    if same_channel_elsewhere is not None:
+        raise EpgBindingOperationError(
+            'invalid_composite_target',
+            '该 EPG channel ID 不属于所选来源',
+        )
+    raise EpgBindingOperationError(
+        'epg_channel_not_found',
+        'EPG 频道不存在',
+    )
+
+
+def _upsert_policy(
+    conn,
+    logical_channel_id: str,
+    mode: str,
+) -> EpgLogicalChannelPolicy:
+    mode = _validate_policy_mode(mode)
+    now = db._utc_now()
+    conn.execute(
+        """
+        INSERT INTO iptv_logical_channel_epg_policies(
+            logical_channel_id, mode, created_at, updated_at
+        ) VALUES(?, ?, ?, ?)
+        ON CONFLICT(logical_channel_id) DO UPDATE SET
+            mode=excluded.mode,
+            updated_at=excluded.updated_at
+        """,
+        (logical_channel_id, mode, now, now),
+    )
+    row = conn.execute(
+        _POLICY_SELECT + ' WHERE logical_channel_id=?',
+        (logical_channel_id,),
+    ).fetchone()
+    return _policy_from_row(dict(row))
 
 
 def _load_binding_rows(conn) -> list[dict]:
@@ -168,6 +299,42 @@ async def list_epg_bindings() -> list[EpgLogicalChannelBinding]:
         conn = db._connect()
         try:
             return [_binding_from_row(row) for row in _load_binding_rows(conn)]
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_list)
+
+
+async def get_epg_binding_policy(
+    logical_channel_id: str,
+) -> EpgLogicalChannelPolicy | None:
+    logical_channel_id = _validate_text(
+        logical_channel_id,
+        'logical_channel_id',
+    )
+
+    def _get():
+        conn = db._connect()
+        try:
+            row = conn.execute(
+                _POLICY_SELECT + ' WHERE logical_channel_id=?',
+                (logical_channel_id,),
+            ).fetchone()
+            return _policy_from_row(dict(row)) if row else None
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_get)
+
+
+async def list_epg_binding_policies() -> list[EpgLogicalChannelPolicy]:
+    def _list():
+        conn = db._connect()
+        try:
+            rows = conn.execute(
+                _POLICY_SELECT + ' ORDER BY logical_channel_id'
+            ).fetchall()
+            return [_policy_from_row(dict(row)) for row in rows]
         finally:
             conn.close()
 
@@ -273,6 +440,203 @@ async def create_matched_epg_binding(
             conn.close()
 
     return await asyncio.to_thread(_create)
+
+
+async def set_manual_epg_binding(
+    logical_channel_id: str,
+    epg_source_id: int,
+    epg_channel_id: str,
+) -> tuple[str, EpgLogicalChannelBinding]:
+    """Atomically create or replace one exact manual composite binding."""
+    logical_channel_id = _validate_text(
+        logical_channel_id,
+        'logical_channel_id',
+    )
+    target = EpgChannelIdentity(
+        _validate_source_id(epg_source_id),
+        _validate_text(epg_channel_id, 'epg_channel_id'),
+    )
+
+    def _set():
+        conn = db._connect()
+        try:
+            conn.execute('BEGIN IMMEDIATE')
+            _manageable_logical_row(conn, logical_channel_id)
+            _validate_management_target(conn, target)
+            existing = conn.execute(
+                _BINDING_SELECT + ' WHERE logical_channel_id=?',
+                (logical_channel_id,),
+            ).fetchone()
+            now = db._utc_now()
+            if existing is None:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO iptv_logical_channel_epg_bindings(
+                        logical_channel_id, epg_source_id, epg_channel_id,
+                        status, match_type, confidence, locked, origin,
+                        shadow_run_id, legacy_canonical_key,
+                        created_at, updated_at
+                    ) VALUES(?, ?, ?, 'matched', 'manual', 100, 1, 'manual',
+                             NULL, '', ?, ?)
+                    """,
+                    (
+                        logical_channel_id,
+                        target.source_id,
+                        target.channel_id,
+                        now,
+                        now,
+                    ),
+                )
+                binding_id = int(cursor.lastrowid)
+                action = 'created'
+            else:
+                binding_id = int(existing['id'])
+                conn.execute(
+                    """
+                    UPDATE iptv_logical_channel_epg_bindings
+                    SET epg_source_id=?, epg_channel_id=?, status='matched',
+                        match_type='manual', confidence=100, locked=1,
+                        origin='manual', shadow_run_id=NULL,
+                        legacy_canonical_key='', updated_at=?
+                    WHERE id=?
+                    """,
+                    (
+                        target.source_id,
+                        target.channel_id,
+                        now,
+                        binding_id,
+                    ),
+                )
+                action = 'replaced'
+            # Manual target selection supersedes an earlier explicit
+            # automatic/no-EPG policy in the same transaction.
+            conn.execute(
+                """
+                DELETE FROM iptv_logical_channel_epg_policies
+                WHERE logical_channel_id=?
+                """,
+                (logical_channel_id,),
+            )
+            row = conn.execute(
+                _BINDING_SELECT + ' WHERE id=?',
+                (binding_id,),
+            ).fetchone()
+            conn.commit()
+            return action, _binding_from_row(dict(row))
+        except BaseException:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_set)
+
+
+async def set_epg_binding_locked(
+    logical_channel_id: str,
+    *,
+    locked: bool,
+) -> EpgLogicalChannelBinding:
+    """Change only protection; unlocking deliberately retains the binding."""
+    logical_channel_id = _validate_text(
+        logical_channel_id,
+        'logical_channel_id',
+    )
+    if not isinstance(locked, bool):
+        raise TypeError('locked 必须是布尔值')
+
+    def _set():
+        conn = db._connect()
+        try:
+            conn.execute('BEGIN IMMEDIATE')
+            _manageable_logical_row(conn, logical_channel_id)
+            current = conn.execute(
+                _BINDING_SELECT + ' WHERE logical_channel_id=?',
+                (logical_channel_id,),
+            ).fetchone()
+            if current is None:
+                raise EpgBindingOperationError(
+                    'binding_conflict',
+                    '逻辑频道当前没有可锁定的 EPG binding',
+                )
+            current_target = EpgChannelIdentity(
+                int(current['epg_source_id']),
+                str(current['epg_channel_id']),
+            )
+            if locked and not _target_exists(conn, current_target):
+                raise EpgBindingOperationError(
+                    'orphan_target',
+                    '当前 EPG binding target 已不存在，请先替换或恢复自动匹配',
+                )
+            conn.execute(
+                """
+                UPDATE iptv_logical_channel_epg_bindings
+                SET locked=?, updated_at=? WHERE logical_channel_id=?
+                """,
+                (int(locked), db._utc_now(), logical_channel_id),
+            )
+            row = conn.execute(
+                _BINDING_SELECT + ' WHERE logical_channel_id=?',
+                (logical_channel_id,),
+            ).fetchone()
+            conn.commit()
+            return _binding_from_row(dict(row))
+        except BaseException:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_set)
+
+
+async def set_epg_binding_management_mode(
+    logical_channel_id: str,
+    mode: str,
+) -> dict:
+    """Remove any target and persist explicit automatic or no-EPG intent."""
+    logical_channel_id = _validate_text(
+        logical_channel_id,
+        'logical_channel_id',
+    )
+    mode = _validate_policy_mode(mode)
+
+    def _set():
+        conn = db._connect()
+        try:
+            conn.execute('BEGIN IMMEDIATE')
+            _manageable_logical_row(conn, logical_channel_id)
+            current = conn.execute(
+                _BINDING_SELECT + ' WHERE logical_channel_id=?',
+                (logical_channel_id,),
+            ).fetchone()
+            previous = _binding_from_row(dict(current)) if current else None
+            conn.execute(
+                """
+                DELETE FROM iptv_logical_channel_epg_bindings
+                WHERE logical_channel_id=?
+                """,
+                (logical_channel_id,),
+            )
+            policy = _upsert_policy(conn, logical_channel_id, mode)
+            conn.commit()
+            return {
+                'logical_channel_id': logical_channel_id,
+                'mode': mode,
+                'binding_removed': previous is not None,
+                'previous_binding': previous,
+                'policy': policy,
+            }
+        except BaseException:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_set)
 
 
 async def update_epg_binding_status(
@@ -381,6 +745,7 @@ def _classify_legacy_records(
     legacy_rows: Iterable[Mapping[str, object]],
     logical_rows: Iterable[Mapping[str, object]],
     target_identities: set[EpgChannelIdentity],
+    suppressed_logical_ids: set[str] | frozenset[str] = frozenset(),
 ) -> list[dict]:
     logical_by_key: dict[str, list[dict]] = defaultdict(list)
     for row in logical_rows:
@@ -440,6 +805,11 @@ def _classify_legacy_records(
 
     classified = list(base_records)
     for logical_id, records in by_logical.items():
+        if logical_id in suppressed_logical_ids:
+            for record in records:
+                record['reason'] = 'management_policy'
+                classified.append(record)
+            continue
         distinct_targets = {record['target'] for record in records}
         if len(distinct_targets) > 1:
             for record in records:
@@ -490,6 +860,7 @@ def _preview_result(legacy_rows: list[Mapping[str, object]], records: list[dict]
         'legacy_unmatched_count': counts['legacy_unmatched'],
         'duplicate_same_target_count': counts['duplicate_same_target'],
         'conflicting_target_count': counts['conflicting_target'],
+        'management_policy_count': counts['management_policy'],
         'locked_count': sum(bool(row.get('locked')) for row in legacy_rows),
         'samples': dict(samples),
         'records': [_safe_summary(record) for record in records],
@@ -501,18 +872,32 @@ async def preview_legacy_epg_binding_migration() -> dict:
     legacy_rows = await db.get_all_channel_epg_maps()
     logical_rows = await db.get_iptv_logical_channels()
     catalog = await build_epg_channel_catalog()
-    records = _classify_legacy_records(legacy_rows, logical_rows, set(catalog.by_identity))
+    policies = await list_epg_binding_policies()
+    records = _classify_legacy_records(
+        legacy_rows,
+        logical_rows,
+        set(catalog.by_identity),
+        {policy.logical_channel_id for policy in policies},
+    )
     return _preview_result(legacy_rows, records)
 
 
-def _migration_snapshot(conn) -> tuple[list[dict], list[dict], set[EpgChannelIdentity]]:
+def _migration_snapshot(
+    conn,
+) -> tuple[list[dict], list[dict], set[EpgChannelIdentity], set[str]]:
     legacy_rows = [dict(row) for row in conn.execute('SELECT * FROM channel_epg_map ORDER BY id').fetchall()]
     logical_rows = [dict(row) for row in conn.execute('SELECT * FROM iptv_logical_channels ORDER BY id').fetchall()]
     target_identities = {
         EpgChannelIdentity(int(row['source_id']), str(row['channel_id']))
         for row in conn.execute('SELECT source_id, channel_id FROM epg_channels').fetchall()
     }
-    return legacy_rows, logical_rows, target_identities
+    suppressed_logical_ids = {
+        str(row['logical_channel_id'])
+        for row in conn.execute(
+            'SELECT logical_channel_id FROM iptv_logical_channel_epg_policies'
+        ).fetchall()
+    }
+    return legacy_rows, logical_rows, target_identities, suppressed_logical_ids
 
 
 async def migrate_legacy_epg_bindings_shadow() -> dict:
@@ -522,8 +907,18 @@ async def migrate_legacy_epg_bindings_shadow() -> dict:
         conn = db._connect()
         try:
             conn.execute('BEGIN IMMEDIATE')
-            legacy_rows, logical_rows, target_identities = _migration_snapshot(conn)
-            records = _classify_legacy_records(legacy_rows, logical_rows, target_identities)
+            (
+                legacy_rows,
+                logical_rows,
+                target_identities,
+                suppressed_logical_ids,
+            ) = _migration_snapshot(conn)
+            records = _classify_legacy_records(
+                legacy_rows,
+                logical_rows,
+                target_identities,
+                suppressed_logical_ids,
+            )
             result = _preview_result(legacy_rows, records)
             created_count = 0
             already_migrated_count = 0

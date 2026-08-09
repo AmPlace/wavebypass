@@ -18,12 +18,14 @@ import httpx
 
 from m3u8_parser import normalize_channel_name, _to_simplified, _channel_alias
 from alias import format_name
+from epg_source_model import BUILTIN_EPG_SOURCE_PRESETS
 
 logger = logging.getLogger("waveflow.epg")
 
 # 内置默认 EPG 源
 DEFAULT_EPG_SOURCES = [
-    {"name": "51zmt", "url": "http://epg.51zmt.top:8000/e.xml.gz"},
+    {"builtin_key": preset.key, "name": preset.name, "url": preset.url}
+    for preset in BUILTIN_EPG_SOURCE_PRESETS
 ]
 
 _EPG_REFRESH_INTERVAL = 6 * 3600  # 6 小时
@@ -767,20 +769,10 @@ async def refresh_epg_source(
 
 
 async def ensure_default_epg_sources() -> list[dict]:
-    """Preserve the legacy empty-install bootstrap without doing network I/O."""
-    import database as db
+    """Ensure all persisted WaveFlow presets without doing network I/O."""
+    from epg_source_management import ensure_builtin_epg_sources
 
-    sources = await db.get_epg_sources()
-    if sources:
-        return sources
-    for default_source in DEFAULT_EPG_SOURCES:
-        try:
-            await db.add_epg_source(default_source['name'], default_source['url'])
-        except Exception:
-            # Concurrent startup/bootstrap may already have inserted the same
-            # unique URL.  Re-read below instead of treating that as fatal.
-            pass
-    return await db.get_epg_sources()
+    return await ensure_builtin_epg_sources()
 
 
 async def run_epg_refresh_maintenance(*, trigger: str = 'epg_refresh') -> dict:

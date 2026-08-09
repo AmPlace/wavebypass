@@ -13,7 +13,15 @@ from unittest import mock
 def _clear_modules():
     for name in list(sys.modules):
         if (
-            name in {"main", "automation", "database", "epg", "epg_tasks", "market", "market_tasks"}
+            name in {
+                "main", "automation", "database", "epg", "epg_management",
+                "epg_binding_management", "epg_bindings", "epg_catalog",
+                "epg_maintenance", "epg_match_shadow", "epg_matcher",
+                "epg_read_resolver",
+                "epg_preference_evidence", "epg_source_management",
+                "epg_source_model", "epg_source_preference", "epg_tasks",
+                "market", "market_tasks",
+            }
             or name == "security"
             or name.startswith("security.")
             or name.startswith("core")
@@ -420,7 +428,7 @@ class AutomationLifespanTest(unittest.IsolatedAsyncioTestCase):
                 "name": "Guide",
                 "url": "https://guide.test/feed.xml",
             }))
-            source_id = created["id"]
+            source_id = created["source"]["id"]
             reconcile.assert_awaited_with(
                 service,
                 self.main.http_client,
@@ -432,7 +440,7 @@ class AutomationLifespanTest(unittest.IsolatedAsyncioTestCase):
                 source_id,
                 request({"enabled": False}),
             )
-            self.assertFalse(updated["enabled"])
+            self.assertFalse(updated["source"]["enabled"])
             reconcile.assert_awaited_with(
                 service,
                 self.main.http_client,
@@ -440,10 +448,12 @@ class AutomationLifespanTest(unittest.IsolatedAsyncioTestCase):
                 operation="update",
             )
 
-            self.assertEqual(
-                await self.main.delete_epg_source(source_id, request({})),
-                {"ok": True},
+            deleted = await self.main.delete_epg_source(
+                source_id,
+                request({}),
+                confirm=False,
             )
+            self.assertEqual(deleted["status"], "deleted")
             reconcile.assert_awaited_with(
                 service,
                 self.main.http_client,
