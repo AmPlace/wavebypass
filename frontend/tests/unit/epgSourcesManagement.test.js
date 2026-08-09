@@ -181,10 +181,10 @@ test('来源卡片明确分为 content 和 action cluster，mobile 可换行且�
   assert.doesNotMatch(view, /<table|overflow-x-scroll/)
 })
 
-test('EPG-6A 不接入 matching、Matcher、binding 或旧 EPG 页面退役', () => {
+test('来源页面本身不接入 matching、Matcher、binding 或旧 EPG 页面退役', () => {
   const view = source('src/views/settings/EpgSourcesSettings.vue')
   const routes = source('src/router/routes.js')
   assert.doesNotMatch(view, /manual bind|lock\/unlock|no_epg|match_logical_channel|channel_epg_map/i)
-  assert.match(routes, /settings-epg-matching[\s\S]*EpgSettingsPlaceholder\.vue/)
+  assert.match(routes, /settings-epg-matching[\s\S]*EpgMatchingSettings\.vue/)
   assert.match(routes, /path: '\/admin\/epg'[\s\S]*EpgDebug\.vue/)
 })

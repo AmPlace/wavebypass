@@ -33,12 +33,7 @@ export const appRoutes = [
           {
             path: 'matching',
             name: 'settings-epg-matching',
-            component: () => import('../views/settings/EpgSettingsPlaceholder.vue'),
-            props: {
-              section: 'matching',
-              title: '频道匹配',
-              description: '查看和调整频道节目单匹配',
-            },
+            component: () => import('../views/settings/EpgMatchingSettings.vue'),
           },
           {
             path: ':epgPath(.*)*',

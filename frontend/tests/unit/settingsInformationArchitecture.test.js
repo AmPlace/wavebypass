@@ -179,17 +179,17 @@ test('安全设置只复用既有 API 并保留 forced 字段语义', () => {
   assert.match(security, />重试</)
 })
 
-test('EPG 来源接入 EPG-6A，频道匹配仍保持后续阶段占位', () => {
-  const placeholder = source('src/views/settings/EpgSettingsPlaceholder.vue')
+test('EPG 来源和频道匹配分别接入正式 Settings 子页面', () => {
   const sources = source('src/views/settings/EpgSourcesSettings.vue')
+  const matching = source('src/views/settings/EpgMatchingSettings.vue')
   const routes = source('src/router/routes.js')
+  const navigation = source('src/views/settings/settingsNavigation.js')
   assert.match(routes, /settings-epg-sources[\s\S]*EpgSourcesSettings\.vue/)
-  assert.match(routes, /频道匹配/)
-  assert.match(routes, /settings-epg-matching[\s\S]*EpgSettingsPlaceholder\.vue/)
+  assert.match(navigation, /频道匹配/)
+  assert.match(routes, /settings-epg-matching[\s\S]*EpgMatchingSettings\.vue/)
   assert.match(sources, /fetchEpgSources/)
+  assert.match(matching, /fetchEpgMatchingChannels/)
   assert.match(sources, /添加节目单来源/)
-  assert.match(placeholder, /将在后续 EPG 管理阶段提供/)
-  assert.doesNotMatch(placeholder, /fetch\(|\/api\/admin\/epg|manual bind|lock|no_epg/i)
 })
 
 test('App 正式设置入口已切换，旧节目单与 Market 一级入口没有迁移', () => {

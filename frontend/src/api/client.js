@@ -1,4 +1,4 @@
-import { API_BASE } from '../apiBase'
+import { API_BASE } from '../apiBase.js'
 
 export class ApiError extends Error {
   constructor(message, { status = 0, detail = null } = {}) {
