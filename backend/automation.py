@@ -335,6 +335,9 @@ class AutomationRepository:
         )
         return _config_from_row(row) if row else None
 
+    async def delete_config(self, task_id: str) -> bool:
+        return await self._database.delete_automation_task_config(task_id)
+
     async def claim(
         self,
         task_id: str,
@@ -393,6 +396,12 @@ class AutomationRegistry:
     def list_definitions(self) -> tuple[AutomationTaskDefinition, ...]:
         return tuple(self._definitions.values())
 
+    def unregister(self, task_id: str) -> AutomationTaskDefinition:
+        try:
+            return self._definitions.pop(task_id)
+        except KeyError as exc:
+            raise AutomationTaskNotFoundError(f"未知自动任务: {task_id}") from exc
+
     def __contains__(self, task_id: str) -> bool:
         return task_id in self._definitions
 
@@ -419,6 +428,11 @@ class AutomationTaskContext:
 
     def stop_requested(self) -> bool:
         return self._stop_event.is_set()
+
+    @property
+    def stop_event(self) -> asyncio.Event:
+        """Expose the cooperative cancellation signal to domain services."""
+        return self._stop_event
 
     async def report_progress(
         self,
@@ -836,24 +850,47 @@ class AutomationService:
                 config = await self.repository.ensure_config(definition)
                 _validate_schedule_config(definition, config)
             for definition in definitions:
-                waiter = self._waiter_factory(definition)
-                scheduler = self._scheduler_factory(
-                    definition,
-                    self.runner,
-                    self.repository,
-                    waiter=waiter,
-                )
-                task = asyncio.create_task(
-                    scheduler.run(),
-                    name=f"automation-scheduler:{definition.task_id}",
-                )
-                task.add_done_callback(
-                    lambda completed, task_id=definition.task_id: self._observe_task(task_id, completed)
-                )
-                self._schedulers[definition.task_id] = scheduler
-                self._tasks[definition.task_id] = task
+                self._start_scheduler_locked(definition)
             self._started = True
             return recovered_count
+
+    async def add_definition(
+        self,
+        definition: AutomationTaskDefinition,
+    ) -> AutomationTaskConfig:
+        """Register and, when started, schedule one dynamic task definition."""
+        async with self._lifecycle_lock:
+            self.registry.register(definition)
+            try:
+                config = await self.repository.ensure_config(definition)
+                _validate_schedule_config(definition, config)
+                if self._started and definition.allow_automatic_scheduling:
+                    self._start_scheduler_locked(definition)
+                return config
+            except BaseException:
+                self.registry.unregister(definition.task_id)
+                raise
+
+    async def remove_definition(
+        self,
+        task_id: str,
+        *,
+        delete_config: bool = False,
+    ) -> bool:
+        """Stop and unregister one dynamic task, optionally deleting its state."""
+        async with self._lifecycle_lock:
+            definition = self.registry.get(task_id)
+            scheduler = self._schedulers.pop(task_id, None)
+            task = self._tasks.pop(task_id, None)
+            if scheduler is not None:
+                scheduler.stop()
+            if task is not None:
+                await asyncio.gather(task, return_exceptions=True)
+            self._scheduler_errors.pop(task_id, None)
+            self.registry.unregister(definition.task_id)
+            if delete_config:
+                return await self.repository.delete_config(task_id)
+            return True
 
     async def stop(self, *, timeout_seconds: float | None = None) -> None:
         async with self._lifecycle_lock:
@@ -888,6 +925,26 @@ class AutomationService:
         if scheduler is None:
             raise AutomationTaskNotFoundError(f"没有运行中的自动调度任务: {task_id}")
         scheduler.notify_config_changed()
+
+    def _start_scheduler_locked(self, definition: AutomationTaskDefinition) -> None:
+        if definition.task_id in self._tasks:
+            raise AutomationRegistrationError(f"自动任务 Scheduler 已存在: {definition.task_id}")
+        waiter = self._waiter_factory(definition)
+        scheduler = self._scheduler_factory(
+            definition,
+            self.runner,
+            self.repository,
+            waiter=waiter,
+        )
+        task = asyncio.create_task(
+            scheduler.run(),
+            name=f"automation-scheduler:{definition.task_id}",
+        )
+        task.add_done_callback(
+            lambda completed, task_id=definition.task_id: self._observe_task(task_id, completed)
+        )
+        self._schedulers[definition.task_id] = scheduler
+        self._tasks[definition.task_id] = task
 
     def _observe_task(self, task_id: str, task: asyncio.Task[None]) -> None:
         if task.cancelled():

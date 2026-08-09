@@ -97,6 +97,11 @@ def _sanitize_error(error: BaseException | str) -> str:
     return text[:EPG_ERROR_MAX_LENGTH] or 'EPG 刷新失败'
 
 
+def sanitize_epg_error(error: BaseException | str) -> str:
+    """Return the bounded URL-redacted EPG diagnostic contract."""
+    return _sanitize_error(error)
+
+
 def _stop_requested(stop_event) -> bool:
     if stop_event is None:
         return False
@@ -761,6 +766,40 @@ async def refresh_epg_source(
                 download.cleanup()
 
 
+async def ensure_default_epg_sources() -> list[dict]:
+    """Preserve the legacy empty-install bootstrap without doing network I/O."""
+    import database as db
+
+    sources = await db.get_epg_sources()
+    if sources:
+        return sources
+    for default_source in DEFAULT_EPG_SOURCES:
+        try:
+            await db.add_epg_source(default_source['name'], default_source['url'])
+        except Exception:
+            # Concurrent startup/bootstrap may already have inserted the same
+            # unique URL.  Re-read below instead of treating that as fatal.
+            pass
+    return await db.get_epg_sources()
+
+
+async def run_epg_refresh_maintenance(*, trigger: str = 'epg_refresh') -> dict:
+    """Run the existing binding lifecycle after a committed EPG dataset.
+
+    Dataset commit and maintenance deliberately remain separate transactions.
+    A maintenance failure is returned as degradation and never rolls back the
+    already committed source dataset.
+    """
+    from epg_maintenance import run_epg_binding_maintenance
+    result = await run_epg_binding_maintenance(
+        sync_logical=True,
+        trigger=trigger,
+    )
+    if result['status'] != 'success':
+        logger.warning('EPG binding maintenance deferred: %s', _sanitize_error(result['error']))
+    return result
+
+
 async def refresh_epg_sources(
     client: httpx.AsyncClient | None = None,
     *,
@@ -777,14 +816,7 @@ async def refresh_epg_sources(
     maintenance_error = ''
     maintenance_result = None
     try:
-        sources = await db.get_epg_sources()
-        if not sources:
-            for default_source in DEFAULT_EPG_SOURCES:
-                try:
-                    await db.add_epg_source(default_source['name'], default_source['url'])
-                except Exception:
-                    pass
-            sources = await db.get_epg_sources()
+        sources = await ensure_default_epg_sources()
         active = [source for source in sources if source['enabled']]
 
         for source in active:
@@ -794,11 +826,7 @@ async def refresh_epg_sources(
         success_count = sum(result['status'] == 'success' for result in source_results)
         if success_count:
             try:
-                from epg_maintenance import run_epg_binding_maintenance
-                maintenance_result = await run_epg_binding_maintenance(
-                    sync_logical=True,
-                    trigger='epg_refresh',
-                )
+                maintenance_result = await run_epg_refresh_maintenance(trigger='epg_refresh')
                 if maintenance_result['status'] != 'success':
                     maintenance_error = maintenance_result['error']
             except asyncio.CancelledError:
@@ -822,8 +850,6 @@ async def refresh_epg_sources(
         errors = [result['error'] for result in source_results if result['error']]
         if not source_results:
             errors.append('没有可刷新的 EPG 来源')
-        if maintenance_error:
-            logger.warning('EPG binding maintenance deferred: %s', maintenance_error)
         return {
             'refresh_status': refresh_status,
             'source_results': source_results,

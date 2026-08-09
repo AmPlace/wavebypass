@@ -14,7 +14,7 @@ import httpx
 def _clear_modules():
     for name in list(sys.modules):
         if (
-            name in {"main", "automation", "database", "market", "market_tasks"}
+            name in {"main", "automation", "database", "epg", "epg_tasks", "market", "market_tasks"}
             or name == "security"
             or name.startswith("security.")
             or name.startswith("core")
@@ -427,7 +427,7 @@ class MarketAutomationApiTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_routes_do_not_create_service_runner_or_background_task(self):
         before_handles = self.service.tasks
-        with mock.patch.object(self.main, "create_market_automation_service") as factory:
+        with mock.patch.object(self.main, "create_production_automation_service") as factory:
             check_response = await self._post("/api/admin/market/check-updates")
             patch_response = await self._patch(
                 "/api/admin/market/automation",

@@ -46,7 +46,11 @@ from market_tasks import (
     MARKET_MAXIMUM_INTERVAL_SECONDS,
     MARKET_MINIMUM_INTERVAL_SECONDS,
     MARKET_TASK_ID,
-    create_market_automation_service,
+)
+from epg_tasks import (
+    create_production_automation_service,
+    reconcile_epg_tasks_after_source_change,
+    run_epg_refresh_now,
 )
 from ssrf_guard import UnsafeTargetError, assert_safe_target_url, assert_safe_host_ips
 from core.config import get_settings
@@ -670,14 +674,13 @@ async def lifespan(app: FastAPI):
     app.state.automation_service = None
     try:
         await database.initialize()
-        automation_service = create_market_automation_service()
+        automation_service = await create_production_automation_service(http_client)
         app.state.automation_service = automation_service
         await automation_service.start()
         _clear_stale_rtsp_hls_dirs()
         asyncio.create_task(refresh_tokens_task())
         asyncio.create_task(_yunting_refresh_task())
         asyncio.create_task(_myradio_refresh_task())
-        asyncio.create_task(_epg_refresh_loop())
         asyncio.create_task(_prefetch_rb())
         asyncio.create_task(_rtsp_hls_cleanup_task())
         # logo 模板：本地兜底已在 import 时加载完成，这里启动后异步拉一次远程覆盖；
@@ -1458,18 +1461,6 @@ async def _prefetch_rb() -> None:
             except Exception as exc:
                 logger.warning("RB %s 预热失败: %s", code, exc)
         await asyncio.sleep(RB_CACHE_TTL)
-
-
-_EPG_REFRESH_INTERVAL = 6 * 3600
-
-
-async def _epg_refresh_loop() -> None:
-    while True:
-        try:
-            await _epg.refresh_epg_sources(http_client)
-        except Exception:
-            logger.exception("EPG 刷新异常")
-        await asyncio.sleep(_EPG_REFRESH_INTERVAL)
 
 
 # =====================================================================
@@ -3867,6 +3858,12 @@ async def add_epg_source(request: Request):
         raise HTTPException(status_code=400, detail="缺少 url")
     try:
         sid = await db.add_epg_source(name, url)
+        await reconcile_epg_tasks_after_source_change(
+            getattr(request.app.state, "automation_service", None),
+            http_client,
+            source_id=sid,
+            operation="create",
+        )
         return {"id": sid, "name": name, "url": url}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
@@ -3877,15 +3874,63 @@ async def list_epg_sources():
     return await db.get_epg_sources()
 
 
+@app.patch("/api/admin/epg/sources/{source_id}", dependencies=[Depends(require_admin)])
+async def update_epg_source(source_id: int, request: Request):
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="请求体必须是对象")
+    updates = {
+        key: body[key]
+        for key in ("name", "url", "enabled")
+        if key in body
+    }
+    try:
+        source = await db.update_epg_source(source_id, **updates)
+    except (TypeError, ValueError) as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    if source is None:
+        raise HTTPException(status_code=404, detail="EPG 来源不存在")
+    await reconcile_epg_tasks_after_source_change(
+        getattr(request.app.state, "automation_service", None),
+        http_client,
+        source_id=source_id,
+        operation="update",
+    )
+    return source
+
+
 @app.delete("/api/admin/epg/sources/{source_id}", dependencies=[Depends(require_admin)])
-async def delete_epg_source(source_id: int):
+async def delete_epg_source(source_id: int, request: Request):
     await db.delete_epg_source(source_id)
+    await reconcile_epg_tasks_after_source_change(
+        getattr(request.app.state, "automation_service", None),
+        http_client,
+        source_id=source_id,
+        operation="delete",
+    )
     return {"ok": True}
 
 
+async def _run_manual_epg_refresh(automation_service) -> None:
+    try:
+        if automation_service is not None and automation_service.is_started:
+            await run_epg_refresh_now(automation_service, http_client)
+        else:
+            await _epg.refresh_epg_sources(http_client)
+    except asyncio.CancelledError:
+        raise
+    except Exception as error:
+        logger.warning(
+            "epg_manual_refresh_failed",
+            extra={"epg_automation": {"error_type": type(error).__name__}},
+        )
+
+
 @app.post("/api/admin/epg/refresh", dependencies=[Depends(require_admin)])
-async def refresh_epg():
-    asyncio.create_task(_epg.refresh_epg_sources(http_client))
+async def refresh_epg(request: Request):
+    asyncio.create_task(
+        _run_manual_epg_refresh(getattr(request.app.state, "automation_service", None))
+    )
     return {"ok": True}
 
 

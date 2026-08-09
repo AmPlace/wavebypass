@@ -837,6 +837,30 @@ async def update_automation_task_config(
     return await asyncio.to_thread(_update)
 
 
+async def delete_automation_task_config(task_id: str) -> bool:
+    """Delete one persisted task and its latest state.
+
+    Dynamic domain tasks use this only after their scheduler has stopped.  The
+    state row is removed by the existing foreign-key cascade, so an orphaned
+    source task cannot remain claimable after reconciliation.
+    """
+    task_id = _normalize_identifier(task_id, 'task_id')
+
+    def _delete():
+        conn = _connect()
+        try:
+            with conn:
+                cursor = conn.execute(
+                    "DELETE FROM automation_task_config WHERE task_id=?",
+                    (task_id,),
+                )
+                return cursor.rowcount == 1
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_delete)
+
+
 async def get_automation_task_state(task_id: str) -> dict | None:
     task_id = _normalize_identifier(task_id, 'task_id')
 

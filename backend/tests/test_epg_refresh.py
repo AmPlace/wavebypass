@@ -454,12 +454,13 @@ class EpgRefreshTest(unittest.IsolatedAsyncioTestCase):
                     await self.epg.refresh_epg_sources(client, stop_event=stop_event)
         self.assertEqual(refresh_one.await_count, 1)
 
-    def test_stage_does_not_register_automation_or_change_legacy_entrypoints(self):
+    def test_production_periodic_refresh_is_owned_only_by_automation(self):
         with open(os.path.join(os.path.dirname(self.epg.__file__), 'main.py'), encoding='utf-8') as fh:
             main_source = fh.read()
-        self.assertIn('asyncio.create_task(_epg_refresh_loop())', main_source)
-        self.assertIn('asyncio.create_task(_epg.refresh_epg_sources(http_client))', main_source)
-        self.assertNotIn('epg_auto_update', main_source)
+        self.assertNotIn('_epg_refresh_loop', main_source)
+        self.assertNotIn('asyncio.create_task(_epg.refresh_epg_sources(http_client))', main_source)
+        self.assertIn('create_production_automation_service(http_client)', main_source)
+        self.assertIn('_run_manual_epg_refresh', main_source)
 
 
 if __name__ == '__main__':

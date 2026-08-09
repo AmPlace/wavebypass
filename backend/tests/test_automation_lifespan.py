@@ -13,7 +13,7 @@ from unittest import mock
 def _clear_modules():
     for name in list(sys.modules):
         if (
-            name in {"main", "automation", "database", "market", "market_tasks"}
+            name in {"main", "automation", "database", "epg", "epg_tasks", "market", "market_tasks"}
             or name == "security"
             or name.startswith("security.")
             or name.startswith("core")
@@ -81,6 +81,7 @@ class AutomationLifespanTest(unittest.IsolatedAsyncioTestCase):
 
         self.db = importlib.import_module("database")
         self.automation = importlib.import_module("automation")
+        self.epg_tasks = importlib.import_module("epg_tasks")
         self.market_tasks = importlib.import_module("market_tasks")
         self.main = importlib.import_module("main")
         await self.db.initialize()
@@ -132,7 +133,6 @@ class AutomationLifespanTest(unittest.IsolatedAsyncioTestCase):
             "refresh_tokens_task",
             "_yunting_refresh_task",
             "_myradio_refresh_task",
-            "_epg_refresh_loop",
             "_prefetch_rb",
             "_rtsp_hls_cleanup_task",
         ):
@@ -205,8 +205,8 @@ class AutomationLifespanTest(unittest.IsolatedAsyncioTestCase):
         legacy_stack, _ = self._patch_legacy_dependencies(events)
         with legacy_stack, mock.patch.object(self.main.database, "initialize", new=initialize), mock.patch.object(
             self.main,
-            "create_market_automation_service",
-            return_value=service,
+            "create_production_automation_service",
+            new=mock.AsyncMock(return_value=service),
         ):
             async with self.main.lifespan(self.main.app):
                 self.assertIs(self.main.app.state.automation_service, service)
@@ -225,13 +225,13 @@ class AutomationLifespanTest(unittest.IsolatedAsyncioTestCase):
         original_factory = self.market_tasks.create_market_automation_service
         legacy_stack, _ = self._patch_legacy_dependencies()
 
-        def factory():
+        async def factory(_client):
             with mock.patch.object(self.market_tasks, "run_market_task", handler):
                 return original_factory(waiter_factory=lambda _definition: waiter)
 
         with legacy_stack, mock.patch.object(
             self.main,
-            "create_market_automation_service",
+            "create_production_automation_service",
             side_effect=factory,
         ):
             async with self.main.lifespan(self.main.app):
@@ -255,13 +255,13 @@ class AutomationLifespanTest(unittest.IsolatedAsyncioTestCase):
         original_factory = self.market_tasks.create_market_automation_service
         legacy_stack, _ = self._patch_legacy_dependencies()
 
-        def factory():
+        async def factory(_client):
             with mock.patch.object(self.market_tasks, "run_market_task", handler):
                 return original_factory(waiter_factory=lambda _definition: waiter)
 
         with legacy_stack, mock.patch.object(
             self.main,
-            "create_market_automation_service",
+            "create_production_automation_service",
             side_effect=factory,
         ):
             async with self.main.lifespan(self.main.app):
@@ -279,10 +279,13 @@ class AutomationLifespanTest(unittest.IsolatedAsyncioTestCase):
         original_factory = self.market_tasks.create_market_automation_service
         legacy_stack, _ = self._patch_legacy_dependencies()
 
+        async def factory(_client):
+            return original_factory(waiter_factory=lambda _definition: waiter)
+
         with legacy_stack, mock.patch.object(
             self.main,
-            "create_market_automation_service",
-            side_effect=lambda: original_factory(waiter_factory=lambda _definition: waiter),
+            "create_production_automation_service",
+            side_effect=factory,
         ):
             async with self.main.lifespan(self.main.app):
                 await self._wait_until(lambda: waiter.calls == [300])
@@ -304,13 +307,13 @@ class AutomationLifespanTest(unittest.IsolatedAsyncioTestCase):
         original_factory = self.market_tasks.create_market_automation_service
         legacy_stack, events = self._patch_legacy_dependencies()
 
-        def factory():
+        async def factory(_client):
             with mock.patch.object(self.market_tasks, "run_market_task", handler):
                 return original_factory(waiter_factory=lambda _definition: waiter)
 
         with legacy_stack, mock.patch.object(
             self.main,
-            "create_market_automation_service",
+            "create_production_automation_service",
             side_effect=factory,
         ):
             manager = self.main.lifespan(self.main.app)
@@ -341,8 +344,8 @@ class AutomationLifespanTest(unittest.IsolatedAsyncioTestCase):
         legacy_stack, _ = self._patch_legacy_dependencies(events)
         with legacy_stack, mock.patch.object(
             self.main,
-            "create_market_automation_service",
-            return_value=service,
+            "create_production_automation_service",
+            new=mock.AsyncMock(return_value=service),
         ):
             with self.assertRaisesRegex(RuntimeError, "automation startup failed"):
                 async with self.main.lifespan(self.main.app):
@@ -367,7 +370,7 @@ class AutomationLifespanTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(self.main.app.state.automation_service)
 
-    async def test_legacy_tasks_still_start_once_with_market_automation_api(self):
+    async def test_non_epg_legacy_tasks_still_start_once_with_market_automation_api(self):
         service = SimpleNamespace(
             start=mock.AsyncMock(),
             stop=mock.AsyncMock(),
@@ -375,8 +378,8 @@ class AutomationLifespanTest(unittest.IsolatedAsyncioTestCase):
         legacy_stack, events = self._patch_legacy_dependencies()
         with legacy_stack, mock.patch.object(
             self.main,
-            "create_market_automation_service",
-            return_value=service,
+            "create_production_automation_service",
+            new=mock.AsyncMock(return_value=service),
         ):
             async with self.main.lifespan(self.main.app):
                 await asyncio.sleep(0)
@@ -385,18 +388,85 @@ class AutomationLifespanTest(unittest.IsolatedAsyncioTestCase):
             "refresh_tokens_task",
             "_yunting_refresh_task",
             "_myradio_refresh_task",
-            "_epg_refresh_loop",
             "_prefetch_rb",
             "_rtsp_hls_cleanup_task",
             "logo",
         ):
             self.assertEqual(events.count(name), 1)
+        self.assertFalse(hasattr(self.main, "_epg_refresh_loop"))
         paths = {route.path for route in self.main.app.routes}
         self.assertIn("/api/admin/market/automation", paths)
         self.assertIn("/api/admin/market/check-updates", paths)
         self.assertIn("/api/admin/market/run-auto-update", paths)
         self.assertIn("/api/admin/market/update-all", paths)
         self.assertNotIn("/api/admin/market/automation/status", paths)
+
+    async def test_epg_source_crud_reconciles_committed_source_state(self):
+        service = SimpleNamespace(is_started=True, stop=mock.AsyncMock())
+        self.main.app.state.automation_service = service
+
+        def request(body):
+            return SimpleNamespace(
+                app=self.main.app,
+                json=mock.AsyncMock(return_value=body),
+            )
+
+        with mock.patch.object(
+            self.main,
+            "reconcile_epg_tasks_after_source_change",
+            new=mock.AsyncMock(),
+        ) as reconcile:
+            created = await self.main.add_epg_source(request({
+                "name": "Guide",
+                "url": "https://guide.test/feed.xml",
+            }))
+            source_id = created["id"]
+            reconcile.assert_awaited_with(
+                service,
+                self.main.http_client,
+                source_id=source_id,
+                operation="create",
+            )
+
+            updated = await self.main.update_epg_source(
+                source_id,
+                request({"enabled": False}),
+            )
+            self.assertFalse(updated["enabled"])
+            reconcile.assert_awaited_with(
+                service,
+                self.main.http_client,
+                source_id=source_id,
+                operation="update",
+            )
+
+            self.assertEqual(
+                await self.main.delete_epg_source(source_id, request({})),
+                {"ok": True},
+            )
+            reconcile.assert_awaited_with(
+                service,
+                self.main.http_client,
+                source_id=source_id,
+                operation="delete",
+            )
+        self.assertIsNone(await self.db.get_epg_source(source_id))
+
+    async def test_manual_epg_refresh_response_stays_immediate_and_uses_run_now_wrapper(self):
+        service = SimpleNamespace(is_started=True, stop=mock.AsyncMock())
+        self.main.app.state.automation_service = service
+        request = SimpleNamespace(app=self.main.app)
+        completed = asyncio.Event()
+
+        async def run(current_service):
+            self.assertIs(current_service, service)
+            completed.set()
+
+        with mock.patch.object(self.main, "_run_manual_epg_refresh", side_effect=run) as refresh:
+            response = await self.main.refresh_epg(request)
+            self.assertEqual(response, {"ok": True})
+            await completed.wait()
+        refresh.assert_awaited_once_with(service)
 
 
 if __name__ == "__main__":
