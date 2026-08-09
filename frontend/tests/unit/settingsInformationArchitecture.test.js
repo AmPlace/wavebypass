@@ -21,6 +21,15 @@ function source(relativePath) {
   return fs.readFileSync(path.join(frontendRoot, relativePath), 'utf8')
 }
 
+function sourceTree(directory) {
+  return fs.readdirSync(directory, { withFileTypes: true })
+    .map((entry) => {
+      const target = path.join(directory, entry.name)
+      return entry.isDirectory() ? sourceTree(target) : fs.readFileSync(target, 'utf8')
+    })
+    .join('\n')
+}
+
 function routeRecordsForNode(routes) {
   return routes.map((route) => ({
     ...route,
@@ -91,13 +100,14 @@ test('Settings route 支持 browser back 和 forward', async () => {
   assert.equal(router.currentRoute.value.fullPath, '/settings/epg/matching')
 })
 
-test('旧 /admin 兼容跳转，legacy EpgDebug 和 Market 路由保持可达', async () => {
+test('旧 /admin 兼容跳转，/admin/epg 转到新频道匹配页，Market 保持可达', async () => {
   const router = memoryRouter()
   await router.push('/admin')
   assert.equal(router.currentRoute.value.fullPath, '/settings/sources')
 
   await router.push('/admin/epg')
-  assert.equal(router.currentRoute.value.name, 'epg-debug')
+  assert.equal(router.currentRoute.value.fullPath, '/settings/epg/matching')
+  assert.equal(router.currentRoute.value.name, 'settings-epg-matching')
 
   await router.push('/market')
   assert.equal(router.currentRoute.value.name, 'market')
@@ -192,10 +202,25 @@ test('EPG 来源和频道匹配分别接入正式 Settings 子页面', () => {
   assert.match(sources, /添加节目单来源/)
 })
 
-test('App 正式设置入口已切换，旧节目单与 Market 一级入口没有迁移', () => {
+test('App 移除旧节目单一级入口，直播、Market 和设置导航保持', () => {
   const app = source('src/App.vue')
+  const primaryNavigation = app
+    .split('const primaryNavItems')[1]
+    .split('const secondaryNavItems')[0]
+  assert.match(primaryNavigation, /label: '直播'[\s\S]*route: '\/iptv'/)
+  assert.doesNotMatch(primaryNavigation, /label: '节目单'|route: '\/admin\/epg'/)
   assert.match(app, /label: '设置'[\s\S]*route: '\/settings\/sources'/)
-  assert.match(app, /label: '节目单'[\s\S]*route: '\/admin\/epg'/)
   assert.match(app, /label: 'Market'[\s\S]*route: '\/market'/)
   assert.match(app, /route\.path\.startsWith\('\/settings'\)/)
+})
+
+test('旧 EpgDebug production code 已退役，match-status 不再有 frontend caller', () => {
+  const routes = source('src/router/routes.js')
+  const sourceRoot = path.join(frontendRoot, 'src')
+  const productionSource = sourceTree(sourceRoot)
+
+  assert.equal(fs.existsSync(path.join(frontendRoot, 'src/views/EpgDebug.vue')), false)
+  assert.doesNotMatch(routes, /EpgDebug|epg-debug/)
+  assert.match(routes, /path: '\/admin\/epg'[\s\S]*redirect: '\/settings\/epg\/matching'/)
+  assert.doesNotMatch(productionSource, /\/api\/iptv\/epg\/match-status/)
 })

@@ -211,7 +211,6 @@ const primaryNavItems = computed(() => [
   { label: '首页', icon: 'home', route: '/', active: route.path === '/' },
   { label: '直播', icon: 'tv', route: '/iptv', active: route.path === '/iptv' },
   { label: '收藏', icon: 'star', route: '/iptv', active: false },
-  { label: '节目单', icon: 'calendar', route: '/admin/epg', active: route.path === '/admin/epg' },
   { label: '回看', icon: 'clock', route: '/iptv', active: false },
 ])
 const secondaryNavItems = computed(() => [

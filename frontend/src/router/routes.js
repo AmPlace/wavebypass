@@ -65,9 +65,9 @@ export const appRoutes = [
   },
   {
     path: '/admin/epg',
-    name: 'epg-debug',
-    component: () => import('../views/EpgDebug.vue'),
-    meta: { requiresAdmin: true, legacyUi: true },
+    name: 'legacy-epg-redirect',
+    redirect: '/settings/epg/matching',
+    meta: { requiresAdmin: true, compatibilityRoute: true },
   },
   {
     path: '/setup',
