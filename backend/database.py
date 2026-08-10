@@ -451,6 +451,45 @@ CREATE TABLE IF NOT EXISTS plugin_artifacts (
 CREATE INDEX IF NOT EXISTS idx_plugin_artifacts_state
 ON plugin_artifacts(publisher_id, plugin_id, state);
 
+CREATE TABLE IF NOT EXISTS plugin_dependency_artifacts (
+    sha256        TEXT PRIMARY KEY,
+    package_name  TEXT NOT NULL,
+    version       TEXT NOT NULL,
+    filename      TEXT NOT NULL,
+    size_bytes    INTEGER NOT NULL,
+    python_tag    TEXT NOT NULL,
+    abi_tag       TEXT NOT NULL,
+    platform_tag  TEXT NOT NULL,
+    path          TEXT NOT NULL,
+    created_at    TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS plugin_python_environments (
+    publisher_id    TEXT NOT NULL,
+    plugin_id       TEXT NOT NULL,
+    plugin_version  TEXT NOT NULL,
+    runtime_identity TEXT NOT NULL,
+    lock_digest     TEXT NOT NULL,
+    path            TEXT NOT NULL,
+    state           TEXT NOT NULL CHECK(state IN ('candidate', 'active', 'retained')),
+    dependency_count INTEGER NOT NULL DEFAULT 0,
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+    PRIMARY KEY (publisher_id, plugin_id, plugin_version, runtime_identity, lock_digest)
+);
+
+CREATE TABLE IF NOT EXISTS plugin_environment_dependencies (
+    publisher_id     TEXT NOT NULL,
+    plugin_id        TEXT NOT NULL,
+    plugin_version   TEXT NOT NULL,
+    runtime_identity TEXT NOT NULL,
+    lock_digest      TEXT NOT NULL,
+    artifact_sha256  TEXT NOT NULL,
+    PRIMARY KEY (publisher_id, plugin_id, plugin_version, runtime_identity, lock_digest, artifact_sha256)
+);
+CREATE INDEX IF NOT EXISTS idx_plugin_python_environments_state
+ON plugin_python_environments(publisher_id, plugin_id, state);
+
 CREATE TABLE IF NOT EXISTS plugin_publisher_trust (
     publisher_id TEXT NOT NULL,
     key_id       TEXT NOT NULL,
@@ -2486,6 +2525,7 @@ async def activate_plugin_candidate(
     entrypoint: str,
     platform_os: str,
     platform_arch: str,
+    environment: dict | None = None,
 ) -> bool:
     def _activate():
         conn = _connect()
@@ -2513,6 +2553,21 @@ async def activate_plugin_candidate(
                 )
                 if cursor.rowcount != 1:
                     return False
+                if environment:
+                    conn.execute(
+                        "UPDATE plugin_python_environments SET state='retained', updated_at=? "
+                        "WHERE publisher_id=? AND plugin_id=? AND state='active'",
+                        (now, publisher_id, plugin_id),
+                    )
+                    env_cursor = conn.execute(
+                        """UPDATE plugin_python_environments SET state='active', updated_at=?
+                           WHERE publisher_id=? AND plugin_id=? AND plugin_version=?
+                             AND runtime_identity=? AND lock_digest=? AND state='candidate'""",
+                        (now, publisher_id, plugin_id, candidate_version,
+                         environment['runtime_identity'], environment['lock_digest']),
+                    )
+                    if env_cursor.rowcount != 1:
+                        raise RuntimeError('plugin environment candidate state changed')
                 conn.execute(
                     """
                     UPDATE plugin_artifacts SET state='retained'
@@ -2637,6 +2692,150 @@ async def delete_retained_plugin_artifacts(publisher_id: str, plugin_id: str) ->
         finally:
             conn.close()
     await asyncio.to_thread(_delete)
+
+
+async def begin_plugin_python_environment(
+    *, publisher_id: str, plugin_id: str, plugin_version: str, runtime_identity: str,
+    lock_digest: str, path: str, dependencies: list[dict],
+) -> None:
+    def _begin():
+        conn = _connect()
+        try:
+            with conn:
+                now = _utc_now()
+                for item in dependencies:
+                    conn.execute(
+                        """
+                        INSERT INTO plugin_dependency_artifacts(
+                            sha256, package_name, version, filename, size_bytes,
+                            python_tag, abi_tag, platform_tag, path, created_at
+                        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(sha256) DO UPDATE SET
+                            package_name=excluded.package_name, version=excluded.version,
+                            filename=excluded.filename, size_bytes=excluded.size_bytes,
+                            python_tag=excluded.python_tag, abi_tag=excluded.abi_tag,
+                            platform_tag=excluded.platform_tag, path=excluded.path
+                        """,
+                        (item['sha256'], item['name'], item['version'], item['filename'], item['size_bytes'],
+                         item['python_tag'], item['abi_tag'], item['platform_tag'], item['path'], now),
+                    )
+                conn.execute(
+                    """
+                    INSERT INTO plugin_python_environments(
+                        publisher_id, plugin_id, plugin_version, runtime_identity,
+                        lock_digest, path, state, dependency_count, created_at, updated_at
+                    ) VALUES(?, ?, ?, ?, ?, ?, 'candidate', ?, ?, ?)
+                    ON CONFLICT(publisher_id, plugin_id, plugin_version, runtime_identity, lock_digest)
+                    DO UPDATE SET path=excluded.path, state='candidate',
+                                  dependency_count=excluded.dependency_count, updated_at=excluded.updated_at
+                    """,
+                    (publisher_id, plugin_id, plugin_version, runtime_identity, lock_digest,
+                     path, len(dependencies), now, now),
+                )
+                conn.execute(
+                    """DELETE FROM plugin_environment_dependencies
+                       WHERE publisher_id=? AND plugin_id=? AND plugin_version=?
+                         AND runtime_identity=? AND lock_digest=?""",
+                    (publisher_id, plugin_id, plugin_version, runtime_identity, lock_digest),
+                )
+                for item in dependencies:
+                    conn.execute(
+                        """INSERT INTO plugin_environment_dependencies(
+                               publisher_id, plugin_id, plugin_version, runtime_identity,
+                               lock_digest, artifact_sha256
+                           ) VALUES(?, ?, ?, ?, ?, ?)""",
+                        (publisher_id, plugin_id, plugin_version, runtime_identity, lock_digest, item['sha256']),
+                    )
+        finally:
+            conn.close()
+    await asyncio.to_thread(_begin)
+
+
+async def activate_plugin_python_environment(
+    publisher_id: str, plugin_id: str, plugin_version: str, runtime_identity: str, lock_digest: str,
+) -> bool:
+    def _activate():
+        conn = _connect()
+        try:
+            with conn:
+                conn.execute(
+                    "UPDATE plugin_python_environments SET state='retained', updated_at=? "
+                    "WHERE publisher_id=? AND plugin_id=? AND state='active'",
+                    (_utc_now(), publisher_id, plugin_id),
+                )
+                cursor = conn.execute(
+                    """UPDATE plugin_python_environments SET state='active', updated_at=?
+                       WHERE publisher_id=? AND plugin_id=? AND plugin_version=?
+                         AND runtime_identity=? AND lock_digest=? AND state='candidate'""",
+                    (_utc_now(), publisher_id, plugin_id, plugin_version, runtime_identity, lock_digest),
+                )
+                return cursor.rowcount == 1
+        finally:
+            conn.close()
+    return await asyncio.to_thread(_activate)
+
+
+async def fail_plugin_python_environment(
+    publisher_id: str, plugin_id: str, plugin_version: str, runtime_identity: str, lock_digest: str,
+) -> None:
+    def _fail():
+        conn = _connect()
+        try:
+            with conn:
+                values = (publisher_id, plugin_id, plugin_version, runtime_identity, lock_digest)
+                conn.execute(
+                    """DELETE FROM plugin_environment_dependencies
+                       WHERE publisher_id=? AND plugin_id=? AND plugin_version=?
+                         AND runtime_identity=? AND lock_digest=?""", values)
+                conn.execute(
+                    """DELETE FROM plugin_python_environments
+                       WHERE publisher_id=? AND plugin_id=? AND plugin_version=?
+                         AND runtime_identity=? AND lock_digest=? AND state='candidate'""", values)
+        finally:
+            conn.close()
+    await asyncio.to_thread(_fail)
+
+
+async def list_plugin_python_environments(publisher_id: str, plugin_id: str) -> list[dict]:
+    def _list():
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM plugin_python_environments WHERE publisher_id=? AND plugin_id=? "
+                "ORDER BY plugin_version, lock_digest", (publisher_id, plugin_id)).fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+    return await asyncio.to_thread(_list)
+
+
+async def delete_plugin_python_environments(publisher_id: str, plugin_id: str) -> list[str]:
+    def _delete():
+        conn = _connect()
+        try:
+            with conn:
+                rows = conn.execute(
+                    "SELECT path FROM plugin_python_environments WHERE publisher_id=? AND plugin_id=?",
+                    (publisher_id, plugin_id)).fetchall()
+                conn.execute("DELETE FROM plugin_environment_dependencies WHERE publisher_id=? AND plugin_id=?",
+                             (publisher_id, plugin_id))
+                conn.execute("DELETE FROM plugin_python_environments WHERE publisher_id=? AND plugin_id=?",
+                             (publisher_id, plugin_id))
+                return [str(row['path']) for row in rows]
+        finally:
+            conn.close()
+    return await asyncio.to_thread(_delete)
+
+
+async def list_plugin_dependency_artifacts() -> list[dict]:
+    def _list():
+        conn = _connect()
+        try:
+            rows = conn.execute("SELECT * FROM plugin_dependency_artifacts ORDER BY sha256").fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+    return await asyncio.to_thread(_list)
 
 
 async def list_plugin_publisher_trust() -> list[dict]:

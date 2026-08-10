@@ -62,6 +62,24 @@ class PluginProductionTest(unittest.IsolatedAsyncioTestCase):
                     await download_plugin_artifact("http://plugins.example/a", directory, expected_size=1, expected_sha256="0" * 64)
                 self.assertEqual(raised.exception.code, "ARTIFACT_INVALID")
 
+    async def test_dependency_download_reuses_streaming_ssrf_and_integrity_gates(self):
+        import plugin_production
+        payload = b"wheel-payload"
+        transport = httpx.MockTransport(lambda request: httpx.Response(200, content=payload))
+        with tempfile.TemporaryDirectory() as directory:
+            async with httpx.AsyncClient(transport=transport) as client:
+                with mock.patch.object(plugin_production.market, "_validate_fetch_url", mock.AsyncMock(side_effect=lambda url, **_: url)):
+                    path = await plugin_production.download_dependency_artifact(
+                        "https://files.pythonhosted.org/dependency.whl", directory,
+                        expected_size=len(payload), expected_sha256=hashlib.sha256(payload).hexdigest(), client=client)
+                    self.assertEqual(path.read_bytes(), payload)
+                    path.unlink()
+                    with self.assertRaises(Exception) as integrity:
+                        await plugin_production.download_dependency_artifact(
+                            "https://files.pythonhosted.org/dependency.whl", directory,
+                            expected_size=len(payload), expected_sha256="0" * 64, client=client)
+                    self.assertEqual(integrity.exception.code, "DEPENDENCY_ARTIFACT_INTEGRITY_FAILED")
+
     async def test_persisted_trust_disable_and_rotation(self):
         from plugin_production import ProductionTrustPolicy
         from plugin_runtime.manifest import validate_manifest

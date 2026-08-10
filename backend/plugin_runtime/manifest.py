@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from packaging.version import InvalidVersion, Version
+
 from .errors import PluginError
 
 
@@ -67,7 +69,7 @@ class PluginManifest:
     owned_schemes: tuple[tuple[str, str], ...]
     capabilities: frozenset[str]
     permissions: dict[str, Any]
-    runtime: dict[str, str]
+    runtime: dict[str, Any]
     artifacts: tuple[dict[str, Any], ...]
     dependencies: tuple[dict[str, Any], ...]
     state_schema_version: int
@@ -157,7 +159,25 @@ def validate_manifest(data: Any, *, core_version: str = "0.1.0") -> PluginManife
             or any(not isinstance(v, (dict, bool, list)) for v in permissions.values())):
         raise _malformed("Invalid permission declaration")
     runtime = data["runtime"]
-    if runtime != {"type": "subprocess", "ipc": "stdio_framed_json_v1"}:
+    if not isinstance(runtime, dict) or runtime.get("ipc") != "stdio_framed_json_v1":
+        raise PluginError("PLUGIN_INCOMPATIBLE", "Unsupported plugin runtime", category="compatibility")
+    runtime_type = runtime.get("type")
+    if runtime_type == "subprocess":
+        if set(runtime) != {"type", "ipc"}:
+            raise _malformed("Invalid subprocess runtime")
+    elif runtime_type == "python":
+        if set(runtime) != {"type", "ipc", "python_version_range", "entrypoint", "dependency_lock"}:
+            raise _malformed("Invalid Python runtime specification")
+        python_range = runtime.get("python_version_range")
+        if (not isinstance(python_range, str) or not python_range
+                or not all(RANGE_PART_RE.fullmatch(part) for part in python_range.split())):
+            raise _malformed("Invalid Python version range")
+        entrypoint = runtime.get("entrypoint")
+        if (not isinstance(entrypoint, str) or not entrypoint or entrypoint.startswith(("/", "."))
+                or ".." in Path(entrypoint).parts):
+            raise _malformed("Invalid Python entrypoint")
+        _validate_dependency_lock(runtime.get("dependency_lock"))
+    else:
         raise PluginError("PLUGIN_INCOMPATIBLE", "Unsupported plugin runtime", category="compatibility")
     artifacts = data["artifacts"]
     if not isinstance(artifacts, list) or not artifacts:
@@ -177,6 +197,8 @@ def validate_manifest(data: Any, *, core_version: str = "0.1.0") -> PluginManife
                 or signature.get("algorithm") != "ed25519"
                 or not all(isinstance(signature.get(key), str) and signature[key] for key in ("key_id", "value"))):
             raise _malformed("Invalid plugin artifact")
+    if runtime_type == "python" and any(artifact["entrypoint"] != runtime["entrypoint"] for artifact in artifacts):
+        raise _malformed("Python runtime entrypoint does not match its artifact")
     dependencies = data["dependencies"]
     if not isinstance(dependencies, list):
         raise _malformed("Invalid plugin dependencies")
@@ -193,6 +215,39 @@ def validate_manifest(data: Any, *, core_version: str = "0.1.0") -> PluginManife
                           expression, tuple(contracts), tuple(schemes), frozenset(capabilities), dict(permissions),
                           dict(runtime), tuple(dict(v) for v in artifacts), tuple(dict(v) for v in dependencies),
                           data["state_schema_version"])
+
+
+def _validate_dependency_lock(value: Any) -> None:
+    if not isinstance(value, dict) or set(value) != {"lock_version", "artifacts"} or value.get("lock_version") != 1:
+        raise PluginError("DEPENDENCY_LOCK_INVALID", "Invalid Python dependency lock", category="dependency")
+    artifacts = value.get("artifacts")
+    if not isinstance(artifacts, list):
+        raise PluginError("DEPENDENCY_LOCK_INVALID", "Invalid Python dependency lock artifacts", category="dependency")
+    seen_names: set[str] = set()
+    seen_digests: set[str] = set()
+    for item in artifacts:
+        fields = {"name", "version", "filename", "url", "sha256", "size_bytes", "python_tag", "abi_tag", "platform_tag"}
+        if not isinstance(item, dict) or set(item) != fields:
+            raise PluginError("DEPENDENCY_LOCK_INVALID", "Invalid dependency artifact entry", category="dependency")
+        name = str(item.get("name") or "")
+        normalized = re.sub(r"[-_.]+", "-", name).lower()
+        try:
+            exact_version = Version(item.get("version")) if isinstance(item.get("version"), str) else None
+        except InvalidVersion:
+            exact_version = None
+        if (name != normalized or not PLUGIN_ID_RE.fullmatch(name)
+                or exact_version is None
+                or not isinstance(item.get("filename"), str) or not item["filename"].endswith(".whl")
+                or not isinstance(item.get("url"), str) or not item["url"].startswith("https://")
+                or not re.fullmatch(r"[a-f0-9]{64}", str(item.get("sha256") or ""))
+                or not isinstance(item.get("size_bytes"), int) or item["size_bytes"] < 1
+                or any(not isinstance(item.get(key), str) or not item[key]
+                       for key in ("python_tag", "abi_tag", "platform_tag"))):
+            raise PluginError("DEPENDENCY_LOCK_INVALID", "Invalid dependency artifact metadata", category="dependency")
+        if name in seen_names or item["sha256"] in seen_digests:
+            raise PluginError("DEPENDENCY_LOCK_INVALID", "Duplicate dependency artifact", category="dependency")
+        seen_names.add(name)
+        seen_digests.add(item["sha256"])
 
 
 def load_manifest(path: str | Path, *, core_version: str = "0.1.0") -> PluginManifest:

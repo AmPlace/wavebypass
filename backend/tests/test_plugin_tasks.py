@@ -61,7 +61,7 @@ class PluginTaskTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_real_provider_plugins_use_the_generic_market_update_task(self):
         import plugin_tasks
-        for plugin_id in ("fjtv", "nowtv"):
+        for plugin_id in ("fjtv", "nowtv", "nmtv"):
             with self.subTest(plugin_id=plugin_id):
                 context = SimpleNamespace(
                     stop_requested=lambda: False,

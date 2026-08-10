@@ -19,6 +19,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 import database as db
 import market
 from plugin_market import PluginArtifactStore, PluginMarketService, current_platform
+from plugin_python_runtime import PythonEnvironmentManager
 from plugin_runtime import PluginError, PluginRuntime
 from plugin_runtime.permissions import PermissionPolicy
 from provider_resolver import ProviderResolver
@@ -27,6 +28,7 @@ from plugin_capabilities import CapabilityGateway, CoreCapabilityDispatcher
 
 logger = logging.getLogger(__name__)
 MAX_PLUGIN_ARTIFACT_BYTES = 64 * 1024 * 1024
+MAX_DEPENDENCY_ARTIFACT_BYTES = 64 * 1024 * 1024
 PLUGIN_DOWNLOAD_TIMEOUT_SECONDS = 60.0
 PLUGIN_DOWNLOAD_REDIRECTS = 3
 
@@ -167,6 +169,10 @@ class ProductionPluginSubsystem:
         store = PluginArtifactStore(root / "artifacts", allowed_local_roots=[downloads])
         service = PluginMarketService(
             runtime=runtime, store=store, trust_policy=trust, command_factory=command_factory,
+            python_environments=PythonEnvironmentManager(root),
+            dependency_fetcher=lambda item, directory: download_dependency_artifact(
+                item["url"], directory, expected_size=item["size_bytes"],
+                expected_sha256=item["sha256"], client=http_client),
         )
         ownership_rows = await db.list_plugin_scheme_ownership()
         resolver = ProviderResolver(
@@ -250,6 +256,25 @@ class ProductionPluginSubsystem:
         finally:
             for path in temp_paths:
                 path.unlink(missing_ok=True)
+
+
+async def download_dependency_artifact(
+    url: str, destination_dir: str | Path, *, expected_size: int, expected_sha256: str,
+    client: httpx.AsyncClient | None = None,
+) -> Path:
+    try:
+        return await download_plugin_artifact(
+            url, destination_dir, expected_size=expected_size, expected_sha256=expected_sha256,
+            max_bytes=MAX_DEPENDENCY_ARTIFACT_BYTES, client=client,
+        )
+    except PluginError as exc:
+        mapping = {
+            "ARTIFACT_NOT_FOUND": "DEPENDENCY_ARTIFACT_NOT_FOUND",
+            "ARTIFACT_INTEGRITY_FAILED": "DEPENDENCY_ARTIFACT_INTEGRITY_FAILED",
+            "ARTIFACT_INVALID": "DEPENDENCY_ARTIFACT_INTEGRITY_FAILED",
+        }
+        raise PluginError(mapping.get(exc.code, exc.code), "Dependency artifact download failed",
+                          retryable=exc.retryable, category="dependency") from exc
 
 
 def default_plugin_root() -> Path:

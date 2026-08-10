@@ -50,6 +50,9 @@ def _error(exc: PluginError) -> HTTPException:
         "PLUGIN_UNTRUSTED": 403, "CAPABILITY_DENIED": 403,
         "SCHEME_CONFLICT": 409, "PLUGIN_CANDIDATE_CONFLICT": 409,
         "PLUGIN_INCOMPATIBLE": 422, "PLATFORM_UNSUPPORTED": 422,
+        "PYTHON_RUNTIME_UNSUPPORTED": 422, "DEPENDENCY_LOCK_INVALID": 422,
+        "DEPENDENCY_PLATFORM_UNSUPPORTED": 422,
+        "DEPENDENCY_ARTIFACT_NOT_FOUND": 404,
     }
     return HTTPException(status_code=statuses.get(exc.code, 400), detail=exc.as_contract())
 
@@ -59,6 +62,9 @@ def _manifest_projection(row: dict[str, Any]) -> dict[str, Any]:
         manifest = json.loads(row.get("manifest_json") or "{}")
     except json.JSONDecodeError:
         manifest = {}
+    runtime = manifest.get("runtime") or {}
+    lock = runtime.get("dependency_lock") or {}
+    dependencies = lock.get("artifacts") if isinstance(lock.get("artifacts"), list) else []
     return {
         "plugin": f"{row['publisher_id']}/{row['plugin_id']}",
         "display_name": manifest.get("display_name") or row["plugin_id"],
@@ -72,6 +78,15 @@ def _manifest_projection(row: dict[str, Any]) -> dict[str, Any]:
         "source_provenance": {"source_key": row.get("source_key") or "", "package_id": row.get("source_package_id") or ""},
         "trust_state": row.get("trust_state") or "",
         "last_error": str(row.get("last_error") or "")[:1024],
+        "runtime": {
+            "type": runtime.get("type") or row.get("runtime_type") or "unknown",
+            "python_version_range": runtime.get("python_version_range") or "",
+            "environment_status": "ready" if runtime.get("type") == "python" and row.get("lifecycle_state") == "active"
+                                  else "not_applicable" if runtime.get("type") != "python" else "unavailable",
+            "dependency_count": len(dependencies),
+            "dependencies": [{"name": item.get("name"), "version": item.get("version")}
+                             for item in dependencies if isinstance(item, dict)],
+        },
     }
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import importlib
+import json
 import os
 import sys
 import tempfile
@@ -86,6 +87,27 @@ class PluginAdminApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("/secret/local/plugin", response.text)
         self.assertNotIn("artifact_path", response.text)
         self.assertNotIn("pid", response.text.lower())
+
+    async def test_python_runtime_projection_is_scoped_and_hides_environment_paths(self):
+        async def admin():
+            return {"id": 1, "role": "admin"}
+        self.main.app.dependency_overrides[self.main.require_admin] = admin
+        from tests.test_plugin_python_runtime import _manifest, _wheel
+        from pathlib import Path
+        dependency = _wheel(Path(self.tmp.name), "fixture-admin-dependency", "1.0.0", "ok")
+        manifest = _manifest("fixture-python-admin", "1.0.0", [dependency])
+        await self.db.begin_plugin_candidate(
+            publisher_id="org.waveflow", plugin_id="fixture-python-admin", version="1.0.0",
+            trust_state="third_party", source_key="third", source_package_id="third::python",
+            manifest_json=json.dumps(manifest.raw), manifest_sha256="1" * 64,
+            artifact_sha256="2" * 64, artifact_path="/secret/plugin.py",
+            runtime_type="python", entrypoint="plugin.py", platform_os="macos", platform_arch="arm64")
+        response = await self.client.get("/api/admin/plugins/org.waveflow/fixture-python-admin")
+        self.assertEqual(response.status_code, 200, response.text)
+        runtime = response.json()["runtime"]
+        self.assertEqual((runtime["type"], runtime["dependency_count"]), ("python", 1))
+        self.assertEqual(runtime["dependencies"], [{"name": "fixture-admin-dependency", "version": "1.0.0"}])
+        self.assertNotIn("/secret", response.text)
 
     async def test_disable_and_uninstall_use_production_ownership_guard(self):
         async def admin():

@@ -145,6 +145,9 @@ class MarketPluginLifecycleTest(unittest.IsolatedAsyncioTestCase):
             tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             self.assertIn("plugin_installations", tables)
             self.assertIn("plugin_artifacts", tables)
+            self.assertIn("plugin_dependency_artifacts", tables)
+            self.assertIn("plugin_python_environments", tables)
+            self.assertIn("plugin_environment_dependencies", tables)
             self.assertIn("market_packages_installed", tables)
         finally:
             conn.close()
