@@ -281,10 +281,10 @@ let fetchOverride
 
 function installFetch() {
   fetchCalls = []
-  globalThis.fetch = async (input) => {
+  globalThis.fetch = async (input, options = {}) => {
     const url = String(input?.url || input)
     fetchCalls.push(url)
-    const overrideResult = await fetchOverride?.(url, input)
+    const overrideResult = await fetchOverride?.(url, options)
     if (overrideResult) return overrideResult
     if (url.includes('/api/iptv/channels')) {
       const parsed = new URL(url, window.location.origin)
@@ -308,6 +308,10 @@ function installFetch() {
         date,
         available_dates: ['2026-08-04', '2026-08-05', '2026-08-06'],
       })
+    }
+    if (url.includes('/api/iptv/epg/batch-current')) {
+      const keys = JSON.parse(options.body || '{}').canonical_keys || []
+      return response(Object.fromEntries(keys.map((key) => [key, null])))
     }
     return response({ ok: true })
   }
@@ -711,6 +715,174 @@ test('播放源菜单切换 direct→proxy→direct，active source 与 store �
   domElements('#iptv-source-menu button')[0].click()
   await flushPromises()
   assert.equal(store.iptvUrls[store.iptvUrlIndex].source_id, 'direct')
+})
+
+test('FullPlayer 主区域显示 current、时间进度和轻量 next', async () => {
+  const now = Date.now()
+  const current = {
+    title: '正在播出的特别节目名称',
+    start: new Date(now - 10 * 60_000).toISOString(),
+    stop: new Date(now + 20 * 60_000).toISOString(),
+  }
+  const next = {
+    title: '下一档新闻',
+    start: new Date(now + 20 * 60_000).toISOString(),
+    stop: new Date(now + 50 * 60_000).toISOString(),
+  }
+  fetchOverride = async (url) => {
+    if (!url.includes('/api/iptv/epg/programs/')) return null
+    return response({
+      current,
+      next,
+      programs: [
+        { ...current, status: 'current' },
+        { ...next, status: 'future' },
+      ],
+      date: '2026-08-09',
+      available_dates: ['2026-08-09'],
+    })
+  }
+
+  const { wrapper, store } = await mountPlayer()
+  store.currentIptvChannel = channels[1]
+  await flushPromises()
+  await wrapper.vm.$nextTick()
+
+  assert.equal(domElement('.now-program-title').textContent.trim(), current.title)
+  assert.match(domElement('.now-program-next').textContent, /下一节目 · 下一档新闻 \d{2}:\d{2}/)
+  assert.equal(domElements('.progress-times').length, 1)
+  assert.notEqual(domElement('.progress-fill').style.width, '0%')
+  assert.match(domElement('.program-state').textContent, /剩余 \d+ 分钟/)
+  assert.equal(store.currentEpgProgram?.title, current.title)
+})
+
+test('FullPlayer 无 next 时不占位', async () => {
+  fetchOverride = async (url) => {
+    if (!url.includes('/api/iptv/epg/programs/')) return null
+    return response({
+      current: { title: '只有当前节目', start: '2026-08-09T10:00:00+08:00', stop: '2026-08-09T11:00:00+08:00' },
+      next: null,
+      programs: [],
+      date: '2026-08-09',
+      available_dates: [],
+    })
+  }
+  const { wrapper, store } = await mountPlayer()
+  store.currentIptvChannel = channels[1]
+  await flushPromises()
+  await wrapper.vm.$nextTick()
+  assert.equal(domElement('.now-program-title').textContent.trim(), '只有当前节目')
+  assert.equal(domElements('.now-program-next').length, 0)
+})
+
+test('FullPlayer 非 IPTV 节目单继续保留电台名 fallback', async () => {
+  setActivePinia(createPinia())
+  const store = usePlayerStore()
+  store.activeMode = 'radio'
+  store.currentStation = 'radio-a'
+  store.stationMap = {
+    'radio-a': { id: 'radio-a', name: '测试电台', subtitle: '音乐' },
+  }
+  store.isPlayerExpanded = true
+  const wrapper = mount(FullPlayer, { attachTo: document.body })
+  mountedWrappers.push(wrapper)
+  await flushPromises()
+  await wrapper.vm.$nextTick()
+
+  assert.equal(domElements('.now-program-title').length, 0)
+  await clickDom('.mobile-panel .panel-tabs button', 1)
+  assert.ok(domElements('.timeline-title').some((item) => item.textContent.trim() === '测试电台'))
+})
+
+test('FullPlayer 区分节目单 loading、无 EPG 和请求失败且不阻塞直播', async () => {
+  let pendingResolve
+  fetchOverride = async (url) => {
+    if (!url.includes('/api/iptv/epg/programs/')) return null
+    return await new Promise((resolve) => { pendingResolve = resolve })
+  }
+  const first = await mountPlayer()
+  first.store.currentIptvChannel = channels[1]
+  await flushPromises()
+  assert.equal(domElement('.now-program-title').textContent.trim(), '正在加载节目单')
+  assert.equal(first.store.isPlaying, true)
+  pendingResolve(response({ current: null, next: null, programs: [], date: '2026-08-09', available_dates: [] }))
+  await flushPromises()
+  assert.equal(domElement('.now-program-title').textContent.trim(), '暂无节目单')
+  assert.match(document.body.textContent, /暂无节目单/)
+
+  first.wrapper.unmount()
+  fetchOverride = async (url) => {
+    if (!url.includes('/api/iptv/epg/programs/')) return null
+    return response({}, { ok: false, status: 503 })
+  }
+  const second = await mountPlayer()
+  second.store.currentIptvChannel = channels[1]
+  await flushPromises()
+  assert.equal(domElement('.now-program-title').textContent.trim(), '节目单加载失败')
+  assert.equal(second.store.isPlaying, true)
+  assert.equal(second.store.playbackError, '')
+})
+
+test('IptvHome batch-current 显示 current 结束时间并在最近节目边界后自动更新', async () => {
+  channels = [channel('Alpha', 'alpha', { group_name: '测试分组' })]
+  let batchCount = 0
+  const bodies = []
+  fetchOverride = async (url, options) => {
+    if (!url.includes('/api/iptv/epg/batch-current')) return null
+    bodies.push(JSON.parse(options.body))
+    batchCount += 1
+    const stop = new Date(Date.now() + (batchCount === 1 ? 80 : 80)).toISOString()
+    return response({
+      alpha: {
+        current: { title: batchCount === 1 ? '第一档节目' : '第二档节目', stop },
+        next: null,
+      },
+    })
+  }
+
+  const { wrapper } = await mountHome()
+  assert.match(domElement('.card-program-name').textContent, /第一档节目 · \d{2}:\d{2} 结束/)
+  assert.deepEqual(bodies[0], { canonical_keys: ['alpha'] })
+  await new Promise((resolve) => setTimeout(resolve, 1_350))
+  await flushPromises()
+  assert.equal(batchCount, 2)
+  assert.match(domElement('.card-program-name').textContent, /第二档节目 · \d{2}:\d{2} 结束/)
+
+  wrapper.unmount()
+  await new Promise((resolve) => setTimeout(resolve, 1_350))
+  assert.equal(batchCount, 2)
+})
+
+test('IptvHome 搜索切换会清理旧列表 EPG timer，且无 EPG 回退分组', async () => {
+  channels = [
+    channel('Alpha', 'alpha', { group_name: '旧分组' }),
+    channel('Bravo', 'bravo', { group_name: '新分组' }),
+  ]
+  const batchKeys = []
+  fetchOverride = async (url, options) => {
+    if (!url.includes('/api/iptv/epg/batch-current')) return null
+    const keys = JSON.parse(options.body).canonical_keys
+    batchKeys.push(keys)
+    if (keys.includes('alpha')) {
+      return response({
+        alpha: { current: { title: '即将结束的旧节目', stop: new Date(Date.now() + 80).toISOString() }, next: null },
+      })
+    }
+    return response({ bravo: null })
+  }
+
+  const { wrapper, searchQuery } = await mountHome({ search: 'Alpha' })
+  assert.match(domElement('.card-program-name').textContent, /即将结束的旧节目/)
+  searchQuery.value = 'Bravo'
+  await flushPromises()
+  await wrapper.vm.$nextTick()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  await flushPromises()
+  assert.equal(domElement('.card-program-name').textContent.trim(), '新分组')
+  await new Promise((resolve) => setTimeout(resolve, 1_350))
+  await flushPromises()
+  assert.equal(batchKeys.filter((keys) => keys.includes('alpha')).length, 1)
+  assert.equal(batchKeys.filter((keys) => keys.includes('bravo')).length, 1)
 })
 
 test('EPG 日期切换与频道切换后，节目单属于当前频道且旧请求不覆盖新请求', async () => {

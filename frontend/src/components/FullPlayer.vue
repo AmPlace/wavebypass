@@ -88,7 +88,19 @@
 
             <section ref="nowPanelRef" class="now-panel">
               <h1>{{ currentStationName }}</h1>
-              <p>{{ currentChannelSubtitle }}</p>
+              <p class="channel-subtitle">{{ currentChannelSubtitle }}</p>
+              <template v-if="isIptvMode">
+                <p
+                  class="now-program-title"
+                  :class="`now-program-title--${epgViewingState}`"
+                  aria-live="polite"
+                >
+                  {{ epgViewingText }}
+                </p>
+                <p v-if="nextProgramSummary" class="now-program-next">
+                  下一节目 · {{ nextProgramSummary }}
+                </p>
+              </template>
 
               <div class="program-progress" :class="{ empty: !hasCurrentEpgProgram }">
                 <div class="progress-track">
@@ -438,6 +450,7 @@ import Hls from 'hls.js'
 import { usePlayerStore } from '../stores/player'
 import { fetchAggregatedChannels } from '../api/iptv'
 import { useEpg } from '../composables/useEpg'
+import { formatEpgClock } from '../utils/epgViewing'
 import { API_BASE } from '../apiBase'
 import { publicAsset } from '../publicAsset'
 import {
@@ -827,6 +840,28 @@ const hasCurrentEpgProgram = computed(() => Boolean(playerStore.currentEpgProgra
 
 const currentProgramProgressPercent = computed(() => `${currentProgram.value.progress}%`)
 
+const epgViewingState = computed(() => {
+  if (_epgLoading.value && !hasCurrentEpgProgram.value) return 'loading'
+  if (_epgError.value) return 'error'
+  if (hasCurrentEpgProgram.value) return 'current'
+  return 'empty'
+})
+
+const epgViewingText = computed(() => {
+  if (epgViewingState.value === 'loading') return '正在加载节目单'
+  if (epgViewingState.value === 'error') return '节目单加载失败'
+  if (epgViewingState.value === 'current') return currentProgram.value.title
+  return '暂无节目单'
+})
+
+const nextProgramSummary = computed(() => {
+  if (!hasCurrentEpgProgram.value || _epgLoading.value || _epgError.value) return ''
+  const title = String(_epgNext.value?.title || '').trim()
+  if (!title) return ''
+  const start = formatEpgClock(_epgNext.value?.start)
+  return start ? `${title} ${start}` : title
+})
+
 function localDateString(date = new Date()) {
   const year = date.getFullYear()
   const month = String(date.getMonth() + 1).padStart(2, '0')
@@ -898,9 +933,13 @@ const displaySchedule = computed(() => {
       }
     })
   }
-  // 没有 EPG 时回退
+  // 非 IPTV 继续保留原有电台名 fallback；IPTV 才显示 EPG 观看状态。
   return [
-    { time: '', title: currentProgram.value.title, current: true },
+    {
+      time: '',
+      title: isIptvMode.value ? epgViewingText.value : currentProgram.value.title,
+      current: false,
+    },
   ]
 })
 
@@ -4016,9 +4055,12 @@ watch(() => playerStore.iptvUrlIndex, () => {
 const epgRequestDate = ref('')
 const {
   current: _epgCurrent,
+  next: _epgNext,
   schedule: _epgSchedule,
   selectedDate: _epgSelectedDate,
   availableDates: _epgAvailableDates,
+  loading: _epgLoading,
+  error: _epgError,
   fetchPrograms: _epgFetch,
   clearPrograms: _epgClear,
   invalidatePrograms: _epgInvalidate,
@@ -4066,6 +4108,10 @@ function scheduleEpgRefreshAfterProgramEnd(program = playerStore.currentEpgProgr
 
 watch(() => playerStore.currentIptvChannel, (ch) => {
   if (ch?.canonical_key) {
+    playerStore.currentEpgProgram = null
+    epgRequestDate.value = ''
+    _epgClear()
+    clearEpgRefreshAfterEndTimer()
     refreshCurrentEpg().then((result) => {
       if (result?.applied) scheduleEpgRefreshAfterProgramEnd()
     })
@@ -4574,6 +4620,41 @@ onBeforeUnmount(() => {
   font-size: var(--subtitle-size);
   font-weight: 500;
   line-height: 1.2;
+}
+
+.now-panel .now-program-title {
+  display: -webkit-box;
+  margin-top: 7px;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: clamp(14px, 1.2vw, 17px);
+  font-weight: 600;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.now-panel .now-program-title--loading,
+.now-panel .now-program-title--empty {
+  color: var(--text-tertiary);
+  font-weight: 500;
+}
+
+.now-panel .now-program-title--error {
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.now-panel .now-program-next {
+  margin-top: 4px;
+  overflow: hidden;
+  color: var(--text-tertiary);
+  font-size: var(--meta-size);
+  font-weight: 400;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .program-progress {

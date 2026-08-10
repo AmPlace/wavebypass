@@ -123,20 +123,19 @@ export function useEpg({
     }
   }
 
-  async function batchCurrent(canonicalKeys) {
+  async function batchCurrent(canonicalKeys, { signal } = {}) {
     if (!canonicalKeys.length) return {}
     try {
-      const res = await fetch(`${API_BASE}/api/iptv/epg/batch-current`, {
+      return await request('/api/iptv/epg/batch-current', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ canonical_keys: canonicalKeys }),
-        signal: AbortSignal.timeout(8000),
+        signal,
+        timeout: 8_000,
       })
-      if (!res.ok) return {}
-      return res.json()
     } catch (e) {
-      console.warn('[EPG] batch fetch failed:', e?.message)
-      return {}
+      if (e?.name !== 'AbortError') console.warn('[EPG] batch fetch failed:', e?.message)
+      return null
     }
   }
 

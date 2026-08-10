@@ -122,6 +122,7 @@ import { loadCover, abortPendingCoverRequests } from '../composables/coverLoader
 import TagFilterRow from '../components/TagFilterRow.vue'
 import { channelIdentity, isChannelAllNotLive, isChannelAllUnsupported, isChannelAllUrlsBlocked } from '../utils/sourceIdentity'
 import { IPTV_CHANNEL_SORT_MODES, sortIptvChannels } from '../utils/iptvChannelList'
+import { channelProgrammeSubtitle, epgBatchRefreshDelay } from '../utils/epgViewing'
 
 const playerStore = usePlayerStore()
 const toastStore = useToastStore()
@@ -134,14 +135,34 @@ const allGroups = ref([])
 const selectedGroup = ref('')
 const loading = ref(false)
 const epgMap = ref({})
+const { batchCurrent } = useEpg()
 
 let requestSeq = 0
 let activeRequestSeq = 0
 let activeController = null
+let epgBatchSeq = 0
+let epgBatchController = null
+let epgBatchRefreshTimer = null
+
+function _clearEpgBatchRefreshTimer() {
+  if (!epgBatchRefreshTimer) return
+  clearTimeout(epgBatchRefreshTimer)
+  epgBatchRefreshTimer = null
+}
+
+function _invalidateEpgBatchRefresh() {
+  epgBatchSeq += 1
+  _clearEpgBatchRefreshTimer()
+  if (epgBatchController) {
+    epgBatchController.abort()
+    epgBatchController = null
+  }
+}
 
 function _invalidateListRequest() {
   requestSeq += 1
   activeRequestSeq = 0
+  _invalidateEpgBatchRefresh()
   if (activeController) {
     activeController.abort()
     activeController = null
@@ -150,6 +171,36 @@ function _invalidateListRequest() {
 
 function _isCurrentListRequest(seq) {
   return seq === activeRequestSeq && seq === requestSeq
+}
+
+function _scheduleEpgBatchRefresh(listSeq, keys, map) {
+  _clearEpgBatchRefreshTimer()
+  if (!_isCurrentListRequest(listSeq) || !keys.length) return
+  const delay = epgBatchRefreshDelay(map)
+  epgBatchRefreshTimer = setTimeout(() => {
+    epgBatchRefreshTimer = null
+    if (_isCurrentListRequest(listSeq)) void _refreshBatchCurrent(listSeq, keys)
+  }, delay)
+}
+
+async function _refreshBatchCurrent(listSeq, keys) {
+  if (!_isCurrentListRequest(listSeq) || !keys.length) return { applied: false }
+  const batchSeq = ++epgBatchSeq
+  epgBatchController?.abort()
+  const ctrl = new AbortController()
+  epgBatchController = ctrl
+  const map = await batchCurrent(keys, { signal: ctrl.signal })
+  if (
+    batchSeq !== epgBatchSeq
+    || !_isCurrentListRequest(listSeq)
+    || ctrl.signal.aborted
+  ) {
+    return { applied: false }
+  }
+  if (epgBatchController === ctrl) epgBatchController = null
+  if (map) epgMap.value = map
+  _scheduleEpgBatchRefresh(listSeq, keys, map || epgMap.value)
+  return { applied: Boolean(map) }
 }
 const logoCandidateIndexes = ref({})
 const channelSortMode = computed(() => playerStore.iptvChannelSortMode)
@@ -225,6 +276,7 @@ function isSelectedCategory(tab) {
 
 async function loadChannels() {
   _invalidateListRequest()
+  epgMap.value = {}
   const seq = ++requestSeq
   activeRequestSeq = seq
   const ctrl = new AbortController()
@@ -254,10 +306,7 @@ async function loadChannels() {
     if (_isCurrentListRequest(seq)) adapterCoverSupported.value = next
     const keys = (data.channels || []).map(c => c.canonical_key).filter(Boolean)
     if (keys.length && _isCurrentListRequest(seq)) {
-      const batchSeq = seq
-      useEpg().batchCurrent(keys).then(m => {
-        if (_isCurrentListRequest(batchSeq)) epgMap.value = m || {}
-      })
+      void _refreshBatchCurrent(seq, keys)
     }
     // 延迟触发封面加载：等 DOM 更新后，IntersectionObserver 开始观察可见卡片
     await nextTick()
@@ -376,12 +425,9 @@ function isAnyPlayable(ch) {
   })
 }
 
-function currentProgramTitle(ch) {
-  return epgMap.value[ch.canonical_key]?.current?.title || ''
-}
-
 function cardSubtitle(ch) {
-  return currentProgramTitle(ch) || ch.group_name || ''
+  const current = epgMap.value[ch.canonical_key]?.current
+  return channelProgrammeSubtitle(current, ch.group_name || '')
 }
 
 function channelStatusKind(ch) {
