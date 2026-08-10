@@ -153,6 +153,17 @@ class PythonRuntimeContractTest(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(PluginError):
                 validate_manifest(data)
 
+    async def test_multi_platform_candidates_select_exactly_one_current_wheel(self):
+        current = _wheel(self.root, "fixture-platform", "1.0.0", "current")
+        foreign = dict(current)
+        foreign.update(filename="fixture_platform-1.0.0-cp999-cp999-linux_x86_64.whl",
+                       url="https://deps.example/fixture_platform-1.0.0-cp999-cp999-linux_x86_64.whl",
+                       sha256="f" * 64, size_bytes=99, python_tag="cp999", abi_tag="cp999",
+                       platform_tag="linux_x86_64")
+        manifest = _manifest("python-platform-candidates", "1.0.0", [current, foreign])
+        env = await self.manager.prepare(manifest, {current["sha256"]: current["path"]})
+        self.assertEqual([item["sha256"] for item in env.dependencies], [current["sha256"]])
+
 
 if __name__ == "__main__":
     unittest.main()

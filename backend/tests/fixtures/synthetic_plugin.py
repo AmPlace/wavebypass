@@ -188,6 +188,14 @@ def main():
             if args.mode in {"nested_http", "nested_crash", "nested_error"}:
                 threading.Thread(target=nested_resolve, args=(request, args.mode), daemon=True).start()
                 continue
+            if args.mode == "ambient_probe":
+                result = descriptor()
+                result["provider_diagnostics"] = {
+                    "cwd": os.getcwd(), "secret": os.environ.get("WAVEFLOW_TEST_SECRET", ""),
+                    "path": os.environ.get("PATH", ""),
+                }
+                write_frame(response(request, result))
+                continue
             result = descriptor(request["payload"].get("transport", "hls"))
             if args.mode == "invalid_descriptor":
                 result["headers"] = {"Authorization": "redacted-fixture"}

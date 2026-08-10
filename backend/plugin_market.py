@@ -19,7 +19,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 import database as db
 from plugin_runtime import LifecycleState, PluginError, PluginInstance, PluginManifest, PluginRuntime, validate_manifest
 from plugin_runtime.manifest import _range_allows, _version_tuple
-from plugin_python_runtime import PythonEnvironmentManager, validate_python_runtime
+from plugin_python_runtime import PythonEnvironmentManager, select_dependency_artifacts, validate_python_runtime
+from plugin_permissions import permission_projection, require_high_risk_approvals, requested_permissions
 
 
 PLUGIN_PACKAGE_TYPE = "plugin_package"
@@ -217,7 +218,7 @@ def _dependency_references(package: dict, manifest: PluginManifest) -> dict[str,
     if not isinstance(references, list):
         raise PluginError("DEPENDENCY_LOCK_INVALID", "Dependency references are invalid", category="dependency")
     result = {}
-    for item in manifest.runtime["dependency_lock"]["artifacts"]:
+    for item in select_dependency_artifacts(manifest.runtime["dependency_lock"]):
         matches = [ref for ref in references if isinstance(ref, dict) and ref.get("sha256") == item["sha256"]]
         if len(matches) == 1 and set(matches[0]) == {"sha256", "local_path"}:
             result[item["sha256"]] = Path(str(matches[0]["local_path"]))
@@ -286,6 +287,7 @@ class PluginMarketService:
         arch: str | None = None,
         python_environments: PythonEnvironmentManager | None = None,
         dependency_fetcher: Callable[[dict[str, Any], Path], Any] | None = None,
+        runtime_command_factory: Callable[[PluginManifest, Path, Any | None], Sequence[str]] | None = None,
     ):
         self.runtime = runtime
         self.store = store
@@ -294,8 +296,25 @@ class PluginMarketService:
         self.command_factory = command_factory or self._default_command
         self.python_environments = python_environments or PythonEnvironmentManager(self.store.root / "python")
         self.dependency_fetcher = dependency_fetcher
+        self.runtime_command_factory = runtime_command_factory
         self._active: dict[str, PluginInstance] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        self.workspaces_root = self.store.root / "workspaces"
+        self.workspaces_root.mkdir(parents=True, exist_ok=True)
+
+    def _working_directory(self, manifest: PluginManifest, *, create: bool = True) -> Path:
+        path = self.workspaces_root / self.store._part(manifest.publisher_id) / self.store._part(manifest.plugin_id)
+        if create:
+            path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _runtime_command(self, manifest: PluginManifest, artifact: Path, environment: Any | None) -> Sequence[str]:
+        if self.runtime_command_factory:
+            return self.runtime_command_factory(manifest, artifact, environment)
+        if environment:
+            return (str(environment.python), "-I", str(artifact), "--identity", manifest.identity,
+                    "--version", manifest.version)
+        return self.command_factory(manifest, artifact)
 
     @staticmethod
     def _default_command(manifest: PluginManifest, artifact: Path) -> Sequence[str]:
@@ -346,6 +365,7 @@ class PluginMarketService:
         if len(manifests) != 1:
             raise PluginError("PLUGIN_INCOMPATIBLE", "Conflicting trusted plugin manifests were published for the same version", category="market")
         candidate = select_candidate(trusted, identity)
+        await require_high_risk_approvals(candidate.manifest)
         lock = self._locks.setdefault(identity, asyncio.Lock())
         async with lock:
             return await self._activate(candidate)
@@ -400,10 +420,9 @@ class PluginMarketService:
                 runtime_type=candidate.artifact["runtime"], entrypoint=candidate.artifact["entrypoint"],
                 platform_os=self.os_name, platform_arch=self.arch,
             )
-            command = ((str(environment.python), "-I", str(promoted), "--identity", candidate.manifest.identity,
-                        "--version", candidate.manifest.version) if environment else
-                       self.command_factory(candidate.manifest, promoted))
-            instance = self.runtime.install(candidate.manifest, command)
+            command = self._runtime_command(candidate.manifest, promoted, environment)
+            instance = self.runtime.install(candidate.manifest, command,
+                                            working_directory=str(self._working_directory(candidate.manifest)))
             async def persist_activation() -> None:
                 activated = await db.activate_plugin_candidate(
                     publisher_id=candidate.manifest.publisher_id, plugin_id=candidate.manifest.plugin_id,
@@ -479,6 +498,7 @@ class PluginMarketService:
         if identity in self._active:
             return self._public(row)
         manifest = validate_manifest(json.loads(row["manifest_json"]))
+        await require_high_risk_approvals(manifest)
         artifact = Path(row["artifact_path"])
         if not artifact.is_file():
             await db.set_plugin_enabled(row["publisher_id"], row["plugin_id"], True, lifecycle_state="unavailable", error="Installed artifact integrity check failed")
@@ -513,8 +533,8 @@ class PluginMarketService:
             except PluginError as exc:
                 raise PluginError("PLUGIN_ENVIRONMENT_INVALID", "Installed Plugin environment is unavailable", category="runtime") from exc
         instance = self.runtime.install(
-            manifest, (str(environment.python), "-I", str(artifact), "--identity", manifest.identity,
-                       "--version", manifest.version) if environment else self.command_factory(manifest, artifact))
+            manifest, self._runtime_command(manifest, artifact, environment),
+            working_directory=str(self._working_directory(manifest)))
         try:
             await self.runtime.enable(instance)
         except BaseException as error:
@@ -549,6 +569,8 @@ class PluginMarketService:
         for path in await db.delete_plugin_python_environments(row["publisher_id"], row["plugin_id"]):
             await asyncio.to_thread(self.python_environments.remove_environment, path)
         await asyncio.to_thread(self.store.remove_plugin, row["publisher_id"], row["plugin_id"])
+        await asyncio.to_thread(shutil.rmtree,
+                                self._working_directory(validate_manifest(json.loads(row["manifest_json"])), create=False), True)
         return removed
 
     async def recover_enabled(self) -> list[dict[str, Any]]:
@@ -595,6 +617,45 @@ class PluginMarketService:
         await asyncio.to_thread(self.store.cleanup_orphan_staging, live_artifact_paths)
         await asyncio.to_thread(self.store.cleanup_orphan_installed, live_artifact_paths)
         return results
+
+    async def permission_projection(self, identity: str) -> dict[str, Any]:
+        row = await self._row(identity)
+        return await permission_projection(validate_manifest(json.loads(row["manifest_json"])))
+
+    async def approve_permission(self, identity: str, packages: Iterable[dict], permission: str, actor: str) -> dict[str, Any]:
+        candidates = candidates_from_packages(packages, os_name=self.os_name, arch=self.arch)
+        candidate = select_candidate(candidates, identity)
+        payload = _read_artifact(self.store._source(candidate.local_reference), max_bytes=int(candidate.artifact["size_bytes"]))
+        if len(payload) != int(candidate.artifact["size_bytes"]) or hashlib.sha256(payload).hexdigest() != candidate.artifact["sha256"]:
+            raise PluginError("ARTIFACT_INTEGRITY_FAILED", "Plugin artifact failed integrity verification", category="artifact")
+        self.trust_policy.verify(candidate.manifest, candidate.artifact, payload)
+        request = next((item for item in requested_permissions(candidate.manifest) if item.name == permission), None)
+        if request is None or request.name not in {"network.direct"}:
+            raise PluginError("INVALID_CAPABILITY_REQUEST", "Permission is not approvable", category="permission")
+        await db.set_plugin_permission_approval(
+            candidate.manifest.publisher_id, candidate.manifest.plugin_id, request.name, request.fingerprint,
+            approved=True, actor=actor, manifest_version=candidate.manifest.version,
+        )
+        return await permission_projection(candidate.manifest)
+
+    async def revoke_permission(self, identity: str, permission: str, actor: str) -> dict[str, Any]:
+        row = await self._row(identity)
+        manifest = validate_manifest(json.loads(row["manifest_json"]))
+        request = next((item for item in requested_permissions(manifest) if item.name == permission), None)
+        if request is None or request.name not in {"network.direct"}:
+            raise PluginError("INVALID_CAPABILITY_REQUEST", "Permission is not revocable", category="permission")
+        instance = self._active.pop(identity, None)
+        if instance:
+            await self.runtime.disable(instance)
+        await db.set_plugin_permission_approval(
+            manifest.publisher_id, manifest.plugin_id, request.name, request.fingerprint,
+            approved=False, actor=actor, manifest_version=manifest.version,
+        )
+        await db.set_plugin_enabled(
+            row["publisher_id"], row["plugin_id"], True,
+            lifecycle_state="unavailable", error="PERMISSION_APPROVAL_REQUIRED: network.direct",
+        )
+        return await permission_projection(manifest)
 
     async def dependency_projection(self, requirements: Iterable[dict[str, Any]]) -> dict[str, Any]:
         items = []
@@ -657,7 +718,8 @@ def _runtime_projection(row: dict) -> dict[str, Any]:
     if runtime.get("type") != "python":
         return {"type": "subprocess", "environment_status": "not_applicable", "dependency_count": 0}
     lock, digest = validate_python_runtime(manifest)
+    selected = select_dependency_artifacts(lock)
     return {"type": "python", "python_version_range": runtime["python_version_range"],
             "environment_status": "ready" if row.get("lifecycle_state") == "active" else "unavailable",
-            "dependency_count": len(lock["artifacts"]), "lock_digest": digest,
-            "dependencies": [{"name": item["name"], "version": item["version"]} for item in lock["artifacts"]]}
+            "dependency_count": len(selected), "lock_digest": digest,
+            "dependencies": [{"name": item["name"], "version": item["version"]} for item in selected]}

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 import uuid
 from collections import deque
@@ -15,16 +16,26 @@ from .protocol import LEGACY_PROTOCOL_VERSION, PROTOCOL_VERSION, SUPPORTED_PROTO
 logger = logging.getLogger("waveflow.plugin_runtime")
 
 
+def sanitized_plugin_environment(source: dict[str, str] | None = None) -> dict[str, str]:
+    source = os.environ if source is None else source
+    allowed = {"PATH", "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "TMPDIR", "TEMP", "TMP",
+               "SYSTEMROOT", "WINDIR"}
+    return {key: value for key, value in source.items() if key in allowed and isinstance(value, str)}
+
+
 class PluginProcess:
     def __init__(self, command: Sequence[str], instance_id: str, *,
                  on_exit: Callable[[int | None], Awaitable[None]] | None = None,
                  capability_handler: Callable[[str, dict[str, Any], float, dict[str, Any]], Awaitable[Any]] | None = None,
-                 lifecycle_timeout: float = 30.0):
+                 lifecycle_timeout: float = 30.0, environment: dict[str, str] | None = None,
+                 working_directory: str | None = None):
         self.command = tuple(command)
         self.instance_id = instance_id
         self.on_exit = on_exit
         self.capability_handler = capability_handler
         self.lifecycle_timeout = lifecycle_timeout
+        self.environment = dict(sanitized_plugin_environment() if environment is None else environment)
+        self.working_directory = working_directory
         self.process: asyncio.subprocess.Process | None = None
         self._pending: dict[str, asyncio.Future] = {}
         self._completed: set[str] = set()
@@ -55,6 +66,8 @@ class PluginProcess:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=self.environment,
+                cwd=self.working_directory,
             )
         except (OSError, ValueError) as exc:
             raise PluginError("PLUGIN_UNAVAILABLE", "Unable to start plugin process", retryable=True,

@@ -502,6 +502,21 @@ CREATE TABLE IF NOT EXISTS plugin_publisher_trust (
     PRIMARY KEY (publisher_id, key_id)
 );
 
+CREATE TABLE IF NOT EXISTS plugin_permission_approvals (
+    publisher_id           TEXT NOT NULL,
+    plugin_id              TEXT NOT NULL,
+    permission_name       TEXT NOT NULL,
+    permission_fingerprint TEXT NOT NULL,
+    approved              INTEGER NOT NULL DEFAULT 0 CHECK(approved IN (0, 1)),
+    approved_at            TEXT DEFAULT '',
+    approved_by            TEXT DEFAULT '',
+    revoked_at             TEXT DEFAULT '',
+    revoked_by             TEXT DEFAULT '',
+    manifest_version       TEXT DEFAULT '',
+    updated_at             TEXT NOT NULL,
+    PRIMARY KEY (publisher_id, plugin_id, permission_name, permission_fingerprint)
+);
+
 CREATE TABLE IF NOT EXISTS plugin_scheme_ownership (
     scheme       TEXT PRIMARY KEY,
     mode         TEXT NOT NULL CHECK(mode IN ('legacy', 'plugin', 'migration_test')),
@@ -2402,6 +2417,83 @@ async def list_plugin_installations() -> list[dict]:
         finally:
             conn.close()
     return await asyncio.to_thread(_list)
+
+
+async def get_plugin_permission_approval(
+    publisher_id: str, plugin_id: str, permission_name: str, permission_fingerprint: str,
+) -> dict | None:
+    def _get():
+        conn = _connect()
+        try:
+            row = conn.execute(
+                """SELECT * FROM plugin_permission_approvals
+                   WHERE publisher_id=? AND plugin_id=? AND permission_name=? AND permission_fingerprint=?""",
+                (publisher_id, plugin_id, permission_name, permission_fingerprint),
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+    return await asyncio.to_thread(_get)
+
+
+async def list_plugin_permission_approvals(publisher_id: str = "", plugin_id: str = "") -> list[dict]:
+    def _list():
+        conn = _connect()
+        try:
+            query = "SELECT * FROM plugin_permission_approvals"
+            values: list[str] = []
+            clauses = []
+            if publisher_id:
+                clauses.append("publisher_id=?")
+                values.append(publisher_id)
+            if plugin_id:
+                clauses.append("plugin_id=?")
+                values.append(plugin_id)
+            if clauses:
+                query += " WHERE " + " AND ".join(clauses)
+            query += " ORDER BY publisher_id, plugin_id, permission_name"
+            return [dict(row) for row in conn.execute(query, values).fetchall()]
+        finally:
+            conn.close()
+    return await asyncio.to_thread(_list)
+
+
+async def set_plugin_permission_approval(
+    publisher_id: str, plugin_id: str, permission_name: str, permission_fingerprint: str,
+    *, approved: bool, actor: str, manifest_version: str,
+) -> dict:
+    def _set():
+        conn = _connect()
+        try:
+            with conn:
+                now = _utc_now()
+                conn.execute(
+                    """INSERT INTO plugin_permission_approvals(
+                           publisher_id, plugin_id, permission_name, permission_fingerprint,
+                           approved, approved_at, approved_by, revoked_at, revoked_by,
+                           manifest_version, updated_at)
+                       VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(publisher_id, plugin_id, permission_name, permission_fingerprint) DO UPDATE SET
+                           approved=excluded.approved,
+                           approved_at=excluded.approved_at,
+                           approved_by=excluded.approved_by,
+                           revoked_at=excluded.revoked_at,
+                           revoked_by=excluded.revoked_by,
+                           manifest_version=excluded.manifest_version,
+                           updated_at=excluded.updated_at""",
+                    (publisher_id, plugin_id, permission_name, permission_fingerprint,
+                     1 if approved else 0, now if approved else "", actor if approved else "",
+                     "" if approved else now, "" if approved else actor, manifest_version, now),
+                )
+                row = conn.execute(
+                    """SELECT * FROM plugin_permission_approvals
+                       WHERE publisher_id=? AND plugin_id=? AND permission_name=? AND permission_fingerprint=?""",
+                    (publisher_id, plugin_id, permission_name, permission_fingerprint),
+                ).fetchone()
+                return dict(row)
+        finally:
+            conn.close()
+    return await asyncio.to_thread(_set)
 
 
 async def list_plugin_artifacts(publisher_id: str, plugin_id: str, *, state: str = '') -> list[dict]:

@@ -77,9 +77,13 @@ async def run_plugin_update_task(context: AutomationTaskContext, plugin_subsyste
         identity = f"{installation['publisher_id']}/{installation['plugin_id']}"
         try:
             await plugin_subsystem.install(identity, [package])
-        except Exception:
-            failed += 1
-            errors.append(f"Plugin {identity}: update failed")
+        except Exception as exc:
+            if getattr(exc, "code", "") == "PERMISSION_APPROVAL_REQUIRED":
+                skipped += 1
+                errors.append(f"Plugin {identity}: permission approval required")
+            else:
+                failed += 1
+                errors.append(f"Plugin {identity}: update failed")
         else:
             updated += 1
         await context.report_progress(

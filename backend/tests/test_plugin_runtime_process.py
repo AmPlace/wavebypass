@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -205,3 +206,16 @@ class PluginRuntimeProcessTest(unittest.IsolatedAsyncioTestCase):
         await runtime.uninstall(instance)
         self.assertEqual(instance.state, LifecycleState.ABSENT)
         self.assertNotIn(instance.instance_id, runtime.registry.instances)
+
+    async def test_sanitized_environment_and_explicit_working_directory_reach_process(self):
+        runtime = self.runtime()
+        manifest = validate_manifest(manifest_data())
+        with tempfile.TemporaryDirectory() as directory:
+            instance = runtime.install(manifest, command("ambient_probe"),
+                                       environment={"PATH": "/usr/bin"}, working_directory=directory)
+            await runtime.enable(instance)
+            result = await runtime.request(instance, "tv.resolve_stream", {})
+            diagnostics = result["provider_diagnostics"]
+            self.assertEqual(Path(diagnostics["cwd"]).resolve(), Path(directory).resolve())
+            self.assertEqual({key: diagnostics[key] for key in ("secret", "path")},
+                             {"secret": "", "path": "/usr/bin"})

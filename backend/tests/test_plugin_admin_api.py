@@ -15,7 +15,7 @@ import httpx
 
 def _clear_modules():
     for name in list(sys.modules):
-        if name in {"database", "main", "plugin_production", "routers.plugins"}:
+        if name in {"database", "main", "plugin_production", "plugin_permissions", "routers.plugins"}:
             sys.modules.pop(name, None)
 
 
@@ -34,6 +34,8 @@ class PluginAdminApiTest(unittest.IsolatedAsyncioTestCase):
             set_ownership=mock.AsyncMock(return_value={"scheme": "synthetic", "mode": "legacy", "plugin": ""}),
             disable=mock.AsyncMock(return_value={"plugin": "org.example/fixture", "enabled": False}),
             uninstall=mock.AsyncMock(return_value=True),
+            approve_permission=mock.AsyncMock(return_value={"requested": [], "approved": [], "pending": [], "risk": {}}),
+            revoke_permission=mock.AsyncMock(return_value={"requested": [], "approved": [], "pending": [], "risk": {}}),
         )
         self.main.app.state.plugin_subsystem = self.subsystem
         self.main.app.state.automation_service = None
@@ -119,6 +121,23 @@ class PluginAdminApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(removed.json(), {"removed": True})
         self.subsystem.disable.assert_awaited_once_with("org.example/fixture")
         self.subsystem.uninstall.assert_awaited_once_with("org.example/fixture")
+
+    async def test_permission_approval_and_revoke_use_production_subsystem(self):
+        async def admin():
+            return {"id": 1, "role": "admin"}
+        self.main.app.dependency_overrides[self.main.require_admin] = admin
+        with mock.patch("routers.plugins._packages", new=mock.AsyncMock(return_value=[{"id": "fixture"}])):
+            approved = await self.client.post(
+                "/api/admin/plugins/org.example/fixture/permissions/approve",
+                json={"permission": "network.direct", "package_id": "fixture"})
+        revoked = await self.client.post(
+            "/api/admin/plugins/org.example/fixture/permissions/revoke",
+            json={"permission": "network.direct"})
+        self.assertEqual((approved.status_code, revoked.status_code), (200, 200))
+        self.subsystem.approve_permission.assert_awaited_once_with(
+            "org.example/fixture", [{"id": "fixture"}], "network.direct", "admin_api")
+        self.subsystem.revoke_permission.assert_awaited_once_with(
+            "org.example/fixture", "network.direct", "admin_api")
 
 
 if __name__ == "__main__":

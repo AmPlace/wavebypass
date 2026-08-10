@@ -43,11 +43,24 @@ def validate_python_runtime(manifest: PluginManifest) -> tuple[dict[str, Any], s
     current = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
     if not _range_allows(current, runtime["python_version_range"]):
         raise PluginError("PYTHON_RUNTIME_UNSUPPORTED", "Python runtime version is unsupported", category="runtime")
-    supported = set(tags.sys_tags())
-    for item in runtime["dependency_lock"]["artifacts"]:
-        if _artifact_tag(item) not in supported:
-            raise PluginError("DEPENDENCY_PLATFORM_UNSUPPORTED", "Dependency wheel is incompatible with this Python runtime", category="dependency")
+    select_dependency_artifacts(runtime["dependency_lock"])
     return runtime["dependency_lock"], dependency_lock_digest(runtime["dependency_lock"])
+
+
+def select_dependency_artifacts(lock: dict[str, Any]) -> tuple[dict[str, Any], ...]:
+    supported = set(tags.sys_tags())
+    by_package: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for item in lock["artifacts"]:
+        by_package.setdefault((item["name"], item["version"]), []).append(item)
+    selected = []
+    for candidates in by_package.values():
+        compatible = [item for item in candidates if _artifact_tag(item) in supported]
+        if len(compatible) != 1:
+            raise PluginError("DEPENDENCY_PLATFORM_UNSUPPORTED",
+                              "Dependency lock must select exactly one compatible wheel per package",
+                              category="dependency")
+        selected.append(compatible[0])
+    return tuple(selected)
 
 
 @dataclass(frozen=True)
@@ -81,7 +94,8 @@ class PythonEnvironmentManager:
     ) -> PreparedPythonEnvironment:
         lock, lock_digest = validate_python_runtime(manifest)
         wheels = []
-        for item in lock["artifacts"]:
+        selected = select_dependency_artifacts(lock)
+        for item in selected:
             wheels.append(await self._cache_artifact(item, references.get(item["sha256"]), fetch=fetch))
         target = self.environment_path(manifest, lock_digest)
         if target.exists():
@@ -95,7 +109,7 @@ class PythonEnvironmentManager:
                                  "--disable-pip-version-check", *map(str, wheels)))
             marker = {"plugin": manifest.identity, "version": manifest.version,
                       "runtime_identity": python_runtime_identity(self.python_executable),
-                      "lock_digest": lock_digest, "dependencies": lock["artifacts"]}
+                      "lock_digest": lock_digest, "dependencies": selected}
             (staging / "waveflow-environment.json").write_text(
                 json.dumps(marker, sort_keys=True, separators=(",", ":")), encoding="utf-8")
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -169,7 +183,13 @@ class PythonEnvironmentManager:
         actual = (marker.get("plugin"), marker.get("version"), marker.get("runtime_identity"), marker.get("lock_digest"))
         if actual != expected or not python.is_file():
             raise PluginError("PLUGIN_ENVIRONMENT_INVALID", "Plugin environment identity is invalid", category="runtime")
-        return PreparedPythonEnvironment(path, python, lock_digest, expected[2], tuple(lock["artifacts"]))
+        dependencies = marker.get("dependencies")
+        if not isinstance(dependencies, list):
+            raise PluginError("PLUGIN_ENVIRONMENT_INVALID", "Plugin environment dependencies are invalid", category="runtime")
+        selected = select_dependency_artifacts(lock)
+        if dependencies != list(selected):
+            raise PluginError("PLUGIN_ENVIRONMENT_INVALID", "Plugin environment dependency plan is invalid", category="runtime")
+        return PreparedPythonEnvironment(path, python, lock_digest, expected[2], selected)
 
     async def rebuild(self, manifest: PluginManifest, references: dict[str, Path], **kwargs) -> PreparedPythonEnvironment:
         _lock, digest = validate_python_runtime(manifest)

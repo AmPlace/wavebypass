@@ -59,6 +59,28 @@ class PluginTaskTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((result.checked_count, result.updated_count, result.failed_count), (2, 1, 1))
         self.assertEqual(subsystem.install.await_count, 2)
 
+    async def test_permission_approval_required_is_skipped_and_other_update_continues(self):
+        import plugin_tasks
+        from plugin_runtime import PluginError
+        context = SimpleNamespace(stop_requested=lambda: False, task_type="auto_update", report_progress=mock.AsyncMock())
+        installations = [{"publisher_id": "org.example", "plugin_id": value, "source_key": "third",
+                          "source_package_id": f"third::{value}", "active_version": "1.0.0"}
+                         for value in ("pending", "ready")]
+        packages = [{"id": f"third::{value}", "version": "2.0.0"} for value in ("pending", "ready")]
+        refresh = {"source_results": [{"source_key": "third", "status": "success", "usable_for_update": True,
+                                        "package_ids": [item["id"] for item in packages]}]}
+        async def install(identity, _packages):
+            if identity.endswith("/pending"):
+                raise PluginError("PERMISSION_APPROVAL_REQUIRED", "approval required", category="permission")
+        subsystem = SimpleNamespace(install=mock.AsyncMock(side_effect=install))
+        with mock.patch.object(plugin_tasks.market, "refresh_market", new=mock.AsyncMock(return_value=refresh)), \
+                mock.patch.object(plugin_tasks.market, "market_packages_snapshot", return_value=packages), \
+                mock.patch.object(plugin_tasks.db, "list_plugin_installations", new=mock.AsyncMock(return_value=installations)):
+            result = await plugin_tasks.run_plugin_update_task(context, subsystem)
+        self.assertEqual((result.status, result.checked_count, result.updated_count, result.skipped_count, result.failed_count),
+                         ("success", 2, 1, 1, 0))
+        self.assertEqual(subsystem.install.await_count, 2)
+
     async def test_real_provider_plugins_use_the_generic_market_update_task(self):
         import plugin_tasks
         for plugin_id in ("fjtv", "nowtv", "nmtv"):

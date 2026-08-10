@@ -37,6 +37,11 @@ class OwnershipRequest(BaseModel):
     plugin: str = ""
 
 
+class PermissionActionRequest(BaseModel):
+    permission: str
+    package_id: str = ""
+
+
 def _subsystem(request: Request):
     subsystem = getattr(request.app.state, "plugin_subsystem", None)
     if subsystem is None:
@@ -53,6 +58,7 @@ def _error(exc: PluginError) -> HTTPException:
         "PYTHON_RUNTIME_UNSUPPORTED": 422, "DEPENDENCY_LOCK_INVALID": 422,
         "DEPENDENCY_PLATFORM_UNSUPPORTED": 422,
         "DEPENDENCY_ARTIFACT_NOT_FOUND": 404,
+        "PERMISSION_APPROVAL_REQUIRED": 409,
     }
     return HTTPException(status_code=statuses.get(exc.code, 400), detail=exc.as_contract())
 
@@ -65,6 +71,12 @@ def _manifest_projection(row: dict[str, Any]) -> dict[str, Any]:
     runtime = manifest.get("runtime") or {}
     lock = runtime.get("dependency_lock") or {}
     dependencies = lock.get("artifacts") if isinstance(lock.get("artifacts"), list) else []
+    if runtime.get("type") == "python":
+        try:
+            from plugin_python_runtime import select_dependency_artifacts
+            dependencies = list(select_dependency_artifacts(lock))
+        except PluginError:
+            dependencies = []
     return {
         "plugin": f"{row['publisher_id']}/{row['plugin_id']}",
         "display_name": manifest.get("display_name") or row["plugin_id"],
@@ -140,7 +152,43 @@ async def plugin_detail(publisher_id: str, plugin_id: str) -> dict[str, Any]:
     row = await db.get_plugin_installation(publisher_id, plugin_id)
     if not row:
         raise HTTPException(status_code=404, detail={"code": "RESOURCE_NOT_FOUND", "message": "Plugin is not installed"})
-    return _manifest_projection(row)
+    projection = _manifest_projection(row)
+    from plugin_permissions import permission_projection
+    from plugin_runtime import validate_manifest
+    try:
+        projection["permissions"] = await permission_projection(validate_manifest(json.loads(row["manifest_json"])))
+    except PluginError:
+        projection["permissions"] = {"requested": [], "approved": [], "pending": [], "risk": {}}
+    return projection
+
+
+@router.get("/{publisher_id}/{plugin_id}/permissions")
+async def plugin_permissions(publisher_id: str, plugin_id: str, request: Request) -> dict[str, Any]:
+    try:
+        return await _subsystem(request).service.permission_projection(f"{publisher_id}/{plugin_id}")
+    except PluginError as exc:
+        raise _error(exc) from exc
+
+
+@router.post("/{publisher_id}/{plugin_id}/permissions/approve")
+async def approve_plugin_permission(publisher_id: str, plugin_id: str, body: PermissionActionRequest, request: Request) -> dict[str, Any]:
+    try:
+        packages = await _packages(body.package_id)
+        return await _subsystem(request).approve_permission(
+            f"{publisher_id}/{plugin_id}", packages, body.permission, "admin_api",
+        )
+    except PluginError as exc:
+        raise _error(exc) from exc
+
+
+@router.post("/{publisher_id}/{plugin_id}/permissions/revoke")
+async def revoke_plugin_permission(publisher_id: str, plugin_id: str, body: PermissionActionRequest, request: Request) -> dict[str, Any]:
+    try:
+        return await _subsystem(request).revoke_permission(
+            f"{publisher_id}/{plugin_id}", body.permission, "admin_api",
+        )
+    except PluginError as exc:
+        raise _error(exc) from exc
 
 
 @router.post("/{publisher_id}/{plugin_id}/install")

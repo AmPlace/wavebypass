@@ -28,13 +28,16 @@ class PluginRuntime:
         self.max_starts = max_starts
         self.capability_dispatcher = capability_dispatcher
         self._commands: dict[str, tuple[str, ...]] = {}
+        self._execution: dict[str, tuple[dict[str, str] | None, str | None]] = {}
         self._gates: dict[str, PermissionGate] = {}
         self._closed = False
 
-    def install(self, manifest: PluginManifest, command: Sequence[str], *, instance_id: str | None = None) -> PluginInstance:
+    def install(self, manifest: PluginManifest, command: Sequence[str], *, instance_id: str | None = None,
+                environment: dict[str, str] | None = None, working_directory: str | None = None) -> PluginInstance:
         instance = PluginInstance(instance_id or str(uuid.uuid4()), manifest)
         self.registry.install(instance)
         self._commands[instance.instance_id] = tuple(command)
+        self._execution[instance.instance_id] = (environment, working_directory)
         self._gates[instance.instance_id] = PermissionGate(manifest, self.permission_policy)
         return instance
 
@@ -52,8 +55,10 @@ class PluginRuntime:
                 instance.manifest.identity, self._gates[instance.instance_id], method, payload,
                 timeout=timeout, context=context,
             )
+        environment, working_directory = self._execution[instance.instance_id]
         process = PluginProcess(self._commands[instance.instance_id], instance.instance_id,
-                                on_exit=lambda code: self._on_exit(instance, code), capability_handler=dispatch)
+                                on_exit=lambda code: self._on_exit(instance, code), capability_handler=dispatch,
+                                environment=environment, working_directory=working_directory)
         instance.process = process
         try:
             await process.start()
@@ -217,4 +222,5 @@ class PluginRuntime:
             await self.disable(instance)
         self.registry.remove(instance)
         self._commands.pop(instance.instance_id, None)
+        self._execution.pop(instance.instance_id, None)
         self._gates.pop(instance.instance_id, None)

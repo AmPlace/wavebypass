@@ -227,35 +227,55 @@ class ProductionPluginSubsystem:
                               category="routing")
         return await self.service.uninstall(identity)
 
-    async def install(self, identity: str, packages: Iterable[dict[str, Any]]) -> dict[str, Any]:
-        prepared: list[dict[str, Any]] = []
-        temp_paths: list[Path] = []
+    async def approve_permission(self, identity: str, packages: Iterable[dict[str, Any]],
+                                 permission: str, actor: str) -> dict[str, Any]:
+        prepared, temp_paths = await self._prepare_packages(packages)
         try:
-            os_name, arch = current_platform()
-            for package in packages:
-                package = json.loads(json.dumps(package))
-                manifest = package.get("plugin_manifest") or {}
-                references = package.get("artifact_references") or []
-                local_references = []
-                for artifact in manifest.get("artifacts") or []:
-                    if artifact.get("os") != os_name or artifact.get("arch") != arch:
-                        continue
-                    remote = next((item for item in references if item.get("sha256") == artifact.get("sha256")), None)
-                    if not remote or not remote.get("url"):
-                        continue
-                    path = await download_plugin_artifact(
-                        str(remote["url"]), self.download_root,
-                        expected_size=int(artifact["size_bytes"]), expected_sha256=str(artifact["sha256"]),
-                        client=self.http_client,
-                    )
-                    temp_paths.append(path)
-                    local_references.append({"sha256": artifact["sha256"], "local_path": str(path)})
-                package["artifact_references"] = local_references
-                prepared.append(package)
+            return await self.service.approve_permission(identity, prepared, permission, actor)
+        finally:
+            for path in temp_paths:
+                path.unlink(missing_ok=True)
+
+    async def revoke_permission(self, identity: str, permission: str, actor: str) -> dict[str, Any]:
+        if any(item.get("mode") == "plugin" and item.get("plugin_identity") == identity
+               for item in await db.list_plugin_scheme_ownership()):
+            raise PluginError("SCHEME_CONFLICT", "Plugin owns a scheme and must be rolled back before permission revoke",
+                              category="routing")
+        return await self.service.revoke_permission(identity, permission, actor)
+
+    async def install(self, identity: str, packages: Iterable[dict[str, Any]]) -> dict[str, Any]:
+        prepared, temp_paths = await self._prepare_packages(packages)
+        try:
             return await self.service.install_from_packages(prepared, identity)
         finally:
             for path in temp_paths:
                 path.unlink(missing_ok=True)
+
+    async def _prepare_packages(self, packages: Iterable[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[Path]]:
+        prepared: list[dict[str, Any]] = []
+        temp_paths: list[Path] = []
+        os_name, arch = current_platform()
+        for package in packages:
+            package = json.loads(json.dumps(package))
+            manifest = package.get("plugin_manifest") or {}
+            references = package.get("artifact_references") or []
+            local_references = []
+            for artifact in manifest.get("artifacts") or []:
+                if artifact.get("os") != os_name or artifact.get("arch") != arch:
+                    continue
+                remote = next((item for item in references if item.get("sha256") == artifact.get("sha256")), None)
+                if not remote or not remote.get("url"):
+                    continue
+                path = await download_plugin_artifact(
+                    str(remote["url"]), self.download_root,
+                    expected_size=int(artifact["size_bytes"]), expected_sha256=str(artifact["sha256"]),
+                    client=self.http_client,
+                )
+                temp_paths.append(path)
+                local_references.append({"sha256": artifact["sha256"], "local_path": str(path)})
+            package["artifact_references"] = local_references
+            prepared.append(package)
+        return prepared, temp_paths
 
 
 async def download_dependency_artifact(

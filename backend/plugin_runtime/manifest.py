@@ -158,6 +158,16 @@ def validate_manifest(data: Any, *, core_version: str = "0.1.0") -> PluginManife
             or not set(permissions).issubset(SUPPORTED_PERMISSIONS)
             or any(not isinstance(v, (dict, bool, list)) for v in permissions.values())):
         raise _malformed("Invalid permission declaration")
+    network = permissions.get("network")
+    if network is not None:
+        if (not isinstance(network, dict)
+                or not set(network).issubset({"managed", "direct", "allowed_hosts", "allow_private"})
+                or any(key in network and not isinstance(network[key], bool)
+                       for key in ("managed", "direct", "allow_private"))
+                or ("allowed_hosts" in network and
+                    (not isinstance(network["allowed_hosts"], list)
+                     or any(not isinstance(value, str) or not value for value in network["allowed_hosts"])) )):
+            raise _malformed("Invalid network permission declaration")
     runtime = data["runtime"]
     if not isinstance(runtime, dict) or runtime.get("ipc") != "stdio_framed_json_v1":
         raise PluginError("PLUGIN_INCOMPATIBLE", "Unsupported plugin runtime", category="compatibility")
@@ -223,7 +233,7 @@ def _validate_dependency_lock(value: Any) -> None:
     artifacts = value.get("artifacts")
     if not isinstance(artifacts, list):
         raise PluginError("DEPENDENCY_LOCK_INVALID", "Invalid Python dependency lock artifacts", category="dependency")
-    seen_names: set[str] = set()
+    seen_candidates: set[tuple[str, str, str, str, str]] = set()
     seen_digests: set[str] = set()
     for item in artifacts:
         fields = {"name", "version", "filename", "url", "sha256", "size_bytes", "python_tag", "abi_tag", "platform_tag"}
@@ -244,9 +254,10 @@ def _validate_dependency_lock(value: Any) -> None:
                 or any(not isinstance(item.get(key), str) or not item[key]
                        for key in ("python_tag", "abi_tag", "platform_tag"))):
             raise PluginError("DEPENDENCY_LOCK_INVALID", "Invalid dependency artifact metadata", category="dependency")
-        if name in seen_names or item["sha256"] in seen_digests:
+        candidate_key = (name, item["version"], item["python_tag"], item["abi_tag"], item["platform_tag"])
+        if candidate_key in seen_candidates or item["sha256"] in seen_digests:
             raise PluginError("DEPENDENCY_LOCK_INVALID", "Duplicate dependency artifact", category="dependency")
-        seen_names.add(name)
+        seen_candidates.add(candidate_key)
         seen_digests.add(item["sha256"])
 
 
