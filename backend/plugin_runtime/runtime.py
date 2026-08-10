@@ -18,13 +18,15 @@ class PluginRuntime:
     def __init__(self, *, registry: PluginRegistry | None = None, permission_policy: PermissionPolicy | None = None,
                  clock: Callable[[], float] | None = None,
                  sleep: Callable[[float], Awaitable[None]] | None = None,
-                 restart_window: float = 600.0, max_starts: int = 3):
+                 restart_window: float = 600.0, max_starts: int = 3,
+                 capability_dispatcher: Any | None = None):
         self.registry = registry or PluginRegistry()
         self.permission_policy = permission_policy or PermissionPolicy()
         self.clock = clock or time.monotonic
         self.sleep = sleep or asyncio.sleep
         self.restart_window = restart_window
         self.max_starts = max_starts
+        self.capability_dispatcher = capability_dispatcher
         self._commands: dict[str, tuple[str, ...]] = {}
         self._gates: dict[str, PermissionGate] = {}
         self._closed = False
@@ -43,17 +45,25 @@ class PluginRuntime:
             raise PluginError("PLUGIN_QUARANTINED", "Plugin is quarantined", category="lifecycle")
         instance.transition(LifecycleState.STARTING)
         self._record_start(instance)
+        async def dispatch(method: str, payload: dict[str, Any], timeout: float, context: dict[str, Any]) -> Any:
+            if self.capability_dispatcher is None:
+                raise PluginError("CAPABILITY_DENIED", "Core capabilities are unavailable", category="permission")
+            return await self.capability_dispatcher.dispatch(
+                instance.manifest.identity, self._gates[instance.instance_id], method, payload,
+                timeout=timeout, context=context,
+            )
         process = PluginProcess(self._commands[instance.instance_id], instance.instance_id,
-                                on_exit=lambda code: self._on_exit(instance, code))
+                                on_exit=lambda code: self._on_exit(instance, code), capability_handler=dispatch)
         instance.process = process
         try:
             await process.start()
             instance.transition(LifecycleState.HANDSHAKING)
             hello = await process.call("runtime.hello", {
-                "core_protocol_versions": ["1.0"],
+                "core_protocol_versions": ["1.1", "1.0"],
                 "manifest_identity": instance.manifest.identity,
             }, timeout=5.0)
             self._validate_hello(instance, hello)
+            process.negotiate_protocol(str(hello["protocol_version"]))
             health = await process.call("runtime.health", {}, timeout=5.0)
             if not isinstance(health, dict) or health.get("healthy") is not True:
                 raise invalid_response("Plugin health check failed")
@@ -67,7 +77,7 @@ class PluginRuntime:
     def _validate_hello(self, instance: PluginInstance, hello: Any) -> None:
         if not isinstance(hello, dict) or hello.get("plugin") != instance.manifest.identity or hello.get("version") != instance.manifest.version:
             raise invalid_response("Plugin hello identity/version mismatch")
-        if hello.get("protocol_version") != "1.0":
+        if hello.get("protocol_version") not in {"1.0", "1.1"}:
             raise PluginError("PLUGIN_INCOMPATIBLE", "Plugin protocol version is incompatible", category="compatibility")
         declared_contracts = {(c.contract, c.contract_version): c.features for c in instance.manifest.provider_contracts}
         claimed_contracts: dict[tuple[str, str], set[str]] = {}
@@ -199,6 +209,8 @@ class PluginRuntime:
                 except PluginError:
                     if instance.process:
                         await instance.process.stop(graceful=False)
+        if self.capability_dispatcher is not None:
+            self.capability_dispatcher.close()
 
     async def uninstall(self, instance: PluginInstance) -> None:
         if instance.state in {LifecycleState.HEALTHY_ACTIVE, LifecycleState.UNHEALTHY}:

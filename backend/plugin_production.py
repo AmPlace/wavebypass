@@ -22,7 +22,7 @@ from plugin_market import PluginArtifactStore, PluginMarketService, current_plat
 from plugin_runtime import PluginError, PluginRuntime
 from plugin_runtime.permissions import PermissionPolicy
 from provider_resolver import ProviderResolver
-from plugin_capabilities import CapabilityGateway
+from plugin_capabilities import CapabilityGateway, CoreCapabilityDispatcher
 
 
 logger = logging.getLogger(__name__)
@@ -158,7 +158,12 @@ class ProductionPluginSubsystem:
         trust_rows = await db.list_plugin_publisher_trust()
         trust_rows.extend(_official_trust_rows())
         trust = ProductionTrustPolicy(trust_rows)
-        runtime = PluginRuntime(permission_policy=PermissionPolicy(frozenset({"network", "cache"})))
+        gateway = CapabilityGateway(client=http_client)
+        dispatcher = CoreCapabilityDispatcher(gateway)
+        runtime = PluginRuntime(
+            permission_policy=PermissionPolicy(frozenset({"network", "cache"})),
+            capability_dispatcher=dispatcher,
+        )
         store = PluginArtifactStore(root / "artifacts", allowed_local_roots=[downloads])
         service = PluginMarketService(
             runtime=runtime, store=store, trust_policy=trust, command_factory=command_factory,
@@ -170,7 +175,7 @@ class ProductionPluginSubsystem:
         )
         for row in ownership_rows:
             resolver.set_mode(row["scheme"], row["mode"], str(row.get("plugin_identity") or ""))
-        return cls(service, trust, downloads, http_client, resolver, CapabilityGateway(client=http_client))
+        return cls(service, trust, downloads, http_client, resolver, gateway)
 
     async def startup(self) -> list[dict[str, Any]]:
         try:

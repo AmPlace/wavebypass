@@ -5,6 +5,9 @@ import argparse
 import json
 import os
 import sys
+import threading
+import time
+import uuid
 
 
 def read_frame():
@@ -20,12 +23,16 @@ def read_frame():
     return json.loads(sys.stdin.buffer.read(int(headers["content-length"])).decode("utf-8"))
 
 
+write_lock = threading.Lock()
+
+
 def write_frame(payload):
     body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    sys.stdout.buffer.write(
-        f"Content-Length: {len(body)}\r\nContent-Type: application/json; charset=utf-8\r\n\r\n".encode("ascii") + body
-    )
-    sys.stdout.buffer.flush()
+    with write_lock:
+        sys.stdout.buffer.write(
+            f"Content-Length: {len(body)}\r\nContent-Type: application/json; charset=utf-8\r\n\r\n".encode("ascii") + body
+        )
+        sys.stdout.buffer.flush()
 
 
 def response(request, result=None, *, request_id=None, error=None):
@@ -37,6 +44,65 @@ def response(request, result=None, *, request_id=None, error=None):
         "error": error,
         "diagnostics": {},
     }
+
+
+callback_lock = threading.Lock()
+callbacks = {}
+
+
+def capability(parent, method, payload):
+    request_id = f"plugin:{uuid.uuid4().hex}"
+    event = threading.Event()
+    with callback_lock:
+        callbacks[request_id] = [event, None]
+    write_frame({
+        "protocol_version": "1.1", "kind": "request", "sender": "plugin",
+        "request_id": request_id, "method": method,
+        "plugin_instance": parent.get("plugin_instance"),
+        "deadline_unix_ms": int((time.time() + 5) * 1000),
+        "context": {"parent_request_id": parent["request_id"]}, "payload": payload,
+    })
+    if not event.wait(5):
+        raise RuntimeError("capability timeout")
+    with callback_lock:
+        result = callbacks.pop(request_id)[1]
+    if result.get("status") == "error":
+        raise CapabilityError(result.get("error") or {})
+    return result.get("result")
+
+
+class CapabilityError(Exception):
+    def __init__(self, error):
+        self.error = error
+
+
+def nested_resolve(request, mode):
+    try:
+        if mode == "nested_crash":
+            request_id = f"plugin:{uuid.uuid4().hex}"
+            write_frame({
+                "protocol_version": "1.1", "kind": "request", "sender": "plugin",
+                "request_id": request_id, "method": "core.http.fetch",
+                "plugin_instance": request.get("plugin_instance"),
+                "deadline_unix_ms": int((time.time() + 5) * 1000),
+                "context": {"parent_request_id": request["request_id"]},
+                "payload": {"method": "GET", "url": "https://api.example/resolve", "response_mode": "json"},
+            })
+            time.sleep(0.03)
+            os._exit(24)
+        result = capability(request, "core.http.fetch", {
+            "method": "GET", "url": request["payload"].get("fixture_url", "https://api.example/resolve"),
+            "response_mode": "json",
+        })
+        stream = descriptor()
+        stream["url"] = result["body"]["url"]
+        write_frame(response(request, stream))
+    except CapabilityError as exc:
+        write_frame(response(request, error=exc.error))
+    except Exception:
+        write_frame(response(request, error={"code": "TEMPORARY_UPSTREAM_FAILURE",
+                                             "message": "Capability callback failed", "retryable": True,
+                                             "category": "capability", "details": {}}))
 
 
 def descriptor(transport="hls"):
@@ -69,6 +135,13 @@ def main():
         request = read_frame()
         if request is None:
             return
+        if request.get("kind") == "response" and request.get("sender") == "core":
+            with callback_lock:
+                callback = callbacks.get(request.get("request_id"))
+                if callback:
+                    callback[1] = request
+                    callback[0].set()
+            continue
         method = request["method"]
         if method == "runtime.hello":
             permissions = [v for v in args.permissions.split(",") if v]
@@ -84,7 +157,8 @@ def main():
                 )
                 capabilities.extend(["radio.catalog", "radio.resolve_stream"])
             result = {
-                "protocol_version": "1.0", "plugin": args.identity, "version": args.version,
+                "protocol_version": "1.1" if args.mode.startswith("nested_") else "1.0",
+                "plugin": args.identity, "version": args.version,
                 "provider_contracts": provider_contracts,
                 "owned_schemes": [{"scheme": scheme, "contract": "tv_provider"} for scheme in schemes],
                 "capabilities": capabilities,
@@ -110,6 +184,9 @@ def main():
             if args.mode == "malformed_frame":
                 sys.stdout.buffer.write(b"garbage\r\n\r\n")
                 sys.stdout.buffer.flush()
+                continue
+            if args.mode in {"nested_http", "nested_crash", "nested_error"}:
+                threading.Thread(target=nested_resolve, args=(request, args.mode), daemon=True).start()
                 continue
             result = descriptor(request["payload"].get("transport", "hls"))
             if args.mode == "invalid_descriptor":
