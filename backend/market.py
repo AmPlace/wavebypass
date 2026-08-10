@@ -17,11 +17,14 @@ import httpx
 
 import database as db
 from m3u8_parser import detect_source_type, parse_m3u, parse_youtube_video_id
+from plugin_runtime.manifest import RANGE_PART_RE, SUPPORTED_CONTRACTS
 
 
 SCHEMA_VERSION = 1
 SUPPORTED_IMPORT_KINDS = {"playlist", "dynamic_playlist", "mixed"}
 SUPPORTED_CHANNEL_SOURCE_TYPES = {"inline_channels", "playlist"}
+CONTENT_PACKAGE_TYPE = "content_package"
+PLUGIN_PACKAGE_TYPE = "plugin_package"
 INDEX_EXECUTION_FIELDS = {
     "defaults",
     "channel_sources",
@@ -240,7 +243,11 @@ def _merge_source_defaults(*items: dict | None) -> dict:
 
 
 def _package_supported(package: dict) -> bool:
-    return package.get("kind") in SUPPORTED_IMPORT_KINDS and bool(package.get("supported_in_v1", True))
+    return (
+        package.get("package_type", CONTENT_PACKAGE_TYPE) == CONTENT_PACKAGE_TYPE
+        and package.get("kind") in SUPPORTED_IMPORT_KINDS
+        and bool(package.get("supported_in_v1", True))
+    )
 
 
 def _schema_warnings(package: dict, *, index: bool = False, manifest: bool = False) -> list[str]:
@@ -266,6 +273,39 @@ def _validate_package_minimal(raw: dict, *, context: str) -> None:
         raise MarketError(f"{context} package 缺少 id", 400)
     if not str(raw.get("kind") or "").strip():
         raise MarketError(f"{context} package 缺少 kind", 400)
+
+
+def _normalize_plugin_requirements(value: Any) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise MarketError("requires_plugins 必须是 array", 400)
+    result: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {"plugin", "version_range", "contract", "required_schemes"}:
+            raise MarketError("requires_plugins 项格式无效", 400)
+        identity = item.get("plugin")
+        version_range = item.get("version_range")
+        contract = item.get("contract")
+        schemes = item.get("required_schemes")
+        if (not isinstance(identity, str) or identity.count("/") != 1
+                or not all(identity.split("/"))
+                or not isinstance(version_range, str)
+                or not version_range.split()
+                or not all(RANGE_PART_RE.fullmatch(part) for part in version_range.split())
+                or contract not in SUPPORTED_CONTRACTS
+                or not isinstance(schemes, list) or not schemes
+                or any(not isinstance(scheme, str) or not scheme for scheme in schemes)
+                or len(set(schemes)) != len(schemes)):
+            raise MarketError("requires_plugins 项格式无效", 400)
+        result.append({
+            "plugin": identity,
+            "version_range": version_range,
+            "contract": contract,
+            "required_schemes": list(schemes),
+        })
+    result.sort(key=lambda item: (item["plugin"], item["contract"], item["version_range"], item["required_schemes"]))
+    return result
 
 
 async def ensure_market_sources() -> list[dict]:
@@ -698,6 +738,12 @@ def _normalize_package(raw: dict, *, manifest_url: str = "", market_url: str = "
     package.setdefault("name", package.get("id") or "未命名 Market 包")
     package.setdefault("description", "")
     package.setdefault("kind", "playlist")
+    package.setdefault("package_type", PLUGIN_PACKAGE_TYPE if package.get("kind") == PLUGIN_PACKAGE_TYPE else CONTENT_PACKAGE_TYPE)
+    if package["package_type"] not in {CONTENT_PACKAGE_TYPE, PLUGIN_PACKAGE_TYPE}:
+        raise MarketError("不支持的 package_type", 400)
+    package["requires_plugins"] = _normalize_plugin_requirements(package.get("requires_plugins"))
+    package.setdefault("plugin_manifest", None)
+    package.setdefault("artifact_references", [])
     package.setdefault("version", "")
     package.setdefault("updated_at", "")
     package.setdefault("region", {})
@@ -725,6 +771,10 @@ def _normalize_package(raw: dict, *, manifest_url: str = "", market_url: str = "
     package["supported_in_v1"] = supported
     package["previewable"] = bool(package.get("previewable", supported)) and supported
     package["importable"] = bool(package.get("importable", supported)) and supported
+    package["plugin_installable"] = bool(
+        package["package_type"] == PLUGIN_PACKAGE_TYPE
+        and isinstance(package.get("plugin_manifest"), dict)
+    )
     if not supported and not package.get("unsupported_reason"):
         package["unsupported_reason"] = "当前版本仅展示，暂不支持预览或导入"
     elif "unsupported_reason" not in package:
@@ -1171,6 +1221,8 @@ def _package_card(package: dict) -> dict:
         "manifest_url", "market_url", "market_source", "display", "installed",
         "installed_version", "auto_update", "update_available",
         "version_status",
+        "package_type", "requires_plugins", "plugin_manifest",
+        "plugin_installable",
     ]
     return {key: deepcopy(package.get(key)) for key in keys if key in package}
 
@@ -1191,6 +1243,10 @@ async def get_package(package_id: str) -> dict:
         package["unsupported_reason"] = f"manifest 加载失败: {exc}"
         _cache_package(package)
     result = deepcopy(package)
+    if result.get("package_type") == PLUGIN_PACKAGE_TYPE:
+        # Local artifact references are lifecycle-service inputs, not an admin
+        # read projection. In particular, never expose Core filesystem paths.
+        result.pop("artifact_references", None)
     install = installed.get(package_id)
     result["installed"] = bool(install)
     result["installed_version"] = install.get("installed_version", "") if install else ""
@@ -1665,6 +1721,7 @@ async def _import_package_locked(
         "channel_sources": package.get("channel_sources", []),
         "defaults": package.get("defaults", {}),
         "warnings": preview.get("warnings", []),
+        "requires_plugins": package.get("requires_plugins", []),
         "imported_at": _now_iso(),
     }
     try:

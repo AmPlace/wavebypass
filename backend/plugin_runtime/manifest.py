@@ -1,0 +1,204 @@
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from .errors import PluginError
+
+
+SEMVER_RE = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$")
+RANGE_PART_RE = re.compile(r"^(<=|>=|<|>|=)(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-([0-9A-Za-z.-]+))?$")
+IDENTITY_RE = re.compile(r"^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$")
+PLUGIN_ID_RE = re.compile(r"^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$")
+SCHEME_RE = re.compile(r"^[a-z][a-z0-9+.-]*$")
+API_VERSION = "1.0"
+SUPPORTED_CONTRACTS = frozenset({"tv_provider", "radio_provider"})
+SUPPORTED_PERMISSIONS = frozenset({
+    "network", "secrets", "cache", "state", "filesystem", "runtime", "subprocess", "crypto", "media",
+})
+SUPPORTED_OS = frozenset({"linux", "macos", "windows"})
+SUPPORTED_ARCH = frozenset({"x86_64", "arm64"})
+
+
+def _version_tuple(value: str) -> tuple[int, int, int, str]:
+    match = SEMVER_RE.fullmatch(value)
+    if not match:
+        raise ValueError(value)
+    return int(match[1]), int(match[2]), int(match[3]), match[4] or ""
+
+
+def _range_allows(version: str, expression: str) -> bool:
+    current = _version_tuple(version)[:3]
+    parts = expression.split()
+    if not parts:
+        return False
+    for part in parts:
+        match = RANGE_PART_RE.fullmatch(part)
+        if not match:
+            return False
+        expected = (int(match[2]), int(match[3]), int(match[4]))
+        op = match[1]
+        if not {"<": current < expected, "<=": current <= expected, ">": current > expected,
+                ">=": current >= expected, "=": current == expected}[op]:
+            return False
+    return True
+
+
+@dataclass(frozen=True)
+class ProviderContract:
+    contract: str
+    contract_version: str
+    features: frozenset[str]
+
+
+@dataclass(frozen=True)
+class PluginManifest:
+    raw: dict[str, Any]
+    publisher_id: str
+    plugin_id: str
+    display_name: str
+    version: str
+    plugin_api_version: str
+    core_version_range: str
+    provider_contracts: tuple[ProviderContract, ...]
+    owned_schemes: tuple[tuple[str, str], ...]
+    capabilities: frozenset[str]
+    permissions: dict[str, Any]
+    runtime: dict[str, str]
+    artifacts: tuple[dict[str, Any], ...]
+    dependencies: tuple[dict[str, Any], ...]
+    state_schema_version: int
+
+    @property
+    def identity(self) -> str:
+        return f"{self.publisher_id}/{self.plugin_id}"
+
+
+def _malformed(message: str) -> PluginError:
+    return PluginError("INVALID_PLUGIN_RESPONSE", message, category="manifest")
+
+
+def validate_manifest(data: Any, *, core_version: str = "0.1.0") -> PluginManifest:
+    if not isinstance(data, dict):
+        raise _malformed("Plugin manifest must be an object")
+    required = {
+        "manifest_version", "publisher_id", "plugin_id", "display_name", "version", "plugin_api_version",
+        "core_version_range", "provider_contracts", "owned_schemes", "capabilities", "permissions", "runtime",
+        "artifacts", "dependencies", "state_schema_version",
+    }
+    missing = required - data.keys()
+    if missing:
+        raise _malformed(f"Plugin manifest is missing required fields: {', '.join(sorted(missing))}")
+    if data["manifest_version"] != 1:
+        raise PluginError("PLUGIN_INCOMPATIBLE", "Unsupported plugin manifest version", category="compatibility")
+    publisher = data["publisher_id"]
+    plugin_id = data["plugin_id"]
+    if not isinstance(publisher, str) or not IDENTITY_RE.fullmatch(publisher) or len(publisher) > 128:
+        raise _malformed("Invalid publisher_id")
+    if not isinstance(plugin_id, str) or not PLUGIN_ID_RE.fullmatch(plugin_id) or len(plugin_id) > 128:
+        raise _malformed("Invalid plugin_id")
+    if not isinstance(data["display_name"], str) or not 1 <= len(data["display_name"]) <= 200:
+        raise _malformed("Invalid display_name")
+    if not isinstance(data["version"], str) or not SEMVER_RE.fullmatch(data["version"]):
+        raise _malformed("Invalid plugin SemVer")
+    if data["plugin_api_version"] != API_VERSION:
+        raise PluginError("PLUGIN_INCOMPATIBLE", "Incompatible plugin API version", category="compatibility")
+    expression = data["core_version_range"]
+    try:
+        allowed = isinstance(expression, str) and _range_allows(core_version, expression)
+    except ValueError:
+        allowed = False
+    if not isinstance(expression, str) or not all(RANGE_PART_RE.fullmatch(p) for p in expression.split()):
+        raise _malformed("Invalid Core version range")
+    if not allowed:
+        raise PluginError("PLUGIN_INCOMPATIBLE", "Plugin does not support this WaveFlow Core version", category="compatibility")
+
+    contracts_raw = data["provider_contracts"]
+    if not isinstance(contracts_raw, list) or not contracts_raw:
+        raise _malformed("provider_contracts must not be empty")
+    contracts: list[ProviderContract] = []
+    contract_names: set[str] = set()
+    for item in contracts_raw:
+        if not isinstance(item, dict) or item.get("contract") not in SUPPORTED_CONTRACTS or item.get("contract_version") != "1.0":
+            raise PluginError("PLUGIN_INCOMPATIBLE", "Unsupported provider contract", category="compatibility")
+        features = item.get("features")
+        if not isinstance(features, list) or any(not isinstance(v, str) or not v for v in features):
+            raise _malformed("Invalid provider contract features")
+        if item["contract"] in contract_names:
+            raise _malformed("Duplicate provider contract")
+        contract_names.add(item["contract"])
+        contracts.append(ProviderContract(item["contract"], "1.0", frozenset(features)))
+
+    schemes_raw = data["owned_schemes"]
+    if not isinstance(schemes_raw, list):
+        raise _malformed("owned_schemes must be an array")
+    schemes: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for item in schemes_raw:
+        if not isinstance(item, dict) or set(item) != {"scheme", "contract"}:
+            raise _malformed("Invalid scheme declaration")
+        scheme, contract = item["scheme"], item["contract"]
+        if not isinstance(scheme, str) or not SCHEME_RE.fullmatch(scheme) or contract not in contract_names:
+            raise _malformed("Invalid scheme declaration")
+        if scheme in seen:
+            raise PluginError("SCHEME_CONFLICT", "Plugin declares the same scheme more than once", category="registry")
+        seen.add(scheme)
+        schemes.append((scheme, contract))
+
+    capabilities = data["capabilities"]
+    if not isinstance(capabilities, list) or any(not isinstance(v, str) or not v for v in capabilities) or len(set(capabilities)) != len(capabilities):
+        raise _malformed("Invalid capability declaration")
+    permissions = data["permissions"]
+    if (not isinstance(permissions, dict)
+            or not set(permissions).issubset(SUPPORTED_PERMISSIONS)
+            or any(not isinstance(v, (dict, bool, list)) for v in permissions.values())):
+        raise _malformed("Invalid permission declaration")
+    runtime = data["runtime"]
+    if runtime != {"type": "subprocess", "ipc": "stdio_framed_json_v1"}:
+        raise PluginError("PLUGIN_INCOMPATIBLE", "Unsupported plugin runtime", category="compatibility")
+    artifacts = data["artifacts"]
+    if not isinstance(artifacts, list) or not artifacts:
+        raise _malformed("At least one plugin artifact is required")
+    for artifact in artifacts:
+        artifact_fields = {"os", "arch", "runtime", "entrypoint", "sha256", "size_bytes", "signature"}
+        if not isinstance(artifact, dict) or set(artifact) != artifact_fields:
+            raise _malformed("Invalid plugin artifact")
+        signature = artifact.get("signature")
+        if (artifact.get("os") not in SUPPORTED_OS or artifact.get("arch") not in SUPPORTED_ARCH
+                or not isinstance(artifact.get("runtime"), str) or not artifact["runtime"]
+                or not isinstance(artifact.get("entrypoint"), str) or not artifact["entrypoint"]
+                or not re.fullmatch(r"[a-f0-9]{64}", str(artifact.get("sha256", "")))
+                or not isinstance(artifact.get("size_bytes"), int) or isinstance(artifact["size_bytes"], bool)
+                or artifact["size_bytes"] < 1 or not isinstance(signature, dict)
+                or set(signature) != {"algorithm", "key_id", "value"}
+                or signature.get("algorithm") != "ed25519"
+                or not all(isinstance(signature.get(key), str) and signature[key] for key in ("key_id", "value"))):
+            raise _malformed("Invalid plugin artifact")
+    dependencies = data["dependencies"]
+    if not isinstance(dependencies, list):
+        raise _malformed("Invalid plugin dependencies")
+    for dependency in dependencies:
+        if (not isinstance(dependency, dict) or not {"plugin", "version_range", "contract"}.issubset(dependency)
+                or not isinstance(dependency["plugin"], str) or dependency["plugin"].count("/") != 1
+                or dependency["contract"] not in SUPPORTED_CONTRACTS
+                or not isinstance(dependency["version_range"], str)
+                or not all(RANGE_PART_RE.fullmatch(part) for part in dependency["version_range"].split())):
+            raise _malformed("Invalid plugin dependency")
+    if not isinstance(data["state_schema_version"], int) or data["state_schema_version"] < 1:
+        raise _malformed("Invalid state_schema_version")
+    return PluginManifest(dict(data), publisher, plugin_id, data["display_name"], data["version"], API_VERSION,
+                          expression, tuple(contracts), tuple(schemes), frozenset(capabilities), dict(permissions),
+                          dict(runtime), tuple(dict(v) for v in artifacts), tuple(dict(v) for v in dependencies),
+                          data["state_schema_version"])
+
+
+def load_manifest(path: str | Path, *, core_version: str = "0.1.0") -> PluginManifest:
+    try:
+        with Path(path).open(encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise _malformed("Unable to read plugin manifest") from exc
+    return validate_manifest(data, core_version=core_version)

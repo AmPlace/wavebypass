@@ -404,6 +404,53 @@ CREATE TABLE IF NOT EXISTS market_sources (
     updated_at      TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS plugin_installations (
+    publisher_id          TEXT NOT NULL,
+    plugin_id             TEXT NOT NULL,
+    installed_version     TEXT NOT NULL,
+    active_version        TEXT DEFAULT '',
+    candidate_version     TEXT DEFAULT '',
+    enabled               INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
+    trust_state           TEXT NOT NULL,
+    source_key            TEXT DEFAULT '',
+    source_package_id     TEXT DEFAULT '',
+    manifest_json         TEXT NOT NULL,
+    manifest_sha256       TEXT NOT NULL,
+    artifact_sha256       TEXT NOT NULL,
+    artifact_path         TEXT NOT NULL,
+    runtime_type          TEXT NOT NULL,
+    entrypoint            TEXT NOT NULL,
+    platform_os           TEXT NOT NULL,
+    platform_arch         TEXT NOT NULL,
+    lifecycle_state       TEXT NOT NULL DEFAULT 'installed',
+    quarantined           INTEGER NOT NULL DEFAULT 0 CHECK(quarantined IN (0, 1)),
+    last_activation_status TEXT DEFAULT '',
+    last_error            TEXT DEFAULT '',
+    retained_state_until  TEXT DEFAULT '',
+    created_at            TEXT NOT NULL,
+    updated_at            TEXT NOT NULL,
+    PRIMARY KEY (publisher_id, plugin_id)
+);
+
+CREATE TABLE IF NOT EXISTS plugin_artifacts (
+    publisher_id      TEXT NOT NULL,
+    plugin_id         TEXT NOT NULL,
+    version           TEXT NOT NULL,
+    platform_os       TEXT NOT NULL,
+    platform_arch     TEXT NOT NULL,
+    sha256            TEXT NOT NULL,
+    path              TEXT NOT NULL,
+    runtime_type      TEXT NOT NULL,
+    entrypoint        TEXT NOT NULL,
+    state             TEXT NOT NULL,
+    source_key        TEXT DEFAULT '',
+    source_package_id TEXT DEFAULT '',
+    created_at        TEXT NOT NULL,
+    PRIMARY KEY (publisher_id, plugin_id, version, platform_os, platform_arch, sha256)
+);
+CREATE INDEX IF NOT EXISTS idx_plugin_artifacts_state
+ON plugin_artifacts(publisher_id, plugin_id, state);
+
 CREATE TABLE IF NOT EXISTS users (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     username      TEXT NOT NULL UNIQUE,
@@ -2267,6 +2314,309 @@ async def delete_market_install(package_id: str):
         conn.execute("DELETE FROM market_packages_installed WHERE package_id=?", (package_id,))
         conn.commit()
         conn.close()
+    await asyncio.to_thread(_delete)
+
+
+# ── Plugin package persistence ──
+
+async def get_plugin_installation(publisher_id: str, plugin_id: str) -> dict | None:
+    def _get():
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM plugin_installations WHERE publisher_id=? AND plugin_id=?",
+                (publisher_id, plugin_id),
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+    return await asyncio.to_thread(_get)
+
+
+async def list_plugin_installations() -> list[dict]:
+    def _list():
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM plugin_installations ORDER BY publisher_id, plugin_id"
+            ).fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+    return await asyncio.to_thread(_list)
+
+
+async def list_plugin_artifacts(publisher_id: str, plugin_id: str, *, state: str = '') -> list[dict]:
+    def _list():
+        conn = _connect()
+        try:
+            if state:
+                rows = conn.execute(
+                    "SELECT * FROM plugin_artifacts WHERE publisher_id=? AND plugin_id=? AND state=? ORDER BY version, sha256",
+                    (publisher_id, plugin_id, state),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM plugin_artifacts WHERE publisher_id=? AND plugin_id=? ORDER BY version, sha256",
+                    (publisher_id, plugin_id),
+                ).fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+    return await asyncio.to_thread(_list)
+
+
+async def begin_plugin_candidate(
+    *,
+    publisher_id: str,
+    plugin_id: str,
+    version: str,
+    trust_state: str,
+    source_key: str,
+    source_package_id: str,
+    manifest_json: str,
+    manifest_sha256: str,
+    artifact_sha256: str,
+    artifact_path: str,
+    runtime_type: str,
+    entrypoint: str,
+    platform_os: str,
+    platform_arch: str,
+) -> dict:
+    def _begin():
+        conn = _connect()
+        try:
+            with conn:
+                now = _utc_now()
+                existing = conn.execute(
+                    "SELECT * FROM plugin_installations WHERE publisher_id=? AND plugin_id=?",
+                    (publisher_id, plugin_id),
+                ).fetchone()
+                if existing and existing['candidate_version']:
+                    raise RuntimeError('plugin candidate already exists')
+                conn.execute(
+                    """
+                    INSERT INTO plugin_artifacts(
+                        publisher_id, plugin_id, version, platform_os, platform_arch,
+                        sha256, path, runtime_type, entrypoint, state,
+                        source_key, source_package_id, created_at
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'candidate', ?, ?, ?)
+                    ON CONFLICT(publisher_id, plugin_id, version, platform_os, platform_arch, sha256)
+                    DO UPDATE SET
+                        path=excluded.path,
+                        runtime_type=excluded.runtime_type,
+                        entrypoint=excluded.entrypoint,
+                        state='candidate',
+                        source_key=excluded.source_key,
+                        source_package_id=excluded.source_package_id
+                    """,
+                    (
+                        publisher_id, plugin_id, version, platform_os, platform_arch,
+                        artifact_sha256, artifact_path, runtime_type, entrypoint,
+                        source_key, source_package_id, now,
+                    ),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO plugin_installations(
+                        publisher_id, plugin_id, installed_version, active_version,
+                        candidate_version, enabled, trust_state, source_key,
+                        source_package_id, manifest_json, manifest_sha256,
+                        artifact_sha256, artifact_path, runtime_type, entrypoint,
+                        platform_os, platform_arch, lifecycle_state, quarantined,
+                        last_activation_status, last_error, created_at, updated_at
+                    ) VALUES(?, ?, ?, '', ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                             'candidate', 0, 'pending', '', ?, ?)
+                    ON CONFLICT(publisher_id, plugin_id) DO UPDATE SET
+                        candidate_version=excluded.candidate_version,
+                        lifecycle_state='candidate',
+                        last_activation_status='pending',
+                        last_error='',
+                        updated_at=excluded.updated_at
+                    """,
+                    (
+                        publisher_id, plugin_id, version, version, trust_state,
+                        source_key, source_package_id, manifest_json, manifest_sha256,
+                        artifact_sha256, artifact_path, runtime_type, entrypoint,
+                        platform_os, platform_arch, now, now,
+                    ),
+                )
+                row = conn.execute(
+                    "SELECT * FROM plugin_installations WHERE publisher_id=? AND plugin_id=?",
+                    (publisher_id, plugin_id),
+                ).fetchone()
+                return dict(row)
+        finally:
+            conn.close()
+    return await asyncio.to_thread(_begin)
+
+
+async def activate_plugin_candidate(
+    *,
+    publisher_id: str,
+    plugin_id: str,
+    candidate_version: str,
+    trust_state: str,
+    source_key: str,
+    source_package_id: str,
+    manifest_json: str,
+    manifest_sha256: str,
+    artifact_sha256: str,
+    artifact_path: str,
+    runtime_type: str,
+    entrypoint: str,
+    platform_os: str,
+    platform_arch: str,
+) -> bool:
+    def _activate():
+        conn = _connect()
+        try:
+            with conn:
+                now = _utc_now()
+                cursor = conn.execute(
+                    """
+                    UPDATE plugin_installations SET
+                        installed_version=?, active_version=?, candidate_version='',
+                        enabled=1, trust_state=?, source_key=?, source_package_id=?,
+                        manifest_json=?, manifest_sha256=?, artifact_sha256=?,
+                        artifact_path=?, runtime_type=?, entrypoint=?, platform_os=?,
+                        platform_arch=?, lifecycle_state='active', quarantined=0,
+                        last_activation_status='success', last_error='', updated_at=?
+                    WHERE publisher_id=? AND plugin_id=? AND candidate_version=?
+                    """,
+                    (
+                        candidate_version, candidate_version, trust_state, source_key,
+                        source_package_id, manifest_json, manifest_sha256,
+                        artifact_sha256, artifact_path, runtime_type, entrypoint,
+                        platform_os, platform_arch, now, publisher_id, plugin_id,
+                        candidate_version,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    return False
+                conn.execute(
+                    """
+                    UPDATE plugin_artifacts SET state='retained'
+                    WHERE publisher_id=? AND plugin_id=? AND state='active'
+                    """,
+                    (publisher_id, plugin_id),
+                )
+                conn.execute(
+                    """
+                    UPDATE plugin_artifacts SET state='active', path=?
+                    WHERE publisher_id=? AND plugin_id=? AND version=?
+                      AND platform_os=? AND platform_arch=? AND sha256=?
+                    """,
+                    (
+                        artifact_path, publisher_id, plugin_id, candidate_version,
+                        platform_os, platform_arch, artifact_sha256,
+                    ),
+                )
+                return True
+        finally:
+            conn.close()
+    return await asyncio.to_thread(_activate)
+
+
+async def fail_plugin_candidate(
+    publisher_id: str,
+    plugin_id: str,
+    candidate_version: str,
+    error: str,
+) -> None:
+    def _fail():
+        conn = _connect()
+        try:
+            with conn:
+                row = conn.execute(
+                    "SELECT active_version FROM plugin_installations WHERE publisher_id=? AND plugin_id=?",
+                    (publisher_id, plugin_id),
+                ).fetchone()
+                conn.execute(
+                    """
+                    DELETE FROM plugin_artifacts
+                    WHERE publisher_id=? AND plugin_id=? AND version=? AND state='candidate'
+                    """,
+                    (publisher_id, plugin_id, candidate_version),
+                )
+                if not row:
+                    return
+                if row['active_version']:
+                    conn.execute(
+                        """
+                        UPDATE plugin_installations SET
+                            candidate_version='', lifecycle_state='active',
+                            last_activation_status='failed', last_error=?, updated_at=?
+                        WHERE publisher_id=? AND plugin_id=? AND candidate_version=?
+                        """,
+                        (error[:1024], _utc_now(), publisher_id, plugin_id, candidate_version),
+                    )
+                else:
+                    conn.execute(
+                        "DELETE FROM plugin_installations WHERE publisher_id=? AND plugin_id=?",
+                        (publisher_id, plugin_id),
+                    )
+        finally:
+            conn.close()
+    await asyncio.to_thread(_fail)
+
+
+async def set_plugin_enabled(
+    publisher_id: str,
+    plugin_id: str,
+    enabled: bool,
+    *,
+    lifecycle_state: str,
+    error: str = '',
+) -> bool:
+    def _set():
+        conn = _connect()
+        try:
+            with conn:
+                cursor = conn.execute(
+                    """
+                    UPDATE plugin_installations SET enabled=?, lifecycle_state=?,
+                        last_error=?, updated_at=?
+                    WHERE publisher_id=? AND plugin_id=?
+                    """,
+                    (1 if enabled else 0, lifecycle_state, error[:1024], _utc_now(), publisher_id, plugin_id),
+                )
+                return cursor.rowcount == 1
+        finally:
+            conn.close()
+    return await asyncio.to_thread(_set)
+
+
+async def delete_plugin_installation(publisher_id: str, plugin_id: str) -> bool:
+    def _delete():
+        conn = _connect()
+        try:
+            with conn:
+                cursor = conn.execute(
+                    "DELETE FROM plugin_installations WHERE publisher_id=? AND plugin_id=?",
+                    (publisher_id, plugin_id),
+                )
+                conn.execute(
+                    "DELETE FROM plugin_artifacts WHERE publisher_id=? AND plugin_id=?",
+                    (publisher_id, plugin_id),
+                )
+                return cursor.rowcount == 1
+        finally:
+            conn.close()
+    return await asyncio.to_thread(_delete)
+
+
+async def delete_retained_plugin_artifacts(publisher_id: str, plugin_id: str) -> None:
+    def _delete():
+        conn = _connect()
+        try:
+            with conn:
+                conn.execute(
+                    "DELETE FROM plugin_artifacts WHERE publisher_id=? AND plugin_id=? AND state='retained'",
+                    (publisher_id, plugin_id),
+                )
+        finally:
+            conn.close()
     await asyncio.to_thread(_delete)
 
 
