@@ -2302,23 +2302,25 @@ async def _get_aggregated_iptv_channels(group: str = '', search: str = '') -> tu
         if tmpl_logo:
             ch['logo_url'] = tmpl_logo
 
-    # 合并 EPG 绑定信息
-    epg_maps = {}
+    # 合并 logical EPG binding projection.  Runtime channel reads do not use
+    # the legacy channel_epg_map; migration remains isolated in maintenance.
+    epg_projection = {}
     try:
-        maps = await db.get_all_channel_epg_maps()
-        epg_maps = {m['canonical_key']: m for m in maps}
+        epg_projection = await epg_read_resolver.resolve_epg_read_many(merged.keys())
     except Exception:
         pass
 
     for ch in merged.values():
-        em = epg_maps.get(ch['canonical_key'])
-        if em:
-            ch['epg_source_id'] = em.get('epg_source_id')
-            ch['epg_channel_id'] = em.get('epg_channel_id') or ''
-            ch['epg_match_type'] = em.get('match_type', '')
-            ch['epg_confidence'] = em.get('confidence', 0)
-            ch['epg_match_status'] = em.get('match_status', 'unmatched')
-            ch['epg_locked'] = bool(em.get('locked'))
+        resolution = epg_projection.get(ch['canonical_key']) or {}
+        target = resolution.get('effective_target')
+        binding = resolution.get('shadow_binding') or {}
+        if target and resolution.get('effective_source') == 'logical':
+            ch['epg_source_id'] = target.get('source_id')
+            ch['epg_channel_id'] = target.get('channel_id') or ''
+            ch['epg_match_type'] = binding.get('match_type', '')
+            ch['epg_confidence'] = binding.get('confidence', 0)
+            ch['epg_match_status'] = binding.get('status', 'matched')
+            ch['epg_locked'] = bool(binding.get('locked'))
         else:
             ch['epg_source_id'] = None
             ch['epg_channel_id'] = ''
@@ -4402,33 +4404,26 @@ def _epg_nearest_date(requested_date: str, available_dates: list[str]) -> str:
 
 @app.get("/api/iptv/epg/programs/{canonical_key}", dependencies=[Depends(require_browse_access)])
 async def get_epg_programs(canonical_key: str, date: str = '', tz: str = ''):
-    em = await db.get_channel_epg_map(canonical_key)
     comparison = None
     try:
         comparison = await epg_read_resolver.resolve_epg_read(
             canonical_key,
-            legacy_mapping=em,
         )
         epg_read_resolver.emit_epg_read_diagnostic(comparison, context='programme')
     except Exception as exc:
-        # Shadow resolution must never alter or break the legacy production
-        # programme path.  The original mapping remains the fallback.
+        # A resolver failure is safe no-EPG for the logical-only read path.
         epg_read_resolver.emit_epg_read_resolver_error(context='programme', error=exc)
 
     effective_target = comparison.get('effective_target') if comparison else None
     if effective_target and effective_target.get('channel_id'):
         sid = effective_target['source_id']
         cid = effective_target['channel_id']
-        effective_match_status = em.get('match_status') if em else 'matched'
-    elif comparison is None and em and em.get('epg_channel_id'):
-        sid = em['epg_source_id']
-        cid = em['epg_channel_id']
-        effective_match_status = em.get('match_status', 'unmatched')
+        effective_match_status = (comparison.get('shadow_binding') or {}).get('status', 'matched')
     else:
         tzinfo = _epg_zoneinfo(tz)
         return {
             "canonical_key": canonical_key,
-            "match_status": em['match_status'] if em else 'unmatched',
+            "match_status": (comparison or {}).get('management_mode') or 'unmatched',
             "current": None,
             "next": None,
             "programs": [],

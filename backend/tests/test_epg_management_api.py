@@ -497,7 +497,7 @@ class EpgManagementApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("canonical_key", json.dumps(first_page))
         self.assertNotIn("shadow_run_id", json.dumps(first_page))
 
-    async def test_detail_explains_legacy_programme_fallback_without_counting_it_as_bound(self):
+    async def test_detail_does_not_treat_legacy_mapping_as_production_read(self):
         source = await self._source(
             "LegacyGuide", channel_id="legacy-target", channel_name="Legacy Target"
         )
@@ -535,8 +535,8 @@ class EpgManagementApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(overview["logical_channels"]["unbound"], 1)
         self.assertEqual(detail["binding"]["status"], "unbound")
         self.assertEqual(detail["production_read"], {
-            "status": "legacy_fallback",
-            "uses_legacy_fallback": True,
+            "status": "none",
+            "uses_legacy_fallback": False,
         })
         self.assertEqual(history_detail["production_read"]["status"], "not_applicable")
         self.assertNotIn("legacy_mapping", json.dumps(detail))

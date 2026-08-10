@@ -259,11 +259,11 @@ class EpgReadResolverTest(unittest.IsolatedAsyncioTestCase):
             await self.resolver.resolve_epg_read_many([f'key-{index}' for index in range(20)])
 
         self.assertEqual(small_batch_calls, {
-            'legacy': 1, 'logical': 1, 'catalog': 1, 'bindings': 1,
+            'legacy': 0, 'logical': 1, 'catalog': 1, 'bindings': 1,
             'policies': 1,
         })
         self.assertEqual(calls, {
-            'legacy': 2, 'logical': 2, 'catalog': 2, 'bindings': 2,
+            'legacy': 0, 'logical': 2, 'catalog': 2, 'bindings': 2,
             'policies': 2,
         })
 
@@ -365,7 +365,7 @@ class EpgReadResolverTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result.effective_target)
         self.assertEqual(result.effective_source, 'none')
 
-    async def test_explicit_automatic_still_reads_current_shadow_binding(self):
+    async def test_explicit_automatic_still_reads_current_logical_binding(self):
         result = self.resolver.resolve_epg_read_snapshot(
             'demo',
             legacy_mapping=None,
@@ -394,9 +394,9 @@ class EpgReadResolverTest(unittest.IsolatedAsyncioTestCase):
             }],
         )
 
-        self.assertEqual(result.comparison_status, 'shadow_only')
+        self.assertEqual(result.comparison_status, 'bound')
         self.assertEqual(result.management_mode, 'automatic')
-        self.assertEqual(result.effective_source, 'shadow')
+        self.assertEqual(result.effective_source, 'logical')
         self.assertEqual(result.effective_target.identity.source_id, 2)
         self.assertNotIn('secret', repr(result.as_dict()))
 
@@ -435,10 +435,10 @@ class EpgReadResolverTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(legacy_only.comparison_status, 'legacy_only')
         self.assertEqual(legacy_only.effective_source, 'legacy')
-        self.assertEqual(neither.comparison_status, 'neither')
+        self.assertEqual(neither.comparison_status, 'unbound')
         self.assertEqual(neither.effective_source, 'none')
-        self.assertEqual(shadow_only.comparison_status, 'shadow_only')
-        self.assertEqual(shadow_only.effective_source, 'shadow')
+        self.assertEqual(shadow_only.comparison_status, 'bound')
+        self.assertEqual(shadow_only.effective_source, 'logical')
         self.assertEqual(shadow_only.effective_target.identity.source_id, 1)
         self.assertEqual(shadow_only.effective_target.identity.channel_id, 'one')
 
@@ -480,8 +480,8 @@ class EpgReadResolverTest(unittest.IsolatedAsyncioTestCase):
             target_rows=[target],
         )
         self.assertEqual(result.logical_channel_id, 'logical-active')
-        self.assertEqual(result.comparison_status, 'shadow_only')
-        self.assertEqual(result.effective_source, 'shadow')
+        self.assertEqual(result.comparison_status, 'bound')
+        self.assertEqual(result.effective_source, 'logical')
 
     async def test_unique_active_logical_ignores_multiple_historical_rows_with_same_key(self):
         target = {'source_id': 1, 'channel_id': 'one', 'source_enabled': 1, 'source_status': 'success'}
@@ -500,8 +500,8 @@ class EpgReadResolverTest(unittest.IsolatedAsyncioTestCase):
             target_rows=[target],
         )
         self.assertEqual(result.logical_channel_id, 'logical-active')
-        self.assertEqual(result.comparison_status, 'shadow_only')
-        self.assertEqual(result.effective_source, 'shadow')
+        self.assertEqual(result.comparison_status, 'bound')
+        self.assertEqual(result.effective_source, 'logical')
 
     async def test_multiple_active_logicals_remain_ambiguous_even_with_history(self):
         target = {'source_id': 1, 'channel_id': 'one', 'source_enabled': 1, 'source_status': 'success'}
@@ -632,12 +632,13 @@ class EpgReadResolverTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.comparison_status, 'legacy_only')
         self.assertIsNone(result.shadow_target)
 
-    async def test_empty_shadow_tables_and_missing_logical_projection_are_legacy_compatible(self):
+    async def test_empty_logical_projection_does_not_resurrect_legacy_mapping(self):
         source = await self._source('legacy-only', 'LEGACY')
         await self._legacy('legacy-key', source, 'LEGACY')
         result = await self.resolver.resolve_epg_read('legacy-key')
         self.assertEqual(result['comparison_status'], 'logical_missing')
-        self.assertEqual(result['effective_target']['source_id'], source)
+        self.assertIsNone(result['effective_target'])
+        self.assertEqual(result['effective_source'], 'none')
         self.assertEqual(self._binding_count(), 0)
 
     async def test_programme_path_uses_trusted_shadow_target_when_changed(self):
@@ -657,7 +658,7 @@ class EpgReadResolverTest(unittest.IsolatedAsyncioTestCase):
             'current', 'next', 'programs', 'date', 'requested_date', 'tz', 'available_dates',
         })
 
-    async def test_programme_resolver_exception_falls_back_to_legacy(self):
+    async def test_programme_resolver_exception_fails_closed_without_legacy(self):
         source = await self._source('legacy-fallback', 'LEGACY')
         await self._legacy('fallback-key', source, 'LEGACY')
         main = importlib.import_module('main')
@@ -670,9 +671,9 @@ class EpgReadResolverTest(unittest.IsolatedAsyncioTestCase):
             ):
                 response = await main.get_epg_programs('fallback-key', date=requested_date, tz='UTC')
         self.assertEqual(captured.records[0].epg_read_diagnostic['status'], 'resolver_error')
-        self.assertEqual(response['epg_source_id'], source)
-        self.assertEqual(response['epg_channel_id'], 'LEGACY')
-        self.assertEqual(response['current']['title'], 'legacy-fallback programme')
+        self.assertNotIn('epg_source_id', response)
+        self.assertNotIn('epg_channel_id', response)
+        self.assertIsNone(response['current'])
 
     async def test_batch_current_uses_trusted_shadow_and_keeps_shape(self):
         legacy_source = await self._source('legacy-batch', 'LEGACY')
@@ -744,7 +745,7 @@ class EpgReadResolverTest(unittest.IsolatedAsyncioTestCase):
             [f'batch-scale-{index} programme' for index in range(20)],
         )
 
-    async def test_batch_resolver_exception_falls_back_and_does_not_write(self):
+    async def test_batch_resolver_exception_fails_closed_and_does_not_write(self):
         source = await self._source('batch-fallback', 'LEGACY')
         await self._legacy('batch-fallback-key', source, 'LEGACY')
         before_legacy = self._legacy_rows()
@@ -758,11 +759,11 @@ class EpgReadResolverTest(unittest.IsolatedAsyncioTestCase):
             ):
                 result = await self.db.batch_get_current_programs(['batch-fallback-key'])
         self.assertEqual(captured.records[0].epg_read_diagnostic['status'], 'resolver_error')
-        self.assertEqual(result['batch-fallback-key']['current']['title'], 'batch-fallback programme')
+        self.assertIsNone(result['batch-fallback-key'])
         self.assertEqual(self._legacy_rows(), before_legacy)
         self.assertEqual(self._binding_count(), before_binding_count)
 
-    async def test_batch_resolver_exception_chunks_legacy_key_fallback(self):
+    async def test_batch_resolver_exception_performs_zero_legacy_reads(self):
         source = await self._source('batch-large-fallback', 'LEGACY')
         keys = [f'batch-large-fallback-key-{index}' for index in range(801)]
         await self._legacy(keys[-1], source, 'LEGACY')
@@ -783,8 +784,8 @@ class EpgReadResolverTest(unittest.IsolatedAsyncioTestCase):
             result = await self.db.batch_get_current_programs(keys)
 
         legacy_selects = [sql for sql in statements if 'FROM channel_epg_map' in sql]
-        self.assertEqual(len(legacy_selects), 2)
-        self.assertEqual(result[keys[-1]]['current']['title'], 'batch-large-fallback programme')
+        self.assertEqual(len(legacy_selects), 0)
+        self.assertIsNone(result[keys[-1]])
 
     async def test_read_comparison_does_not_write_bindings_or_legacy_mapping(self):
         source = await self._source('readonly', 'READONLY')
@@ -797,6 +798,59 @@ class EpgReadResolverTest(unittest.IsolatedAsyncioTestCase):
         await self.resolver.resolve_epg_read_many(['readonly-key'])
         self.assertEqual(self._legacy_rows(), before_legacy)
         self.assertEqual(self._binding_count(), before_binding_count)
+
+    async def test_runtime_reads_and_export_never_call_legacy_mapping_repository(self):
+        source = await self._source('logical-runtime', 'LOGICAL', with_programmes=True)
+        subscription_id = await self.db.add_subscription(
+            'logical-runtime-subscription',
+            'https://example.test/logical-runtime.m3u',
+        )
+        await self.db.add_channels_bulk(subscription_id, [{
+            'name': 'Logical Runtime',
+            'url': 'https://stream.example/logical-runtime.m3u8',
+            'group_name': '测试',
+            'logo_url': '',
+            'tvg_id': 'legacy-id',
+            'tvg_name': 'Logical Runtime',
+        }])
+        iptv_channels = importlib.import_module('iptv_channels')
+        await iptv_channels.sync_iptv_logical_channels()
+        logical = next(
+            row for row in await self.db.get_iptv_logical_channels()
+            if row['canonical_key'] == 'logicalruntime'
+        )
+        logical_id = logical['id']
+        await self._binding(logical_id, source, 'LOGICAL')
+        main = importlib.import_module('main')
+
+        async def forbidden(*args, **kwargs):
+            raise AssertionError('runtime read accessed channel_epg_map')
+
+        with (
+            mock.patch.object(self.db, 'get_channel_epg_map', forbidden),
+            mock.patch.object(self.db, 'get_all_channel_epg_maps', forbidden),
+        ):
+            programme = await main.get_epg_programs(
+                'logicalruntime',
+                date=datetime.now(timezone.utc).date().isoformat(),
+                tz='UTC',
+            )
+            batch = await self.db.batch_get_current_programs(['logicalruntime'])
+            channels, _ = await main._get_aggregated_iptv_channels()
+
+        self.assertEqual(programme['epg_channel_id'], 'LOGICAL')
+        self.assertEqual(batch['logicalruntime']['current']['title'], 'logical-runtime programme')
+        self.assertEqual(len(channels), 1)
+        self.assertEqual(channels[0]['epg_source_id'], source)
+        self.assertEqual(channels[0]['epg_channel_id'], 'LOGICAL')
+        self.assertEqual(
+            main._m3u_attrs_for_channel(
+                channels[0],
+                True,
+                False,
+            ),
+            'tvg-name="Logical Runtime" tvg-id="LOGICAL" group-title="测试"',
+        )
 
 
 if __name__ == '__main__':

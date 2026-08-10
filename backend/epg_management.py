@@ -742,8 +742,7 @@ async def _production_read_projection(canonical_key: str) -> dict[str, str | boo
 
     effective_source = str(resolution.get("effective_source") or "none")
     status = {
-        "legacy": "legacy_fallback",
-        "shadow": "logical_binding",
+        "logical": "logical_binding",
     }.get(effective_source, "none")
     return {
         "status": status,

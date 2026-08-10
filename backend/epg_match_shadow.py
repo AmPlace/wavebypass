@@ -1,9 +1,8 @@
 """Shadow execution and persistence for the deterministic EPG matcher.
 
-EPG-2D-b1 intentionally keeps the result completely separate from both the
-legacy ``channel_epg_map`` and the EPG-2C logical binding table.  A run reads
-one SQLite snapshot, executes the pure matcher in memory, and writes only the
-three shadow tables in one transaction.
+EPG-2D-b1 intentionally keeps the result separate from the logical binding
+table. A run reads one SQLite snapshot, executes the pure matcher in memory,
+and writes only the three shadow tables in one transaction.
 """
 
 from __future__ import annotations
@@ -40,7 +39,6 @@ MAX_JSON_LENGTH = 16384
 MAX_ERROR_LENGTH = 1024
 SHADOW_FINAL_STATUSES = frozenset({'success', 'partial'})
 SHADOW_STATUSES = frozenset({'running', 'success', 'partial', 'failed', 'cancelled'})
-LEGACY_VALID_MATCH_STATUSES = frozenset({'matched', 'locked'})
 
 
 @dataclass(frozen=True)
@@ -630,102 +628,6 @@ async def list_shadow_conflict(run_id: str) -> list[ShadowDecisionRecord]:
 async def list_shadow_unmatched(run_id: str) -> list[ShadowDecisionRecord]:
     return await list_shadow_decisions(run_id, status='unmatched')
 
-
-def _legacy_target(row: Mapping[str, Any]) -> EpgChannelIdentity | None:
-    source = row.get('epg_source_id')
-    channel = row.get('epg_channel_id')
-    if source is None or channel in (None, ''):
-        return None
-    return EpgChannelIdentity(int(source), str(channel))
-
-
-async def compare_shadow_decisions_with_legacy(run_id: str | None = None) -> dict[str, Any]:
-    shadow_run = await (get_latest_completed_shadow_run() if run_id is None else get_shadow_run(run_id))
-    if shadow_run is None:
-        return {'run_id': run_id, 'status': 'insufficient_data', 'counts': {}, 'samples': []}
-    snapshot = await load_epg_match_shadow_snapshot()
-
-    # Keep database I/O synchronous and decision reads asynchronous; this also
-    # makes the comparison safe for callers already inside an event loop.
-    conn = db._connect()
-    try:
-        legacy_rows = [dict(row) for row in conn.execute('SELECT * FROM channel_epg_map ORDER BY canonical_key').fetchall()]
-        target_rows = conn.execute('SELECT source_id, channel_id FROM epg_channels').fetchall()
-        targets = {
-            EpgChannelIdentity(int(row['source_id']), str(row['channel_id']))
-            for row in target_rows
-        }
-    finally:
-        conn.close()
-    decisions = {item.logical_channel_id: item for item in await list_shadow_decisions(shadow_run.run_id)}
-    hints_by_key = {hint.canonical_key: hint for hint in snapshot.hints if hint.canonical_key}
-    legacy_by_key = {str(row['canonical_key']): row for row in legacy_rows}
-    counts = {key: 0 for key in ('same_target', 'new_match', 'legacy_only', 'target_changed', 'legacy_orphan', 'shadow_ambiguous', 'shadow_conflict', 'shadow_unmatched', 'existing_binding_preserved', 'insufficient_data')}
-    samples: list[dict[str, Any]] = []
-
-    def add(category: str, payload: dict[str, Any]) -> None:
-        counts[category] += 1
-        if len(samples) < 20:
-            samples.append({'category': category, **_sanitize(payload)})
-
-    for hint in snapshot.hints:
-        decision = decisions.get(hint.logical_channel_id)
-        legacy = legacy_by_key.get(hint.canonical_key)
-        legacy_target = _legacy_target(legacy) if legacy else None
-        legacy_valid = (
-            legacy_target is not None
-            and legacy_target in targets
-            and str(legacy.get('match_status') or '').lower() in LEGACY_VALID_MATCH_STATUSES
-        )
-        if decision is None:
-            add('insufficient_data', {'logical_channel_id': hint.logical_channel_id, 'canonical_key': hint.canonical_key})
-            continue
-        if decision.status in {'locked_preserved', 'existing_preserved'}:
-            add('existing_binding_preserved', {'logical_channel_id': hint.logical_channel_id, 'target': decision.selected_identity.as_dict() if decision.selected_identity else None})
-        elif decision.status == 'ambiguous':
-            add('shadow_ambiguous', {'logical_channel_id': hint.logical_channel_id})
-        elif decision.status == 'conflict':
-            add('shadow_conflict', {'logical_channel_id': hint.logical_channel_id})
-        elif decision.status == 'unmatched':
-            add('shadow_unmatched', {'logical_channel_id': hint.logical_channel_id})
-        elif decision.status == 'matched' and decision.selected_identity:
-            if legacy_valid and legacy_target == decision.selected_identity:
-                add('same_target', {'logical_channel_id': hint.logical_channel_id, 'target': decision.selected_identity.as_dict()})
-            elif legacy_valid:
-                add('target_changed', {'logical_channel_id': hint.logical_channel_id, 'shadow_target': decision.selected_identity.as_dict(), 'legacy_target': legacy_target.as_dict()})
-            else:
-                add('new_match', {'logical_channel_id': hint.logical_channel_id, 'target': decision.selected_identity.as_dict()})
-        else:
-            add('insufficient_data', {'logical_channel_id': hint.logical_channel_id})
-
-    for key, legacy in legacy_by_key.items():
-        if key not in hints_by_key:
-            target = _legacy_target(legacy)
-            if target is not None and target not in targets:
-                add('legacy_orphan', {'canonical_key': key, 'legacy_target': target.as_dict()})
-            elif (
-                target is not None
-                and str(legacy.get('match_status') or '').lower() in LEGACY_VALID_MATCH_STATUSES
-            ):
-                add('legacy_only', {'canonical_key': key, 'legacy_target': target.as_dict()})
-            else:
-                add('insufficient_data', {'canonical_key': key})
-
-    return {
-        'run_id': shadow_run.run_id,
-        'status': shadow_run.status,
-        'logical_channel_count': snapshot.logical_channel_count,
-        'valid_legacy_mapping_count': sum(
-            1 for row in legacy_rows
-            if (
-                _legacy_target(row) is not None
-                and _legacy_target(row) in targets
-                and str(row.get('match_status') or '').lower() in LEGACY_VALID_MATCH_STATUSES
-            )
-        ),
-        'counts': counts,
-        'samples': samples,
-    }
 
 # EPG-2D-b2: safe, opt-in application of deterministic shadow decisions.
 # This entry point deliberately lives beside the shadow executor and does not

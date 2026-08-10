@@ -1,8 +1,8 @@
-"""Read-only comparison between legacy EPG mappings and shadow bindings.
+"""Read-only resolution of logical EPG bindings for production reads.
 
-EPG read resolution compares the legacy mapping with the source-aware
-shadow binding without writing either table.  The effective target policy is
-kept here so programme and batch reads cannot diverge.
+The pure snapshot resolver retains legacy fields for migration-era diagnostics,
+but production snapshot loading is logical-only.  Programme, batch and channel
+projection callers therefore cannot accidentally resurrect channel_epg_map.
 """
 
 from __future__ import annotations
@@ -16,8 +16,6 @@ from epg_catalog import EpgChannelIdentity
 
 
 READABLE_BINDING_STATUSES = {'matched'}
-_UNSET = object()
-
 logger = logging.getLogger(__name__)
 _DIAGNOSTIC_STATUSES = {
     'target_changed',
@@ -248,6 +246,60 @@ def _resolve_epg_read_indexed(
             binding = candidate_binding
             shadow_target = _target_from_identity(_identity_from_mapping(binding), target_by_identity)
 
+    # Production loaders always pass no legacy mapping. Keep this branch
+    # explicit so runtime resolution has a logical-only taxonomy and cannot
+    # enter the historical cutover comparison below.
+    if legacy_mapping is None:
+        if management_mode == 'no_epg':
+            comparison_status = 'not_applicable'
+            fallback_reason = 'explicit_no_epg'
+        elif not logical_candidates:
+            comparison_status = 'logical_missing'
+            fallback_reason = 'logical_channel_missing'
+        elif len(active_candidates) > 1:
+            comparison_status = 'logical_ambiguous'
+            fallback_reason = 'multiple_logical_channels'
+        elif not active_candidates:
+            comparison_status = 'logical_conflict'
+            fallback_reason = (
+                f'logical_channel_{logical_status}'
+                if logical_status
+                else 'logical_channel_historical'
+            )
+        elif binding is not None and shadow_target is not None and not shadow_target.exists:
+            comparison_status = 'shadow_orphan_target'
+            fallback_reason = 'logical_target_missing'
+        elif binding is not None and shadow_target is not None:
+            comparison_status = 'bound'
+            fallback_reason = 'logical_binding'
+        else:
+            comparison_status = 'unbound'
+            fallback_reason = 'logical_binding_unavailable'
+
+        effective_target = (
+            shadow_target
+            if (
+                management_mode != 'no_epg'
+                and shadow_target is not None
+                and shadow_target.readable
+            )
+            else None
+        )
+        return EpgReadResolution(
+            canonical_key=canonical_key,
+            logical_channel_ids=logical_ids,
+            logical_channel_id=logical_channel_id,
+            legacy_target=None,
+            shadow_target=shadow_target,
+            comparison_status=comparison_status,
+            effective_target=effective_target,
+            effective_source='logical' if effective_target is not None else 'none',
+            fallback_reason=fallback_reason,
+            management_mode=management_mode,
+            legacy_mapping=None,
+            shadow_binding=_safe_shadow_binding(binding),
+        )
+
     if management_mode == 'no_epg':
         comparison_status = 'not_applicable'
         fallback_reason = 'explicit_no_epg'
@@ -384,40 +436,29 @@ def emit_epg_read_resolver_error(*, context: str, error: BaseException) -> None:
     logger.warning('epg_read_shadow_diagnostic', extra={'epg_read_diagnostic': payload})
 
 
-async def _load_snapshot(legacy_mappings: Mapping[str, Mapping[str, object] | None] | None = None):
-    if legacy_mappings is None:
-        legacy_rows = await db.get_all_channel_epg_maps()
-        legacy_mappings = {
-            str(row.get('canonical_key') or ''): row
-            for row in legacy_rows
-        }
+async def _load_snapshot():
     logical_rows = await db.get_iptv_logical_channels()
     target_rows = await db.list_epg_channel_catalog_rows()
     from epg_bindings import list_epg_binding_policies, list_epg_bindings
 
     bindings = [binding.as_dict() for binding in await list_epg_bindings()]
     policies = [policy.as_dict() for policy in await list_epg_binding_policies()]
-    return legacy_mappings, logical_rows, bindings, target_rows, policies
+    return logical_rows, bindings, target_rows, policies
 
 
 async def resolve_epg_read(
     canonical_key: str,
-    *,
-    legacy_mapping: Mapping[str, object] | None | object = _UNSET,
 ) -> dict:
-    """Resolve one production EPG read target with legacy fallback."""
-    if legacy_mapping is _UNSET:
-        legacy_mapping = await db.get_channel_epg_map(canonical_key)
+    """Resolve one production EPG read target from logical state only."""
     (
-        legacy_mappings,
         logical_rows,
         binding_rows,
         target_rows,
         policy_rows,
-    ) = await _load_snapshot({canonical_key: legacy_mapping})
+    ) = await _load_snapshot()
     return resolve_epg_read_snapshot(
         canonical_key,
-        legacy_mapping=legacy_mappings.get(canonical_key),
+        legacy_mapping=None,
         logical_rows=logical_rows,
         binding_rows=binding_rows,
         target_rows=target_rows,
@@ -428,11 +469,7 @@ async def resolve_epg_read(
 async def resolve_epg_read_many(canonical_keys: Iterable[str]) -> dict[str, dict]:
     """Resolve a batch in one logical/catalog/binding snapshot."""
     keys = [str(key) for key in canonical_keys]
-    legacy_rows = await db.get_all_channel_epg_maps()
-    legacy_by_key = {str(row.get('canonical_key') or ''): row for row in legacy_rows}
-    _, logical_rows, binding_rows, target_rows, policy_rows = await _load_snapshot(
-        legacy_by_key
-    )
+    logical_rows, binding_rows, target_rows, policy_rows = await _load_snapshot()
     indexes = _build_snapshot_indexes(
         logical_rows,
         binding_rows,
@@ -442,7 +479,7 @@ async def resolve_epg_read_many(canonical_keys: Iterable[str]) -> dict[str, dict
     return {
         key: _resolve_epg_read_indexed(
             key,
-            legacy_mapping=legacy_by_key.get(key),
+            legacy_mapping=None,
             indexes=indexes,
         ).as_dict()
         for key in keys

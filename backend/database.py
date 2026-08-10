@@ -2976,7 +2976,6 @@ async def get_epg_programs(source_id: int, channel_id: str, start_after: str = '
 async def batch_get_current_programs(canonical_keys: list[str]) -> dict:
     """批量查当前节目：返回 {canonical_key: {current, next}} 或 {}。"""
     comparisons: dict[str, dict] = {}
-    resolver_succeeded = False
     try:
         from epg_read_resolver import (
             emit_epg_read_diagnostic,
@@ -2984,11 +2983,11 @@ async def batch_get_current_programs(canonical_keys: list[str]) -> dict:
             resolve_epg_read_many,
         )
         comparisons = await resolve_epg_read_many(canonical_keys)
-        resolver_succeeded = True
         for comparison in comparisons.values():
             emit_epg_read_diagnostic(comparison, context='batch-current')
     except Exception as exc:
-        # The original legacy mapping remains the unconditional fallback.
+        # Logical-only reads fail closed to no EPG; legacy mapping remains
+        # available only to the isolated migration/bootstrap path.
         from epg_read_resolver import emit_epg_read_resolver_error
         emit_epg_read_resolver_error(context='batch-current', error=exc)
         comparisons = {}
@@ -3001,47 +3000,13 @@ async def batch_get_current_programs(canonical_keys: list[str]) -> dict:
             if not keys:
                 return {}
 
-            if resolver_succeeded:
-                legacy_by_key = {
-                    key: comparison.get('legacy_mapping')
-                    for key, comparison in comparisons.items()
-                }
-            else:
-                legacy_rows = []
-                for offset in range(0, len(keys), 800):
-                    chunk = keys[offset:offset + 800]
-                    placeholders = ','.join('?' for _ in chunk)
-                    legacy_rows.extend(conn.execute(
-                        f"""SELECT canonical_key, epg_source_id, epg_channel_id, match_status
-                            FROM channel_epg_map
-                            WHERE canonical_key IN ({placeholders})""",
-                        chunk,
-                    ).fetchall())
-                legacy_by_key = {str(row['canonical_key']): row for row in legacy_rows}
-
             targets: dict[str, tuple[int, str] | None] = {}
             for key in keys:
                 comparison = comparisons.get(key)
                 effective = comparison.get('effective_target') if comparison else None
                 effective_source = str(comparison.get('effective_source') or '') if comparison else ''
-                legacy = legacy_by_key.get(key)
-                if effective and effective_source == 'shadow':
+                if effective and effective_source == 'logical':
                     targets[key] = (int(effective['source_id']), str(effective['channel_id']))
-                elif (
-                    effective
-                    and effective_source == 'legacy'
-                    and legacy is not None
-                    and str(legacy['match_status']) in {'matched', 'locked'}
-                ):
-                    targets[key] = (int(effective['source_id']), str(effective['channel_id']))
-                elif (
-                    comparison is None
-                    and legacy is not None
-                    and str(legacy['match_status']) in {'matched', 'locked'}
-                    and legacy['epg_source_id'] is not None
-                    and legacy['epg_channel_id']
-                ):
-                    targets[key] = (int(legacy['epg_source_id']), str(legacy['epg_channel_id']))
                 else:
                     targets[key] = None
 

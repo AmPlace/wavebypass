@@ -311,62 +311,6 @@ class EpgMatchShadowTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(await self.shadow.get_shadow_decision(result['run_id'], 'logical-1'))
         self.assertEqual((await self.shadow.get_shadow_decision_candidates(result['run_id'], 'logical-1'))[0].identity.source_id, source)
 
-    async def test_legacy_comparison_uses_composite_identity_and_does_not_change_binding(self):
-        first = await self._source('first', [('SAME', ('SAME',))])
-        second = await self._source('second', [('OLD', ('OLD',))])
-        await self._logical(tvg_id='SAME', key='same', name='SAME', raw_name='SAME')
-        conn = self._connect()
-        try:
-            conn.execute(
-                "INSERT INTO channel_epg_map(canonical_key, epg_source_id, epg_channel_id, match_type, confidence, match_status, updated_at) VALUES('same', ?, ?, 'exact', 90, 'matched', ?)",
-                (second, 'OLD', '2026-08-06T00:00:00+00:00'),
-            )
-            conn.commit()
-        finally:
-            conn.close()
-        result = await self.shadow.run_epg_match_shadow()
-        diff = await self.shadow.compare_shadow_decisions_with_legacy(result['run_id'])
-        self.assertEqual(diff['counts']['target_changed'], 1)
-        self.assertEqual(diff['counts']['same_target'], 0)
-        self.assertEqual(diff['valid_legacy_mapping_count'], 1)
-        self.assertEqual(self._counts()['iptv_logical_channel_epg_bindings'], 0)
-        self.assertEqual(first != second, True)
-
-    async def test_locked_legacy_mapping_is_a_valid_comparison_target(self):
-        source = await self._source('one', [('A', ('A',))])
-        await self._logical(tvg_id='A', key='a', name='A', raw_name='A')
-        conn = self._connect()
-        try:
-            now = '2026-08-06T00:00:00+00:00'
-            conn.execute(
-                "INSERT INTO channel_epg_map(canonical_key, epg_source_id, epg_channel_id, match_status, locked, updated_at) VALUES('a', ?, 'A', 'locked', 1, ?)",
-                (source, now),
-            )
-            conn.commit()
-        finally:
-            conn.close()
-        result = await self.shadow.run_epg_match_shadow()
-        diff = await self.shadow.compare_shadow_decisions_with_legacy(result['run_id'])
-        self.assertEqual(diff['valid_legacy_mapping_count'], 1)
-        self.assertEqual(diff['counts']['same_target'], 1)
-        self.assertEqual(diff['counts']['legacy_only'], 0)
-
-    async def test_legacy_only_and_orphan_categories(self):
-        source = await self._source('one', [('A', ('A',))])
-        await self._logical(tvg_id='A', key='a', name='A', raw_name='A')
-        conn = self._connect()
-        try:
-            now = '2026-08-06T00:00:00+00:00'
-            conn.execute("INSERT INTO channel_epg_map(canonical_key, epg_source_id, epg_channel_id, match_status, updated_at) VALUES('legacy-only', ?, 'A', 'matched', ?)", (source, now))
-            conn.execute("INSERT INTO channel_epg_map(canonical_key, epg_source_id, epg_channel_id, match_status, updated_at) VALUES('orphan', ?, 'MISSING', 'matched', ?)", (source, now))
-            conn.commit()
-        finally:
-            conn.close()
-        result = await self.shadow.run_epg_match_shadow()
-        diff = await self.shadow.compare_shadow_decisions_with_legacy(result['run_id'])
-        self.assertEqual(diff['counts']['legacy_only'], 1)
-        self.assertEqual(diff['counts']['legacy_orphan'], 1)
-
     async def test_no_production_surfaces_are_imported_or_written(self):
         source = open('backend/epg_match_shadow.py', encoding='utf-8').read()
         self.assertNotIn('run_epg_matching', source)

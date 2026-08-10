@@ -14,7 +14,7 @@ def _clear_modules():
     for name in (
         'automation', 'database', 'epg', 'epg_preference_evidence',
         'epg_source_management', 'epg_source_model', 'epg_source_preference',
-        'epg_tasks',
+        'epg_tasks', 'epg_bindings',
     ):
         sys.modules.pop(name, None)
 
@@ -40,6 +40,7 @@ class EpgRefreshTest(unittest.IsolatedAsyncioTestCase):
         _clear_modules()
         self.db = importlib.import_module('database')
         self.epg = importlib.import_module('epg')
+        self.bindings = importlib.import_module('epg_bindings')
         await self.db.initialize()
 
     async def asyncTearDown(self):
@@ -254,6 +255,34 @@ class EpgRefreshTest(unittest.IsolatedAsyncioTestCase):
             match_status='locked',
             match_detail='{}',
             locked=1,
+        )
+        conn = self.db._connect()
+        try:
+            conn.execute(
+                """
+                INSERT INTO iptv_logical_channels(
+                    id, canonical_key, display_name, status, created_at, updated_at
+                ) VALUES(?, ?, ?, 'active', ?, ?)
+                """,
+                (
+                    'logical-current',
+                    'canonical-current',
+                    'Current',
+                    now.isoformat(),
+                    now.isoformat(),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        await self.bindings.create_matched_epg_binding(
+            'logical-current',
+            source['id'],
+            'current',
+            match_type='legacy_migrated',
+            confidence=100,
+            origin='legacy_migrated',
+            legacy_canonical_key='canonical-current',
         )
         async with self._client(b'failed', status=500) as client:
             result = await self.epg.refresh_epg_source(source, client)
