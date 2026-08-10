@@ -126,7 +126,6 @@ class EpgMatchShadowApplyTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_matched_success_applies_with_provenance_and_is_idempotent(self):
         run, source = await self._successful_run()
-        before_legacy = self._connect().execute('SELECT COUNT(*) FROM channel_epg_map').fetchone()[0]
         first = await self.shadow.apply_epg_match_shadow_run(run['run_id'])
         self.assertEqual(first['run_status'], 'success')
         self.assertEqual(first['eligible_decision_count'], 1)
@@ -139,8 +138,6 @@ class EpgMatchShadowApplyTest(unittest.IsolatedAsyncioTestCase):
         second = await self.shadow.apply_epg_match_shadow_run(run['run_id'])
         self.assertEqual(second['applied_count'], 0)
         self.assertEqual(second['already_bound_count'], 1)
-        after_legacy = self._connect().execute('SELECT COUNT(*) FROM channel_epg_map').fetchone()[0]
-        self.assertEqual(before_legacy, after_legacy)
 
     async def test_non_success_and_missing_runs_are_rejected_without_writes(self):
         await self._source()
@@ -309,7 +306,6 @@ class EpgMatchShadowApplyTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn('injected insert failure', result['error'])
         self.assertEqual(result['applied_count'], 1)
         self.assertEqual(len(self._binding_rows()), 0)
-        self.assertEqual(self._connect().execute('SELECT COUNT(*) FROM channel_epg_map').fetchone()[0], 0)
 
     async def test_provenance_field_is_readable_for_existing_manual_bindings(self):
         source = await self._source()

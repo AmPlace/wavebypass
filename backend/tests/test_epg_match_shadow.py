@@ -91,7 +91,7 @@ class EpgMatchShadowTest(unittest.IsolatedAsyncioTestCase):
         try:
             return {
                 table: conn.execute(f'SELECT COUNT(*) AS n FROM {table}').fetchone()['n']
-                for table in ('epg_match_shadow_runs', 'epg_match_shadow_decisions', 'epg_match_shadow_candidates', 'channel_epg_map', 'iptv_logical_channel_epg_bindings')
+                for table in ('epg_match_shadow_runs', 'epg_match_shadow_decisions', 'epg_match_shadow_candidates', 'iptv_logical_channel_epg_bindings')
             }
         finally:
             conn.close()
@@ -319,7 +319,6 @@ class EpgMatchShadowTest(unittest.IsolatedAsyncioTestCase):
         before = self._counts()
         await self.shadow.run_epg_match_shadow()
         after = self._counts()
-        self.assertEqual(before['channel_epg_map'], after['channel_epg_map'])
         self.assertEqual(before['iptv_logical_channel_epg_bindings'], after['iptv_logical_channel_epg_bindings'])
 
 

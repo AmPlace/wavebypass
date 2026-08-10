@@ -246,16 +246,6 @@ class EpgRefreshTest(unittest.IsolatedAsyncioTestCase):
                 'finished_at': now.isoformat(),
             },
         )
-        await self.db.upsert_channel_epg_map(
-            'canonical-current',
-            epg_source_id=source['id'],
-            epg_channel_id='current',
-            match_type='manual',
-            confidence=100,
-            match_status='locked',
-            match_detail='{}',
-            locked=1,
-        )
         conn = self.db._connect()
         try:
             conn.execute(
@@ -279,10 +269,9 @@ class EpgRefreshTest(unittest.IsolatedAsyncioTestCase):
             'logical-current',
             source['id'],
             'current',
-            match_type='legacy_migrated',
+            match_type='exact',
             confidence=100,
-            origin='legacy_migrated',
-            legacy_canonical_key='canonical-current',
+            origin='automatic',
         )
         async with self._client(b'failed', status=500) as client:
             result = await self.epg.refresh_epg_source(source, client)

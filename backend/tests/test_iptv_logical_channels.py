@@ -244,22 +244,10 @@ class IptvLogicalChannelsTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(row['status'] == 'merge_conflict' for row in logical))
         self.assertEqual(len({row['channel_id'] for row in members}), len(members))
 
-    async def test_shadow_sync_does_not_read_or_write_channel_epg_map(self):
+    async def test_shadow_sync_does_not_require_legacy_mapping(self):
         await self._add_subscription('one', [self._channel('测试台', 'http://one.test/a')])
-        await self.db.upsert_channel_epg_map(
-            'legacy-key',
-            epg_source_id=None,
-            epg_channel_id='legacy',
-            match_type='manual',
-            confidence=100,
-            match_status='locked',
-            match_detail='legacy',
-            locked=1,
-        )
-        before = await self.db.get_all_channel_epg_maps()
-        await self.iptv_channels.sync_iptv_logical_channels()
-        after = await self.db.get_all_channel_epg_maps()
-        self.assertEqual(after, before)
+        result = await self.iptv_channels.sync_iptv_logical_channels()
+        self.assertEqual(result['projection_mismatch_count'], 0)
 
     async def test_market_in_place_channel_refresh_keeps_logical_and_source_identity(self):
         package_id = 'test.market.logical'

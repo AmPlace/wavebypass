@@ -2,10 +2,8 @@
 
 The management classification is deliberately built from logical channels,
 logical bindings, source-aware catalog identities, preference evidence and
-persisted matcher diagnostics.  It never counts ``channel_epg_map`` as a
-binding authority.  Detail reads may report that the production programme
-resolver is currently using the legacy fallback, but do not expose or promote
-that mapping as a logical binding.  None of the entry points run sync,
+persisted matcher diagnostics. It never uses a legacy mapping authority. None
+of the entry points run sync,
 migration, matching, refresh or maintenance.
 """
 
@@ -668,7 +666,7 @@ async def get_epg_matching_detail(
     production_read = (
         await _production_read_projection(str(logical.get("canonical_key") or ""))
         if item["channel"]["state"] == "active"
-        else {"status": "not_applicable", "uses_legacy_fallback": False}
+        else {"status": "not_applicable"}
     )
 
     sources_by_id = {int(row["id"]): row for row in snapshot.sources}
@@ -732,22 +730,19 @@ async def get_epg_matching_detail(
 
 
 async def _production_read_projection(canonical_key: str) -> dict[str, str | bool]:
-    """Report read authority without exposing the legacy mapping itself."""
+    """Report the current logical binding read authority."""
     try:
         from epg_read_resolver import resolve_epg_read
 
         resolution = await resolve_epg_read(canonical_key)
     except Exception:
-        return {"status": "unavailable", "uses_legacy_fallback": False}
+        return {"status": "unavailable"}
 
     effective_source = str(resolution.get("effective_source") or "none")
     status = {
         "logical": "logical_binding",
     }.get(effective_source, "none")
-    return {
-        "status": status,
-        "uses_legacy_fallback": status == "legacy_fallback",
-    }
+    return {"status": status}
 
 
 def _catalog_search_sync(

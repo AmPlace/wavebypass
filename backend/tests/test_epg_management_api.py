@@ -269,7 +269,7 @@ class EpgManagementApiTest(unittest.IsolatedAsyncioTestCase):
             "iptv_logical_channels", "iptv_logical_channel_members",
             "iptv_logical_channel_epg_bindings", "epg_source_preference_evidence",
             "epg_match_shadow_runs", "epg_match_shadow_decisions",
-            "epg_match_shadow_candidates", "channel_epg_map",
+            "epg_match_shadow_candidates",
             "automation_task_config", "automation_task_state",
         )
         conn = self._connect()
@@ -416,15 +416,6 @@ class EpgManagementApiTest(unittest.IsolatedAsyncioTestCase):
                     """,
                     (source_id, self.now, self.now),
                 )
-            for index in range(67):
-                conn.execute(
-                    """
-                    INSERT INTO channel_epg_map(
-                        canonical_key, epg_source_id, epg_channel_id, match_status, updated_at
-                    ) VALUES(?, ?, ?, 'matched', ?)
-                    """,
-                    (f"historical-{index}", healthy, f"legacy-{index}", self.now),
-                )
             conn.commit()
         finally:
             conn.close()
@@ -515,16 +506,6 @@ class EpgManagementApiTest(unittest.IsolatedAsyncioTestCase):
             conn.commit()
         finally:
             conn.close()
-        await self.db.upsert_channel_epg_map(
-            "key-lc-legacy",
-            epg_source_id=source,
-            epg_channel_id="legacy-target",
-            match_type="exact_tvg_id",
-            confidence=100,
-            match_status="matched",
-            match_detail="legacy fallback fixture",
-        )
-
         overview = await self.management.get_epg_management_overview()
         detail = await self.management.get_epg_matching_detail("lc-legacy")
         history_detail = await self.management.get_epg_matching_detail(
@@ -534,10 +515,7 @@ class EpgManagementApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(overview["logical_channels"]["bound"], 0)
         self.assertEqual(overview["logical_channels"]["unbound"], 1)
         self.assertEqual(detail["binding"]["status"], "unbound")
-        self.assertEqual(detail["production_read"], {
-            "status": "none",
-            "uses_legacy_fallback": False,
-        })
+        self.assertEqual(detail["production_read"], {"status": "none"})
         self.assertEqual(history_detail["production_read"]["status"], "not_applicable")
         self.assertNotIn("legacy_mapping", json.dumps(detail))
 

@@ -85,6 +85,94 @@ class EpgDatabaseTest(unittest.IsolatedAsyncioTestCase):
             'channel_count', 'programme_count', 'data_start_at', 'data_end_at',
         }.issubset(columns))
 
+    async def test_final_legacy_map_upgrade_is_active_first_transactional_and_idempotent(self):
+        now = '2026-08-08T00:00:00+00:00'
+        conn = self._connect()
+        try:
+            conn.execute(
+                """
+                CREATE TABLE channel_epg_map (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    canonical_key TEXT NOT NULL UNIQUE,
+                    epg_source_id INTEGER,
+                    epg_channel_id TEXT,
+                    match_type TEXT DEFAULT '',
+                    confidence INTEGER DEFAULT 0,
+                    match_status TEXT DEFAULT 'unmatched',
+                    match_detail TEXT DEFAULT '',
+                    locked INTEGER DEFAULT 0,
+                    updated_at TEXT NOT NULL
+                );
+                """
+            )
+            conn.executemany(
+                """
+                INSERT INTO iptv_logical_channels
+                    (id, canonical_key, display_name, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    ('active-eligible', 'eligible', 'Eligible', 'active', now, now),
+                    ('orphan-eligible', 'eligible', 'Old Eligible', 'orphaned', now, now),
+                    ('orphan-only', 'orphan-only', 'Orphan Only', 'orphaned', now, now),
+                    ('active-conflict-a', 'conflict', 'Conflict A', 'active', now, now),
+                    ('active-conflict-b', 'conflict', 'Conflict B', 'active', now, now),
+                    ('active-missing', 'missing', 'Missing Target', 'active', now, now),
+                ],
+            )
+            conn.executemany(
+                """
+                INSERT INTO channel_epg_map
+                    (canonical_key, epg_source_id, epg_channel_id, match_type,
+                     confidence, match_status, locked, updated_at)
+                VALUES (?, ?, ?, 'exact_tvg_id', 100, 'matched', 0, ?)
+                """,
+                [
+                    ('eligible', self.source_id, 'old', now),
+                    ('orphan-only', self.source_id, 'old', now),
+                    ('conflict', self.source_id, 'old', now),
+                    ('missing', self.source_id, 'does-not-exist', now),
+                ],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        await self.db.initialize()
+        conn = self._connect()
+        try:
+            table_count = conn.execute(
+                "SELECT COUNT(*) FROM sqlite_master "
+                "WHERE type='table' AND name='channel_epg_map'"
+            ).fetchone()[0]
+            bindings = [dict(row) for row in conn.execute(
+                'SELECT * FROM iptv_logical_channel_epg_bindings '
+                'ORDER BY logical_channel_id'
+            ).fetchall()]
+            integrity = conn.execute('PRAGMA integrity_check').fetchone()[0]
+        finally:
+            conn.close()
+
+        self.assertEqual(table_count, 0)
+        self.assertEqual(integrity, 'ok')
+        self.assertEqual([row['logical_channel_id'] for row in bindings], ['active-eligible'])
+        self.assertEqual(bindings[0]['epg_source_id'], self.source_id)
+        self.assertEqual(bindings[0]['epg_channel_id'], 'old')
+        self.assertEqual(bindings[0]['origin'], 'legacy_migrated')
+        self.assertNotIn('orphan-eligible', {
+            row['logical_channel_id'] for row in bindings
+        })
+
+        await self.db.initialize()
+        conn = self._connect()
+        try:
+            count = conn.execute(
+                'SELECT COUNT(*) FROM iptv_logical_channel_epg_bindings'
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(count, 1)
+
     async def test_legacy_database_upgrade_preserves_epg_rows_and_backfills_state(self):
         legacy_path = os.path.join(self.tmpdir.name, 'legacy.db')
         conn = sqlite3.connect(legacy_path)

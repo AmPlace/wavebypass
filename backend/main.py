@@ -2303,7 +2303,7 @@ async def _get_aggregated_iptv_channels(group: str = '', search: str = '') -> tu
             ch['logo_url'] = tmpl_logo
 
     # 合并 logical EPG binding projection.  Runtime channel reads do not use
-    # the legacy channel_epg_map; migration remains isolated in maintenance.
+    # The runtime channel projection is sourced from logical bindings.
     epg_projection = {}
     try:
         epg_projection = await epg_read_resolver.resolve_epg_read_many(merged.keys())

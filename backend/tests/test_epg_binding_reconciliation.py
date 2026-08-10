@@ -1,4 +1,3 @@
-import hashlib
 import importlib
 import json
 import os
@@ -90,13 +89,6 @@ class EpgBindingReconciliationTest(unittest.IsolatedAsyncioTestCase):
             return [tuple(row) for row in conn.execute(
                 'SELECT logical_channel_id, epg_source_id, epg_channel_id, status, locked, origin, shadow_run_id FROM iptv_logical_channel_epg_bindings ORDER BY logical_channel_id'
             ).fetchall()]
-        finally:
-            conn.close()
-
-    def _legacy_digest(self):
-        conn = self._connect()
-        try:
-            return hashlib.sha256(repr([tuple(row) for row in conn.execute('SELECT * FROM channel_epg_map ORDER BY canonical_key').fetchall()]).encode()).hexdigest()
         finally:
             conn.close()
 
@@ -343,16 +335,15 @@ class EpgBindingReconciliationTest(unittest.IsolatedAsyncioTestCase):
         preview = await self.bindings.preview_epg_binding_reconciliation(result)
         self.assertEqual(preview['counts']['locked_conflict'], 1)
 
-    async def test_preview_order_and_legacy_mapping_are_stable_and_read_only(self):
+    async def test_preview_order_is_stable_and_read_only(self):
         result, _, _ = await self._prepare_merge(bindings=(0, 1))
-        await self.db.upsert_channel_epg_map('legacy', epg_source_id=None, epg_channel_id='', match_type='manual', confidence=0, match_status='unmatched', match_detail='legacy')
-        before = (self._binding_snapshot(), self._legacy_digest())
+        before = self._binding_snapshot()
         reverse = dict(result)
         reverse['merge_conflicts'] = [dict(result['merge_conflicts'][0], logical_channel_ids=list(reversed(result['merge_conflicts'][0]['logical_channel_ids'])))]
         first = await self.bindings.preview_epg_binding_reconciliation(result)
         second = await self.bindings.preview_epg_binding_reconciliation(reverse)
         self.assertEqual(first, second)
-        self.assertEqual((self._binding_snapshot(), self._legacy_digest()), before)
+        self.assertEqual(self._binding_snapshot(), before)
 
 
 if __name__ == '__main__':

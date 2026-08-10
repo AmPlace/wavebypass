@@ -1,9 +1,4 @@
-"""Read-only resolution of logical EPG bindings for production reads.
-
-The pure snapshot resolver retains legacy fields for migration-era diagnostics,
-but production snapshot loading is logical-only.  Programme, batch and channel
-projection callers therefore cannot accidentally resurrect channel_epg_map.
-"""
+"""Read-only resolution of logical EPG bindings for production reads."""
 
 from __future__ import annotations
 
@@ -66,44 +61,27 @@ class EpgReadResolution:
     canonical_key: str
     logical_channel_ids: tuple[str, ...]
     logical_channel_id: str | None
-    legacy_target: EpgReadTarget | None
-    shadow_target: EpgReadTarget | None
+    logical_target: EpgReadTarget | None
     comparison_status: str
     effective_target: EpgReadTarget | None
     effective_source: str
     fallback_reason: str
     management_mode: str
-    legacy_mapping: dict | None
-    shadow_binding: dict | None
+    binding: dict | None
 
     def as_dict(self) -> dict:
         return {
             'canonical_key': self.canonical_key,
             'logical_channel_ids': list(self.logical_channel_ids),
             'logical_channel_id': self.logical_channel_id,
-            'legacy_target': self.legacy_target.as_dict() if self.legacy_target else None,
-            'shadow_target': self.shadow_target.as_dict() if self.shadow_target else None,
+            'logical_target': self.logical_target.as_dict() if self.logical_target else None,
             'comparison_status': self.comparison_status,
             'effective_target': self.effective_target.as_dict() if self.effective_target else None,
             'effective_source': self.effective_source,
             'fallback_reason': self.fallback_reason,
             'management_mode': self.management_mode,
-            'legacy_mapping': self.legacy_mapping,
-            'shadow_binding': self.shadow_binding,
+            'binding': self.binding,
         }
-
-
-def _identity_from_mapping(row: Mapping[str, object] | None) -> EpgChannelIdentity | None:
-    if not row:
-        return None
-    source_id = row.get('epg_source_id')
-    channel_id = row.get('epg_channel_id')
-    if source_id is None or channel_id is None or str(channel_id) == '':
-        return None
-    try:
-        return EpgChannelIdentity(int(source_id), str(channel_id))
-    except (TypeError, ValueError):
-        return None
 
 
 def _target_from_identity(
@@ -122,16 +100,17 @@ def _target_from_identity(
     )
 
 
-def _safe_legacy_mapping(row: Mapping[str, object] | None) -> dict | None:
-    if row is None:
+def _binding_identity(row: Mapping[str, object] | None) -> EpgChannelIdentity | None:
+    if not row:
         return None
-    # Do not carry match_detail into diagnostics; historical records may
-    # contain URLs or other secret-bearing text.
-    fields = (
-        'id', 'canonical_key', 'epg_source_id', 'epg_channel_id',
-        'match_type', 'confidence', 'match_status', 'locked', 'updated_at',
-    )
-    return {field: row.get(field) for field in fields if field in row}
+    source_id = row.get('epg_source_id')
+    channel_id = row.get('epg_channel_id')
+    if source_id is None or channel_id in (None, ''):
+        return None
+    try:
+        return EpgChannelIdentity(int(source_id), str(channel_id))
+    except (TypeError, ValueError):
+        return None
 
 
 def _safe_shadow_binding(row: Mapping[str, object] | None) -> dict | None:
@@ -148,7 +127,6 @@ def _safe_shadow_binding(row: Mapping[str, object] | None) -> dict | None:
 def resolve_epg_read_snapshot(
     canonical_key: str,
     *,
-    legacy_mapping: Mapping[str, object] | None,
     logical_rows: Iterable[Mapping[str, object]],
     binding_rows: Iterable[Mapping[str, object]],
     target_rows: Iterable[Mapping[str, object]],
@@ -163,7 +141,6 @@ def resolve_epg_read_snapshot(
     )
     return _resolve_epg_read_indexed(
         canonical_key,
-        legacy_mapping=legacy_mapping,
         indexes=indexes,
     )
 
@@ -207,7 +184,6 @@ def _build_snapshot_indexes(
 def _resolve_epg_read_indexed(
     canonical_key: str,
     *,
-    legacy_mapping: Mapping[str, object] | None,
     indexes: Mapping[str, Mapping],
 ) -> EpgReadResolution:
     """Resolve one key against indexes built from a single snapshot."""
@@ -227,9 +203,7 @@ def _resolve_epg_read_indexed(
         logical_channel_id = logical_ids[0]
         logical_status = str(logical_candidates[0].get('status') or '')
 
-    legacy_identity = _identity_from_mapping(legacy_mapping)
     target_by_identity = indexes['target_by_identity']
-    legacy_target = _target_from_identity(legacy_identity, target_by_identity)
 
     binding_by_logical = indexes['binding_by_logical']
     management_mode = str(
@@ -244,61 +218,7 @@ def _resolve_epg_read_indexed(
             and str(candidate_binding.get('status') or '') in READABLE_BINDING_STATUSES
         ):
             binding = candidate_binding
-            shadow_target = _target_from_identity(_identity_from_mapping(binding), target_by_identity)
-
-    # Production loaders always pass no legacy mapping. Keep this branch
-    # explicit so runtime resolution has a logical-only taxonomy and cannot
-    # enter the historical cutover comparison below.
-    if legacy_mapping is None:
-        if management_mode == 'no_epg':
-            comparison_status = 'not_applicable'
-            fallback_reason = 'explicit_no_epg'
-        elif not logical_candidates:
-            comparison_status = 'logical_missing'
-            fallback_reason = 'logical_channel_missing'
-        elif len(active_candidates) > 1:
-            comparison_status = 'logical_ambiguous'
-            fallback_reason = 'multiple_logical_channels'
-        elif not active_candidates:
-            comparison_status = 'logical_conflict'
-            fallback_reason = (
-                f'logical_channel_{logical_status}'
-                if logical_status
-                else 'logical_channel_historical'
-            )
-        elif binding is not None and shadow_target is not None and not shadow_target.exists:
-            comparison_status = 'shadow_orphan_target'
-            fallback_reason = 'logical_target_missing'
-        elif binding is not None and shadow_target is not None:
-            comparison_status = 'bound'
-            fallback_reason = 'logical_binding'
-        else:
-            comparison_status = 'unbound'
-            fallback_reason = 'logical_binding_unavailable'
-
-        effective_target = (
-            shadow_target
-            if (
-                management_mode != 'no_epg'
-                and shadow_target is not None
-                and shadow_target.readable
-            )
-            else None
-        )
-        return EpgReadResolution(
-            canonical_key=canonical_key,
-            logical_channel_ids=logical_ids,
-            logical_channel_id=logical_channel_id,
-            legacy_target=None,
-            shadow_target=shadow_target,
-            comparison_status=comparison_status,
-            effective_target=effective_target,
-            effective_source='logical' if effective_target is not None else 'none',
-            fallback_reason=fallback_reason,
-            management_mode=management_mode,
-            legacy_mapping=None,
-            shadow_binding=_safe_shadow_binding(binding),
-        )
+            shadow_target = _target_from_identity(_binding_identity(binding), target_by_identity)
 
     if management_mode == 'no_epg':
         comparison_status = 'not_applicable'
@@ -318,74 +238,32 @@ def _resolve_epg_read_indexed(
         )
     elif binding is not None and shadow_target is not None and not shadow_target.exists:
         comparison_status = 'shadow_orphan_target'
-        fallback_reason = 'shadow_target_missing'
+        fallback_reason = 'logical_target_missing'
     elif binding is not None and shadow_target is not None:
-        if legacy_target is None:
-            comparison_status = 'shadow_only'
-            fallback_reason = 'legacy_mapping_missing_shadow'
-        elif legacy_target.identity == shadow_target.identity:
-            comparison_status = 'same_target'
-            fallback_reason = 'shadow_target_preferred'
-        else:
-            comparison_status = 'target_changed'
-            origin = str(binding.get('origin') or '')
-            if bool(binding.get('locked')) or origin == 'manual':
-                fallback_reason = 'trusted_shadow_binding'
-            elif origin == 'automatic' and binding.get('shadow_run_id'):
-                fallback_reason = 'trusted_shadow_binding'
-            elif origin == 'legacy_migrated':
-                fallback_reason = 'migrated_target_mismatch'
-            else:
-                fallback_reason = 'unknown_shadow_origin'
-    elif legacy_target is not None:
-        comparison_status = 'legacy_only'
-        fallback_reason = 'shadow_binding_unavailable'
+        comparison_status = 'bound'
+        fallback_reason = 'logical_binding'
     else:
-        comparison_status = 'neither'
-        fallback_reason = 'no_legacy_or_shadow_target'
+        comparison_status = 'unbound'
+        fallback_reason = 'logical_binding_unavailable'
 
-    effective_target = legacy_target
-    effective_source = 'legacy' if legacy_target is not None else 'none'
-    if shadow_target is not None and shadow_target.readable:
-        if comparison_status in {'same_target', 'shadow_only'}:
-            effective_target = shadow_target
-            effective_source = 'shadow'
-        elif comparison_status == 'target_changed':
-            origin = str((binding or {}).get('origin') or '')
-            if (
-                bool((binding or {}).get('locked'))
-                or origin == 'manual'
-                or (origin == 'automatic' and (binding or {}).get('shadow_run_id'))
-            ):
-                effective_target = shadow_target
-                effective_source = 'shadow'
-
-    # An explicit management policy means the logical binding system has been
-    # selected over historical compatibility state. ``no_epg`` always reads
-    # nothing. Explicit ``automatic`` may use a current shadow binding, but it
-    # must not resurrect a stale legacy answer when Matcher safely returns no
-    # binding.
     if management_mode == 'no_epg':
         effective_target = None
         effective_source = 'none'
-    elif management_mode == 'automatic' and effective_source == 'legacy':
-        effective_target = None
-        effective_source = 'none'
-        fallback_reason = 'explicit_automatic_without_shadow'
+    else:
+        effective_target = shadow_target if shadow_target is not None and shadow_target.readable else None
+        effective_source = 'logical' if effective_target is not None else 'none'
 
     return EpgReadResolution(
         canonical_key=canonical_key,
         logical_channel_ids=logical_ids,
         logical_channel_id=logical_channel_id,
-        legacy_target=legacy_target,
-        shadow_target=shadow_target,
+        logical_target=shadow_target,
         comparison_status=comparison_status,
         effective_target=effective_target,
         effective_source=effective_source,
         fallback_reason=fallback_reason,
         management_mode=management_mode,
-        legacy_mapping=_safe_legacy_mapping(legacy_mapping),
-        shadow_binding=_safe_shadow_binding(binding),
+        binding=_safe_shadow_binding(binding),
     )
 
 
@@ -395,8 +273,7 @@ def _diagnostic_payload(resolution: EpgReadResolution | Mapping[str, object], *,
         data = resolution.as_dict()
     else:
         data = dict(resolution)
-    legacy = data.get('legacy_target') or {}
-    shadow = data.get('shadow_target') or {}
+    logical = data.get('logical_target') or {}
     comparison_status = str(data.get('comparison_status') or '')
     fallback_reason = str(data.get('fallback_reason') or '')
     diagnostic_status = (
@@ -411,8 +288,7 @@ def _diagnostic_payload(resolution: EpgReadResolution | Mapping[str, object], *,
         'canonical_key': str(data.get('canonical_key') or ''),
         'logical_channel_id': data.get('logical_channel_id'),
         'logical_channel_count': len(data.get('logical_channel_ids') or []),
-        'legacy_target': (legacy.get('source_id'), legacy.get('channel_id')) if legacy else None,
-        'shadow_target': (shadow.get('source_id'), shadow.get('channel_id')) if shadow else None,
+        'logical_target': (logical.get('source_id'), logical.get('channel_id')) if logical else None,
         'fallback_reason': fallback_reason,
     }
 
@@ -458,7 +334,6 @@ async def resolve_epg_read(
     ) = await _load_snapshot()
     return resolve_epg_read_snapshot(
         canonical_key,
-        legacy_mapping=None,
         logical_rows=logical_rows,
         binding_rows=binding_rows,
         target_rows=target_rows,
@@ -479,7 +354,6 @@ async def resolve_epg_read_many(canonical_keys: Iterable[str]) -> dict[str, dict
     return {
         key: _resolve_epg_read_indexed(
             key,
-            legacy_mapping=None,
             indexes=indexes,
         ).as_dict()
         for key in keys

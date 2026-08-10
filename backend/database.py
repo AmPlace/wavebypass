@@ -370,19 +370,6 @@ CREATE TABLE IF NOT EXISTS epg_programs (
 );
 CREATE INDEX IF NOT EXISTS idx_epg_programs_ch_time ON epg_programs(source_id, channel_id, start, stop);
 
-CREATE TABLE IF NOT EXISTS channel_epg_map (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    canonical_key   TEXT NOT NULL UNIQUE,
-    epg_source_id   INTEGER,
-    epg_channel_id  TEXT,
-    match_type      TEXT DEFAULT '',
-    confidence      INTEGER DEFAULT 0,
-    match_status    TEXT DEFAULT 'unmatched',
-    match_detail    TEXT DEFAULT '',
-    locked          INTEGER DEFAULT 0,
-    updated_at      TEXT NOT NULL
-);
-
 CREATE TABLE IF NOT EXISTS market_packages_installed (
     package_id                TEXT PRIMARY KEY,
     market_url                TEXT DEFAULT '',
@@ -532,10 +519,123 @@ def _normalize_count(value, field: str) -> int:
     return value
 
 
+def _finalize_legacy_epg_map_upgrade(conn: sqlite3.Connection) -> dict[str, int]:
+    """Migrate the old mapping table once, then remove it from the schema.
+
+    This is intentionally kept in database initialization rather than the
+    runtime maintenance module. The old table is therefore an upgrade input,
+    never a normal production dependency.
+    """
+    table = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='channel_epg_map'"
+    ).fetchone()
+    if table is None:
+        return {'legacy_rows': 0, 'migrated_rows': 0, 'skipped_rows': 0}
+
+    logical_rows = [dict(row) for row in conn.execute(
+        'SELECT id, canonical_key, status FROM iptv_logical_channels'
+    ).fetchall()]
+    logical_by_key: dict[str, list[dict]] = {}
+    for row in logical_rows:
+        logical_by_key.setdefault(str(row['canonical_key'] or ''), []).append(row)
+    targets = {
+        (int(row['source_id']), str(row['channel_id']))
+        for row in conn.execute('SELECT source_id, channel_id FROM epg_channels').fetchall()
+    }
+    no_epg = {
+        str(row['logical_channel_id'])
+        for row in conn.execute(
+            "SELECT logical_channel_id FROM iptv_logical_channel_epg_policies WHERE mode='no_epg'"
+        ).fetchall()
+    }
+    existing = {
+        str(row['logical_channel_id'])
+        for row in conn.execute(
+            'SELECT logical_channel_id FROM iptv_logical_channel_epg_bindings'
+        ).fetchall()
+    }
+    rows = [dict(row) for row in conn.execute(
+        'SELECT * FROM channel_epg_map ORDER BY id'
+    ).fetchall()]
+    candidates: dict[str, list[dict]] = {}
+    skipped = 0
+    for row in rows:
+        if str(row.get('match_status') or '').lower() != 'matched':
+            skipped += 1
+            continue
+        source_id = row.get('epg_source_id')
+        channel_id = row.get('epg_channel_id')
+        if source_id is None or not str(channel_id or ''):
+            skipped += 1
+            continue
+        try:
+            target = (int(source_id), str(channel_id))
+        except (TypeError, ValueError):
+            skipped += 1
+            continue
+        logical = logical_by_key.get(str(row.get('canonical_key') or ''), [])
+        active = [item for item in logical if item['status'] == 'active']
+        if (
+            len(active) != 1
+            or any(item['status'] not in {'active', 'orphaned'} for item in logical)
+            or target not in targets
+            or active[0]['id'] in no_epg
+            or active[0]['id'] in existing
+        ):
+            skipped += 1
+            continue
+        item = dict(row)
+        item['logical_channel_id'] = str(active[0]['id'])
+        item['target'] = target
+        candidates.setdefault(item['logical_channel_id'], []).append(item)
+
+    migrated = 0
+    now = _utc_now()
+    for logical_id, items in candidates.items():
+        target_set = {item['target'] for item in items}
+        if len(target_set) != 1:
+            skipped += len(items)
+            continue
+        item = sorted(
+            items,
+            key=lambda value: (
+                -int(bool(value.get('locked'))),
+                -int(str(value.get('match_type') or '').lower() == 'manual'),
+                -int(value.get('confidence') or 0),
+                int(value['id']),
+            ),
+        )[0]
+        origin = (
+            'manual'
+            if bool(item.get('locked')) or str(item.get('match_type') or '').lower() == 'manual'
+            else 'legacy_migrated'
+        )
+        locked = int(bool(item.get('locked'))) if origin == 'manual' else 0
+        conn.execute(
+            """
+            INSERT INTO iptv_logical_channel_epg_bindings(
+                logical_channel_id, epg_source_id, epg_channel_id,
+                status, match_type, confidence, locked, origin,
+                legacy_canonical_key, created_at, updated_at
+            ) VALUES(?, ?, ?, 'matched', ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                logical_id, item['target'][0], item['target'][1],
+                str(item.get('match_type') or ''),
+                max(0, min(100, int(item.get('confidence') or 0))),
+                locked, origin, str(item.get('canonical_key') or ''), now, now,
+            ),
+        )
+        migrated += 1
+    conn.execute('DROP TABLE channel_epg_map')
+    return {'legacy_rows': len(rows), 'migrated_rows': migrated, 'skipped_rows': skipped}
+
+
 async def initialize():
     def _init():
         conn = _connect()
         conn.executescript(_SCHEMA)
+        _finalize_legacy_epg_map_upgrade(conn)
         # 兼容已有数据库：补充新字段
         for col, typ, default in [
             ('custom_ua', 'TEXT', "''"),
@@ -768,7 +868,6 @@ async def get_setting(key: str, default: str = '') -> str:
         conn.close()
         return row['value'] if row else default
     return await asyncio.to_thread(_get)
-
 
 async def set_setting(key: str, value: str):
     def _set():
@@ -3059,38 +3158,3 @@ async def batch_get_current_programs(canonical_keys: list[str]) -> dict:
             conn.close()
 
     return await asyncio.to_thread(_get)
-
-
-async def get_channel_epg_map(key: str = '') -> dict | None:
-    def _get():
-        conn = _connect()
-        row = conn.execute("SELECT * FROM channel_epg_map WHERE canonical_key=?", (key,)).fetchone()
-        conn.close()
-        return dict(row) if row else None
-    return await asyncio.to_thread(_get)
-
-
-async def get_all_channel_epg_maps() -> list[dict]:
-    def _get():
-        conn = _connect()
-        rows = conn.execute("SELECT * FROM channel_epg_map ORDER BY canonical_key").fetchall()
-        conn.close()
-        return [dict(r) for r in rows]
-    return await asyncio.to_thread(_get)
-
-
-async def upsert_channel_epg_map(key: str, **kwargs):
-    def _upsert():
-        conn = _connect()
-        now = datetime.now(timezone.utc).isoformat()
-        kwargs['updated_at'] = now
-        cols = ', '.join(kwargs.keys())
-        placeholders = ', '.join('?' for _ in kwargs)
-        sets = ', '.join(f"{k}=excluded.{k}" for k in kwargs)
-        conn.execute(
-            f"INSERT INTO channel_epg_map(canonical_key, {cols}) VALUES(?, {placeholders}) ON CONFLICT(canonical_key) DO UPDATE SET {sets}",
-            (key, *kwargs.values()),
-        )
-        conn.commit()
-        conn.close()
-    await asyncio.to_thread(_upsert)

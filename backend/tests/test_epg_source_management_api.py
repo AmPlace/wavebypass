@@ -210,22 +210,6 @@ class EpgSourceManagementApiTest(unittest.IsolatedAsyncioTestCase):
         finally:
             conn.close()
 
-    def _legacy_mapping(self, source_id, channel_id="shared"):
-        conn = self._connect()
-        try:
-            conn.execute(
-                """
-                INSERT INTO channel_epg_map(
-                    canonical_key, epg_source_id, epg_channel_id,
-                    match_status, updated_at
-                ) VALUES('legacy-key', ?, ?, 'matched', ?)
-                """,
-                (source_id, channel_id, self.now),
-            )
-            conn.commit()
-        finally:
-            conn.close()
-
     async def test_clean_bootstrap_creates_one_stable_builtin_preset(self):
         first = await self.epg.ensure_default_epg_sources()
         second = await self.epg.ensure_default_epg_sources()
@@ -456,7 +440,6 @@ class EpgSourceManagementApiTest(unittest.IsolatedAsyncioTestCase):
         self._dataset(other["id"], "shared")
         self._logical("logical-auto")
         self._binding("logical-auto", source["id"], "shared")
-        self._legacy_mapping(source["id"], "shared")
         task_id = self.epg_tasks.epg_task_id(source["id"])
         self.assertIsNotNone(await service.repository.get_config(task_id))
 
@@ -492,12 +475,6 @@ class EpgSourceManagementApiTest(unittest.IsolatedAsyncioTestCase):
                     (source["id"],),
                 ).fetchone()[0],
                 0,
-            )
-            self.assertEqual(
-                conn.execute(
-                    "SELECT COUNT(*) FROM channel_epg_map WHERE canonical_key='legacy-key'"
-                ).fetchone()[0],
-                1,
             )
             remaining = conn.execute(
                 "SELECT source_id, channel_id FROM epg_channels"

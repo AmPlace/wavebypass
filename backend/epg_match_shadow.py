@@ -792,7 +792,7 @@ def _apply_epg_match_shadow_run_sync(run_id: str, started_at: str) -> dict[str, 
     conn = db._connect()
     try:
         # BEGIN IMMEDIATE makes the revalidation and all inserts one serialized
-        # operation. No shadow/legacy table is changed until every check passes.
+        # operation. No shadow table is changed until every check passes.
         conn.execute('BEGIN IMMEDIATE')
         run_row = conn.execute(
             'SELECT * FROM epg_match_shadow_runs WHERE run_id=?', (run_id,)

@@ -300,17 +300,8 @@ class EpgCatalogTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(hints[0]['has_membership_conflict'])
         self.assertNotIn('epg_source_id', hints[0])
         self.assertNotIn('epg_channel_id', hints[0])
-        self.assertEqual(await self.db.get_all_channel_epg_maps(), [])
-
-    async def test_existing_mapping_and_production_matcher_paths_are_not_switched_to_catalog(self):
-        await self.db.upsert_channel_epg_map(
-            'legacy', epg_source_id=1, epg_channel_id='CCTV1', match_type='manual',
-            confidence=100, match_status='locked', match_detail='legacy', locked=1,
-        )
-        before = await self.db.get_all_channel_epg_maps()
+    async def test_catalog_does_not_switch_production_matcher_paths(self):
         await self.catalog_module.build_epg_channel_catalog()
-        after = await self.db.get_all_channel_epg_maps()
-        self.assertEqual(after, before)
         backend_dir = Path(__file__).resolve().parents[1]
         epg_source = (backend_dir / 'epg.py').read_text(encoding='utf-8')
         main_source = (backend_dir / 'main.py').read_text(encoding='utf-8')

@@ -12,7 +12,6 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-import epg_bindings
 import epg_match_shadow
 import iptv_logical_gc
 import iptv_channels
@@ -38,9 +37,8 @@ async def run_epg_binding_maintenance(
     """Run one serialized, idempotent logical binding maintenance pass.
 
     ``sync_logical`` is enabled for channel and EPG lifecycle events so the
-    matcher always sees the latest logical projection.  No legacy mapping is
-    written and no binding is changed except through the existing safe apply
-    operation.
+    matcher always sees the latest logical projection. No binding is changed
+    except through the existing safe apply operation.
     """
     started_at = _now()
     result: dict[str, Any] = {
@@ -50,7 +48,6 @@ async def run_epg_binding_maintenance(
         'finished_at': '',
         'logical_sync': None,
         'logical_gc': None,
-        'bootstrap': None,
         'shadow_run': None,
         'apply': None,
         'error': '',
@@ -60,7 +57,6 @@ async def run_epg_binding_maintenance(
             if sync_logical:
                 result['logical_sync'] = await iptv_channels.sync_iptv_logical_channels()
             result['logical_gc'] = await iptv_logical_gc.garbage_collect_iptv_logical_channels()
-            result['bootstrap'] = await epg_bindings.migrate_legacy_epg_bindings_shadow()
             result['shadow_run'] = await epg_match_shadow.run_epg_match_shadow()
             shadow_run = result['shadow_run']
             run_id = shadow_run.get('run_id') if isinstance(shadow_run, dict) else None

@@ -256,18 +256,6 @@ class EpgBindingManagementApiTest(unittest.IsolatedAsyncioTestCase):
         finally:
             conn.close()
 
-    async def _legacy(self, canonical_key, source_id, channel_id):
-        await self.db.upsert_channel_epg_map(
-            canonical_key,
-            epg_source_id=source_id,
-            epg_channel_id=channel_id,
-            match_type="manual",
-            confidence=100,
-            match_status="locked",
-            match_detail='{"fixture":true}',
-            locked=1,
-        )
-
     def _binding_row(self, logical_id):
         conn = self._connect()
         try:
@@ -296,22 +284,6 @@ class EpgBindingManagementApiTest(unittest.IsolatedAsyncioTestCase):
         finally:
             conn.close()
 
-    def _legacy_digest(self):
-        conn = self._connect()
-        try:
-            digest = hashlib.sha256()
-            for row in conn.execute(
-                "SELECT * FROM channel_epg_map ORDER BY canonical_key"
-            ).fetchall():
-                digest.update(
-                    json.dumps(
-                        dict(row), sort_keys=True, ensure_ascii=False
-                    ).encode()
-                )
-            return digest.hexdigest()
-        finally:
-            conn.close()
-
     async def _bind(self, logical_id, source_id, channel_id):
         return await self.client.put(
             f"/api/admin/epg/logical-channels/{logical_id}/binding",
@@ -325,7 +297,6 @@ class EpgBindingManagementApiTest(unittest.IsolatedAsyncioTestCase):
         source_a = await self._source("source-a", "shared")
         source_b = await self._source("source-b", "shared")
         self._logical("logical-manual")
-        legacy_digest = self._legacy_digest()
 
         catalog = await self.client.get(
             f"/api/admin/epg/catalog?source_id={source_a}&q=shared"
@@ -367,7 +338,6 @@ class EpgBindingManagementApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(programme.status_code, 200, programme.text)
         self.assertEqual(programme.json()["epg_source_id"], source_b)
         self.assertEqual(programme.json()["current"]["title"], "source-b programme")
-        self.assertEqual(self._legacy_digest(), legacy_digest)
 
     async def test_replace_all_origins_and_invalid_target_roll_back(self):
         source_a = await self._source("origin-a", "A")
@@ -504,8 +474,6 @@ class EpgBindingManagementApiTest(unittest.IsolatedAsyncioTestCase):
             origin="manual",
             locked=True,
         )
-        await self._legacy("key-logical-restore", manual_source, "MANUAL")
-        legacy_digest = self._legacy_digest()
 
         response = await self.client.post(
             "/api/admin/epg/logical-channels/logical-restore/restore-automatic"
@@ -528,7 +496,6 @@ class EpgBindingManagementApiTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(programme.json()["epg_source_id"], auto_source)
         self.assertEqual(programme.json()["current"]["title"], "auto programme")
-        self.assertEqual(self._legacy_digest(), legacy_digest)
 
     async def test_restore_automatic_can_remain_safely_unmatched(self):
         legacy_source = await self._source("legacy", "LEGACY")
@@ -544,7 +511,6 @@ class EpgBindingManagementApiTest(unittest.IsolatedAsyncioTestCase):
             origin="manual",
             locked=True,
         )
-        await self._legacy("key-logical-unmatched", legacy_source, "LEGACY")
 
         response = await self.client.post(
             "/api/admin/epg/logical-channels/logical-unmatched/restore-automatic"
@@ -589,7 +555,6 @@ class EpgBindingManagementApiTest(unittest.IsolatedAsyncioTestCase):
     async def test_explicit_no_epg_blocks_read_match_and_stale_apply_then_restores(self):
         source = await self._source("no-epg", "NOEPG")
         self._logical("logical-no-epg", tvg_id="NOEPG")
-        await self._legacy("key-logical-no-epg", source, "NOEPG")
         stale_run = await self.shadow.run_epg_match_shadow()
         self.assertEqual(stale_run["matched_count"], 1)
 

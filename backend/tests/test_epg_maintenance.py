@@ -33,16 +33,14 @@ class EpgMaintenanceTest(unittest.IsolatedAsyncioTestCase):
         _clear_modules()
         self.tmpdir.cleanup()
 
-    async def test_success_runs_projection_bootstrap_shadow_and_apply(self):
+    async def test_success_runs_projection_gc_shadow_and_apply(self):
         calls = []
         sync = mock.AsyncMock(side_effect=lambda: calls.append('sync') or {'projection_mismatch_count': 0})
         gc = mock.AsyncMock(side_effect=lambda: calls.append('gc') or {'deleted_count': 0})
-        bootstrap = mock.AsyncMock(side_effect=lambda: calls.append('bootstrap') or {'created_count': 0})
         shadow = mock.AsyncMock(side_effect=lambda: calls.append('shadow') or {'run_id': 'run-1', 'status': 'success'})
         apply = mock.AsyncMock(side_effect=lambda *_: calls.append('apply') or {'applied_count': 2})
         with mock.patch.object(self.maintenance.iptv_channels, 'sync_iptv_logical_channels', sync), \
              mock.patch.object(self.maintenance.iptv_logical_gc, 'garbage_collect_iptv_logical_channels', gc), \
-             mock.patch.object(self.maintenance.epg_bindings, 'migrate_legacy_epg_bindings_shadow', bootstrap), \
              mock.patch.object(self.maintenance.epg_match_shadow, 'run_epg_match_shadow', shadow), \
              mock.patch.object(self.maintenance.epg_match_shadow, 'apply_epg_match_shadow_run', apply):
             result = await self.maintenance.run_epg_binding_maintenance(trigger='test')
@@ -51,20 +49,17 @@ class EpgMaintenanceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['apply']['applied_count'], 2)
         sync.assert_awaited_once_with()
         gc.assert_awaited_once_with()
-        bootstrap.assert_awaited_once_with()
         shadow.assert_awaited_once_with()
         apply.assert_awaited_once_with('run-1')
-        self.assertEqual(calls, ['sync', 'gc', 'bootstrap', 'shadow', 'apply'])
+        self.assertEqual(calls, ['sync', 'gc', 'shadow', 'apply'])
 
     async def test_maintenance_failure_isolated_and_can_retry(self):
         sync = mock.AsyncMock(side_effect=[RuntimeError('temporary'), {'projection_mismatch_count': 0}])
-        bootstrap = mock.AsyncMock(return_value={'created_count': 0})
         gc = mock.AsyncMock(return_value={'deleted_count': 0})
         shadow = mock.AsyncMock(return_value={'run_id': 'run-2', 'status': 'success'})
         apply = mock.AsyncMock(return_value={'applied_count': 0})
         with mock.patch.object(self.maintenance.iptv_channels, 'sync_iptv_logical_channels', sync), \
              mock.patch.object(self.maintenance.iptv_logical_gc, 'garbage_collect_iptv_logical_channels', gc), \
-             mock.patch.object(self.maintenance.epg_bindings, 'migrate_legacy_epg_bindings_shadow', bootstrap), \
              mock.patch.object(self.maintenance.epg_match_shadow, 'run_epg_match_shadow', shadow), \
              mock.patch.object(self.maintenance.epg_match_shadow, 'apply_epg_match_shadow_run', apply):
             failed = await self.maintenance.run_epg_binding_maintenance(trigger='failure')
@@ -75,7 +70,6 @@ class EpgMaintenanceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(retried['status'], 'success')
         self.assertEqual(retried['apply']['applied_count'], 0)
         self.assertEqual(sync.await_count, 2)
-        bootstrap.assert_awaited_once_with()
         shadow.assert_awaited_once_with()
         apply.assert_awaited_once_with('run-2')
 
@@ -85,7 +79,6 @@ class EpgMaintenanceTest(unittest.IsolatedAsyncioTestCase):
         apply = mock.AsyncMock()
         with mock.patch.object(self.maintenance.iptv_channels, 'sync_iptv_logical_channels', mock.AsyncMock()), \
              mock.patch.object(self.maintenance.iptv_logical_gc, 'garbage_collect_iptv_logical_channels', gc), \
-             mock.patch.object(self.maintenance.epg_bindings, 'migrate_legacy_epg_bindings_shadow', mock.AsyncMock()), \
              mock.patch.object(self.maintenance.epg_match_shadow, 'run_epg_match_shadow', shadow), \
              mock.patch.object(self.maintenance.epg_match_shadow, 'apply_epg_match_shadow_run', apply):
             result = await self.maintenance.run_epg_binding_maintenance()
@@ -111,11 +104,9 @@ class EpgMaintenanceTest(unittest.IsolatedAsyncioTestCase):
 
         common = {
             'sync_iptv_logical_channels': sync,
-            'migrate_legacy_epg_bindings_shadow': mock.AsyncMock(return_value={}),
             'run_epg_match_shadow': mock.AsyncMock(return_value={'run_id': 'run', 'status': 'partial'}),
         }
         with mock.patch.object(self.maintenance.iptv_channels, 'sync_iptv_logical_channels', side_effect=common['sync_iptv_logical_channels']), \
-             mock.patch.object(self.maintenance.epg_bindings, 'migrate_legacy_epg_bindings_shadow', common['migrate_legacy_epg_bindings_shadow']), \
              mock.patch.object(self.maintenance.epg_match_shadow, 'run_epg_match_shadow', common['run_epg_match_shadow']):
             first = asyncio.create_task(self.maintenance.run_epg_binding_maintenance(trigger='one'))
             await entered.wait()
@@ -142,11 +133,9 @@ class EpgMaintenanceTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_failed_maintenance_is_reported_without_raising(self):
         sync = mock.AsyncMock(return_value={'projection_mismatch_count': 0})
-        bootstrap = mock.AsyncMock(return_value={})
         shadow = mock.AsyncMock(return_value={'run_id': 'run-failed', 'status': 'success'})
         apply = mock.AsyncMock(return_value={'rollback': True, 'error': 'write failed'})
         with mock.patch.object(self.maintenance.iptv_channels, 'sync_iptv_logical_channels', sync), \
-             mock.patch.object(self.maintenance.epg_bindings, 'migrate_legacy_epg_bindings_shadow', bootstrap), \
              mock.patch.object(self.maintenance.epg_match_shadow, 'run_epg_match_shadow', shadow), \
              mock.patch.object(self.maintenance.epg_match_shadow, 'apply_epg_match_shadow_run', apply):
             result = await self.maintenance.run_epg_binding_maintenance(trigger='apply-failure')

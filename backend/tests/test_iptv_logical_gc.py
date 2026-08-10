@@ -520,22 +520,10 @@ class IptvLogicalGcTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self._table_count('epg_match_shadow_decisions'), 0)
         self.assertEqual(self._table_count('epg_match_shadow_candidates'), 0)
 
-    async def test_channel_epg_map_is_unchanged(self):
-        self._logical('legacy-map')
-        await self.db.upsert_channel_epg_map(
-            'legacy-map',
-            epg_source_id=None,
-            epg_channel_id='',
-            match_type='',
-            confidence=0,
-            match_status='unmatched',
-            match_detail='',
-            locked=0,
-        )
-        before = await self.db.get_all_channel_epg_maps()
+    async def test_gc_does_not_require_legacy_mapping(self):
+        self._logical('logical-map')
         await self._collect()
-        after = await self.db.get_all_channel_epg_maps()
-        self.assertEqual(after, before)
+        self.assertEqual(self._table_count('iptv_logical_channels'), 0)
 
     async def test_batch_failure_rolls_back_logical_and_derived_cleanup(self):
         source_id = await self._source()
