@@ -451,6 +451,25 @@ CREATE TABLE IF NOT EXISTS plugin_artifacts (
 CREATE INDEX IF NOT EXISTS idx_plugin_artifacts_state
 ON plugin_artifacts(publisher_id, plugin_id, state);
 
+CREATE TABLE IF NOT EXISTS plugin_publisher_trust (
+    publisher_id TEXT NOT NULL,
+    key_id       TEXT NOT NULL,
+    public_key   TEXT NOT NULL,
+    trust_level  TEXT NOT NULL CHECK(trust_level IN ('official', 'third_party')),
+    enabled      INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
+    description  TEXT DEFAULT '',
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL,
+    PRIMARY KEY (publisher_id, key_id)
+);
+
+CREATE TABLE IF NOT EXISTS plugin_scheme_ownership (
+    scheme       TEXT PRIMARY KEY,
+    mode         TEXT NOT NULL CHECK(mode IN ('legacy', 'plugin', 'migration_test')),
+    plugin_identity TEXT DEFAULT '',
+    updated_at   TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS users (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     username      TEXT NOT NULL UNIQUE,
@@ -2618,6 +2637,126 @@ async def delete_retained_plugin_artifacts(publisher_id: str, plugin_id: str) ->
         finally:
             conn.close()
     await asyncio.to_thread(_delete)
+
+
+async def list_plugin_publisher_trust() -> list[dict]:
+    def _list():
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM plugin_publisher_trust ORDER BY publisher_id, key_id"
+            ).fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+    return await asyncio.to_thread(_list)
+
+
+async def upsert_plugin_publisher_trust(
+    *, publisher_id: str, key_id: str, public_key: str, trust_level: str,
+    enabled: bool, description: str = '',
+) -> dict:
+    def _upsert():
+        conn = _connect()
+        try:
+            with conn:
+                now = _utc_now()
+                conn.execute(
+                    """
+                    INSERT INTO plugin_publisher_trust(
+                        publisher_id, key_id, public_key, trust_level, enabled,
+                        description, created_at, updated_at
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(publisher_id, key_id) DO UPDATE SET
+                        public_key=excluded.public_key,
+                        trust_level=excluded.trust_level,
+                        enabled=excluded.enabled,
+                        description=excluded.description,
+                        updated_at=excluded.updated_at
+                    """,
+                    (publisher_id, key_id, public_key, trust_level, 1 if enabled else 0,
+                     description, now, now),
+                )
+                row = conn.execute(
+                    "SELECT * FROM plugin_publisher_trust WHERE publisher_id=? AND key_id=?",
+                    (publisher_id, key_id),
+                ).fetchone()
+                return dict(row)
+        finally:
+            conn.close()
+    return await asyncio.to_thread(_upsert)
+
+
+async def delete_plugin_publisher_trust(publisher_id: str, key_id: str) -> bool:
+    def _delete():
+        conn = _connect()
+        try:
+            with conn:
+                cursor = conn.execute(
+                    "DELETE FROM plugin_publisher_trust WHERE publisher_id=? AND key_id=?",
+                    (publisher_id, key_id),
+                )
+                return cursor.rowcount == 1
+        finally:
+            conn.close()
+    return await asyncio.to_thread(_delete)
+
+
+async def list_plugin_scheme_ownership() -> list[dict]:
+    def _list():
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM plugin_scheme_ownership ORDER BY scheme"
+            ).fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+    return await asyncio.to_thread(_list)
+
+
+async def set_plugin_scheme_ownership(scheme: str, mode: str, plugin_identity: str = '') -> dict:
+    def _set():
+        conn = _connect()
+        try:
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO plugin_scheme_ownership(scheme, mode, plugin_identity, updated_at)
+                    VALUES(?, ?, ?, ?)
+                    ON CONFLICT(scheme) DO UPDATE SET
+                        mode=excluded.mode,
+                        plugin_identity=excluded.plugin_identity,
+                        updated_at=excluded.updated_at
+                    """,
+                    (scheme, mode, plugin_identity, _utc_now()),
+                )
+                row = conn.execute(
+                    "SELECT * FROM plugin_scheme_ownership WHERE scheme=?", (scheme,)
+                ).fetchone()
+                return dict(row)
+        finally:
+            conn.close()
+    return await asyncio.to_thread(_set)
+
+
+async def recover_quarantined_plugin(publisher_id: str, plugin_id: str) -> bool:
+    def _recover():
+        conn = _connect()
+        try:
+            with conn:
+                cursor = conn.execute(
+                    """
+                    UPDATE plugin_installations SET quarantined=0, enabled=0,
+                        lifecycle_state='disabled', last_error='', updated_at=?
+                    WHERE publisher_id=? AND plugin_id=? AND quarantined=1
+                    """,
+                    (_utc_now(), publisher_id, plugin_id),
+                )
+                return cursor.rowcount == 1
+        finally:
+            conn.close()
+    return await asyncio.to_thread(_recover)
 
 
 # ── Market sources ──

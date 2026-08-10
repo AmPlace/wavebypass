@@ -646,7 +646,7 @@ async def _probe_http_stream(client: httpx.AsyncClient, url: str, headers: dict[
     )
 
 
-async def probe_channel_source(ch: dict[str, Any], client: httpx.AsyncClient) -> dict[str, Any]:
+async def probe_channel_source(ch: dict[str, Any], client: httpx.AsyncClient, *, provider_resolver=None) -> dict[str, Any]:
     original_url = str(ch.get("url") or "").strip()
     headers = _headers_from_channel(ch)
     declared_proxy = _truthy(ch.get("force_proxy"))
@@ -673,7 +673,11 @@ async def probe_channel_source(ch: dict[str, Any], client: httpx.AsyncClient) ->
 
     if source_type == "adapter":
         try:
-            resolved = await resolve_adapter_source(original_url, client)
+            resolved = await (
+                provider_resolver.resolve(original_url, client)
+                if provider_resolver is not None
+                else resolve_adapter_source(original_url, client)
+            )
             url = str(resolved.get("url") or "")
             source_type = str(resolved.get("source_type") or detect_source_type(url)).strip().lower()
             resolved_headers = resolved.get("headers") if isinstance(resolved.get("headers"), dict) else {}

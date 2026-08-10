@@ -45,6 +45,7 @@ from security.dependencies import (
     require_admin,
     resolve_media_access,
 )
+from plugin_runtime import PluginError
 from security.proxy_context import ProxyContext, get_registry as get_proxy_context_registry
 from security.proxy_handles import (
     DEFAULT_TTL_BY_KIND,
@@ -322,9 +323,16 @@ async def media_channel_source_resolve(
         adapter_url = raw_url if raw_url.lower().startswith("youtube://") else f"youtube://resolve?url={quote(raw_url, safe='')}"
 
     try:
-        resolved = await _m.resolve_adapter_source(adapter_url, _m.http_client)
+        provider_resolver = _provider_resolver(_m, request)
+        resolved = await (
+            provider_resolver.resolve(adapter_url, _m.http_client)
+            if provider_resolver is not None
+            else _m.resolve_adapter_source(adapter_url, _m.http_client)
+        )
     except _m.AdapterResolveError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.to_payload()) from exc
+    except PluginError as exc:
+        raise HTTPException(status_code=502, detail=exc.as_contract()) from exc
 
     resolved_url = str(resolved.get("url") or "").strip()
     if resolved_url:
@@ -537,9 +545,16 @@ async def _serve_iptv_source_playlist(
         if source_type in {"youtube", "unsupported_youtube_url"}:
             adapter_url = raw_url if raw_url.lower().startswith("youtube://") else f"youtube://resolve?url={quote(raw_url, safe='')}"
         try:
-            resolved = await _m.resolve_adapter_source(adapter_url, _m.http_client)
+            provider_resolver = _provider_resolver(_m)
+            resolved = await (
+                provider_resolver.resolve(adapter_url, _m.http_client)
+                if provider_resolver is not None
+                else _m.resolve_adapter_source(adapter_url, _m.http_client)
+            )
         except _m.AdapterResolveError as exc:
             raise HTTPException(status_code=exc.status_code, detail=exc.to_payload()) from exc
+        except PluginError as exc:
+            raise HTTPException(status_code=502, detail=exc.as_contract()) from exc
 
         resolved_url = str(resolved.get("url") or "").strip()
         if not resolved_url:
@@ -1009,3 +1024,8 @@ async def admin_probe_url(
         "content_length": int(upstream.headers.get("content-length") or 0),
         "preview": text_preview,
     }
+def _provider_resolver(main_module, request: Request | None = None):
+    request_app = getattr(request, "app", None) if request is not None else None
+    app = request_app or getattr(main_module, "app", None)
+    state = getattr(app, "state", None)
+    return getattr(state, "provider_resolver", None)

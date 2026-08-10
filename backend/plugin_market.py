@@ -83,6 +83,13 @@ class FixtureTrustPolicy:
         return "fixture_trusted"
 
 
+def _read_artifact(path: Path, *, max_bytes: int | None = None) -> bytes:
+    if max_bytes is not None and path.stat().st_size > max_bytes:
+        raise PluginError("ARTIFACT_INVALID", "Plugin artifact exceeds the verification limit", category="artifact")
+    with path.open("rb") as stream:
+        return stream.read()
+
+
 class PluginArtifactStore:
     def __init__(self, root: str | Path, *, allowed_local_roots: Iterable[str | Path]):
         self.root = Path(root).resolve()
@@ -117,7 +124,7 @@ class PluginArtifactStore:
         temp = Path(temp_name)
         try:
             shutil.copyfile(source, temp)
-            payload = temp.read_bytes()
+            payload = _read_artifact(temp, max_bytes=int(artifact["size_bytes"]))
             actual = hashlib.sha256(payload).hexdigest()
             if actual != digest or len(payload) != int(artifact["size_bytes"]):
                 raise PluginError("INVALID_PLUGIN_RESPONSE", "Plugin artifact digest or size mismatch", category="artifact")
@@ -275,9 +282,22 @@ class PluginMarketService:
         return (sys.executable, str(artifact)) if selected["runtime"] == "python" else (str(artifact),)
 
     async def install_from_packages(self, packages: Iterable[dict], identity: str) -> dict:
+        packages = list(packages)
         candidates = candidates_from_packages(packages, os_name=self.os_name, arch=self.arch)
         matching = [candidate for candidate in candidates if candidate.identity == identity]
         if not matching:
+            declared = []
+            for package in packages:
+                if package.get("package_type") != PLUGIN_PACKAGE_TYPE:
+                    continue
+                try:
+                    manifest = validate_manifest(package.get("plugin_manifest"))
+                except PluginError:
+                    continue
+                if manifest.identity == identity:
+                    declared.append(manifest)
+            if declared:
+                raise PluginError("PLATFORM_UNSUPPORTED", "Plugin has no artifact for this platform", category="compatibility")
             raise PluginError("RESOURCE_NOT_FOUND", "No compatible plugin candidate is available", category="market")
         highest = max((candidate.manifest.version for candidate in matching), key=_version_tuple)
         version_candidates = [candidate for candidate in matching if candidate.manifest.version == highest]
@@ -288,7 +308,10 @@ class PluginMarketService:
         trust_errors: list[PluginError] = []
         for candidate in version_candidates:
             try:
-                payload = self.store._source(candidate.local_reference).read_bytes()
+                payload = _read_artifact(
+                    self.store._source(candidate.local_reference),
+                    max_bytes=int(candidate.artifact["size_bytes"]),
+                )
                 if hashlib.sha256(payload).hexdigest() != candidate.artifact["sha256"]:
                     raise PluginError("INVALID_PLUGIN_RESPONSE", "Plugin artifact digest or size mismatch", category="artifact")
                 self.trust_policy.verify(candidate.manifest, candidate.artifact, payload)
@@ -404,13 +427,33 @@ class PluginMarketService:
 
     async def enable(self, identity: str) -> dict:
         row = await self._row(identity)
+        if row.get("quarantined"):
+            raise PluginError("PLUGIN_QUARANTINED", "Plugin requires explicit recovery", category="lifecycle")
         if identity in self._active:
             return self._public(row)
         manifest = validate_manifest(json.loads(row["manifest_json"]))
         artifact = Path(row["artifact_path"])
-        if not artifact.is_file() or hashlib.sha256(artifact.read_bytes()).hexdigest() != row["artifact_sha256"]:
+        if not artifact.is_file():
             await db.set_plugin_enabled(row["publisher_id"], row["plugin_id"], True, lifecycle_state="unavailable", error="Installed artifact integrity check failed")
             raise PluginError("PLUGIN_UNAVAILABLE", "Installed plugin artifact failed integrity verification", category="artifact")
+        payload = await asyncio.to_thread(_read_artifact, artifact, max_bytes=int(artifact.stat().st_size))
+        if hashlib.sha256(payload).hexdigest() != row["artifact_sha256"]:
+            await db.set_plugin_enabled(row["publisher_id"], row["plugin_id"], True, lifecycle_state="unavailable", error="Installed artifact integrity check failed")
+            raise PluginError("ARTIFACT_INTEGRITY_FAILED", "Installed plugin artifact failed integrity verification", category="artifact")
+        selected = next(
+            (item for item in manifest.artifacts if item["sha256"] == row["artifact_sha256"]),
+            None,
+        )
+        if selected is None:
+            raise PluginError("ARTIFACT_INVALID", "Installed artifact is absent from the manifest", category="artifact")
+        try:
+            self.trust_policy.verify(manifest, selected, payload)
+        except PluginError as error:
+            await db.set_plugin_enabled(
+                row["publisher_id"], row["plugin_id"], True,
+                lifecycle_state="unavailable", error=_safe_error(error),
+            )
+            raise
         instance = self.runtime.install(manifest, self.command_factory(manifest, artifact))
         try:
             await self.runtime.enable(instance)
@@ -419,6 +462,17 @@ class PluginMarketService:
             raise
         self._active[identity] = instance
         await db.set_plugin_enabled(row["publisher_id"], row["plugin_id"], True, lifecycle_state="active")
+        return self._public(await db.get_plugin_installation(row["publisher_id"], row["plugin_id"]))
+
+    async def recover_quarantine(self, identity: str) -> dict:
+        row = await self._row(identity)
+        if not row.get("quarantined"):
+            raise PluginError("PLUGIN_UNAVAILABLE", "Plugin is not quarantined", category="lifecycle")
+        instance = self._active.pop(identity, None)
+        if instance and instance.state == LifecycleState.QUARANTINED:
+            self.runtime.registry.recover(instance)
+        if not await db.recover_quarantined_plugin(row["publisher_id"], row["plugin_id"]):
+            raise PluginError("PLUGIN_UNAVAILABLE", "Plugin quarantine state changed", category="persistence")
         return self._public(await db.get_plugin_installation(row["publisher_id"], row["plugin_id"]))
 
     async def uninstall(self, identity: str) -> bool:
@@ -515,4 +569,5 @@ class PluginMarketService:
             "lifecycle_state": row["lifecycle_state"],
             "last_activation_status": row["last_activation_status"],
             "last_error": row["last_error"],
+            "quarantined": bool(row.get("quarantined")),
         }

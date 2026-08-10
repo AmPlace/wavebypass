@@ -63,6 +63,9 @@ from routers.auth import router as auth_router
 from routers.media_credentials import router as media_credentials_router
 from routers.media_proxy import router as media_proxy_router
 from routers.settings import router as settings_router
+from routers.plugins import router as plugins_router
+from plugin_production import ProductionPluginSubsystem, default_plugin_root
+from plugin_tasks import register_plugin_update_task
 from routers.setup import router as setup_router
 from security.dependencies import require_admin, require_browse_access, require_media_access, resolve_media_access
 from security.source_ids import source_id_for
@@ -675,10 +678,31 @@ def _load_tingfm_streams():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     automation_service = None
+    plugin_subsystem = None
     app.state.automation_service = None
+    app.state.plugin_subsystem = None
+    app.state.provider_resolver = None
     try:
         await database.initialize()
+        try:
+            plugin_subsystem = await ProductionPluginSubsystem.create(
+                root=default_plugin_root(), http_client=http_client,
+            )
+            app.state.plugin_subsystem = plugin_subsystem
+            app.state.provider_resolver = plugin_subsystem.provider_resolver
+            recovery = await plugin_subsystem.startup()
+            unavailable = [item for item in recovery if item.get("status") != "active"]
+            if unavailable:
+                logger.warning("Plugin startup recovery completed with %d unavailable provider(s)", len(unavailable))
+        except Exception:
+            logger.exception("Plugin subsystem startup failed; Core will continue without Plugin providers")
+            plugin_subsystem = None
+            app.state.plugin_subsystem = None
+            app.state.provider_resolver = None
         automation_service = await create_production_automation_service(http_client)
+        if plugin_subsystem is not None:
+            if await database.list_plugin_installations():
+                register_plugin_update_task(automation_service.registry, plugin_subsystem)
         app.state.automation_service = automation_service
         await automation_service.start()
         _clear_stale_rtsp_hls_dirs()
@@ -699,9 +723,15 @@ async def lifespan(app: FastAPI):
                 await automation_service.stop()
         finally:
             app.state.automation_service = None
-            await _stop_all_rtsp_sessions()
-            await http_client.aclose()
-            await yunting_client.aclose()
+            try:
+                if plugin_subsystem is not None:
+                    await plugin_subsystem.shutdown()
+            finally:
+                app.state.plugin_subsystem = None
+                app.state.provider_resolver = None
+                await _stop_all_rtsp_sessions()
+                await http_client.aclose()
+                await yunting_client.aclose()
 
 app = FastAPI(
     title="WaveFlow",
@@ -726,6 +756,7 @@ app.include_router(auth_router)
 app.include_router(media_credentials_router)
 app.include_router(media_proxy_router)
 app.include_router(settings_router)
+app.include_router(plugins_router)
 
 
 @app.get("/health")
@@ -2503,7 +2534,9 @@ async def _run_speed_test_sub(sub_id: int, channels: list[dict], cancel_event: a
             if cancel_event.is_set():
                 return ch, {"probe_status": "untested", "latency_ms": 0, "last_error": "cancelled"}
             try:
-                return ch, await asyncio.wait_for(probe_channel_source(ch, http_client), timeout=24)
+                return ch, await asyncio.wait_for(probe_channel_source(
+                    ch, http_client, provider_resolver=getattr(app.state, "provider_resolver", None)
+                ), timeout=24)
             except asyncio.TimeoutError:
                 return ch, {"probe_status": "timeout", "latency_ms": 0, "last_error": "timeout"}
             except Exception as exc:
@@ -2567,7 +2600,9 @@ async def _run_speed_test_global(channels: list[dict], cancel_event: asyncio.Eve
             if cancel_event.is_set():
                 return ch, {"probe_status": "untested", "latency_ms": 0, "last_error": "cancelled"}
             try:
-                return ch, await asyncio.wait_for(probe_channel_source(ch, http_client), timeout=24)
+                return ch, await asyncio.wait_for(probe_channel_source(
+                    ch, http_client, provider_resolver=getattr(app.state, "provider_resolver", None)
+                ), timeout=24)
             except asyncio.TimeoutError:
                 logger.warning("测速超时: %s", ch.get('name', ch.get('url', ''))[:60])
                 return ch, {"probe_status": "timeout", "latency_ms": 0, "last_error": "timeout"}

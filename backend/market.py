@@ -1224,7 +1224,24 @@ def _package_card(package: dict) -> dict:
         "package_type", "requires_plugins", "plugin_manifest",
         "plugin_installable",
     ]
-    return {key: deepcopy(package.get(key)) for key in keys if key in package}
+    card = {key: deepcopy(package.get(key)) for key in keys if key in package}
+    if card.get("package_type") == PLUGIN_PACKAGE_TYPE:
+        manifest = card.pop("plugin_manifest", None) or {}
+        if isinstance(manifest, dict):
+            card["plugin"] = {
+                "publisher_id": str(manifest.get("publisher_id") or ""),
+                "plugin_id": str(manifest.get("plugin_id") or ""),
+                "display_name": str(manifest.get("display_name") or package.get("name") or ""),
+                "version": str(manifest.get("version") or package.get("version") or ""),
+                "provider_contracts": deepcopy(manifest.get("provider_contracts") or []),
+                "owned_schemes": deepcopy(manifest.get("owned_schemes") or []),
+                "platforms": [
+                    {key: artifact.get(key) for key in ("os", "arch", "runtime")}
+                    for artifact in manifest.get("artifacts") or [] if isinstance(artifact, dict)
+                ],
+                "permissions": sorted(str(key) for key in (manifest.get("permissions") or {})),
+            }
+    return card
 
 
 async def get_package(package_id: str) -> dict:
