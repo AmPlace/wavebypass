@@ -44,13 +44,14 @@ class CapabilityGateway:
         method = request.get("method", "GET")
         url = request.get("url")
         headers = request.get("headers", {})
-        params = request.get("query", {})
+        params = request.get("query")
         mode = request.get("response_mode", "text")
         body = request.get("body")
         if (method not in {"GET", "POST"} or not isinstance(url, str) or not url
-                or not isinstance(headers, dict) or not isinstance(params, dict)
+                or not isinstance(headers, dict) or (params is not None and not isinstance(params, dict))
                 or mode not in {"text", "json", "binary_base64"}
-                or any(not isinstance(k, str) or not isinstance(v, (str, int, float, bool)) for k, v in params.items())
+                or any(not isinstance(k, str) or not isinstance(v, (str, int, float, bool))
+                       for k, v in (params or {}).items())
                 or len(headers) > 32
                 or any(not isinstance(k, str) or not k or not isinstance(v, str) or len(k) > 128 or len(v) > 8192
                        for k, v in headers.items())):
@@ -89,7 +90,7 @@ class CapabilityGateway:
                         current = urljoin(current, location)
                         if response.status_code in {301, 302, 303}:
                             method, content, json_body = "GET", None, None
-                        params = {}
+                        params = None
                         continue
                     if response.status_code in {401, 403}:
                         raise PluginError("AUTH_FAILED", "Managed HTTP authentication failed", category="auth")
@@ -98,6 +99,9 @@ class CapabilityGateway:
                                           retryable=True, category="network")
                     if response.status_code >= 500:
                         raise PluginError("TEMPORARY_UPSTREAM_FAILURE", "Managed HTTP upstream failed",
+                                          retryable=True, category="network")
+                    if response.status_code >= 400:
+                        raise PluginError("TEMPORARY_UPSTREAM_FAILURE", "Managed HTTP upstream rejected the request",
                                           retryable=True, category="network")
                     data = bytearray()
                     async for chunk in response.aiter_bytes():

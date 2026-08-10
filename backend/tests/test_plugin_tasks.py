@@ -59,6 +59,31 @@ class PluginTaskTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((result.checked_count, result.updated_count, result.failed_count), (2, 1, 1))
         self.assertEqual(subsystem.install.await_count, 2)
 
+    async def test_fjtv_installation_uses_the_generic_market_update_task(self):
+        import plugin_tasks
+        context = SimpleNamespace(
+            stop_requested=lambda: False,
+            task_type="auto_update",
+            report_progress=mock.AsyncMock(),
+        )
+        installation = {
+            "publisher_id": "org.waveflow", "plugin_id": "fjtv",
+            "source_key": "official", "source_package_id": "official::fjtv-plugin",
+            "active_version": "1.0.0",
+        }
+        package = {"id": "official::fjtv-plugin", "version": "1.1.0"}
+        refresh = {"source_results": [{
+            "source_key": "official", "status": "success", "usable_for_update": True,
+            "package_ids": ["official::fjtv-plugin"],
+        }]}
+        subsystem = SimpleNamespace(install=mock.AsyncMock())
+        with mock.patch.object(plugin_tasks.market, "refresh_market", new=mock.AsyncMock(return_value=refresh)), \
+                mock.patch.object(plugin_tasks.market, "market_packages_snapshot", return_value=[package]), \
+                mock.patch.object(plugin_tasks.db, "list_plugin_installations", new=mock.AsyncMock(return_value=[installation])):
+            result = await plugin_tasks.run_plugin_update_task(context, subsystem)
+        self.assertEqual((result.status, result.checked_count, result.updated_count), ("success", 1, 1))
+        subsystem.install.assert_awaited_once_with("org.waveflow/fjtv", [package])
+
 
 if __name__ == "__main__":
     unittest.main()

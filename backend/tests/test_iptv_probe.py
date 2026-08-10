@@ -3,6 +3,7 @@ import unittest
 from adapters import AdapterResolveError, parse_adapter_url
 from adapters.youtube import resolve_youtube
 import iptv_probe
+from plugin_runtime import PluginError
 from iptv_probe import (
     _empty_result,
     _enrich_with_ffprobe,
@@ -37,6 +38,18 @@ Input #0, rtsp, from 'rtsp://example/live':
 
 
 class IptvProbeRealtimeStreamTest(unittest.IsolatedAsyncioTestCase):
+    async def test_plugin_not_live_maps_to_existing_probe_taxonomy(self):
+        class Resolver:
+            async def resolve(self, _url, _client):
+                raise PluginError("NOT_LIVE", "Provider is not live", retryable=True, category="provider")
+
+        result = await probe_channel_source(
+            {"url": "fjtv://fjzh", "source_type": "adapter"}, None, provider_resolver=Resolver(),
+        )
+
+        self.assertEqual((result["probe_status"], result["live_status"]), ("not_live", "not_live"))
+        self.assertIn('"error_code":"NOT_LIVE"', result["probe_meta_json"])
+
     async def test_rtsp_does_not_run_duplicate_ffmpeg_fallback(self):
         calls = 0
         original_probe = iptv_probe._probe_with_ffmpeg

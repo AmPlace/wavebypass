@@ -31,6 +31,8 @@ class PluginAdminApiTest(unittest.IsolatedAsyncioTestCase):
             service=mock.Mock(),
             reload_trust=mock.AsyncMock(),
             set_ownership=mock.AsyncMock(return_value={"scheme": "synthetic", "mode": "legacy", "plugin": ""}),
+            disable=mock.AsyncMock(return_value={"plugin": "org.example/fixture", "enabled": False}),
+            uninstall=mock.AsyncMock(return_value=True),
         )
         self.main.app.state.plugin_subsystem = self.subsystem
         self.main.app.state.automation_service = None
@@ -84,6 +86,17 @@ class PluginAdminApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("/secret/local/plugin", response.text)
         self.assertNotIn("artifact_path", response.text)
         self.assertNotIn("pid", response.text.lower())
+
+    async def test_disable_and_uninstall_use_production_ownership_guard(self):
+        async def admin():
+            return {"id": 1, "role": "admin"}
+        self.main.app.dependency_overrides[self.main.require_admin] = admin
+        disabled = await self.client.post("/api/admin/plugins/org.example/fixture/disable")
+        removed = await self.client.delete("/api/admin/plugins/org.example/fixture")
+        self.assertEqual(disabled.status_code, 200, disabled.text)
+        self.assertEqual(removed.json(), {"removed": True})
+        self.subsystem.disable.assert_awaited_once_with("org.example/fixture")
+        self.subsystem.uninstall.assert_awaited_once_with("org.example/fixture")
 
 
 if __name__ == "__main__":

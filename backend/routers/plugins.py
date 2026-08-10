@@ -158,7 +158,7 @@ async def enable_plugin(publisher_id: str, plugin_id: str, request: Request) -> 
 @router.post("/{publisher_id}/{plugin_id}/disable")
 async def disable_plugin(publisher_id: str, plugin_id: str, request: Request) -> dict[str, Any]:
     try:
-        return await _subsystem(request).service.disable(f"{publisher_id}/{plugin_id}")
+        return await _subsystem(request).disable(f"{publisher_id}/{plugin_id}")
     except PluginError as exc:
         raise _error(exc) from exc
 
@@ -174,7 +174,7 @@ async def recover_plugin(publisher_id: str, plugin_id: str, request: Request) ->
 @router.delete("/{publisher_id}/{plugin_id}")
 async def uninstall_plugin(publisher_id: str, plugin_id: str, request: Request) -> dict[str, Any]:
     try:
-        removed = await _subsystem(request).service.uninstall(f"{publisher_id}/{plugin_id}")
+        removed = await _subsystem(request).uninstall(f"{publisher_id}/{plugin_id}")
         automation = getattr(request.app.state, "automation_service", None)
         if automation is not None:
             await reconcile_plugin_update_task(automation, _subsystem(request))

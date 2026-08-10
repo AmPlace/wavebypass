@@ -107,6 +107,22 @@ class CapabilityBridgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.code, "INVALID_CAPABILITY_REQUEST")
         await client.aclose(); await too_large.aclose()
 
+    async def test_managed_http_preserves_url_query_when_no_query_override_is_supplied(self):
+        seen = []
+        client = httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda request: (seen.append(request), httpx.Response(200, text="ok"))[1]
+        ))
+        gateway = CapabilityGateway(client=client)
+        manifest = validate_manifest(manifest_data(permissions={"network": {"managed": True}}))
+        gate = PermissionGate(manifest, PermissionPolicy(frozenset({"network"})))
+        with mock.patch("plugin_capabilities.assert_safe_target_url", new=mock.AsyncMock()):
+            await gateway.managed_http_fetch(
+                manifest.identity, gate,
+                {"method": "GET", "url": "https://api.example/data?channel_id=123"}, timeout=1,
+            )
+        self.assertEqual(seen[0].url.params["channel_id"], "123")
+        await client.aclose()
+
     async def test_managed_http_host_redirect_ssrf_timeout_and_malformed_request(self):
         manifest = validate_manifest(manifest_data(permissions={
             "network": {"managed": True, "allowed_hosts": ["api.example"]}

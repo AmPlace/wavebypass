@@ -93,6 +93,7 @@ class ProviderResolver:
             "headers": dict(descriptor.get("headers") or {}),
             "ttl": descriptor.get("ttl_seconds"),
             "expires_at": descriptor.get("expires_at"),
+            "volatile_url": bool(descriptor.get("volatile_url")),
             "warnings": list(descriptor.get("warnings") or []),
             "stream_descriptor_version": descriptor.get("descriptor_version"),
         }

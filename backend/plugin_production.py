@@ -207,6 +207,20 @@ class ProductionPluginSubsystem:
         self.provider_resolver.set_mode(scheme, mode, plugin_identity)
         return {"scheme": row["scheme"], "mode": row["mode"], "plugin": row["plugin_identity"]}
 
+    async def disable(self, identity: str) -> dict[str, Any]:
+        if any(item.get("mode") == "plugin" and item.get("plugin_identity") == identity
+               for item in await db.list_plugin_scheme_ownership()):
+            raise PluginError("SCHEME_CONFLICT", "Plugin owns a scheme and must be rolled back before disable",
+                              category="routing")
+        return await self.service.disable(identity)
+
+    async def uninstall(self, identity: str) -> bool:
+        if any(item.get("mode") == "plugin" and item.get("plugin_identity") == identity
+               for item in await db.list_plugin_scheme_ownership()):
+            raise PluginError("SCHEME_CONFLICT", "Plugin owns a scheme and must be rolled back before uninstall",
+                              category="routing")
+        return await self.service.uninstall(identity)
+
     async def install(self, identity: str, packages: Iterable[dict[str, Any]]) -> dict[str, Any]:
         prepared: list[dict[str, Any]] = []
         temp_paths: list[Path] = []

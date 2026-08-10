@@ -9,6 +9,7 @@ from urllib.parse import quote, urljoin
 import httpx
 
 from adapters import AdapterResolveError, resolve_adapter_source
+from plugin_runtime import PluginError
 from m3u8_parser import adapter_provider, detect_source_type, is_youtube_url
 from media_tools import media_tool_bin
 
@@ -734,6 +735,19 @@ async def probe_channel_source(ch: dict[str, Any], client: httpx.AsyncClient, *,
             if err_vid:
                 result["youtube_video_id"] = err_vid
             return result
+        except PluginError as exc:
+            status = "not_live" if exc.code == "NOT_LIVE" else "error"
+            return _empty_result(
+                probe_status=status,
+                live_status="not_live" if status == "not_live" else "error",
+                probe_method="adapter_resolve",
+                last_error=exc.message,
+                adapter_provider=adapter,
+                proxy_required_hint=True,
+                requires_headers=_requires_headers(headers),
+                requires_proxy_declared=declared_proxy,
+                probe_meta_json=_safe_meta({"error_code": exc.code, "retryable": exc.retryable}),
+            )
 
     if not url:
         return _empty_result(
