@@ -4500,42 +4500,6 @@ async def batch_current_programs(request: Request):
     return await db.batch_get_current_programs(keys)
 
 
-@app.put("/api/admin/epg/bind/{canonical_key}", dependencies=[Depends(require_admin)])
-async def bind_epg_channel(canonical_key: str, request: Request):
-    body = await request.json()
-    await db.upsert_channel_epg_map(
-        canonical_key,
-        epg_source_id=body.get('epg_source_id'),
-        epg_channel_id=body.get('epg_channel_id'),
-        match_type='manual',
-        confidence=100,
-        match_status='locked',
-        match_detail='{"matched_by":"manual"}',
-        locked=1,
-    )
-    return {"ok": True}
-
-
-@app.delete("/api/admin/epg/bind/{canonical_key}", dependencies=[Depends(require_admin)])
-async def unbind_epg_channel(canonical_key: str):
-    await db.upsert_channel_epg_map(
-        canonical_key,
-        epg_channel_id='',
-        match_type='',
-        confidence=0,
-        match_status='unmatched',
-        match_detail='',
-        locked=0,
-    )
-    return {"ok": True}
-
-
-@app.get("/api/iptv/epg/match-status", dependencies=[Depends(require_browse_access)])
-async def epg_match_status():
-    maps = await db.get_all_channel_epg_maps()
-    return [{"canonical_key": m['canonical_key'], "status": m['match_status'], "epg_channel_id": m.get('epg_channel_id', ''), "confidence": m.get('confidence', 0)} for m in maps]
-
-
 # ── 订阅导出 ──
 
 IPTV_SUBSCRIPTION_MODES = {"hybrid", "direct", "proxy", "smart"}

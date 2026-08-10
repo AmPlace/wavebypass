@@ -133,17 +133,12 @@ class EpgMaintenanceTest(unittest.IsolatedAsyncioTestCase):
         refresh_body = source[source.index('async def refresh_epg_sources'):]
         self.assertNotIn('await run_epg_matching()', refresh_body)
 
-    async def test_normal_production_modules_only_reference_legacy_matcher_as_compatibility(self):
+    async def test_normal_production_modules_do_not_reference_legacy_matcher(self):
         for relative in ('epg.py', 'main.py', 'market.py'):
             with self.subTest(relative=relative):
                 with open(os.path.join(os.path.dirname(__file__), '..', relative), encoding='utf-8') as handle:
                     source = handle.read()
-                if relative == 'epg.py':
-                    self.assertIn('async def run_epg_matching', source)
-                    refresh_body = source[source.index('async def refresh_epg_sources'):]
-                    self.assertNotIn('run_epg_matching()', refresh_body)
-                else:
-                    self.assertNotIn('run_epg_matching(', source)
+                self.assertNotIn('run_epg_matching', source)
 
     async def test_failed_maintenance_is_reported_without_raising(self):
         sync = mock.AsyncMock(return_value={'projection_mismatch_count': 0})

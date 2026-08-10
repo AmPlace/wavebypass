@@ -26,7 +26,7 @@ BINDING_STATUSES = {
     'orphan_target',
 }
 BINDING_ORIGINS = {'legacy_migrated', 'automatic', 'manual'}
-MIGRATABLE_MATCH_STATUSES = {'matched', 'locked'}
+MIGRATABLE_MATCH_STATUSES = {'matched'}
 LOGICAL_CONFLICT_STATUSES = {'split_conflict', 'merge_conflict'}
 EPG_POLICY_MODES = {'automatic', 'no_epg'}
 
@@ -778,6 +778,10 @@ def _classify_legacy_records(
             base['reason'] = 'legacy_unmatched'
             base_records.append(base)
             continue
+        if bool(row.get('locked')) or base['match_type'].lower() == 'manual':
+            base['reason'] = 'management_policy'
+            base_records.append(base)
+            continue
         try:
             target = EpgChannelIdentity(int(source_id), str(channel_id))
         except (TypeError, ValueError):
@@ -788,9 +792,9 @@ def _classify_legacy_records(
         logical_candidates = logical_by_key.get(canonical_key, [])
         active = [row for row in logical_candidates if row.get('status') == 'active']
         if (
-            len(logical_candidates) != 1
-            or len(active) != 1
+            len(active) != 1
             or any(row.get('status') in LOGICAL_CONFLICT_STATUSES for row in logical_candidates)
+            or any(row.get('status') not in {'active', 'orphaned'} for row in logical_candidates)
         ):
             base['reason'] = 'orphan_key' if not logical_candidates else 'ambiguous_logical'
             base_records.append(base)
@@ -877,7 +881,11 @@ async def preview_legacy_epg_binding_migration() -> dict:
         legacy_rows,
         logical_rows,
         set(catalog.by_identity),
-        {policy.logical_channel_id for policy in policies},
+        {
+            policy.logical_channel_id
+            for policy in policies
+            if policy.mode == 'no_epg'
+        },
     )
     return _preview_result(legacy_rows, records)
 
@@ -894,7 +902,7 @@ def _migration_snapshot(
     suppressed_logical_ids = {
         str(row['logical_channel_id'])
         for row in conn.execute(
-            'SELECT logical_channel_id FROM iptv_logical_channel_epg_policies'
+            "SELECT logical_channel_id FROM iptv_logical_channel_epg_policies WHERE mode='no_epg'"
         ).fetchall()
     }
     return legacy_rows, logical_rows, target_identities, suppressed_logical_ids

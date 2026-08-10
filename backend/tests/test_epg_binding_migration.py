@@ -214,17 +214,17 @@ class EpgBindingMigrationTest(unittest.IsolatedAsyncioTestCase):
         ]
         records = self.bindings._classify_legacy_records([legacy_rows[0]], ambiguous_rows, {target_a})
         self.assertEqual(records[0]['reason'], 'ambiguous_logical')
-        ambiguous_with_orphan = [
+        active_with_orphan = [
             {'id': 'lc-a', 'canonical_key': 'a', 'status': 'active'},
             {'id': 'lc-old', 'canonical_key': 'a', 'status': 'orphaned'},
         ]
-        records = self.bindings._classify_legacy_records([legacy_rows[0]], ambiguous_with_orphan, {target_a})
-        self.assertEqual(records[0]['reason'], 'ambiguous_logical')
+        records = self.bindings._classify_legacy_records([legacy_rows[0]], active_with_orphan, {target_a})
+        self.assertEqual(records[0]['reason'], 'eligible')
 
     async def test_migration_is_conservative_idempotent_and_does_not_touch_legacy(self):
         source_id = await self._seed_source('source', 'https://source.example/epg.xml')
         logical = await self._seed_logical('known', 'Known')
-        await self._legacy('known', source_id, 'CCTV1', confidence=88, locked=1, match_type='manual')
+        await self._legacy('known', source_id, 'CCTV1', confidence=88, locked=0, match_type='exact')
         before = await self.db.get_all_channel_epg_maps()
         first = await self.bindings.migrate_legacy_epg_bindings_shadow()
         second = await self.bindings.migrate_legacy_epg_bindings_shadow()
@@ -235,10 +235,10 @@ class EpgBindingMigrationTest(unittest.IsolatedAsyncioTestCase):
         binding = await self.bindings.get_epg_binding(logical)
         self.assertEqual(binding.origin, 'legacy_migrated')
         self.assertEqual(binding.confidence, 88)
-        self.assertTrue(binding.locked)
-        self.assertEqual(binding.match_type, 'manual')
+        self.assertFalse(binding.locked)
+        self.assertEqual(binding.match_type, 'exact')
 
-    async def test_legacy_fallback_with_active_and_orphan_identity_is_not_auto_migrated(self):
+    async def test_legacy_fallback_with_active_and_orphan_identity_uses_active_first(self):
         source_id = await self._seed_source(
             'source', 'https://source.example/epg.xml', 'CCTV1'
         )
@@ -262,11 +262,63 @@ class EpgBindingMigrationTest(unittest.IsolatedAsyncioTestCase):
         preview = await self.bindings.preview_legacy_epg_binding_migration()
         result = await self.bindings.migrate_legacy_epg_bindings_shadow()
 
-        self.assertEqual(preview['eligible_count'], 0)
-        self.assertEqual(preview['ambiguous_logical_count'], 1)
-        self.assertEqual(result['created_count'], 0)
-        self.assertIsNone(await self.bindings.get_epg_binding(logical_id))
+        self.assertEqual(preview['eligible_count'], 1)
+        self.assertEqual(result['created_count'], 1)
+        self.assertEqual((await self.bindings.get_epg_binding(logical_id)).logical_channel_id, logical_id)
         self.assertEqual(await self.db.get_all_channel_epg_maps(), before)
+
+    async def test_active_first_allows_multiple_orphans_but_rejects_active_conflicts(self):
+        source_id = await self._seed_source('source', 'https://source.example/epg.xml')
+        logical_id = await self._seed_logical('known', 'Known')
+        conn = self._connect()
+        try:
+            for index, status in enumerate(('orphaned', 'orphaned')):
+                conn.execute(
+                    "INSERT INTO iptv_logical_channels(id, canonical_key, display_name, status, created_at, updated_at) VALUES(?, 'known', ?, ?, ?, ?)",
+                    (f'lc-old-known-{index}', f'Known history {index}', status, '2026-08-06T00:00:00+00:00', '2026-08-06T00:00:00+00:00'),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+        await self._legacy('known', source_id, 'CCTV1')
+        records = await self.bindings.preview_legacy_epg_binding_migration()
+        self.assertEqual(records['eligible_count'], 1)
+
+        conn = self._connect()
+        try:
+            conn.execute("UPDATE iptv_logical_channels SET status='active' WHERE id='lc-old-known-0'")
+            conn.commit()
+        finally:
+            conn.close()
+        records = await self.bindings.preview_legacy_epg_binding_migration()
+        self.assertEqual(records['eligible_count'], 0)
+        self.assertEqual(records['ambiguous_logical_count'], 1)
+
+    async def test_active_conflict_missing_target_and_no_epg_are_refused(self):
+        source_id = await self._seed_source('source', 'https://source.example/epg.xml')
+        logical_id = await self._seed_logical('known', 'Known')
+        await self._legacy('known', source_id, 'MISSING')
+        self.assertEqual((await self.bindings.preview_legacy_epg_binding_migration())['eligible_count'], 0)
+        await self.bindings.set_epg_binding_management_mode(logical_id, 'no_epg')
+        self.assertEqual((await self.bindings.preview_legacy_epg_binding_migration())['eligible_count'], 0)
+
+    async def test_automatic_policy_does_not_suppress_legacy_migration(self):
+        source_id = await self._seed_source('source', 'https://source.example/epg.xml')
+        logical_id = await self._seed_logical('known', 'Known')
+        await self.bindings.set_epg_binding_management_mode(logical_id, 'automatic')
+        await self._legacy('known', source_id, 'CCTV1')
+        preview = await self.bindings.preview_legacy_epg_binding_migration()
+        self.assertEqual(preview['eligible_count'], 1)
+        result = await self.bindings.migrate_legacy_epg_bindings_shadow()
+        self.assertEqual(result['created_count'], 1)
+
+    async def test_locked_or_manual_legacy_intent_is_not_bootstrapped(self):
+        source_id = await self._seed_source('source', 'https://source.example/epg.xml')
+        await self._seed_logical('locked', 'Locked')
+        await self._legacy('locked', source_id, 'CCTV1', locked=1, match_type='manual')
+        preview = await self.bindings.preview_legacy_epg_binding_migration()
+        self.assertEqual(preview['eligible_count'], 0)
+        self.assertEqual(preview['management_policy_count'], 1)
 
     async def test_existing_binding_different_target_is_never_overwritten(self):
         source_a = await self._seed_source('A', 'https://a.example/epg.xml', 'A')
