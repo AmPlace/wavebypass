@@ -1,0 +1,93 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Callable
+
+
+@dataclass(frozen=True)
+class TVReference:
+    scheme: str
+    resource_id: str
+    query: dict[str, list[str]] = field(default_factory=dict)
+    raw_reference: str = ""
+    reference_version: str = "1.0"
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> "TVReference":
+        query = payload.get("query") if isinstance(payload.get("query"), dict) else {}
+        return cls(str(payload.get("scheme") or ""), str(payload.get("resource_id") or ""),
+                   {str(k): [str(v) for v in values] for k, values in query.items() if isinstance(values, list)},
+                   str(payload.get("raw_reference") or ""), str(payload.get("reference_version") or "1.0"))
+
+
+@dataclass(frozen=True)
+class RadioReference:
+    provider_key: str
+    provider_station_id: str
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> "RadioReference":
+        station = payload.get("station_ref") if isinstance(payload.get("station_ref"), dict) else payload
+        return cls(str(station.get("provider_key") or ""), str(station.get("provider_station_id") or ""))
+
+
+@dataclass(frozen=True)
+class ResolveContext:
+    request_id: str
+    deadline_unix_ms: int
+    metadata: dict[str, Any]
+    capabilities: Any
+    _is_cancelled: Callable[[], bool] = field(default=lambda: False, repr=False)
+
+    @property
+    def cancelled(self) -> bool:
+        return self._is_cancelled()
+
+    def raise_if_cancelled(self) -> None:
+        if self.cancelled:
+            from .errors import PluginError
+            raise PluginError("PLUGIN_CANCELLED", "Provider request was cancelled", category="lifecycle")
+
+
+@dataclass(frozen=True)
+class StreamDescriptor:
+    url: str
+    transport: str = "hls"
+    headers: dict[str, str] = field(default_factory=dict)
+    credential_refs: list[str] = field(default_factory=list)
+    ttl_seconds: int | None = None
+    expires_at: int | None = None
+    volatile_url: bool = True
+    requires_proxy: bool = False
+    warnings: list[str] = field(default_factory=list)
+    provider_diagnostics: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def direct_playable(self) -> bool:
+        return not self.requires_proxy
+
+    def as_contract(self) -> dict[str, Any]:
+        value = {"descriptor_version": "1.0", "transport": self.transport, "url": self.url,
+                 "headers": dict(self.headers), "credential_refs": list(self.credential_refs),
+                 "ttl_seconds": self.ttl_seconds, "expires_at": self.expires_at,
+                 "volatile_url": self.volatile_url, "requires_proxy": self.requires_proxy,
+                 "warnings": list(self.warnings)}
+        if self.provider_diagnostics:
+            value["provider_diagnostics"] = dict(self.provider_diagnostics)
+        return value
+
+    @classmethod
+    def hls(cls, url: str, **kwargs: Any) -> "StreamDescriptor":
+        return cls(url=url, transport="hls", **kwargs)
+
+    @classmethod
+    def dash(cls, url: str, **kwargs: Any) -> "StreamDescriptor":
+        return cls(url=url, transport="dash", **kwargs)
+
+    @classmethod
+    def flv(cls, url: str, **kwargs: Any) -> "StreamDescriptor":
+        return cls(url=url, transport="http_flv", **kwargs)
+
+    @classmethod
+    def rtsp(cls, url: str, **kwargs: Any) -> "StreamDescriptor":
+        return cls(url=url, transport="rtsp", **kwargs)

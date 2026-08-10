@@ -16,7 +16,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 
-ARTIFACT = Path(__file__).parents[1] / "bundled_plugins" / "nowtv" / "plugin.py"
+SOURCE = Path(__file__).parents[1] / "bundled_plugins" / "nowtv" / "plugin.py"
 IDENTITY = "org.waveflow/nowtv"
 STREAM = "https://media.example/nowtv/live.m3u8?fixture=1"
 API_URL = "https://webtvapi.now.com/10/7/getLiveURL"
@@ -38,9 +38,12 @@ class NOWTVPluginTest(unittest.IsolatedAsyncioTestCase):
         import plugin_market
         from plugin_capabilities import CapabilityGateway, CoreCapabilityDispatcher
         from plugin_runtime import PermissionPolicy, PluginRuntime
+        from waveflow_plugin_cli import build_sdk_artifact
 
         self.db, self.pm = database, plugin_market
         await self.db.initialize()
+        self.artifact = Path(self.tmp.name) / "nowtv-plugin.pyz"
+        build_sdk_artifact(SOURCE, self.artifact)
         self.private = Ed25519PrivateKey.generate()
         public = self.private.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
         self.requests: list[httpx.Request] = []
@@ -72,7 +75,7 @@ class NOWTVPluginTest(unittest.IsolatedAsyncioTestCase):
             permission_policy=PermissionPolicy(frozenset({"network"})),
             capability_dispatcher=CoreCapabilityDispatcher(CapabilityGateway(client=self.client)),
         )
-        self.store = plugin_market.PluginArtifactStore(Path(self.tmp.name) / "store", allowed_local_roots=[ARTIFACT.parent])
+        self.store = plugin_market.PluginArtifactStore(Path(self.tmp.name) / "store", allowed_local_roots=[self.artifact.parent])
         self.service = plugin_market.PluginMarketService(
             runtime=self.runtime, store=self.store,
             trust_policy=plugin_market.FixtureTrustPolicy({("org.waveflow", "nowtv-test-key"): public}),
@@ -95,7 +98,7 @@ class NOWTVPluginTest(unittest.IsolatedAsyncioTestCase):
         self.tmp.cleanup()
 
     def package(self, version="1.0.0", *, trusted=True, managed_network=True) -> dict:
-        payload = ARTIFACT.read_bytes()
+        payload = self.artifact.read_bytes()
         digest = hashlib.sha256(payload).hexdigest()
         signature = self.private.sign(payload) if trusted else b"invalid"
         manifest = {
@@ -107,7 +110,7 @@ class NOWTVPluginTest(unittest.IsolatedAsyncioTestCase):
             "capabilities": ["tv.resolve_stream"],
             "permissions": {"network": {"managed": managed_network, "allowed_hosts": ["webtvapi.now.com"]}},
             "runtime": {"type": "subprocess", "ipc": "stdio_framed_json_v1"},
-            "artifacts": [{"os": "linux", "arch": "x86_64", "runtime": "python", "entrypoint": "plugin.py",
+            "artifacts": [{"os": "linux", "arch": "x86_64", "runtime": "python", "entrypoint": "plugin.pyz",
                 "sha256": digest, "size_bytes": len(payload), "signature": {"algorithm": "ed25519",
                 "key_id": "nowtv-test-key", "value": base64.b64encode(signature).decode()}}],
             "dependencies": [], "state_schema_version": 1,
@@ -115,7 +118,7 @@ class NOWTVPluginTest(unittest.IsolatedAsyncioTestCase):
         return {"schema_version": 1, "id": "official::nowtv-plugin", "original_id": "nowtv-plugin",
             "name": "NOW TV Plugin", "kind": "plugin_package", "package_type": "plugin_package",
             "version": version, "plugin_manifest": manifest,
-            "artifact_references": [{"sha256": digest, "local_path": str(ARTIFACT)}],
+            "artifact_references": [{"sha256": digest, "local_path": str(self.artifact)}],
             "market_source": {"source_key": "official"}}
 
     async def install(self, version="1.0.0"):
@@ -207,7 +210,7 @@ class NOWTVPluginTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(PluginError) as denied:
             await self.runtime.request(self.runtime.registry.route("nowtv"), "tv.resolve_stream", {"resource_id": "NEWS"})
         self.assertEqual(denied.exception.code, "CAPABILITY_DENIED")
-        source = ARTIFACT.read_text(encoding="utf-8")
+        source = SOURCE.read_text(encoding="utf-8")
         for forbidden in ("import backend", "import httpx", "import requests", "os.environ", "FastAPI"):
             self.assertNotIn(forbidden, source)
 

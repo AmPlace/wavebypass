@@ -16,7 +16,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 
-ARTIFACT = Path(__file__).parents[1] / "bundled_plugins" / "ptbtv" / "plugin.py"
+SOURCE = Path(__file__).parents[1] / "bundled_plugins" / "ptbtv" / "plugin.py"
 DEPENDENCIES = Path(__file__).parent / "fixtures" / "dependencies" / "ptbtv"
 LOCK = json.loads((DEPENDENCIES / "dependency-lock.json").read_text())
 IDENTITY = "org.waveflow/ptbtv"
@@ -33,7 +33,10 @@ class PTBTVPluginTest(unittest.IsolatedAsyncioTestCase):
         from plugin_capabilities import CapabilityGateway, CoreCapabilityDispatcher
         from plugin_python_runtime import PythonEnvironmentManager
         from plugin_runtime import PermissionPolicy, PluginRuntime
+        from waveflow_plugin_cli import build_sdk_artifact
         self.db, self.pm = database, plugin_market; await self.db.initialize()
+        self.artifact = Path(self.tmp.name) / "ptbtv-plugin.pyz"
+        build_sdk_artifact(SOURCE, self.artifact)
         self.private = Ed25519PrivateKey.generate()
         public = self.private.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
         self.requests = []
@@ -49,7 +52,7 @@ class PTBTVPluginTest(unittest.IsolatedAsyncioTestCase):
         self.runtime = PluginRuntime(permission_policy=PermissionPolicy(frozenset({"network"})),
             capability_dispatcher=CoreCapabilityDispatcher(CapabilityGateway(client=self.client)))
         self.store = plugin_market.PluginArtifactStore(Path(self.tmp.name) / "store",
-            allowed_local_roots=[ARTIFACT.parent, DEPENDENCIES])
+            allowed_local_roots=[self.artifact.parent, DEPENDENCIES])
         self.envs = PythonEnvironmentManager(Path(self.tmp.name) / "store" / "python")
         def runtime_command(manifest, artifact, environment):
             python = str(environment.python) if environment else sys.executable
@@ -67,7 +70,7 @@ class PTBTVPluginTest(unittest.IsolatedAsyncioTestCase):
         self.tmp.cleanup()
 
     def package(self, version="1.0.0"):
-        payload = ARTIFACT.read_bytes(); digest = hashlib.sha256(payload).hexdigest()
+        payload = self.artifact.read_bytes(); digest = hashlib.sha256(payload).hexdigest()
         manifest = {"manifest_version": 1, "publisher_id": "org.waveflow", "plugin_id": "ptbtv",
             "display_name": "PTBTV Provider", "version": version, "plugin_api_version": "1.0",
             "core_version_range": ">=0.1.0 <1.0.0",
@@ -75,12 +78,12 @@ class PTBTVPluginTest(unittest.IsolatedAsyncioTestCase):
             "owned_schemes": [{"scheme": "ptbtv", "contract": "tv_provider"}], "capabilities": ["tv.resolve_stream"],
             "permissions": {"network": {"managed": True, "direct": True, "allowed_hosts": ["www.ptbtv.com"]}},
             "runtime": {"type": "python", "ipc": "stdio_framed_json_v1", "python_version_range": ">=3.14.0 <3.15.0",
-                "entrypoint": "plugin.py", "dependency_lock": LOCK},
-            "artifacts": [{"os": "macos", "arch": "arm64", "runtime": "python", "entrypoint": "plugin.py",
+                "entrypoint": "plugin.pyz", "dependency_lock": LOCK},
+            "artifacts": [{"os": "macos", "arch": "arm64", "runtime": "python", "entrypoint": "plugin.pyz",
                 "sha256": digest, "size_bytes": len(payload), "signature": {"algorithm": "ed25519", "key_id": "ptbtv-test-key",
                     "value": base64.b64encode(self.private.sign(payload)).decode()}}], "dependencies": [], "state_schema_version": 1}
         return {"id": "official::ptbtv-plugin", "package_type": "plugin_package", "version": version,
-            "plugin_manifest": manifest, "artifact_references": [{"sha256": digest, "local_path": str(ARTIFACT)}],
+            "plugin_manifest": manifest, "artifact_references": [{"sha256": digest, "local_path": str(self.artifact)}],
             "dependency_references": [{"sha256": item["sha256"], "local_path": str(DEPENDENCIES / item["filename"])} for item in LOCK["artifacts"]],
             "market_source": {"source_key": "official"}}
 
@@ -90,7 +93,7 @@ class PTBTVPluginTest(unittest.IsolatedAsyncioTestCase):
         return await self.service.install_from_packages([package], IDENTITY)
 
     async def test_real_direct_request_construction_with_injected_session(self):
-        spec = importlib.util.spec_from_file_location("ptbtv_direct_fixture", ARTIFACT)
+        spec = importlib.util.spec_from_file_location("ptbtv_direct_fixture", SOURCE)
         module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
         captured = {}
         class Response: status_code = 200; text = json.dumps([{"m3u8": STREAM}])
@@ -147,7 +150,7 @@ class PTBTVPluginTest(unittest.IsolatedAsyncioTestCase):
                     await self.runtime.request(instance, "tv.resolve_stream", {"resource_id": "1"})
                 self.assertIn(failed.exception.code, {"TEMPORARY_UPSTREAM_FAILURE", "PLUGIN_TIMEOUT"})
                 self.assertTrue(failed.exception.retryable)
-        source = ARTIFACT.read_text(encoding="utf-8")
+        source = SOURCE.read_text(encoding="utf-8")
         for forbidden in ("import backend", "import httpx", "import requests", "os.environ", "FastAPI"):
             self.assertNotIn(forbidden, source)
         self.assertIn("from curl_cffi.requests import AsyncSession", source)

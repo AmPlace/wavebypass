@@ -17,7 +17,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from packaging import tags
 
 
-ARTIFACT = Path(__file__).parents[1] / "bundled_plugins" / "nmtv" / "plugin.py"
+SOURCE = Path(__file__).parents[1] / "bundled_plugins" / "nmtv" / "plugin.py"
 WHEEL = next((Path(__file__).parent / "fixtures" / "dependencies").glob("xxtea-5.0.0-*.whl"))
 IDENTITY = "org.waveflow/nmtv"
 STREAM = "https://media.example/nmtv/live.m3u8?fixture=1"
@@ -41,9 +41,12 @@ class NMTVPluginTest(unittest.IsolatedAsyncioTestCase):
         from plugin_capabilities import CapabilityGateway, CoreCapabilityDispatcher
         from plugin_python_runtime import PythonEnvironmentManager
         from plugin_runtime import PermissionPolicy, PluginRuntime
+        from waveflow_plugin_cli import build_sdk_artifact
 
         self.db, self.pm = database, plugin_market
         await self.db.initialize()
+        self.artifact = Path(self.tmp.name) / "nmtv-plugin.pyz"
+        build_sdk_artifact(SOURCE, self.artifact)
         self.private = Ed25519PrivateKey.generate()
         public = self.private.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
         self.requests = []
@@ -65,7 +68,7 @@ class NMTVPluginTest(unittest.IsolatedAsyncioTestCase):
         self.client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
         self.runtime = PluginRuntime(permission_policy=PermissionPolicy(frozenset({"network"})),
             capability_dispatcher=CoreCapabilityDispatcher(CapabilityGateway(client=self.client)))
-        self.store = plugin_market.PluginArtifactStore(Path(self.tmp.name) / "store", allowed_local_roots=[ARTIFACT.parent, WHEEL.parent])
+        self.store = plugin_market.PluginArtifactStore(Path(self.tmp.name) / "store", allowed_local_roots=[self.artifact.parent, WHEEL.parent])
         self.envs = PythonEnvironmentManager(Path(self.tmp.name) / "store" / "python")
         self.service = plugin_market.PluginMarketService(runtime=self.runtime, store=self.store,
             trust_policy=plugin_market.FixtureTrustPolicy({("org.waveflow", "nmtv-test-key"): public}),
@@ -85,7 +88,7 @@ class NMTVPluginTest(unittest.IsolatedAsyncioTestCase):
         self.tmp.cleanup()
 
     def package(self, version="1.0.0", *, trusted=True):
-        payload = ARTIFACT.read_bytes(); artifact_digest = hashlib.sha256(payload).hexdigest()
+        payload = self.artifact.read_bytes(); artifact_digest = hashlib.sha256(payload).hexdigest()
         wheel = WHEEL.read_bytes(); wheel_digest = hashlib.sha256(wheel).hexdigest()
         wheel_tag = next(tag for tag in tags.sys_tags() if str(tag) == "cp314-cp314-macosx_11_0_arm64")
         lock_item = {"name": "xxtea", "version": "5.0.0", "filename": WHEEL.name,
@@ -102,9 +105,9 @@ class NMTVPluginTest(unittest.IsolatedAsyncioTestCase):
             "capabilities": ["tv.resolve_stream"],
             "permissions": {"network": {"managed": True, "allowed_hosts": ["api-bt.nmtv.cn"]}},
             "runtime": {"type": "python", "ipc": "stdio_framed_json_v1",
-                        "python_version_range": ">=3.14.0 <3.15.0", "entrypoint": "plugin.py",
+                        "python_version_range": ">=3.14.0 <3.15.0", "entrypoint": "plugin.pyz",
                         "dependency_lock": {"lock_version": 1, "artifacts": [lock_item]}},
-            "artifacts": [{"os": "macos", "arch": "arm64", "runtime": "python", "entrypoint": "plugin.py",
+            "artifacts": [{"os": "macos", "arch": "arm64", "runtime": "python", "entrypoint": "plugin.pyz",
                            "sha256": artifact_digest, "size_bytes": len(payload),
                            "signature": {"algorithm": "ed25519", "key_id": "nmtv-test-key",
                                          "value": base64.b64encode(signature).decode()}}],
@@ -113,7 +116,7 @@ class NMTVPluginTest(unittest.IsolatedAsyncioTestCase):
         return {"schema_version": 1, "id": "official::nmtv-plugin", "original_id": "nmtv-plugin",
                 "name": "NMTV Plugin", "kind": "plugin_package", "package_type": "plugin_package",
                 "version": version, "plugin_manifest": manifest,
-                "artifact_references": [{"sha256": artifact_digest, "local_path": str(ARTIFACT)}],
+                "artifact_references": [{"sha256": artifact_digest, "local_path": str(self.artifact)}],
                 "dependency_references": [{"sha256": wheel_digest, "local_path": str(WHEEL)}],
                 "market_source": {"source_key": "official"}}
 
@@ -251,7 +254,7 @@ class NMTVPluginTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(conflict.exception.code, "PLUGIN_INCOMPATIBLE")
 
     async def test_artifact_source_has_no_core_or_network_dependency_import(self):
-        source = ARTIFACT.read_text()
+        source = SOURCE.read_text()
         for forbidden in ("import backend", "import httpx", "import requests", "os.environ", "FastAPI"):
             self.assertNotIn(forbidden, source)
         with self.assertRaises(Exception) as untrusted:
