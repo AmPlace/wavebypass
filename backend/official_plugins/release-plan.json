@@ -50,7 +50,11 @@
       "dependency_sources": [
         {
           "filename": "xxtea-5.0.0-cp314-cp314-macosx_11_0_arm64.whl",
-          "source": "../tests/fixtures/dependencies/xxtea-5.0.0-cp314-cp314-macosx_11_0_arm64.whl"
+          "source": "dependency_artifacts/nmtv/xxtea-5.0.0-cp314-cp314-macosx_11_0_arm64.whl"
+        },
+        {
+          "filename": "xxtea-5.0.0-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+          "source": "dependency_artifacts/nmtv/xxtea-5.0.0-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl"
         }
       ],
       "description": "WaveFlow official NMTV TV Provider.",
@@ -62,15 +66,23 @@
       "dependency_sources": [
         {
           "filename": "cffi-2.0.0-cp314-cp314-macosx_11_0_arm64.whl",
-          "source": "../tests/fixtures/dependencies/cffi-2.0.0-cp314-cp314-macosx_11_0_arm64.whl"
+          "source": "dependency_artifacts/sdtv/cffi-2.0.0-cp314-cp314-macosx_11_0_arm64.whl"
         },
         {
           "filename": "cryptography-48.0.1-cp311-abi3-macosx_10_9_universal2.whl",
-          "source": "../tests/fixtures/dependencies/cryptography-48.0.1-cp311-abi3-macosx_10_9_universal2.whl"
+          "source": "dependency_artifacts/sdtv/cryptography-48.0.1-cp311-abi3-macosx_10_9_universal2.whl"
+        },
+        {
+          "filename": "cryptography-48.0.1-cp311-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+          "source": "dependency_artifacts/sdtv/cryptography-48.0.1-cp311-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl"
+        },
+        {
+          "filename": "cffi-2.0.0-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+          "source": "dependency_artifacts/sdtv/cffi-2.0.0-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.whl"
         },
         {
           "filename": "pycparser-3.0-py3-none-any.whl",
-          "source": "../tests/fixtures/dependencies/pycparser-3.0-py3-none-any.whl"
+          "source": "dependency_artifacts/sdtv/pycparser-3.0-py3-none-any.whl"
         }
       ],
       "description": "WaveFlow official SDTV TV Provider.",
@@ -80,7 +92,7 @@
     }
   ],
   "publisher_id": "org.waveflow",
-  "release_version": "1.1.0",
+  "release_version": "1.2.0",
   "schema_version": 1,
-  "updated_at": "2026-08-11T00:00:00Z"
+  "updated_at": "2026-08-11T12:00:00Z"
 }

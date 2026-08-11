@@ -3,7 +3,7 @@
   "publisher_id": "org.waveflow",
   "plugin_id": "sdtv",
   "display_name": "SDTV Provider",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "plugin_api_version": "1.0",
   "core_version_range": ">=0.1.0 <1.0.0",
   "provider_contracts": [
@@ -26,7 +26,7 @@
   "runtime": {
     "type": "python",
     "ipc": "stdio_framed_json_v1",
-    "python_version_range": ">=3.14.0 <3.15.0",
+    "python_version_range": ">=3.11.0 <3.15.0",
     "entrypoint": "plugin.py",
     "dependency_lock": {
       "lock_version": 1,
@@ -43,6 +43,17 @@
           "platform_tag": "macosx_10_9_universal2"
         },
         {
+          "name": "cryptography",
+          "version": "48.0.1",
+          "filename": "cryptography-48.0.1-cp311-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+          "url": "https://files.pythonhosted.org/packages/9c/87/c85d147b53323c7eb4d850920c8901377323c2a0ff8d79c262d4fee89aa2/cryptography-48.0.1-cp311-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+          "sha256": "f0d27a5696721ef7a672b8c810f6aded391058e0b9486e63e6d93baf765da691",
+          "size_bytes": 4713235,
+          "python_tag": "cp311",
+          "abi_tag": "abi3",
+          "platform_tag": "manylinux2014_x86_64"
+        },
+        {
           "name": "cffi",
           "version": "2.0.0",
           "filename": "cffi-2.0.0-cp314-cp314-macosx_11_0_arm64.whl",
@@ -52,6 +63,17 @@
           "python_tag": "cp314",
           "abi_tag": "cp314",
           "platform_tag": "macosx_11_0_arm64"
+        },
+        {
+          "name": "cffi",
+          "version": "2.0.0",
+          "filename": "cffi-2.0.0-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+          "url": "https://files.pythonhosted.org/packages/d7/91/500d892b2bf36529a75a77958edfcd5ad8e2ce4064ce2ecfeab2125d72d1/cffi-2.0.0-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+          "sha256": "8941aaadaf67246224cee8c3803777eed332a19d909b47e29c9842ef1e79ac26",
+          "size_bytes": 215574,
+          "python_tag": "cp311",
+          "abi_tag": "cp311",
+          "platform_tag": "manylinux2014_x86_64"
         },
         {
           "name": "pycparser",
@@ -68,6 +90,7 @@
     }
   },
   "artifacts": [
+    {"os": "linux", "arch": "x86_64", "runtime": "python", "entrypoint": "plugin.py", "sha256": "0000000000000000000000000000000000000000000000000000000000000000", "size_bytes": 1, "signature": {"algorithm": "ed25519", "key_id": "org.waveflow.release.2026-01", "value": "UNSIGNED"}},
     {"os": "macos", "arch": "arm64", "runtime": "python", "entrypoint": "plugin.py", "sha256": "0000000000000000000000000000000000000000000000000000000000000000", "size_bytes": 1, "signature": {"algorithm": "ed25519", "key_id": "org.waveflow.release.2026-01", "value": "UNSIGNED"}}
   ],
   "dependencies": [],

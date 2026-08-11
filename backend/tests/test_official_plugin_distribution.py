@@ -15,6 +15,7 @@ from unittest import mock
 import httpx
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from packaging import tags
 
 
 IDENTITIES = {
@@ -59,7 +60,7 @@ class OfficialReleaseBuildTest(unittest.TestCase):
         _market, packages = load_bundled_official_market()
         self.assertEqual({f"{p['plugin_manifest']['publisher_id']}/{p['plugin_manifest']['plugin_id']}"
                           for p in packages}, IDENTITIES)
-        self.assertEqual(_market["market_version"], "1.1.0")
+        self.assertEqual(_market["market_version"], "1.2.0")
         policy = ProductionTrustPolicy(rows)
         for package in packages:
             manifest = validate_manifest(package["plugin_manifest"])
@@ -72,10 +73,7 @@ class OfficialReleaseBuildTest(unittest.TestCase):
             identity = manifest.identity
             lock = manifest.runtime.get("dependency_lock", {})
             expected = DEPENDENCIES.get(identity, [])
-            self.assertEqual(
-                [(item["name"], item["version"]) for item in lock.get("artifacts", [])],
-                expected,
-            )
+            self.assertEqual({(item["name"], item["version"]) for item in lock.get("artifacts", [])}, set(expected))
             dependency_refs = package.get("dependency_references", [])
             self.assertEqual(
                 {item["sha256"] for item in dependency_refs},
@@ -86,6 +84,63 @@ class OfficialReleaseBuildTest(unittest.TestCase):
                 dependency_payload = Path(reference["_bundled_path"]).read_bytes()
                 self.assertEqual(len(dependency_payload), dependency["size_bytes"])
                 self.assertEqual(hashlib.sha256(dependency_payload).hexdigest(), dependency["sha256"])
+
+    def test_nmtv_sdtv_candidates_cover_published_targets_without_cross_platform_fallback(self):
+        from plugin_python_runtime import select_dependency_artifacts
+        from plugin_runtime import PluginError
+
+        _market, packages = importlib.import_module("official_plugin_distribution").load_bundled_official_market()
+        by_identity = {
+            f"{item['plugin_manifest']['publisher_id']}/{item['plugin_manifest']['plugin_id']}": item
+            for item in packages
+        }
+        macos_cp314 = {
+            tags.Tag("cp314", "cp314", "macosx_11_0_arm64"),
+            tags.Tag("cp311", "abi3", "macosx_10_9_universal2"),
+            tags.Tag("py3", "none", "any"),
+        }
+        linux_cp311 = {
+            tags.Tag("cp311", "cp311", "manylinux2014_x86_64"),
+            tags.Tag("cp311", "abi3", "manylinux2014_x86_64"),
+            tags.Tag("py3", "none", "any"),
+        }
+        linux_arm64_cp311 = {
+            tags.Tag("cp311", "cp311", "manylinux2014_aarch64"),
+            tags.Tag("cp311", "abi3", "manylinux2014_aarch64"),
+            tags.Tag("py3", "none", "any"),
+        }
+        expected = {
+            "org.waveflow/nmtv": {
+                "macos": {"83212c868cd88decde39467579282464853942e36764031f9507ee81e803ac9a"},
+                "linux": {"b11d6b8119e1f4413e07f24741b6d1ad78a93012d968afabd15448b9912712ac"},
+            },
+            "org.waveflow/sdtv": {
+                "macos": {
+                    "3e4a1a3232eef2e6c732827d5722db29a0cc8b27af2a4d865b094cf954be9ca1",
+                    "c654de545946e0db659b3400168c9ad31b5d29593291482c43e3564effbcee13",
+                    "b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992",
+                },
+                "linux": {
+                    "f0d27a5696721ef7a672b8c810f6aded391058e0b9486e63e6d93baf765da691",
+                    "8941aaadaf67246224cee8c3803777eed332a19d909b47e29c9842ef1e79ac26",
+                    "b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992",
+                },
+            },
+        }
+        for identity, package in by_identity.items():
+            if identity not in expected:
+                continue
+            manifest = package["plugin_manifest"]
+            self.assertEqual({(item["os"], item["arch"]) for item in manifest["artifacts"]},
+                             {( "macos", "arm64"), ("linux", "x86_64")})
+            lock = manifest["runtime"]["dependency_lock"]
+            self.assertEqual({item["sha256"] for item in select_dependency_artifacts(lock, supported_tags=macos_cp314)},
+                             expected[identity]["macos"])
+            self.assertEqual({item["sha256"] for item in select_dependency_artifacts(lock, supported_tags=linux_cp311)},
+                             expected[identity]["linux"])
+            with self.assertRaises(PluginError) as unsupported:
+                select_dependency_artifacts(lock, supported_tags=linux_arm64_cp311)
+            self.assertEqual(unsupported.exception.code, "DEPENDENCY_PLATFORM_UNSUPPORTED")
 
     def test_release_builder_is_deterministic_with_a_test_only_key(self):
         from build_official_plugins import build_release
@@ -180,7 +235,7 @@ class OfficialDistributionProductionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             projection_by_plugin["org.waveflow/nmtv"]["runtime"],
             {
-                "type": "python", "python_version_range": ">=3.14.0 <3.15.0",
+                "type": "python", "python_version_range": ">=3.11.0 <3.15.0",
                 "environment_status": "ready", "dependency_count": 1,
                 "dependencies": [{"name": "xxtea", "version": "5.0.0"}],
             },
@@ -235,12 +290,15 @@ class OfficialDistributionProductionTest(unittest.IsolatedAsyncioTestCase):
         first = await self._subsystem()
         await first.startup()
         environments = first.service.python_environments
+        from plugin_python_runtime import select_dependency_artifacts
         expected_digests = {
             item["sha256"]
             for identity in ("org.waveflow/nmtv", "org.waveflow/sdtv")
-            for item in first.service.runtime.registry.route(identity.rsplit("/", 1)[1]).manifest.runtime[
-                "dependency_lock"
-            ]["artifacts"]
+            for item in select_dependency_artifacts(
+                first.service.runtime.registry.route(identity.rsplit("/", 1)[1]).manifest.runtime[
+                    "dependency_lock"
+                ]
+            )
         }
         self.assertEqual({path.parent.name for path in environments.cache_objects()}, expected_digests)
         dependency_rows = await self.db.list_plugin_dependency_artifacts()
@@ -298,6 +356,24 @@ class OfficialDistributionProductionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((installed["trust_state"], installed["source_key"], installed["active_version"]),
                          ("official", "official", "1.0.0"))
         self.assertEqual(subsystem.provider_resolver.mode("fjtv"), "legacy")
+
+    async def test_missing_target_platform_fails_before_installation_or_ownership(self):
+        from official_plugin_distribution import bundled_official_packages
+        from plugin_runtime import PluginError
+
+        subsystem = await self._subsystem()
+        prepared, temporary_paths = await subsystem._prepare_packages(bundled_official_packages())
+        try:
+            subsystem.service.os_name = "linux"
+            subsystem.service.arch = "arm64"
+            with self.assertRaises(PluginError) as unsupported:
+                await subsystem.service.install_from_packages(prepared, "org.waveflow/nmtv")
+            self.assertEqual(unsupported.exception.code, "PLATFORM_UNSUPPORTED")
+            self.assertIsNone(await self.db.get_plugin_installation("org.waveflow", "nmtv"))
+            self.assertEqual(await self.db.list_plugin_scheme_ownership(), [])
+        finally:
+            for path in temporary_paths:
+                path.unlink(missing_ok=True)
 
     async def test_manifest_artifact_signature_and_wrong_key_tamper_are_rejected(self):
         from official_plugin_distribution import OFFICIAL_RELEASE_ROOT, load_bundled_official_market

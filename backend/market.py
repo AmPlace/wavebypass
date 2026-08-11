@@ -1313,13 +1313,21 @@ def _package_card(package: dict) -> dict:
                     for artifact in manifest.get("artifacts") or [] if isinstance(artifact, dict)
                 ],
                 "permissions": sorted(set(permissions)),
-                "dependencies": [
-                    {"name": item.get("name"), "version": item.get("version")}
-                    for item in (manifest.get("runtime", {}).get("dependency_lock", {}).get("artifacts", [])
-                                 if isinstance(manifest.get("runtime"), dict) else [])
-                    if isinstance(item, dict)
-                ],
+                "dependencies": [],
             }
+            seen_dependencies: set[tuple[Any, Any]] = set()
+            lock_artifacts = (manifest.get("runtime", {}).get("dependency_lock", {}).get("artifacts", [])
+                              if isinstance(manifest.get("runtime"), dict) else [])
+            for item in lock_artifacts:
+                if not isinstance(item, dict):
+                    continue
+                dependency_key = (item.get("name"), item.get("version"))
+                if dependency_key in seen_dependencies:
+                    continue
+                seen_dependencies.add(dependency_key)
+                card["plugin"]["dependencies"].append({
+                    "name": item.get("name"), "version": item.get("version"),
+                })
     return card
 
 

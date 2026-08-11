@@ -11,7 +11,7 @@ import tempfile
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Iterable
 
 from packaging import tags
 
@@ -47,8 +47,16 @@ def validate_python_runtime(manifest: PluginManifest) -> tuple[dict[str, Any], s
     return runtime["dependency_lock"], dependency_lock_digest(runtime["dependency_lock"])
 
 
-def select_dependency_artifacts(lock: dict[str, Any]) -> tuple[dict[str, Any], ...]:
-    supported = set(tags.sys_tags())
+def select_dependency_artifacts(lock: dict[str, Any], *, supported_tags: Iterable[tags.Tag] | None = None,
+                                ) -> tuple[dict[str, Any], ...]:
+    """Select one exact wheel candidate per locked package for a runtime.
+
+    Production callers use the current interpreter's tags.  Tests and release
+    tooling may provide a deterministic target tag set to validate a Docker
+    or other published target without pretending that target is executing on
+    the current host.
+    """
+    supported = set(tags.sys_tags() if supported_tags is None else supported_tags)
     by_package: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for item in lock["artifacts"]:
         by_package.setdefault((item["name"], item["version"]), []).append(item)
