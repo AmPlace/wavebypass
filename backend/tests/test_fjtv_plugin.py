@@ -164,7 +164,7 @@ class FJTVPluginTest(unittest.IsolatedAsyncioTestCase):
         card = _package_card(_normalize_package(self.package()))
         self.assertEqual(card["plugin"]["publisher_id"], "org.waveflow")
         self.assertEqual(card["plugin"]["owned_schemes"], [{"scheme": "fjtv", "contract": "tv_provider"}])
-        self.assertEqual(card["plugin"]["permissions"], ["network"])
+        self.assertEqual(card["plugin"]["permissions"], ["network.managed"])
         self.assertNotIn("artifact_references", card)
 
     async def test_all_provider_shapes_referers_and_stable_errors(self):

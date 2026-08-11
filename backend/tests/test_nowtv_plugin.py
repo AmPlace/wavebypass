@@ -204,7 +204,7 @@ class NOWTVPluginTest(unittest.IsolatedAsyncioTestCase):
         card = _package_card(_normalize_package(self.package()))
         self.assertEqual(card["plugin"]["publisher_id"], "org.waveflow")
         self.assertEqual(card["plugin"]["owned_schemes"], [{"scheme": "nowtv", "contract": "tv_provider"}])
-        self.assertEqual(card["plugin"]["permissions"], ["network"])
+        self.assertEqual(card["plugin"]["permissions"], ["network.managed"])
         self.assertNotIn("artifact_references", card)
         await self.service.install_from_packages([self.package(managed_network=False)], IDENTITY)
         with self.assertRaises(PluginError) as denied:

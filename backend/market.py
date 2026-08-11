@@ -1105,6 +1105,18 @@ async def _installed_map() -> dict[str, dict]:
             continue
         row["subscription"] = sub
         result[row["package_id"]] = row
+    for row in await db.list_plugin_installations():
+        package_id = str(row.get("source_package_id") or "")
+        if not package_id:
+            continue
+        result[package_id] = {
+            "package_id": package_id,
+            "installed_version": row.get("active_version") or row.get("installed_version") or "",
+            "installed_subscription_id": None,
+            "auto_update": True,
+            "plugin_identity": f"{row['publisher_id']}/{row['plugin_id']}",
+            "trust_state": str(row.get("trust_state") or ""),
+        }
     return result
 
 
@@ -1191,7 +1203,9 @@ async def list_packages(filters: dict[str, str | bool]) -> list[dict]:
             continue
         if tag and tag not in (package.get("tags") or []):
             continue
-        if supported_only and not package.get("supported_in_v1"):
+        if supported_only and not (
+            package.get("supported_in_v1") or package.get("plugin_installable")
+        ):
             continue
         if importable_only and not package.get("importable"):
             continue
@@ -1206,6 +1220,8 @@ async def list_packages(filters: dict[str, str | bool]) -> list[dict]:
             install.get("installed_version", "") if install else "",
         )
         item["update_available"] = _update_available(package, install)
+        if install and install.get("plugin_identity"):
+            item["installed_trust_state"] = install.get("trust_state") or ""
         packages.append(item)
     return packages
 
@@ -1228,6 +1244,19 @@ def _package_card(package: dict) -> dict:
     if card.get("package_type") == PLUGIN_PACKAGE_TYPE:
         manifest = card.pop("plugin_manifest", None) or {}
         if isinstance(manifest, dict):
+            raw_permissions = manifest.get("permissions") or {}
+            permissions = []
+            network = raw_permissions.get("network") if isinstance(raw_permissions, dict) else None
+            if isinstance(network, dict):
+                if network.get("managed") is True:
+                    permissions.append("network.managed")
+                if network.get("direct") is True:
+                    permissions.append("network.direct")
+            if isinstance(raw_permissions, dict):
+                permissions.extend(
+                    str(key) for key, value in raw_permissions.items()
+                    if key != "network" and value is True
+                )
             card["plugin"] = {
                 "publisher_id": str(manifest.get("publisher_id") or ""),
                 "plugin_id": str(manifest.get("plugin_id") or ""),
@@ -1239,7 +1268,7 @@ def _package_card(package: dict) -> dict:
                     {key: artifact.get(key) for key in ("os", "arch", "runtime")}
                     for artifact in manifest.get("artifacts") or [] if isinstance(artifact, dict)
                 ],
-                "permissions": sorted(str(key) for key in (manifest.get("permissions") or {})),
+                "permissions": sorted(set(permissions)),
             }
     return card
 
@@ -1274,6 +1303,8 @@ async def get_package(package_id: str) -> dict:
         install.get("installed_version", "") if install else "",
     )
     result["update_available"] = _update_available(package, install)
+    if install and install.get("plugin_identity"):
+        result["installed_trust_state"] = install.get("trust_state") or ""
     return result
 
 

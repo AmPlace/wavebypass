@@ -4,6 +4,9 @@
   >
     <section class="market-filter-bar">
       <div class="market-filter-scroll">
+        <div class="market-package-type-switch" aria-label="Market 包类型">
+          <button v-for="item in packageTypeOptions" :key="item.key" type="button" class="market-package-type-button" :class="{ 'is-active': packageType === item.key }" @click="selectPackageType(item.key)">{{ item.label }}</button>
+        </div>
         <button
           v-for="quick in quickFilterTabs"
           :key="quick.key"
@@ -22,7 +25,7 @@
           <span v-if="selectedChips.length" class="market-filter-count">{{ selectedChips.length }}</span>
         </button>
         <MarketFilterDropdown
-          v-for="group in filterGroups"
+          v-for="group in visibleFilterGroups"
           :key="group.key"
           :label="group.label"
           :options="group.options()"
@@ -43,7 +46,7 @@
         <span class="flex size-8 shrink-0 items-center justify-center rounded-full bg-[var(--surface)] text-[var(--text-primary)]">
           <svg class="size-4" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 8.4 12 4l8 4.4-8 4.4L4 8.4Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M4 12.2 12 16.6l8-4.4M4 16l8 4.4L20 16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </span>
-        <h1 class="truncate text-lg font-semibold leading-none text-[var(--text-primary)]">频道包</h1>
+        <h1 class="truncate text-lg font-semibold leading-none text-[var(--text-primary)]">{{ packageType === 'plugins' ? 'Plugin Packages' : '频道包' }}</h1>
         <span class="shrink-0 text-sm text-[var(--text-secondary)]">{{ resultCountLabel }}</span>
       </div>
 
@@ -71,7 +74,7 @@
               ref="searchInputRef"
               v-model="filters.search"
               type="search"
-              placeholder="搜索频道包、地区、分类…"
+              :placeholder="packageType === 'plugins' ? '搜索插件、publisher、scheme…' : '搜索频道包、地区、分类…'"
               class="min-w-0 flex-1 bg-transparent text-[13px] text-[var(--text-primary)] outline-none placeholder:text-[var(--text-tertiary)]"
               :tabindex="searchOpen || filters.search ? 0 : -1"
               @keydown.esc.prevent="closeSearch"
@@ -186,18 +189,18 @@
           @keydown.space.prevent="openDetail(pkg, $event)"
         >
           <div class="market-card-head">
-            <span class="market-region-badge" :class="regionBadgeClass(pkg)">
-              {{ regionBadge(pkg) }}
+            <span class="market-region-badge" :class="isPluginPackage(pkg) ? 'market-region-violet' : regionBadgeClass(pkg)">
+              {{ isPluginPackage(pkg) ? 'P' : regionBadge(pkg) }}
             </span>
             <div class="min-w-0 flex-1">
               <h2 class="truncate text-[15px] font-semibold leading-snug text-[var(--text-primary)]">{{ pkg.name }}</h2>
-              <p class="mt-1 truncate text-[13px] text-[var(--text-secondary)]">{{ displayMeta(pkg) }}</p>
+              <p class="mt-1 truncate text-[13px] text-[var(--text-secondary)]">{{ isPluginPackage(pkg) ? pluginIdentity(pkg) : displayMeta(pkg) }}</p>
             </div>
           </div>
 
           <AdaptiveTagList
             class="market-card-tags"
-            :items="displayTagItems(pkg)"
+            :items="isPluginPackage(pkg) ? pluginTagItems(pkg) : displayTagItems(pkg)"
             :max-rows="2"
             :gap="6"
           >
@@ -234,20 +237,20 @@
             <button
               type="button"
               class="market-btn-primary"
-              :disabled="importLoading || !pkg.importable"
+              :disabled="importLoading || !packageInstallable(pkg)"
               @click.stop="handleReinstall(pkg)"
             >
-              {{ importLoading && actingId === pkg.id ? '更新中…' : '更新' }}
+              {{ importLoading && actingId === pkg.id ? packageActionLabel(pkg, 'updating') : packageActionLabel(pkg, 'update') }}
             </button>
           </template>
           <button
             v-else
             type="button"
             class="market-btn-primary"
-            :disabled="importLoading || !pkg.importable"
+            :disabled="importLoading || !packageInstallable(pkg)"
             @click.stop="handleImport(pkg)"
           >
-            {{ importLoading && actingId === pkg.id ? '导入中…' : '导入' }}
+            {{ importLoading && actingId === pkg.id ? packageActionLabel(pkg, 'installing') : packageActionLabel(pkg, 'install') }}
           </button>
 
           <div class="market-more-wrap">
@@ -264,8 +267,8 @@
               </svg>
             </button>
             <div v-if="menuOpenId === pkg.id" class="market-more-menu" @click.stop>
-              <button v-if="pkg.previewable" type="button" class="market-menu-item" @click="closeMenuAnd(() => openDetail(pkg, { showAllChannels: true }))">查看频道列表</button>
-              <button v-if="pkg.installed" type="button" class="market-menu-item" :disabled="importLoading" @click="closeMenuAnd(() => handleUninstall(pkg))">卸载</button>
+              <button v-if="pkg.previewable && !isPluginPackage(pkg)" type="button" class="market-menu-item" @click="closeMenuAnd(() => openDetail(pkg, { showAllChannels: true }))">查看频道列表</button>
+              <button v-if="pkg.installed" type="button" class="market-menu-item" :disabled="importLoading" @click="closeMenuAnd(() => handleUninstall(pkg))">{{ packageActionLabel(pkg, 'uninstall') }}</button>
               <button v-if="pkg.installed && pkg.update_available" type="button" class="market-menu-item" :disabled="importLoading" @click="closeMenuAnd(() => handleReinstall(pkg))">立即更新</button>
             </div>
           </div>
@@ -274,7 +277,7 @@
     </section>
 
     <section v-else class="py-20 text-center">
-      <p class="mb-2 text-[15px] font-medium text-[var(--text-primary)]">没有找到符合条件的频道包</p>
+      <p class="mb-2 text-[15px] font-medium text-[var(--text-primary)]">{{ packageType === 'plugins' ? '没有找到符合条件的 Plugin Package' : '没有找到符合条件的频道包' }}</p>
       <p class="text-[13px] text-[var(--text-secondary)]">试试减少筛选条件或更换关键词。</p>
       <button v-if="hasActiveSelections || filters.search" type="button" class="mx-auto mt-4 market-btn-ghost" @click="clearAllFilters">
         清除筛选
@@ -296,12 +299,12 @@
           @keydown.tab="onDrawerTab"
         >
           <header class="market-drawer-header">
-            <span class="market-region-badge" :class="regionBadgeClass(selectedPackage || {})">
-              {{ regionBadge(selectedPackage || {}) }}
+            <span class="market-region-badge" :class="isPluginPackage(selectedPackage) ? 'market-region-violet' : regionBadgeClass(selectedPackage || {})">
+              {{ isPluginPackage(selectedPackage) ? 'P' : regionBadge(selectedPackage || {}) }}
             </span>
             <div class="min-w-0 flex-1">
               <h2 :id="drawerTitleId" class="truncate text-[16px] font-semibold leading-snug text-[var(--text-primary)]">{{ selectedPackage?.name }}</h2>
-              <p class="mt-0.5 truncate text-[12.5px] text-[var(--text-secondary)]">{{ displayMeta(selectedPackage || {}) }}</p>
+              <p class="mt-0.5 truncate text-[12.5px] text-[var(--text-secondary)]">{{ isPluginPackage(selectedPackage) ? pluginIdentity(selectedPackage) : displayMeta(selectedPackage || {}) }}</p>
             </div>
             <button type="button" class="market-touch-icon-btn" aria-label="关闭" @click="closeDialog">
               <svg class="size-4" viewBox="0 0 24 24" fill="none"><path d="M6 6l12 12M18 6 6 18" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
@@ -315,7 +318,7 @@
               <p v-if="availabilitySummary.detail" class="mt-1 text-[12.5px] leading-5 text-[var(--text-secondary)]">{{ availabilitySummary.detail }}</p>
             </section>
 
-            <section v-if="drawerTags.length || selectedPackage?.previewable" ref="channelSectionRef" class="market-drawer-section">
+            <section v-if="!isPluginPackage(selectedPackage) && (drawerTags.length || selectedPackage?.previewable)" ref="channelSectionRef" class="market-drawer-section">
               <h3 class="market-section-title">频道</h3>
               <div v-if="drawerTags.length" class="mb-3 flex flex-wrap gap-1.5">
                 <span v-for="tag in drawerTags" :key="tag" class="market-tag" :class="tagAccentClass(tag, selectedPackage || {})">{{ tag }}</span>
@@ -348,7 +351,7 @@
               </button>
             </section>
 
-            <section class="market-drawer-section">
+            <section v-if="!isPluginPackage(selectedPackage)" class="market-drawer-section">
               <h3 class="market-section-title">播放方式</h3>
               <dl class="grid grid-cols-[96px_minmax(0,1fr)] gap-y-1.5 text-[13px]">
                 <template v-for="row in playbackMethods" :key="row.key">
@@ -356,6 +359,22 @@
                   <dd :class="row.warn ? 'text-amber-600 dark:text-amber-300' : 'text-[var(--text-primary)]'">{{ row.value }}</dd>
                 </template>
               </dl>
+            </section>
+
+            <section v-if="isPluginPackage(selectedPackage)" class="market-drawer-section">
+              <h3 class="market-section-title">Capability</h3>
+              <dl class="grid grid-cols-[96px_minmax(0,1fr)] gap-y-1.5 text-[13px]"><dt class="text-[var(--text-tertiary)]">Contracts</dt><dd class="text-[var(--text-primary)]">{{ providerContractLabels(selectedPackage).join(', ') || '无' }}</dd><dt class="text-[var(--text-tertiary)]">Schemes</dt><dd class="text-[var(--text-primary)]">{{ selectedPackage?.plugin?.owned_schemes?.join(', ') || '无' }}</dd></dl>
+            </section>
+
+            <section v-if="isPluginPackage(selectedPackage)" class="market-drawer-section">
+              <h3 class="market-section-title">Dependencies</h3>
+              <p v-if="!pluginDependencies(selectedPackage).length" class="text-[13px] text-[var(--text-secondary)]">无额外 Python dependency</p>
+              <ul v-else class="space-y-1.5 text-[13px]"><li v-for="dependency in pluginDependencies(selectedPackage).slice(0, 8)" :key="`${dependency.name}-${dependency.version}`" class="flex items-center justify-between gap-3"><span class="truncate text-[var(--text-primary)]">{{ dependency.name }}</span><span class="shrink-0 text-[12px] text-[var(--text-tertiary)]">{{ dependency.version }}</span></li></ul>
+            </section>
+
+            <section v-if="isPluginPackage(selectedPackage)" class="market-drawer-section">
+              <h3 class="market-section-title">Runtime 与权限</h3>
+                <dl class="grid grid-cols-[96px_minmax(0,1fr)] gap-y-1.5 text-[13px]"><dt class="text-[var(--text-tertiary)]">Runtime</dt><dd class="text-[var(--text-primary)]">{{ pluginRuntimeLabel(selectedPackage) }}</dd><dt class="text-[var(--text-tertiary)]">Permissions</dt><dd class="text-[var(--text-primary)]">{{ requestedPermissions(selectedPackage).map(permissionLabel).join(', ') || '无额外权限' }}</dd><dt class="text-[var(--text-tertiary)]">Publisher</dt><dd class="text-[var(--text-primary)]">{{ selectedPackage?.plugin?.publisher_id || 'unknown' }}</dd><dt class="text-[var(--text-tertiary)]">Trust</dt><dd class="text-[var(--text-primary)]">{{ selectedPackage?.installed_trust_state || '安装时验证 publisher 与签名' }}</dd></dl>
             </section>
 
             <section class="market-drawer-section">
@@ -371,6 +390,7 @@
                 <dd class="text-[var(--text-primary)]">{{ selectedPackage?.supported_in_v1 ? '是' : '否' }}</dd>
                 <dt class="text-[var(--text-tertiary)]">版本</dt>
                 <dd class="truncate text-[var(--text-primary)]">{{ selectedPackage?.version || '未知' }}</dd>
+                <template v-if="selectedPackage?.installed_version"><dt class="text-[var(--text-tertiary)]">已安装版本</dt><dd class="truncate text-[var(--text-primary)]">{{ selectedPackage.installed_version }}</dd></template>
                 <dt class="text-[var(--text-tertiary)]">Manifest</dt>
                 <dd class="min-w-0">
                   <span class="block truncate text-[12px] text-[var(--text-secondary)]" :title="selectedPackage?.manifest_url || '内联配置'">
@@ -380,7 +400,7 @@
               </dl>
             </section>
 
-            <section v-if="selectedPackage?.installed" class="market-drawer-section">
+            <section v-if="selectedPackage?.installed && !isPluginPackage(selectedPackage)" class="market-drawer-section">
               <label class="flex items-start justify-between gap-3 text-[13px] text-[var(--text-primary)]">
                 <span class="min-w-0">
                   <span class="block font-medium">自动更新</span>
@@ -406,7 +426,7 @@
               <template v-if="installState(selectedPackage || {}) === 'update'">发现新版本</template>
               <template v-else-if="installState(selectedPackage || {}) === 'installed'">已安装</template>
               <template v-else-if="installState(selectedPackage || {}) === 'unsupported'">{{ selectedPackage?.unsupported_reason || '暂不支持' }}</template>
-              <template v-else>{{ selectedPackage?.channel_count || 0 }} 个频道</template>
+              <template v-else>{{ isPluginPackage(selectedPackage) ? '可安装 Plugin Package' : `${selectedPackage?.channel_count || 0} 个频道` }}</template>
             </div>
             <button
               v-if="installState(selectedPackage || {}) === 'unsupported'"
@@ -420,10 +440,10 @@
               v-else-if="installState(selectedPackage || {}) === 'update'"
               type="button"
               class="market-btn-primary"
-              :disabled="importLoading || !selectedPackage?.importable"
+              :disabled="importLoading || !packageInstallable(selectedPackage)"
               @click="handleReinstall(selectedPackage)"
             >
-              {{ importLoading ? '更新中…' : '更新' }}
+              {{ importLoading ? packageActionLabel(selectedPackage, 'updating') : packageActionLabel(selectedPackage, 'update') }}
             </button>
             <button
               v-else-if="installState(selectedPackage || {}) === 'installed'"
@@ -438,10 +458,10 @@
               v-else
               type="button"
               class="market-btn-primary"
-              :disabled="importLoading || !selectedPackage?.importable"
+              :disabled="importLoading || !packageInstallable(selectedPackage)"
               @click="handleImport(selectedPackage)"
             >
-              {{ importLoading ? '导入中…' : '导入' }}
+              {{ importLoading ? packageActionLabel(selectedPackage, 'installing') : packageActionLabel(selectedPackage, 'install') }}
             </button>
             <div v-if="selectedPackage?.installed" class="market-detail-more-wrap">
               <button
@@ -457,7 +477,7 @@
                 </svg>
               </button>
               <div v-if="menuOpenId === `detail-${selectedPackage.id}`" class="market-more-menu market-detail-menu" @click.stop>
-                <button type="button" class="market-menu-item" :disabled="importLoading" @click="closeMenuAnd(() => handleUninstall(selectedPackage))">卸载</button>
+                <button type="button" class="market-menu-item" :disabled="importLoading" @click="closeMenuAnd(() => handleUninstall(selectedPackage))">{{ packageActionLabel(selectedPackage, 'uninstall') }}</button>
               </div>
             </div>
           </footer>
@@ -477,8 +497,8 @@
         <section class="market-filter-sheet">
           <header class="market-sheet-header">
             <div>
-              <h2 class="text-[17px] font-semibold text-[var(--text-primary)]">筛选频道包</h2>
-              <p class="mt-0.5 text-[12.5px] text-[var(--text-secondary)]">{{ selectedChips.length ? `已选 ${selectedChips.length} 项` : '按地区、运营商和内容整理' }}</p>
+              <h2 class="text-[17px] font-semibold text-[var(--text-primary)]">筛选{{ packageType === 'plugins' ? ' Plugin Packages' : '频道包' }}</h2>
+              <p class="mt-0.5 text-[12.5px] text-[var(--text-secondary)]">{{ selectedChips.length ? `已选 ${selectedChips.length} 项` : packageType === 'plugins' ? '按状态筛选插件包' : '按地区、运营商和内容整理' }}</p>
             </div>
             <button type="button" class="market-touch-icon-btn" aria-label="关闭筛选" @click="filterSheetOpen = false">
               <svg class="size-4" viewBox="0 0 24 24" fill="none"><path d="M6 6l12 12M18 6 6 18" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
@@ -486,7 +506,7 @@
           </header>
 
           <div class="market-sheet-body">
-            <section v-for="group in filterGroups" :key="group.key" class="market-sheet-group">
+            <section v-for="group in visibleFilterGroups" :key="group.key" class="market-sheet-group">
               <h3 class="market-section-title">{{ group.label }}</h3>
               <div class="market-sheet-options">
                 <button
@@ -577,10 +597,12 @@
 
 <script setup>
 import { computed, nextTick, onMounted, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import {
   createMarketSource,
   deleteMarketSource,
   fetchMarketPackages,
+  fetchMarketPackage,
   fetchMarketSummary,
   fetchMarketSources,
   importMarketPackage,
@@ -593,11 +615,15 @@ import {
   updateMarketPackage,
   updateMarketSource,
 } from '../api/market'
+import { approvePluginPermission, pluginErrorCode, pluginErrorDetails, pluginErrorMessage } from '../api/plugins'
 import { useToastStore } from '../stores/toast'
 import MarketFilterDropdown from '../components/MarketFilterDropdown.vue'
 import AdaptiveTagList from '../components/AdaptiveTagList.vue'
+import { isPluginPackage, packageActionLabel, packageInstallable, permissionLabel, pluginDependencies, pluginIdentity, pluginRuntimeLabel, providerContractLabels, requestedPermissions } from './marketPackageUi'
 
 const toastStore = useToastStore()
+const route = useRoute()
+const router = useRouter()
 
 const summary = ref({})
 const packages = ref([])
@@ -641,6 +667,11 @@ const sourceDraft = reactive({
   url: '',
   allow_private: false,
 })
+const packageType = ref(route.query.type === 'plugins' ? 'plugins' : 'content')
+const packageTypeOptions = Object.freeze([
+  { key: 'content', label: '内容' },
+  { key: 'plugins', label: 'Plugins' },
+])
 
 // 服务器端筛选只透传 search（其余在前端做多选过滤；后端单选 API 不便表达多选）。
 const filters = reactive({
@@ -1174,7 +1205,7 @@ function tagAccentClass(tag, pkg) {
 
 function installState(pkg) {
   if (!pkg) return 'available'
-  if (!pkg.supported_in_v1 || !pkg.importable) return 'unsupported'
+  if (!packageInstallable(pkg)) return 'unsupported'
   if (pkg.installed && pkg.update_available) return 'update'
   if (pkg.installed) return 'installed'
   return 'available'
@@ -1207,6 +1238,19 @@ const drawerTags = computed(() => {
 const availabilitySummary = computed(() => {
   const pkg = selectedPackage.value
   if (!pkg) return { headline: '', detail: '' }
+
+  if (isPluginPackage(pkg)) {
+    if (!pkg.plugin_installable) {
+      return { headline: '当前平台暂不支持', detail: pkg.unsupported_reason || '此 Plugin Package 没有当前平台可用的 artifact。' }
+    }
+    if (pkg.installed && pkg.update_available) {
+      return { headline: '有可用更新', detail: `已安装 ${pkg.installed_version || '当前版本'}，Market 提供 ${pkg.version || '新版本'}。` }
+    }
+    if (pkg.installed) {
+      return { headline: 'Plugin 已安装', detail: '运行状态、权限和 scheme ownership 请前往 Settings → Plugins 管理。' }
+    }
+    return { headline: '可以安装', detail: '安装会验证 publisher trust、签名、平台兼容性与所需权限。' }
+  }
 
   // 1) 当前版本不支持 / 不可导入。
   if (!pkg.supported_in_v1 || !pkg.importable) {
@@ -1424,6 +1468,23 @@ const filterGroups = [
     options: () => uniqueValues(packages.value.flatMap(pkgContentTags)).slice(0, 60).map(v => ({ key: v, label: v })),
   },
 ]
+const visibleFilterGroups = computed(() => packageType.value === 'plugins'
+  ? filterGroups.filter(group => group.key === 'status')
+  : filterGroups)
+
+function selectPackageType(value) {
+  packageType.value = value === 'plugins' ? 'plugins' : 'content'
+  clearSelections()
+  filters.sort = 'recommended'
+  router.replace({ path: '/market', query: packageType.value === 'plugins' ? { type: 'plugins' } : {} })
+}
+
+function openQueriedPackage() {
+  const packageId = String(route.query.package || '')
+  if (!packageId) return
+  const pkg = packages.value.find(item => item.id === packageId)
+  if (pkg) openDetail(pkg)
+}
 
 function filterStatusHasMatch(key) {
   const list = packages.value
@@ -1433,10 +1494,10 @@ function filterStatusHasMatch(key) {
 
 function packageMatchesStatusKey(pkg, key) {
   switch (key) {
-    case 'available': return !pkg.installed && pkg.supported_in_v1 && pkg.importable
+    case 'available': return !pkg.installed && packageInstallable(pkg)
     case 'installed': return !!pkg.installed && !pkg.update_available
     case 'update': return !!pkg.installed && !!pkg.update_available
-    case 'unsupported': return !pkg.supported_in_v1 || !pkg.importable
+    case 'unsupported': return !packageInstallable(pkg)
     case 'requires_proxy': return !!pkg.requires_proxy
     default: return pkg.status === key
   }
@@ -1456,7 +1517,7 @@ const hasActiveSelections = computed(() => {
 
 const selectedChips = computed(() => {
   const out = []
-  for (const group of filterGroups) {
+  for (const group of visibleFilterGroups.value) {
     const selected = filterMultiSelections[group.key] || []
     if (!selected.length) continue
     const opts = group.options()
@@ -1543,7 +1604,7 @@ function handleSearchBlur() {
 // ── 前端筛选 + 排序 ────────────────────────────────────────
 
 const filteredPackages = computed(() => {
-  let list = packages.value.slice()
+  let list = packages.value.filter(pkg => packageType.value === 'plugins' ? isPluginPackage(pkg) : !isPluginPackage(pkg))
   const sel = filterMultiSelections
   if (sel.region.length) {
     list = list.filter(p => {
@@ -1596,10 +1657,15 @@ const filteredPackages = computed(() => {
 const resultCountLabel = computed(() => {
   const visible = filteredPackages.value.length
   if (filters.search.trim() || hasActiveSelections.value) return `找到 ${visible} 个`
-  return `共 ${packages.value.length} 个`
+  const total = packages.value.filter(pkg => packageType.value === 'plugins' ? isPluginPackage(pkg) : !isPluginPackage(pkg)).length
+  return `共 ${total} 个`
 })
 
-const updatableInstalledCount = computed(() => packages.value.filter(p => p.installed && p.update_available).length)
+const updatableInstalledPackages = computed(() => packages.value.filter(p => (
+  (packageType.value === 'plugins' ? isPluginPackage(p) : !isPluginPackage(p))
+  && p.installed && p.update_available
+)))
+const updatableInstalledCount = computed(() => updatableInstalledPackages.value.length)
 const hasUpdatableInstalled = computed(() => updatableInstalledCount.value > 0)
 
 // ── 数据加载 ────────────────────────────────────────────────
@@ -1669,6 +1735,29 @@ async function handleUpdateAllInstalled() {
   updating.value = true
   error.value = ''
   try {
+    if (packageType.value === 'plugins') {
+      let updatedCount = 0
+      let failedCount = 0
+      for (const pkg of updatableInstalledPackages.value) {
+        try {
+          await updateMarketPackage(pkg.id)
+          updatedCount += 1
+        } catch (caught) {
+          failedCount += 1
+          if (pluginErrorCode(caught) === 'PERMISSION_APPROVAL_REQUIRED') {
+            await confirmPermissionAndRetry(pkg, caught, async () => {
+              await updateMarketPackage(pkg.id)
+              updatedCount += 1
+              failedCount -= 1
+            })
+          }
+        }
+      }
+      await loadPackages()
+      if (failedCount) toastStore.warning(`已更新 ${updatedCount} 个 Plugin，${failedCount} 个失败`)
+      else toastStore.success(`已更新 ${updatedCount} 个 Plugin`)
+      return
+    }
     const result = await runMarketUpdates()
     await loadSummary()
     await loadPackages()
@@ -1790,8 +1879,25 @@ function openDetail(pkg, eventOrOpts) {
 
   if (pkg?.previewable) {
     loadFullPreview()
+  } else if (isPluginPackage(pkg)) {
+    loadPluginPackageDetail(pkg)
   } else {
     pendingShowAllChannels.value = false
+  }
+}
+
+async function loadPluginPackageDetail(pkg) {
+  const requestId = ++previewRequestId
+  previewLoading.value = true
+  try {
+    const detail = await fetchMarketPackage(pkg.id)
+    if (requestId !== previewRequestId || selectedPackage.value?.id !== pkg.id) return
+    selectedPackage.value = { ...selectedPackage.value, ...detail }
+  } catch (error) {
+    if (requestId !== previewRequestId || selectedPackage.value?.id !== pkg.id) return
+    previewError.value = pluginErrorMessage(error, 'Plugin Package 详情加载失败')
+  } finally {
+    if (requestId === previewRequestId) previewLoading.value = false
   }
 }
 
@@ -1974,8 +2080,10 @@ async function handleImport(pkg) {
   actingId.value = pkg.id
   try {
     const result = await importMarketPackage(pkg.id, preview.value?.preview_id || '')
-    markPackageInstalled(pkg.id, result.subscription_id)
-    if (Array.isArray(result.warnings) && result.warnings.length) {
+    markPackageInstalled(pkg.id, result.subscription_id, result.active_version)
+    if (isPluginPackage(pkg)) {
+      toastStore.success('Plugin 已安装，scheme ownership 保持 Legacy')
+    } else if (Array.isArray(result.warnings) && result.warnings.length) {
       toastStore.warning(`已导入 ${result.channel_count || 0} 个频道（含 ${result.warnings.length} 条警告）`)
     } else {
       toastStore.success(`已导入 ${result.channel_count || 0} 个频道`)
@@ -1984,7 +2092,11 @@ async function handleImport(pkg) {
       // ignore
     }
   } catch (e) {
-    toastStore.error(`导入失败：${e.message || String(e)}`)
+    if (pluginErrorCode(e) === 'PERMISSION_APPROVAL_REQUIRED') {
+      await confirmPermissionAndRetry(pkg, e, () => handleImport(pkg))
+    } else {
+      toastStore.error(isPluginPackage(pkg) ? pluginErrorMessage(e, 'Plugin 安装失败') : `导入失败：${e.message || String(e)}`)
+    }
   } finally {
     importLoading.value = false
     actingId.value = null
@@ -1997,10 +2109,14 @@ async function handleReinstall(pkg) {
   actingId.value = pkg.id
   try {
     const result = await updateMarketPackage(pkg.id)
-    markPackageInstalled(pkg.id, result.subscription_id)
-    toastStore.success(`已更新 ${result.channel_count || 0} 个频道`)
+    markPackageInstalled(pkg.id, result.subscription_id, result.active_version)
+    toastStore.success(isPluginPackage(pkg) ? 'Plugin 已更新' : `已更新 ${result.channel_count || 0} 个频道`)
   } catch (e) {
-    toastStore.error(`更新失败：${e.message || String(e)}`)
+    if (pluginErrorCode(e) === 'PERMISSION_APPROVAL_REQUIRED') {
+      await confirmPermissionAndRetry(pkg, e, () => handleReinstall(pkg))
+    } else {
+      toastStore.error(isPluginPackage(pkg) ? pluginErrorMessage(e, 'Plugin 更新失败') : `更新失败：${e.message || String(e)}`)
+    }
   } finally {
     importLoading.value = false
     actingId.value = null
@@ -2027,7 +2143,12 @@ async function handleUninstall(pkg) {
   // 先关闭任意残留的"更多"菜单（卡片菜单 / 详情 footer 菜单），
   // 避免确认弹窗出现在菜单背后或被 Drawer backdrop blur 影响层级。
   menuOpenId.value = null
-  const ok = await toastStore.askConfirm({ message: `确认卸载「${pkg.name}」？`, confirmText: '卸载', danger: true })
+  const ok = await toastStore.askConfirm({
+    message: isPluginPackage(pkg)
+      ? `确认卸载「${pkg.name}」？如果 scheme 仍由该 Plugin 拥有，后端会拒绝并要求先切回 Legacy。`
+      : `确认卸载「${pkg.name}」？`,
+    confirmText: packageActionLabel(pkg, 'uninstall'), danger: true,
+  })
   if (!ok) return
   importLoading.value = true
   actingId.value = pkg.id
@@ -2039,22 +2160,59 @@ async function handleUninstall(pkg) {
     if (selectedPackage.value?.id === pkg.id) {
       selectedPackage.value = { ...selectedPackage.value, installed: false, installed_subscription_id: null, installed_version: '', auto_update: false }
     }
-    toastStore.success('已卸载')
+    toastStore.success(isPluginPackage(pkg) ? 'Plugin 已卸载' : '已卸载')
   } catch (e) {
-    toastStore.error(e.message || String(e))
+    toastStore.error(isPluginPackage(pkg) ? pluginErrorMessage(e, 'Plugin 卸载失败') : (e.message || String(e)))
   } finally {
     importLoading.value = false
     actingId.value = null
   }
 }
 
-function markPackageInstalled(packageId, subscriptionId) {
+function markPackageInstalled(packageId, subscriptionId, activeVersion = '') {
   packages.value = packages.value.map(item => item.id === packageId
-    ? { ...item, installed: true, installed_subscription_id: subscriptionId, installed_version: item.version || '', update_available: false }
+    ? { ...item, installed: true, installed_subscription_id: subscriptionId || null, installed_version: activeVersion || item.version || '', update_available: false }
     : item)
   if (selectedPackage.value?.id === packageId) {
-    selectedPackage.value = { ...selectedPackage.value, installed: true, installed_subscription_id: subscriptionId, installed_version: selectedPackage.value.version || '', update_available: false }
+    selectedPackage.value = { ...selectedPackage.value, installed: true, installed_subscription_id: subscriptionId || null, installed_version: activeVersion || selectedPackage.value.version || '', update_available: false }
   }
+}
+
+async function confirmPermissionAndRetry(pkg, error, retry) {
+  const permissions = pluginErrorDetails(error).permissions || ['network.direct']
+  const permission = permissions[0]
+  const identity = isPluginPackage(pkg)
+    ? pluginIdentity(pkg)
+    : String(pluginErrorDetails(error).plugin || '')
+  if (!identity || !permission) {
+    toastStore.error(pluginErrorMessage(error))
+    return
+  }
+  const ok = await toastStore.askConfirm({
+    title: '允许高风险权限',
+    message: permission === 'network.direct'
+      ? `安装所需扩展「${identity}」需要直接访问网络。该请求不经过 Core managed HTTP，Plugin subprocess 也不是强安全沙箱。`
+      : `安装所需扩展「${identity}」需要 ${permissionLabel(permission)}。`,
+    confirmText: '允许并继续', danger: true,
+  })
+  if (!ok) return
+  try {
+    await approvePluginPermission(identity, permission, isPluginPackage(pkg) ? pkg.id : '')
+    await retry()
+  } catch (caught) {
+    toastStore.error(pluginErrorMessage(caught))
+  }
+}
+
+function pluginTagItems(pkg) {
+  return [
+    ...providerContractLabels(pkg).map(label => ({ label, accentClass: 'market-tag-blue' })),
+    ...(pkg?.plugin?.owned_schemes || []).map(label => ({ label, accentClass: '' })),
+    ...requestedPermissions(pkg).map(name => ({
+      label: permissionLabel(name),
+      accentClass: name === 'network.direct' ? 'market-tag-orange' : '',
+    })),
+  ]
 }
 
 function setPackageAutoUpdate(packageId, autoUpdate) {
@@ -2089,6 +2247,7 @@ watch(() => filters.search, () => {
 onMounted(async () => {
   await loadSummary().catch((e) => { error.value = e.message || String(e) })
   await loadPackages()
+  openQueriedPackage()
   window.addEventListener('click', onWindowClick)
   window.addEventListener('keydown', onWindowKey)
 })
@@ -2387,6 +2546,36 @@ onBeforeUnmount(() => {
 
 .market-filter-scroll::-webkit-scrollbar {
   display: none;
+}
+
+.market-package-type-switch {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  height: 40px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.market-package-type-button {
+  height: 32px;
+  min-width: 66px;
+  padding: 0 12px;
+  border-radius: 7px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.market-package-type-button:hover {
+  color: var(--text-primary);
+}
+
+.market-package-type-button.is-active {
+  background: var(--text-primary);
+  color: var(--bg);
 }
 
 .market-filter-sheet-trigger {

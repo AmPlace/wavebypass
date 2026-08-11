@@ -42,6 +42,11 @@ export const appRoutes = [
         ],
       },
       {
+        path: 'plugins',
+        name: 'settings-plugins',
+        component: () => import('../views/settings/PluginsSettings.vue'),
+      },
+      {
         path: 'security',
         name: 'settings-security',
         component: () => import('../views/settings/SecuritySettings.vue'),

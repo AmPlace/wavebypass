@@ -1,4 +1,4 @@
-import { apiRequest as request } from './client'
+import { apiRequest as request } from './client.js'
 
 export async function fetchMarketSummary() {
   const res = await request('/api/admin/market')

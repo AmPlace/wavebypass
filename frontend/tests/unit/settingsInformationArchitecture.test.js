@@ -63,6 +63,9 @@ test('Settings 路由默认进入直播源并支持所有正式 deep link', asyn
   await router.push('/settings/security')
   assert.equal(router.currentRoute.value.name, 'settings-security')
 
+  await router.push('/settings/plugins')
+  assert.equal(router.currentRoute.value.name, 'settings-plugins')
+
   await router.push('/settings/epg')
   assert.equal(router.currentRoute.value.fullPath, '/settings/epg/sources')
   assert.equal(router.currentRoute.value.name, 'settings-epg-sources')
@@ -72,11 +75,12 @@ test('Settings 路由默认进入直播源并支持所有正式 deep link', asyn
 })
 
 test('Settings active tab 完全由当前 route 推导', () => {
-  assert.deepEqual(SETTINGS_TABS.map((item) => item.label), ['直播源', 'EPG', '安全与访问'])
+  assert.deepEqual(SETTINGS_TABS.map((item) => item.label), ['直播源', 'EPG', 'Plugins', '安全与访问'])
   assert.deepEqual(EPG_SETTINGS_TABS.map((item) => item.label), ['来源', '频道匹配'])
   assert.equal(activeSettingsTab('/settings/sources'), 'sources')
   assert.equal(activeSettingsTab('/settings/epg/matching'), 'epg')
   assert.equal(activeSettingsTab('/settings/security'), 'security')
+  assert.equal(activeSettingsTab('/settings/plugins'), 'plugins')
   assert.equal(activeEpgSettingsTab('/settings/epg/sources'), 'sources')
   assert.equal(activeEpgSettingsTab('/settings/epg/matching'), 'matching')
 })

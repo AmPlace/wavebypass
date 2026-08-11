@@ -102,6 +102,41 @@ def _manifest_projection(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+async def _plugin_projection(row: dict[str, Any], *, include_permissions: bool = True) -> dict[str, Any]:
+    projection = _manifest_projection(row)
+    ownership_rows = await db.list_plugin_scheme_ownership()
+    by_scheme = {str(item.get("scheme") or ""): item for item in ownership_rows}
+    projection["ownership"] = [
+        {
+            "scheme": scheme,
+            "mode": str(by_scheme.get(scheme, {}).get("mode") or "legacy"),
+            "plugin": str(by_scheme.get(scheme, {}).get("plugin_identity") or ""),
+        }
+        for scheme in projection["owned_schemes"]
+    ]
+    package = next(
+        (item for item in market.market_packages_snapshot()
+         if item.get("id") == row.get("source_package_id")),
+        None,
+    )
+    projection["market"] = {
+        "package_id": str(row.get("source_package_id") or ""),
+        "source_key": str(row.get("source_key") or ""),
+        "available_version": str((package or {}).get("version") or ""),
+        "update_available": bool(package) and market._version_status(
+            str(package.get("version") or ""), projection["version"]
+        ) == "upgrade",
+    }
+    if include_permissions:
+        from plugin_permissions import permission_projection
+        from plugin_runtime import validate_manifest
+        try:
+            projection["permissions"] = await permission_projection(validate_manifest(json.loads(row["manifest_json"])))
+        except PluginError:
+            projection["permissions"] = {"requested": [], "approved": [], "pending": [], "risk": {}}
+    return projection
+
+
 async def _packages(package_id: str = "") -> list[dict[str, Any]]:
     await market.ensure_market_loaded()
     packages = market.market_packages_snapshot()
@@ -113,7 +148,7 @@ async def _packages(package_id: str = "") -> list[dict[str, Any]]:
 @router.get("")
 async def list_plugins() -> dict[str, Any]:
     rows = await db.list_plugin_installations()
-    return {"plugins": [_manifest_projection(row) for row in rows]}
+    return {"plugins": [await _plugin_projection(row) for row in rows]}
 
 
 @router.get("/trust")
@@ -152,14 +187,7 @@ async def plugin_detail(publisher_id: str, plugin_id: str) -> dict[str, Any]:
     row = await db.get_plugin_installation(publisher_id, plugin_id)
     if not row:
         raise HTTPException(status_code=404, detail={"code": "RESOURCE_NOT_FOUND", "message": "Plugin is not installed"})
-    projection = _manifest_projection(row)
-    from plugin_permissions import permission_projection
-    from plugin_runtime import validate_manifest
-    try:
-        projection["permissions"] = await permission_projection(validate_manifest(json.loads(row["manifest_json"])))
-    except PluginError:
-        projection["permissions"] = {"requested": [], "approved": [], "pending": [], "risk": {}}
-    return projection
+    return await _plugin_projection(row)
 
 
 @router.get("/{publisher_id}/{plugin_id}/permissions")

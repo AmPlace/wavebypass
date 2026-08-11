@@ -1923,9 +1923,85 @@ def _invalidate_market_covers_after_update(result) -> None:
         invalidate_all_covers()
 
 def _market_http_error(exc: Exception):
+    from plugin_runtime import PluginError
+    if isinstance(exc, PluginError):
+        statuses = {
+            "RESOURCE_NOT_FOUND": 404, "ARTIFACT_NOT_FOUND": 404,
+            "PLUGIN_UNTRUSTED": 403, "CAPABILITY_DENIED": 403,
+            "SCHEME_CONFLICT": 409, "PLUGIN_CANDIDATE_CONFLICT": 409,
+            "PERMISSION_APPROVAL_REQUIRED": 409,
+            "PLUGIN_UNAVAILABLE": 503,
+            "PLUGIN_INCOMPATIBLE": 422, "PLATFORM_UNSUPPORTED": 422,
+            "PYTHON_RUNTIME_UNSUPPORTED": 422, "DEPENDENCY_LOCK_INVALID": 422,
+            "DEPENDENCY_PLATFORM_UNSUPPORTED": 422,
+        }
+        raise HTTPException(
+            status_code=statuses.get(exc.code, 400), detail=exc.as_contract()
+        ) from exc
     if isinstance(exc, _market.MarketError):
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+async def _market_package_with_private_artifacts(package_id: str) -> dict:
+    await _market.ensure_market_loaded()
+    package = next(
+        (item for item in _market.market_packages_snapshot() if item.get("id") == package_id),
+        None,
+    )
+    if not package:
+        raise _market.MarketError("Market 包不存在", 404)
+    return package
+
+
+def _plugin_identity_from_package(package: dict) -> str:
+    manifest = package.get("plugin_manifest") or {}
+    publisher = str(manifest.get("publisher_id") or "")
+    plugin_id = str(manifest.get("plugin_id") or "")
+    if not publisher or not plugin_id:
+        raise _market.MarketError("Plugin Package manifest 无效", 422)
+    return f"{publisher}/{plugin_id}"
+
+
+async def _ensure_content_plugin_dependencies(request: Request, package: dict) -> list[str]:
+    requirements = package.get("requires_plugins") or []
+    if not requirements:
+        return []
+    subsystem = getattr(request.app.state, "plugin_subsystem", None)
+    if subsystem is None:
+        from plugin_runtime import PluginError
+        raise PluginError("PLUGIN_UNAVAILABLE", "Plugin subsystem is unavailable", category="runtime")
+    packages = _market.market_packages_snapshot()
+    installed: list[str] = []
+    for requirement in requirements:
+        identity = str(requirement.get("plugin") or "")
+        projection = await subsystem.service.dependency_projection([requirement])
+        if projection.get("status") == "ready":
+            continue
+        status = str(projection.get("status") or "dependency_missing")
+        if status != "dependency_missing":
+            from plugin_runtime import PluginError
+            code = "PLUGIN_INCOMPATIBLE" if status == "plugin_incompatible" else "PLUGIN_UNAVAILABLE"
+            raise PluginError(
+                code,
+                f"Required Plugin {identity} is {status}",
+                category="dependency",
+                details={"plugin": identity, "status": status},
+            )
+        try:
+            result = await subsystem.install(identity, packages)
+        except Exception as exc:
+            from plugin_runtime import PluginError
+            if isinstance(exc, PluginError) and exc.code == "PERMISSION_APPROVAL_REQUIRED":
+                raise PluginError(
+                    exc.code, exc.message, retryable=exc.retryable, category=exc.category,
+                    details={**exc.details, "plugin": identity},
+                ) from exc
+            raise
+        if not result.get("enabled"):
+            await subsystem.service.enable(identity)
+        installed.append(identity)
+    return installed
 
 
 @app.get("/api/admin/market", dependencies=[Depends(require_admin)])
@@ -2137,6 +2213,19 @@ async def preview_market_package(package_id: str):
 async def import_market_package(package_id: str, request: Request):
     try:
         body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+        package = await _market_package_with_private_artifacts(package_id)
+        if package.get("package_type") == _market.PLUGIN_PACKAGE_TYPE:
+            subsystem = getattr(request.app.state, "plugin_subsystem", None)
+            if subsystem is None:
+                from plugin_runtime import PluginError
+                raise PluginError("PLUGIN_UNAVAILABLE", "Plugin subsystem is unavailable", category="runtime")
+            result = await subsystem.install(_plugin_identity_from_package(package), [package])
+            automation = getattr(request.app.state, "automation_service", None)
+            if automation is not None:
+                from plugin_tasks import reconcile_plugin_update_task
+                await reconcile_plugin_update_task(automation, subsystem)
+            return {"ok": True, "package_type": "plugin_package", **result}
+        dependencies = await _ensure_content_plugin_dependencies(request, package)
         result = await _market.import_package(
             package_id,
             preview_id=(body or {}).get("preview_id", ""),
@@ -2145,14 +2234,26 @@ async def import_market_package(package_id: str, request: Request):
         )
         from core.cover_cache import invalidate_all_covers
         invalidate_all_covers()
-        return result
+        return {**result, "installed_plugins": dependencies}
     except Exception as exc:
         _market_http_error(exc)
 
 
 @app.post("/api/admin/market/packages/{package_id}/update", dependencies=[Depends(require_admin)])
-async def update_market_package(package_id: str):
+async def update_market_package(package_id: str, request: Request):
     try:
+        package = await _market_package_with_private_artifacts(package_id)
+        if package.get("package_type") == _market.PLUGIN_PACKAGE_TYPE:
+            subsystem = getattr(request.app.state, "plugin_subsystem", None)
+            if subsystem is None:
+                from plugin_runtime import PluginError
+                raise PluginError("PLUGIN_UNAVAILABLE", "Plugin subsystem is unavailable", category="runtime")
+            result = await subsystem.install(_plugin_identity_from_package(package), [package])
+            automation = getattr(request.app.state, "automation_service", None)
+            if automation is not None:
+                from plugin_tasks import reconcile_plugin_update_task
+                await reconcile_plugin_update_task(automation, subsystem)
+            return {"ok": True, "package_type": "plugin_package", **result}
         result = await _market.update_installed_package(package_id)
         from core.cover_cache import invalidate_all_covers
         invalidate_all_covers()
@@ -2194,8 +2295,20 @@ async def run_market_updates(request: Request):
 
 
 @app.delete("/api/admin/market/packages/{package_id}/install", dependencies=[Depends(require_admin)])
-async def uninstall_market_package(package_id: str):
+async def uninstall_market_package(package_id: str, request: Request):
     try:
+        package = await _market_package_with_private_artifacts(package_id)
+        if package.get("package_type") == _market.PLUGIN_PACKAGE_TYPE:
+            subsystem = getattr(request.app.state, "plugin_subsystem", None)
+            if subsystem is None:
+                from plugin_runtime import PluginError
+                raise PluginError("PLUGIN_UNAVAILABLE", "Plugin subsystem is unavailable", category="runtime")
+            removed = await subsystem.uninstall(_plugin_identity_from_package(package))
+            automation = getattr(request.app.state, "automation_service", None)
+            if automation is not None:
+                from plugin_tasks import reconcile_plugin_update_task
+                await reconcile_plugin_update_task(automation, subsystem)
+            return {"ok": True, "package_type": "plugin_package", "uninstalled": removed}
         result = await _market.uninstall_package(package_id)
         from core.cover_cache import invalidate_all_covers
         invalidate_all_covers()
