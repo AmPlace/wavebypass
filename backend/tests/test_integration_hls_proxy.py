@@ -16,8 +16,8 @@ import re
 
 os.environ["WAVEFLOW_PROXY_HANDLE_SECRET"] = "test-handle-secret-32bytes!!!"
 WAVEFLOW_DB = "/tmp/wf_integration_test.db"
-# 必须在任何 import database 之前设置，否则 database.DB_PATH 会落到默认路径
-os.environ["WAVEFLOW_DB_PATH"] = WAVEFLOW_DB
+# 子进程通过 _start_waveflow 的显式 env 使用隔离数据库。不要在测试模块
+# import 时改写父进程 DB 路径，否则 unittest discovery 会污染其他测试。
 # 确保 backend/ 在路径中，以便 import database / main / security.*
 _backend_dir = os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, _backend_dir)

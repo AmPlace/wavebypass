@@ -1,6 +1,7 @@
 """验证 m3u 中 EXTVLCOPT/KODIPROP/WAVEFLOW 解析的字段能正确入库与回退。"""
 import asyncio
 import os
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -86,6 +87,23 @@ class ChannelOptionsPersistTest(unittest.TestCase):
             self.assertEqual(agg["P"]["custom_ua"], "SubUA/2")
 
         self._run(go())
+
+    def test_cached_database_module_follows_explicit_isolated_path(self):
+        import database as db
+
+        first_path = os.environ["WAVEFLOW_DB_PATH"]
+        self._run(db.initialize())
+        with tempfile.TemporaryDirectory() as second_dir:
+            second_path = os.path.join(second_dir, "second.db")
+            os.environ["WAVEFLOW_DB_PATH"] = second_path
+            self._run(db.initialize())
+            with sqlite3.connect(second_path) as conn:
+                table = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='plugin_installations'"
+                ).fetchone()
+            self.assertIsNotNone(table)
+            self.assertEqual(db._current_db_path(), second_path)
+        os.environ["WAVEFLOW_DB_PATH"] = first_path
 
 
 if __name__ == "__main__":

@@ -122,6 +122,23 @@ class PluginAdminApiTest(unittest.IsolatedAsyncioTestCase):
         self.subsystem.disable.assert_awaited_once_with("org.example/fixture")
         self.subsystem.uninstall.assert_awaited_once_with("org.example/fixture")
 
+    async def test_ownership_preflight_unavailable_is_reported_as_service_blocker(self):
+        async def admin():
+            return {"id": 1, "role": "admin"}
+        self.main.app.dependency_overrides[self.main.require_admin] = admin
+        from plugin_runtime import PluginError
+        self.subsystem.set_ownership.side_effect = PluginError(
+            "PLUGIN_UNAVAILABLE", "Plugin runtime is not healthy", category="routing",
+        )
+
+        response = await self.client.put(
+            "/api/admin/plugins/ownership/jstv",
+            json={"mode": "plugin", "plugin": "org.waveflow/jstv"},
+        )
+
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertEqual(response.json()["detail"]["code"], "PLUGIN_UNAVAILABLE")
+
     async def test_permission_approval_and_revoke_use_production_subsystem(self):
         async def admin():
             return {"id": 1, "role": "admin"}

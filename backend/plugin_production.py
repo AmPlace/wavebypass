@@ -20,7 +20,7 @@ import database as db
 import market
 from plugin_market import PluginArtifactStore, PluginMarketService, current_platform
 from plugin_python_runtime import PythonEnvironmentManager
-from plugin_runtime import PluginError, PluginRuntime
+from plugin_runtime import LifecycleState, PluginError, PluginRuntime, validate_manifest
 from plugin_runtime.permissions import PermissionPolicy
 from provider_resolver import ProviderResolver
 from plugin_capabilities import CapabilityGateway, CoreCapabilityDispatcher
@@ -203,15 +203,52 @@ class ProductionPluginSubsystem:
         if mode not in {"legacy", "plugin", "migration_test"}:
             raise PluginError("INVALID_PLUGIN_RESPONSE", "Invalid provider ownership mode", category="routing")
         if mode != "legacy":
-            instance = self.service.runtime.registry.route(scheme)
-            if plugin_identity and instance.manifest.identity != plugin_identity:
-                raise PluginError("SCHEME_CONFLICT", "Requested Plugin does not own this scheme", category="routing")
-            plugin_identity = instance.manifest.identity
+            plugin_identity, _instance = await self._ownership_preflight(scheme, plugin_identity)
         else:
             plugin_identity = ''
         row = await db.set_plugin_scheme_ownership(scheme, mode, plugin_identity)
         self.provider_resolver.set_mode(scheme, mode, plugin_identity)
         return {"scheme": row["scheme"], "mode": row["mode"], "plugin": row["plugin_identity"]}
+
+    async def _ownership_preflight(self, scheme: str, plugin_identity: str = '') -> tuple[str, Any]:
+        """Require a healthy, durable installation before routing production traffic."""
+        instance = self.service.runtime.registry.route(scheme)
+        resolved_identity = instance.manifest.identity
+        if plugin_identity and resolved_identity != plugin_identity:
+            raise PluginError("SCHEME_CONFLICT", "Requested Plugin does not own this scheme", category="routing")
+        publisher, separator, plugin_id = resolved_identity.partition("/")
+        row = await db.get_plugin_installation(publisher, plugin_id) if separator else None
+        if not row:
+            raise PluginError("PLUGIN_UNAVAILABLE", "Plugin installation state is missing", category="routing",
+                              details={"scheme": scheme, "plugin": resolved_identity})
+        if not row.get("enabled") or row.get("quarantined"):
+            raise PluginError("PLUGIN_UNAVAILABLE", "Plugin is not enabled and healthy", category="routing",
+                              details={"scheme": scheme, "plugin": resolved_identity,
+                                       "lifecycle_state": row.get("lifecycle_state", "")})
+        if (row.get("lifecycle_state") != "active"
+                or instance.state != LifecycleState.HEALTHY_ACTIVE
+                or instance.health != "healthy"):
+            raise PluginError("PLUGIN_UNAVAILABLE", "Plugin runtime is not healthy", category="routing",
+                              details={"scheme": scheme, "plugin": resolved_identity,
+                                       "lifecycle_state": row.get("lifecycle_state", "")})
+        active_version = str(row.get("active_version") or "")
+        if active_version != instance.manifest.version:
+            raise PluginError("PLUGIN_CANDIDATE_CONFLICT", "Plugin installation version is not active in runtime",
+                              category="routing", details={"scheme": scheme, "plugin": resolved_identity})
+        try:
+            persisted_manifest = validate_manifest(json.loads(row.get("manifest_json") or "{}"))
+        except (PluginError, json.JSONDecodeError) as exc:
+            raise PluginError("PLUGIN_UNAVAILABLE", "Installed Plugin manifest is invalid", category="routing",
+                              details={"scheme": scheme, "plugin": resolved_identity}) from exc
+        if (persisted_manifest.identity != resolved_identity
+                or persisted_manifest.version != active_version
+                or persisted_manifest.owned_schemes != instance.manifest.owned_schemes):
+            raise PluginError("PLUGIN_CANDIDATE_CONFLICT", "Persisted Plugin manifest does not match active runtime",
+                              category="routing", details={"scheme": scheme, "plugin": resolved_identity})
+        if scheme not in {owned_scheme for owned_scheme, _contract in persisted_manifest.owned_schemes}:
+            raise PluginError("SCHEME_CONFLICT", "Plugin manifest does not own this scheme", category="routing",
+                              details={"scheme": scheme, "plugin": resolved_identity})
+        return resolved_identity, instance
 
     async def disable(self, identity: str) -> dict[str, Any]:
         if any(item.get("mode") == "plugin" and item.get("plugin_identity") == identity

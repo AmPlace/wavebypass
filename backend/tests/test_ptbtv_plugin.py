@@ -27,7 +27,10 @@ class PTBTVPluginTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tmp = tempfile.TemporaryDirectory(); self.old_db = os.environ.get("WAVEFLOW_DB_PATH")
         os.environ["WAVEFLOW_DB_PATH"] = str(Path(self.tmp.name) / "waveflow.db")
-        for name in ("database", "plugin_market", "plugin_permissions"):
+        # plugin_production keeps a module-level database reference. Reload it
+        # whenever this test swaps WAVEFLOW_DB_PATH so ownership checks cannot
+        # leak a database module from an earlier test case.
+        for name in ("database", "plugin_market", "plugin_permissions", "plugin_production"):
             sys.modules.pop(name, None)
         import database, plugin_market
         from plugin_capabilities import CapabilityGateway, CoreCapabilityDispatcher

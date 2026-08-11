@@ -36,11 +36,14 @@ DB_PATH_RAW = (
     os.environ.get('WAVEFLOW_DB_PATH')
     or os.path.join(os.path.dirname(__file__), 'data', 'waveflow.db')
 )
-# 转为 file: URI（允许 :memory: 多连接共享，以及正常路径）
+# 保留 import-time 默认值供现有调用方查看；每次连接仍会重新读取显式
+# WAVEFLOW_DB_PATH。这样测试/嵌入式启动器在模块已被其他组件缓存后切换
+# 隔离数据库，不会让旧模块继续写入先前或默认数据库。
 if DB_PATH_RAW == ":memory:":
     DB_PATH = "file:waveflow?mode=memory&cache=shared"
 else:
     DB_PATH = DB_PATH_RAW
+_IMPORTED_DB_PATH = DB_PATH
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS settings (
@@ -568,9 +571,23 @@ CREATE TABLE IF NOT EXISTS app_secrets (
 """
 
 
+def _current_db_path() -> str:
+    # Preserve the narrow test/bootstrap seam that explicitly overrides the
+    # module value for a one-off legacy-database migration.
+    if DB_PATH != _IMPORTED_DB_PATH:
+        return DB_PATH
+    configured = os.environ.get('WAVEFLOW_DB_PATH')
+    if configured is None:
+        return DB_PATH
+    if configured == ':memory:':
+        return 'file:waveflow?mode=memory&cache=shared'
+    return configured
+
+
 def _connect() -> sqlite3.Connection:
-    os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    path = _current_db_path()
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    conn = sqlite3.connect(path)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.row_factory = sqlite3.Row
