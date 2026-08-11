@@ -94,8 +94,10 @@ class OfficialDistributionProductionTest(unittest.IsolatedAsyncioTestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.old_db = os.environ.get("WAVEFLOW_DB_PATH")
         self.old_bootstrap = os.environ.get("WAVEFLOW_OFFICIAL_PLUGIN_BOOTSTRAP")
+        self.old_rollout = os.environ.get("WAVEFLOW_OFFICIAL_PLUGIN_ROLLOUT")
         os.environ["WAVEFLOW_DB_PATH"] = str(Path(self.tmp.name) / "waveflow.db")
         os.environ["WAVEFLOW_OFFICIAL_PLUGIN_BOOTSTRAP"] = "1"
+        os.environ["WAVEFLOW_OFFICIAL_PLUGIN_ROLLOUT"] = "0"
         _clear_modules()
         self.db = importlib.import_module("database")
         await self.db.initialize()
@@ -120,6 +122,10 @@ class OfficialDistributionProductionTest(unittest.IsolatedAsyncioTestCase):
             os.environ.pop("WAVEFLOW_OFFICIAL_PLUGIN_BOOTSTRAP", None)
         else:
             os.environ["WAVEFLOW_OFFICIAL_PLUGIN_BOOTSTRAP"] = self.old_bootstrap
+        if self.old_rollout is None:
+            os.environ.pop("WAVEFLOW_OFFICIAL_PLUGIN_ROLLOUT", None)
+        else:
+            os.environ["WAVEFLOW_OFFICIAL_PLUGIN_ROLLOUT"] = self.old_rollout
         _clear_modules()
         self.tmp.cleanup()
 
@@ -273,9 +279,11 @@ class OfficialDistributionProductionTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_signed_update_and_failed_provenance_keep_previous_active(self):
         from official_plugin_distribution import OFFICIAL_DISTRIBUTION_ROOT
+        from plugin_capabilities import CapabilityGateway
         from plugin_market import PluginArtifactStore, PluginMarketService, current_platform, manifest_signature_payload
-        from plugin_production import ProductionTrustPolicy
+        from plugin_production import ProductionPluginSubsystem, ProductionTrustPolicy
         from plugin_runtime import PluginError, PluginRuntime, validate_manifest
+        from provider_resolver import ProviderResolver
         from waveflow_plugin_cli import build_sdk_artifact
 
         key = Ed25519PrivateKey.generate()
@@ -323,10 +331,20 @@ class OfficialDistributionProductionTest(unittest.IsolatedAsyncioTestCase):
             store=PluginArtifactStore(root / "store", allowed_local_roots=[root]),
             trust_policy=policy, os_name=os_name, arch=arch,
         )
+        subsystem = ProductionPluginSubsystem(
+            service=service, trust_policy=policy, download_root=root / "downloads",
+            http_client=self.client, provider_resolver=ProviderResolver(runtime=runtime),
+            capability_gateway=CapabilityGateway(client=self.client),
+        )
         try:
             await service.install_from_packages([package("1.0.0")], "org.waveflow/jstv")
+            await subsystem.set_ownership("jstv", "plugin", "org.waveflow/jstv")
             await service.install_from_packages([package("1.1.0")], "org.waveflow/jstv")
             self.assertEqual(runtime.registry.route("jstv").manifest.version, "1.1.0")
+            owner = next(item for item in await self.db.list_plugin_scheme_ownership()
+                         if item["scheme"] == "jstv")
+            self.assertEqual((owner["mode"], owner["plugin_identity"]),
+                             ("plugin", "org.waveflow/jstv"))
             alternate = root / "jstv-alternate.pyz"
             alternate.write_bytes(payload + b"different-signed-artifact")
             with self.assertRaises(PluginError) as immutable_conflict:
@@ -341,6 +359,10 @@ class OfficialDistributionProductionTest(unittest.IsolatedAsyncioTestCase):
                 await service.install_from_packages([invalid], "org.waveflow/jstv")
             self.assertEqual(rejected.exception.code, "ARTIFACT_SIGNATURE_INVALID")
             self.assertEqual(runtime.registry.route("jstv").manifest.version, "1.1.0")
+            owner = next(item for item in await self.db.list_plugin_scheme_ownership()
+                         if item["scheme"] == "jstv")
+            self.assertEqual((owner["mode"], owner["plugin_identity"]),
+                             ("plugin", "org.waveflow/jstv"))
         finally:
             await runtime.shutdown()
 

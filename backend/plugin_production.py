@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import os
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,6 +27,7 @@ from plugin_runtime import LifecycleState, PluginError, PluginRuntime, validate_
 from plugin_runtime.permissions import PermissionPolicy
 from provider_resolver import ProviderResolver
 from plugin_capabilities import CapabilityGateway, CoreCapabilityDispatcher
+from plugin_permissions import permission_projection
 from official_plugin_distribution import (
     OFFICIAL_PUBLISHER_ID, OFFICIAL_RELEASE_ROOT, bundled_official_packages, load_official_trust_rows,
 )
@@ -37,6 +39,7 @@ MAX_DEPENDENCY_ARTIFACT_BYTES = 64 * 1024 * 1024
 PLUGIN_DOWNLOAD_TIMEOUT_SECONDS = 60.0
 PLUGIN_DOWNLOAD_REDIRECTS = 3
 OFFICIAL_PLUGIN_BOOTSTRAP_SETTING = "official_plugin_bootstrap_v1"
+OFFICIAL_PLUGIN_ROLLOUT_SETTING = "official_plugin_rollout_v1"
 
 
 class ProductionTrustPolicy:
@@ -233,6 +236,13 @@ class ProductionPluginSubsystem:
                 "plugin": f"{OFFICIAL_PUBLISHER_ID}/*", "status": "unavailable",
                 "error": _safe_bootstrap_error(error),
             })
+        try:
+            results.extend(await self.rollout_official_plugins())
+        except BaseException as error:
+            results.append({
+                "plugin": f"{OFFICIAL_PUBLISHER_ID}/*", "status": "unavailable",
+                "error": _safe_bootstrap_error(error), "rollout": "failed",
+            })
         return results
 
     async def bootstrap_official_plugins(self) -> list[dict[str, Any]]:
@@ -276,6 +286,85 @@ class ProductionPluginSubsystem:
         if changed:
             await db.set_setting(
                 OFFICIAL_PLUGIN_BOOTSTRAP_SETTING,
+                json.dumps({"version": 1, "completed": sorted(completed)}, separators=(",", ":"), sort_keys=True),
+            )
+        return results
+
+    async def rollout_official_plugins(self) -> list[dict[str, Any]]:
+        """Apply release-declared ownership once on Python-backed deployments."""
+        if not _python_backed_rollout_enabled():
+            return []
+        try:
+            state = json.loads(await db.get_setting(OFFICIAL_PLUGIN_ROLLOUT_SETTING, "{}"))
+        except json.JSONDecodeError:
+            state = {}
+        completed = set(state.get("completed") or []) if isinstance(state, dict) else set()
+        ownership = {row["scheme"]: row for row in await db.list_plugin_scheme_ownership()}
+        results: list[dict[str, Any]] = []
+        changed = False
+        for package in bundled_official_packages(self.official_release_root):
+            if package.get("rollout") != {
+                "deployment": "python_backed", "default_ownership": "plugin",
+            }:
+                continue
+            baseline = validate_manifest(package.get("plugin_manifest"))
+            identity = baseline.identity
+            schemes = [scheme for scheme, _contract in baseline.owned_schemes]
+            pending_keys = [f"{identity}:{scheme}" for scheme in schemes
+                            if f"{identity}:{scheme}" not in completed]
+            if not pending_keys:
+                continue
+            row = await db.get_plugin_installation(baseline.publisher_id, baseline.plugin_id)
+            if (not row or row.get("trust_state") != "official"
+                    or row.get("source_key") != "official"
+                    or row.get("source_package_id") != package.get("id")):
+                results.append({
+                    "plugin": identity, "status": "unavailable", "rollout": "blocked",
+                    "error": "PLUGIN_UNAVAILABLE: verified official installation is required",
+                })
+                continue
+            try:
+                installed = validate_manifest(json.loads(row.get("manifest_json") or "{}"))
+                installed_schemes = {scheme for scheme, _contract in installed.owned_schemes}
+                if not set(schemes).issubset(installed_schemes):
+                    raise PluginError(
+                        "SCHEME_CONFLICT", "Installed Plugin no longer owns the release rollout scheme",
+                        category="routing",
+                    )
+                for scheme in schemes:
+                    completion_key = f"{identity}:{scheme}"
+                    if completion_key in completed:
+                        continue
+                    current = ownership.get(scheme)
+                    if current and current.get("mode") not in {"legacy", "plugin"}:
+                        raise PluginError(
+                            "SCHEME_CONFLICT", "Existing migration ownership must be resolved before rollout",
+                            category="routing",
+                        )
+                    if current and current.get("mode") == "plugin" and current.get("plugin_identity") != identity:
+                        raise PluginError(
+                            "SCHEME_CONFLICT", "Another Plugin already owns the rollout scheme", category="routing",
+                        )
+                    if current and current.get("mode") == "plugin":
+                        await self._ownership_preflight(scheme, identity)
+                    else:
+                        result = await self.set_ownership(scheme, "plugin", identity)
+                        ownership[scheme] = {
+                            "scheme": scheme, "mode": result["mode"], "plugin_identity": result["plugin"],
+                        }
+                    completed.add(completion_key)
+                    changed = True
+                results.append({
+                    "plugin": identity, "status": "active", "rollout": "plugin", "schemes": schemes,
+                })
+            except BaseException as error:
+                results.append({
+                    "plugin": identity, "status": "unavailable", "rollout": "blocked",
+                    "error": _safe_bootstrap_error(error),
+                })
+        if changed:
+            await db.set_setting(
+                OFFICIAL_PLUGIN_ROLLOUT_SETTING,
                 json.dumps({"version": 1, "completed": sorted(completed)}, separators=(",", ":"), sort_keys=True),
             )
         return results
@@ -339,6 +428,14 @@ class ProductionPluginSubsystem:
         if scheme not in {owned_scheme for owned_scheme, _contract in persisted_manifest.owned_schemes}:
             raise PluginError("SCHEME_CONFLICT", "Plugin manifest does not own this scheme", category="routing",
                               details={"scheme": scheme, "plugin": resolved_identity})
+        permissions = await permission_projection(persisted_manifest)
+        if permissions["pending"]:
+            raise PluginError(
+                "PERMISSION_APPROVAL_REQUIRED", "Plugin permissions must be approved before ownership rollout",
+                category="permission", details={
+                    "permissions": [item["name"] for item in permissions["pending"]],
+                },
+            )
         return resolved_identity, instance
 
     async def disable(self, identity: str) -> dict[str, Any]:
@@ -492,6 +589,18 @@ def _official_trust_rows() -> list[dict[str, Any]]:
                 "enabled": 1, "require_manifest_signature": True,
             })
     return rows
+
+
+def _python_backed_rollout_enabled() -> bool:
+    if getattr(sys, "frozen", False):
+        return False
+    if os.environ.get("WAVEFLOW_MODE", "nas").strip().lower() == "desktop":
+        return False
+    value = os.environ.get("WAVEFLOW_OFFICIAL_PLUGIN_ROLLOUT")
+    if value is None:
+        bootstrap = os.environ.get("WAVEFLOW_OFFICIAL_PLUGIN_BOOTSTRAP", "1").strip().lower()
+        return bootstrap not in {"0", "false", "no", "off"}
+    return value.strip().lower() not in {"0", "false", "no", "off"}
 
 
 def _stage_bundled_plugin_artifact(

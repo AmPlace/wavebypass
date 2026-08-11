@@ -105,6 +105,11 @@ def load_bundled_official_market(root: str | Path | None = None) -> tuple[dict[s
             raise PluginError("PLUGIN_UNTRUSTED", "Bundled Plugin publisher is not official", category="trust")
         if package.get("version") != manifest.version:
             raise PluginError("PLUGIN_INCOMPATIBLE", "Bundled Plugin package version is inconsistent", category="distribution")
+        rollout = package.get("rollout")
+        if rollout is not None and rollout != {
+            "deployment": "python_backed", "default_ownership": "plugin",
+        }:
+            raise PluginError("ARTIFACT_INVALID", "Bundled Plugin rollout policy is invalid", category="distribution")
         references = package.get("artifact_references")
         if not isinstance(references, list):
             raise PluginError("ARTIFACT_INVALID", "Bundled official artifact references are invalid", category="artifact")

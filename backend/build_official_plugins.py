@@ -120,6 +120,13 @@ def build_release(
                     "url": f"payloads/{artifact_name}",
                 }],
             })
+            rollout = item.get("rollout")
+            if rollout is not None:
+                if rollout != {"deployment": "python_backed", "default_ownership": "plugin"}:
+                    raise PluginError(
+                        "INVALID_PLUGIN_RESPONSE", "Official rollout policy is invalid", category="release",
+                    )
+                package["rollout"] = dict(rollout)
             package.pop("market_source", None)
             _write_json(staging / "packages" / f"{plugin_id}.market-package.json", package)
             packages.append(package)

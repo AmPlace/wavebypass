@@ -131,6 +131,10 @@
         "version": "1.0.0"
       },
       "risk_level": "official_signed_not_sandboxed",
+      "rollout": {
+        "default_ownership": "plugin",
+        "deployment": "python_backed"
+      },
       "schema_version": 1,
       "source_origin": "official",
       "source_policy": "signed_release",
@@ -264,6 +268,10 @@
         "version": "1.0.0"
       },
       "risk_level": "official_signed_not_sandboxed",
+      "rollout": {
+        "default_ownership": "plugin",
+        "deployment": "python_backed"
+      },
       "schema_version": 1,
       "source_origin": "official",
       "source_policy": "signed_release",
@@ -390,6 +398,10 @@
         "version": "1.0.0"
       },
       "risk_level": "official_signed_not_sandboxed",
+      "rollout": {
+        "default_ownership": "plugin",
+        "deployment": "python_backed"
+      },
       "schema_version": 1,
       "source_origin": "official",
       "source_policy": "signed_release",
@@ -523,6 +535,10 @@
         "version": "1.0.0"
       },
       "risk_level": "official_signed_not_sandboxed",
+      "rollout": {
+        "default_ownership": "plugin",
+        "deployment": "python_backed"
+      },
       "schema_version": 1,
       "source_origin": "official",
       "source_policy": "signed_release",
