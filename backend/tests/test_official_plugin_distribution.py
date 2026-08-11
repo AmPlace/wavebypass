@@ -18,15 +18,24 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from packaging import tags
 
 
-IDENTITIES = {
+BASE_IDENTITIES = {
     "org.waveflow/jstv", "org.waveflow/fjtv", "org.waveflow/nd0593tv", "org.waveflow/gzstv",
     "org.waveflow/nowtv", "org.waveflow/nmtv", "org.waveflow/sdtv",
 }
+DIRECT_IDENTITIES = {"org.waveflow/ptbtv", "org.waveflow/hnntv"}
+IDENTITIES = BASE_IDENTITIES | DIRECT_IDENTITIES
 SCHEMES = {identity.rsplit("/", 1)[1] for identity in IDENTITIES}
+BASE_SCHEMES = {identity.rsplit("/", 1)[1] for identity in BASE_IDENTITIES}
 DEPENDENCIES = {
     "org.waveflow/nowtv": [],
     "org.waveflow/nmtv": [("xxtea", "5.0.0")],
     "org.waveflow/sdtv": [("cryptography", "48.0.1"), ("cffi", "2.0.0"), ("pycparser", "3.0")],
+    "org.waveflow/ptbtv": [
+        ("curl-cffi", "0.15.0"), ("cffi", "2.0.0"), ("certifi", "2026.5.20"),
+        ("rich", "15.0.0"), ("pycparser", "3.0"), ("markdown-it-py", "4.2.0"),
+        ("pygments", "2.20.0"), ("mdurl", "0.1.2"),
+    ],
+    "org.waveflow/hnntv": [],
 }
 
 
@@ -61,7 +70,7 @@ class OfficialReleaseBuildTest(unittest.TestCase):
         _market, packages = load_bundled_official_market()
         self.assertEqual({f"{p['plugin_manifest']['publisher_id']}/{p['plugin_manifest']['plugin_id']}"
                           for p in packages}, IDENTITIES)
-        self.assertEqual(_market["market_version"], "1.2.0")
+        self.assertEqual(_market["market_version"], "1.3.0")
         policy = ProductionTrustPolicy(rows)
         for package in packages:
             manifest = validate_manifest(package["plugin_manifest"])
@@ -102,6 +111,19 @@ class OfficialReleaseBuildTest(unittest.TestCase):
             by_identity["org.waveflow/jstv"]["rollout"],
             os_name="linux", arch="x86_64", python_version="3.11.9",
         ))
+        for identity in DIRECT_IDENTITIES:
+            self.assertNotIn("rollout", by_identity[identity])
+        self.assertEqual(
+            {(item["os"], item["arch"]) for item in by_identity["org.waveflow/ptbtv"]["plugin_manifest"]["artifacts"]},
+            {("macos", "arm64")},
+        )
+        self.assertEqual(
+            {(item["os"], item["arch"]) for item in by_identity["org.waveflow/hnntv"]["plugin_manifest"]["artifacts"]},
+            {("linux", "x86_64"), ("macos", "arm64")},
+        )
+        for identity in DIRECT_IDENTITIES:
+            network = by_identity[identity]["plugin_manifest"]["permissions"]["network"]
+            self.assertTrue(network["managed"] and network["direct"])
 
     def test_nmtv_sdtv_candidates_cover_published_targets_without_cross_platform_fallback(self):
         from plugin_python_runtime import select_dependency_artifacts
@@ -199,17 +221,39 @@ class OfficialDistributionProductionTest(unittest.IsolatedAsyncioTestCase):
         self.db = importlib.import_module("database")
         await self.db.initialize()
         self.network_requests: list[httpx.Request] = []
+        self.provider_fixture = False
 
         def transport(request: httpx.Request) -> httpx.Response:
             self.network_requests.append(request)
+            if self.provider_fixture:
+                if request.url.host == "www.ptbtv.com":
+                    return httpx.Response(
+                        200,
+                        json=[{"m3u8": "https://media.example/ptbtv-official/live.m3u8"}],
+                    )
+                if request.url.host == "www.hnntv.cn":
+                    return httpx.Response(200, json={"resultSet": [{"schedules": [{
+                        "id": "official-replay",
+                        "startDatetime": "2026-08-11 12:00:00",
+                        "endDatetime": "2026-08-11 12:30:00",
+                        "programName": "Official HNNTV fixture",
+                    }]}]})
+                if request.url.host == "ps.hnntv.cn" and request.url.path.endswith("/wbPlayUrl"):
+                    return httpx.Response(
+                        200,
+                        text='{"url":"https:\\/\\/media.example\\/hnntv-official\\/replay.m3u8"}',
+                    )
             return httpx.Response(503, text="offline")
 
         self.client = httpx.AsyncClient(transport=httpx.MockTransport(transport))
         self.subsystems = []
+        self.safe = mock.patch("plugin_capabilities.assert_safe_target_url", new=mock.AsyncMock())
+        self.safe.start()
 
     async def asyncTearDown(self):
         for subsystem in reversed(self.subsystems):
             await subsystem.shutdown()
+        self.safe.stop()
         await self.client.aclose()
         if self.old_db is None:
             os.environ.pop("WAVEFLOW_DB_PATH", None)
@@ -232,15 +276,47 @@ class OfficialDistributionProductionTest(unittest.IsolatedAsyncioTestCase):
         subsystem = await ProductionPluginSubsystem.create(
             root=Path(self.tmp.name) / "plugin-store", http_client=self.client,
         )
+
+        def command_factory(manifest, artifact):
+            command = [sys.executable, str(artifact), "--identity", manifest.identity,
+                       "--version", manifest.version]
+            if manifest.plugin_id == "hnntv":
+                command.extend(["--fixture-live-url", "https://media.example/hnntv-official/live.m3u8"])
+            return tuple(command)
+
+        def runtime_command_factory(manifest, artifact, environment):
+            if manifest.plugin_id == "hnntv":
+                return command_factory(manifest, artifact)
+            python = str(environment.python) if environment else sys.executable
+            command = [python, "-I", str(artifact), "--identity", manifest.identity,
+                       "--version", manifest.version]
+            if manifest.plugin_id == "ptbtv":
+                command.append("--fixture-direct-unavailable")
+            return tuple(command)
+
+        # Keep the production subsystem and its generic lifecycle intact while
+        # making this release acceptance deterministic at the provider boundary.
+        subsystem.service.command_factory = command_factory
+        subsystem.service.runtime_command_factory = runtime_command_factory
         self.subsystems.append(subsystem)
         return subsystem
+
+    async def _restart(self, subsystem):
+        await subsystem.shutdown()
+        self.subsystems.remove(subsystem)
+        restarted = await self._subsystem()
+        await restarted.startup()
+        return restarted
 
     async def test_fresh_bootstrap_installs_official_plugins_keeps_legacy_and_projects_settings(self):
         subsystem = await self._subsystem()
         results = await subsystem.startup()
-        self.assertEqual({item["plugin"] for item in results if item.get("bootstrap") == "installed"}, IDENTITIES)
+        self.assertEqual({item["plugin"] for item in results if item.get("bootstrap") == "installed"}, BASE_IDENTITIES)
+        self.assertEqual(
+            {item["plugin"] for item in results if item.get("status") == "unavailable"}, DIRECT_IDENTITIES,
+        )
         rows = await self.db.list_plugin_installations()
-        self.assertEqual({f"{row['publisher_id']}/{row['plugin_id']}" for row in rows}, IDENTITIES)
+        self.assertEqual({f"{row['publisher_id']}/{row['plugin_id']}" for row in rows}, BASE_IDENTITIES)
         self.assertTrue(all(row["lifecycle_state"] == "active" and row["trust_state"] == "official" for row in rows))
         self.assertEqual(await self.db.list_plugin_scheme_ownership(), [])
         self.assertTrue(all(subsystem.provider_resolver.mode(scheme) == "legacy" for scheme in SCHEMES))
@@ -271,7 +347,13 @@ class OfficialDistributionProductionTest(unittest.IsolatedAsyncioTestCase):
             await market.refresh_market()
         cards = [item for item in await market.list_packages({}) if item.get("package_type") == "plugin_package"]
         self.assertEqual(len(cards), len(IDENTITIES))
-        self.assertTrue(all(item["installed"] and item["installed_trust_state"] == "official" for item in cards))
+        cards_by_identity = {
+            f"{item['plugin']['publisher_id']}/{item['plugin']['plugin_id']}": item for item in cards
+        }
+        self.assertTrue(all(cards_by_identity[item]["installed"] for item in BASE_IDENTITIES))
+        self.assertTrue(all(not cards_by_identity[item]["installed"] for item in DIRECT_IDENTITIES))
+        self.assertTrue(all(cards_by_identity[item]["plugin"]["permissions"] == ["network.direct", "network.managed"]
+                            for item in DIRECT_IDENTITIES))
         self.assertEqual(self.network_requests, [])
         card_by_plugin = {
             f"{item['plugin']['publisher_id']}/{item['plugin']['plugin_id']}": item for item in cards
@@ -292,9 +374,9 @@ class OfficialDistributionProductionTest(unittest.IsolatedAsyncioTestCase):
 
         second = await self._subsystem()
         recovered = await second.startup()
-        self.assertEqual({item["plugin"] for item in recovered if item.get("status") == "active"}, IDENTITIES)
+        self.assertEqual({item["plugin"] for item in recovered if item.get("status") == "active"}, BASE_IDENTITIES)
         self.assertEqual(self.network_requests, [])
-        self.assertTrue(all(second.service.runtime.registry.route(scheme).health == "healthy" for scheme in SCHEMES))
+        self.assertTrue(all(second.service.runtime.registry.route(scheme).health == "healthy" for scheme in BASE_SCHEMES))
 
         await second.uninstall("org.waveflow/jstv")
         await second.shutdown()
@@ -302,7 +384,7 @@ class OfficialDistributionProductionTest(unittest.IsolatedAsyncioTestCase):
         third = await self._subsystem()
         await third.startup()
         self.assertIsNone(await self.db.get_plugin_installation("org.waveflow", "jstv"))
-        self.assertEqual(len(await self.db.list_plugin_installations()), len(IDENTITIES) - 1)
+        self.assertEqual(len(await self.db.list_plugin_installations()), len(BASE_IDENTITIES) - 1)
 
     async def test_python_dependency_cold_cache_warm_restart_and_environment_projection(self):
         first = await self._subsystem()
@@ -331,7 +413,7 @@ class OfficialDistributionProductionTest(unittest.IsolatedAsyncioTestCase):
         self.subsystems.remove(first)
         second = await self._subsystem()
         recovered = await second.startup()
-        self.assertEqual({item["plugin"] for item in recovered if item.get("status") == "active"}, IDENTITIES)
+        self.assertEqual({item["plugin"] for item in recovered if item.get("status") == "active"}, BASE_IDENTITIES)
         self.assertEqual({path.parent.name for path in second.service.python_environments.cache_objects()}, expected_digests)
         self.assertEqual(self.network_requests, [])
         for identity in ("org.waveflow/nmtv", "org.waveflow/sdtv"):
@@ -339,6 +421,126 @@ class OfficialDistributionProductionTest(unittest.IsolatedAsyncioTestCase):
             rows = await self.db.list_plugin_python_environments("org.waveflow", plugin)
             self.assertEqual([row["state"] for row in rows], ["active"])
             self.assertEqual(second.service.runtime.registry.route(plugin).health, "healthy")
+
+    async def test_ptbtv_hnntv_official_approval_runtime_resolution_and_revoke_recovery(self):
+        from official_plugin_distribution import bundled_official_packages
+        from plugin_market import current_platform
+        from plugin_runtime import PluginError
+
+        if current_platform() != ("macos", "arm64") or (sys.version_info.major, sys.version_info.minor) != (3, 14):
+            self.skipTest("OFFICIAL-PLUGIN-DISTRIBUTION-3 acceptance requires macOS arm64 / CPython 3.14")
+
+        self.provider_fixture = True
+        packages = bundled_official_packages()
+        package_by_identity = {
+            f"{item['plugin_manifest']['publisher_id']}/{item['plugin_manifest']['plugin_id']}": item
+            for item in packages
+        }
+        subsystem = await self._subsystem()
+
+        for identity in sorted(DIRECT_IDENTITIES):
+            with self.subTest(identity=identity):
+                with self.assertRaises(PluginError) as pending:
+                    await subsystem.install(identity, packages)
+                self.assertEqual(pending.exception.code, "PERMISSION_APPROVAL_REQUIRED")
+                plugin_id = identity.rsplit("/", 1)[1]
+                self.assertIsNone(await self.db.get_plugin_installation("org.waveflow", plugin_id))
+
+                await subsystem.approve_permission(
+                    identity, packages, "network.direct", "official-distribution-3-test",
+                )
+                installed = await subsystem.install(identity, packages)
+                self.assertEqual(
+                    (installed["trust_state"], installed["source_key"], installed["lifecycle_state"], installed["enabled"]),
+                    ("official", "official", "active", 1),
+                )
+                instance = subsystem.service.runtime.registry.route(plugin_id)
+                self.assertEqual((instance.health, instance.state.value), ("healthy", "HEALTHY_ACTIVE"))
+                row = await self.db.get_plugin_installation("org.waveflow", plugin_id)
+                projection = await importlib.import_module("routers.plugins")._plugin_projection(
+                    row, runtime=subsystem.service.runtime,
+                )
+                self.assertEqual(
+                    (projection["trust_state"], projection["source_provenance"]["source_key"],
+                     projection["runtime_health"], projection["ownership"]),
+                    ("official", "official", "healthy", [{"scheme": plugin_id, "mode": "legacy", "plugin": ""}]),
+                )
+                self.assertEqual(
+                    {item["name"] for item in projection["permissions"]["requested"]},
+                    {"network.direct", "network.managed"},
+                )
+                self.assertEqual(projection["permissions"]["pending"], [])
+
+                if plugin_id == "ptbtv":
+                    descriptor = await subsystem.service.runtime.request(
+                        instance, "tv.resolve_stream", {"resource_id": "pt1"},
+                    )
+                    self.assertEqual(
+                        (descriptor["url"], descriptor["transport"], descriptor["ttl_seconds"],
+                         descriptor["volatile_url"], descriptor["requires_proxy"]),
+                        ("https://media.example/ptbtv-official/live.m3u8", "hls", 180, True, False),
+                    )
+                    self.assertIn(
+                        str(subsystem.service.python_environments.environments_root),
+                        descriptor["provider_diagnostics"]["dependency_origin"],
+                    )
+                    self.assertEqual(self.network_requests[-1].url.host, "www.ptbtv.com")
+                else:
+                    live = await subsystem.service.runtime.request(
+                        instance, "tv.resolve_stream", {"resource_id": "hnws"},
+                    )
+                    replay = await subsystem.service.runtime.request(
+                        instance, "tv.resolve_stream",
+                        {"resource_id": "hnws", "query": {"playseek": ["20260811120000-20260811123000"]}},
+                    )
+                    self.assertEqual(live["url"], "https://media.example/hnntv-official/live.m3u8")
+                    self.assertEqual(replay["url"], "https://media.example/hnntv-official/replay.m3u8")
+                    self.assertEqual(replay["provider_diagnostics"], {
+                        "schedule_id": "official-replay", "program_name": "Official HNNTV fixture",
+                    })
+                    self.assertEqual(
+                        {request.url.host for request in self.network_requests[-2:]},
+                        {"www.hnntv.cn", "ps.hnntv.cn"},
+                    )
+
+                self.assertEqual(subsystem.provider_resolver.mode(plugin_id), "legacy")
+                self.assertEqual(await self.db.list_plugin_scheme_ownership(), [])
+
+        # A fresh production subsystem recovers both signed installations from
+        # durable state without consulting the remote Market.
+        subsystem = await self._restart(subsystem)
+        for identity in sorted(DIRECT_IDENTITIES):
+            plugin_id = identity.rsplit("/", 1)[1]
+            row = await self.db.get_plugin_installation("org.waveflow", plugin_id)
+            self.assertEqual((row["lifecycle_state"], row["trust_state"], row["enabled"]), ("active", "official", 1))
+            self.assertEqual(subsystem.service.runtime.registry.route(plugin_id).health, "healthy")
+            self.assertEqual(subsystem.provider_resolver.mode(plugin_id), "legacy")
+
+        # Revocation is enforced by the generic lifecycle for each high-risk
+        # package, including startup recovery; re-approval is required to
+        # activate it again.
+        for identity in sorted(DIRECT_IDENTITIES):
+            plugin_id = identity.rsplit("/", 1)[1]
+            await subsystem.revoke_permission(identity, "network.direct", "official-distribution-3-test")
+            with self.assertRaises(PluginError) as revoked:
+                await subsystem.service.enable(identity)
+            self.assertEqual(revoked.exception.code, "PERMISSION_APPROVAL_REQUIRED")
+            row = await self.db.get_plugin_installation("org.waveflow", plugin_id)
+            self.assertEqual((row["lifecycle_state"], row["enabled"]), ("unavailable", 1))
+            await subsystem.approve_permission(
+                identity, packages, "network.direct", "official-distribution-3-test",
+            )
+            enabled = await subsystem.service.enable(identity)
+            self.assertEqual((enabled["lifecycle_state"], enabled["enabled"]), ("active", 1))
+            self.assertEqual(subsystem.service.runtime.registry.route(plugin_id).health, "healthy")
+            self.assertEqual(subsystem.provider_resolver.mode(plugin_id), "legacy")
+
+        self.assertEqual(
+            {f"{row['publisher_id']}/{row['plugin_id']}" for row in await self.db.list_plugin_installations()},
+            BASE_IDENTITIES | DIRECT_IDENTITIES,
+        )
+        self.assertEqual(await self.db.list_plugin_scheme_ownership(), [])
+        self.assertEqual(set(package_by_identity), IDENTITIES)
 
     async def test_corrupt_bundled_catalog_does_not_tear_down_recovered_installations(self):
         from official_plugin_distribution import OFFICIAL_RELEASE_ROOT
@@ -355,9 +557,9 @@ class OfficialDistributionProductionTest(unittest.IsolatedAsyncioTestCase):
         second = await self._subsystem()
         second.official_release_root = copied
         results = await second.startup()
-        self.assertEqual({item["plugin"] for item in results if item.get("status") == "active"}, IDENTITIES)
+        self.assertEqual({item["plugin"] for item in results if item.get("status") == "active"}, BASE_IDENTITIES)
         self.assertIn("org.waveflow/*", {item["plugin"] for item in results if item.get("status") == "unavailable"})
-        self.assertTrue(all(second.service.runtime.registry.route(scheme).health == "healthy" for scheme in SCHEMES))
+        self.assertTrue(all(second.service.runtime.registry.route(scheme).health == "healthy" for scheme in BASE_SCHEMES))
 
     async def test_market_offline_discovers_bundled_packages_without_update_provenance(self):
         market = importlib.import_module("market")
