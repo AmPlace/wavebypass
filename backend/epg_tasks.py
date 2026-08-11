@@ -38,6 +38,11 @@ EPG_MINIMUM_INTERVAL_SECONDS = 5 * 60
 EPG_MAXIMUM_INTERVAL_SECONDS = 31 * 24 * 60 * 60
 EPG_INITIAL_DELAY_SECONDS = 0
 
+# Source CRUD and task projection share this short lifecycle boundary.  The
+# lock never covers network I/O; it only protects the durable-source read and
+# the corresponding Automation projection mutation.
+EPG_RECONCILIATION_LOCK = asyncio.Lock()
+
 
 def epg_task_id(source_id: int) -> str:
     source_id = _normalize_source_id(source_id)
@@ -194,12 +199,46 @@ async def reconcile_epg_automation_tasks(
     *,
     ensure_defaults: bool = False,
 ) -> dict:
-    """Make source tasks match the current source snapshot without duplicates."""
-    sources = (
-        await epg.ensure_default_epg_sources()
-        if ensure_defaults
-        else await db.get_epg_sources()
-    )
+    """Make source tasks match durable sources without stale resurrection."""
+
+    async def _reconcile():
+        if ensure_defaults:
+            await epg.ensure_default_epg_sources()
+        async with EPG_RECONCILIATION_LOCK:
+            return await _reconcile_epg_automation_tasks_locked(service, client)
+
+    reconciliation_task = asyncio.ensure_future(_reconcile())
+    try:
+        return await asyncio.shield(reconciliation_task)
+    except asyncio.CancelledError:
+        # A source mutation may already have committed before its caller was
+        # cancelled.  Drain projection reconciliation before propagating the
+        # cancellation so the task/config state cannot be stranded halfway.
+        while not reconciliation_task.done():
+            try:
+                await asyncio.shield(reconciliation_task)
+            except asyncio.CancelledError:
+                continue
+        try:
+            reconciliation_task.result()
+        except BaseException as error:
+            logger.exception(
+                "EPG reconciliation failed while draining cancellation: %s",
+                type(error).__name__,
+            )
+        raise
+
+
+async def _reconcile_epg_automation_tasks_locked(
+    service: AutomationService,
+    client: httpx.AsyncClient,
+) -> dict:
+    """Reconcile under ``EPG_RECONCILIATION_LOCK``.
+
+    The durable source table is reloaded immediately inside the shared
+    lifecycle boundary.  A caller must not pass a pre-lock snapshot here.
+    """
+    sources = await db.get_epg_sources()
     source_by_id = {int(source["id"]): source for source in sources}
     expected_task_ids = {epg_task_id(source_id) for source_id in source_by_id}
     configs = await service.repository.list_configs()
@@ -227,6 +266,20 @@ async def reconcile_epg_automation_tasks(
 
     for source_id, source in sorted(source_by_id.items()):
         task_id = epg_task_id(source_id)
+        # Revalidate immediately before projection mutation.  A changed
+        # revision/config is reconciled from the current durable row; a
+        # deleted row is removed rather than recreated from the old snapshot.
+        current_source = await db.get_epg_source(source_id)
+        if current_source is None:
+            if task_id in registered_task_ids:
+                await service.remove_definition(task_id, delete_config=True)
+                registered_task_ids.discard(task_id)
+            elif task_id in persisted_epg_task_ids:
+                await service.repository.delete_config(task_id)
+                persisted_epg_task_ids.discard(task_id)
+            removed_count += 1
+            continue
+        source = current_source
         if task_id not in registered_task_ids:
             definition = create_epg_task_definition(
                 source_id,

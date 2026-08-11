@@ -14,7 +14,7 @@ from epg_source_model import (
     validate_epg_source_name,
     validate_epg_source_url,
 )
-from epg_tasks import epg_task_id
+from epg_tasks import EPG_RECONCILIATION_LOCK, epg_task_id
 
 
 logger = logging.getLogger(__name__)
@@ -71,21 +71,23 @@ async def _reconcile_url_evidence_safely() -> bool:
 
 
 async def ensure_builtin_epg_sources() -> list[dict]:
-    for preset in BUILTIN_EPG_SOURCE_PRESETS:
-        try:
-            await db.ensure_builtin_epg_source(
-                builtin_key=preset.key,
-                name=preset.name,
-                url=preset.url,
-            )
-        except sqlite3.IntegrityError as error:
-            raise EpgSourceManagementError(
-                "builtin_preset_conflict",
-                "内置 EPG 预设与现有来源冲突，请重建当前开发数据库",
-                409,
-            ) from error
+    async with EPG_RECONCILIATION_LOCK:
+        for preset in BUILTIN_EPG_SOURCE_PRESETS:
+            try:
+                await db.ensure_builtin_epg_source(
+                    builtin_key=preset.key,
+                    name=preset.name,
+                    url=preset.url,
+                )
+            except sqlite3.IntegrityError as error:
+                raise EpgSourceManagementError(
+                    "builtin_preset_conflict",
+                    "内置 EPG 预设与现有来源冲突，请重建当前开发数据库",
+                    409,
+                ) from error
+        sources = await db.get_epg_sources()
     await _reconcile_url_evidence_safely()
-    return await db.get_epg_sources()
+    return sources
 
 
 async def create_custom_epg_source(
@@ -108,19 +110,20 @@ async def create_custom_epg_source(
             "enabled 必须是布尔值",
             422,
         )
-    try:
-        source_id = await db.add_epg_source(
-            normalized_name,
-            normalized_url,
-            enabled=enabled,
-            source_origin="custom",
-        )
-    except sqlite3.IntegrityError as error:
-        raise EpgSourceManagementError(
-            "source_url_exists",
-            "该 EPG URL 已存在",
-            409,
-        ) from error
+    async with EPG_RECONCILIATION_LOCK:
+        try:
+            source_id = await db.add_epg_source(
+                normalized_name,
+                normalized_url,
+                enabled=enabled,
+                source_origin="custom",
+            )
+        except sqlite3.IntegrityError as error:
+            raise EpgSourceManagementError(
+                "source_url_exists",
+                "该 EPG URL 已存在",
+                409,
+            ) from error
     preference_reconciled = await _reconcile_url_evidence_safely()
     source = await db.get_epg_source(source_id)
     if source is None:
@@ -139,58 +142,59 @@ async def update_managed_epg_source(
     url: object = _UNSET,
     enabled: object = _UNSET,
 ) -> tuple[dict, bool]:
-    source = await db.get_epg_source(source_id)
-    if source is None:
-        raise EpgSourceManagementError(
-            "source_not_found",
-            "EPG 来源不存在",
-            404,
-        )
-    if name is _UNSET and url is _UNSET and enabled is _UNSET:
-        raise EpgSourceManagementError(
-            "empty_update",
-            "至少提供一个需要修改的字段",
-            422,
-        )
-    updates: dict[str, Any] = {}
-    if name is not _UNSET:
-        try:
-            updates["name"] = validate_epg_source_name(name)
-        except (TypeError, ValueError) as error:
-            raise _invalid_name(error) from error
-    if url is not _UNSET:
-        if source.get("source_origin") == "builtin":
+    async with EPG_RECONCILIATION_LOCK:
+        source = await db.get_epg_source(source_id)
+        if source is None:
             raise EpgSourceManagementError(
-                "builtin_url_managed",
-                "内置 EPG 来源 URL 由 WaveFlow 管理",
-                409,
+                "source_not_found",
+                "EPG 来源不存在",
+                404,
             )
-        try:
-            updates["url"] = validate_epg_source_url(url)
-        except (TypeError, ValueError) as error:
-            raise _invalid_url() from error
-    if enabled is not _UNSET:
-        if not isinstance(enabled, bool):
+        if name is _UNSET and url is _UNSET and enabled is _UNSET:
             raise EpgSourceManagementError(
-                "invalid_enabled",
-                "enabled 必须是布尔值",
+                "empty_update",
+                "至少提供一个需要修改的字段",
                 422,
             )
-        updates["enabled"] = enabled
-    try:
-        updated = await db.update_epg_source(source_id, **updates)
-    except sqlite3.IntegrityError as error:
-        raise EpgSourceManagementError(
-            "source_url_exists",
-            "该 EPG URL 已存在",
-            409,
-        ) from error
-    if updated is None:
-        raise EpgSourceManagementError(
-            "source_not_found",
-            "EPG 来源不存在",
-            404,
-        )
+        updates: dict[str, Any] = {}
+        if name is not _UNSET:
+            try:
+                updates["name"] = validate_epg_source_name(name)
+            except (TypeError, ValueError) as error:
+                raise _invalid_name(error) from error
+        if url is not _UNSET:
+            if source.get("source_origin") == "builtin":
+                raise EpgSourceManagementError(
+                    "builtin_url_managed",
+                    "内置 EPG 来源 URL 由 WaveFlow 管理",
+                    409,
+                )
+            try:
+                updates["url"] = validate_epg_source_url(url)
+            except (TypeError, ValueError) as error:
+                raise _invalid_url() from error
+        if enabled is not _UNSET:
+            if not isinstance(enabled, bool):
+                raise EpgSourceManagementError(
+                    "invalid_enabled",
+                    "enabled 必须是布尔值",
+                    422,
+                )
+            updates["enabled"] = enabled
+        try:
+            updated = await db.update_epg_source(source_id, **updates)
+        except sqlite3.IntegrityError as error:
+            raise EpgSourceManagementError(
+                "source_url_exists",
+                "该 EPG URL 已存在",
+                409,
+            ) from error
+        if updated is None:
+            raise EpgSourceManagementError(
+                "source_not_found",
+                "EPG 来源不存在",
+                404,
+            )
     preference_reconciled = True
     if "url" in updates:
         preference_reconciled = await _reconcile_url_evidence_safely()
@@ -319,7 +323,8 @@ async def preview_epg_source_delete(source_id: int) -> dict[str, Any]:
         finally:
             conn.close()
 
-    return await asyncio.to_thread(_preview)
+    async with EPG_RECONCILIATION_LOCK:
+        return await asyncio.to_thread(_preview)
 
 
 async def delete_custom_epg_source(
@@ -399,14 +404,15 @@ async def delete_custom_epg_source(
         finally:
             conn.close()
 
-    try:
-        result = await asyncio.to_thread(_delete)
-    except sqlite3.DatabaseError as error:
-        raise EpgSourceManagementError(
-            "source_delete_failed",
-            "EPG 来源删除失败",
-            500,
-        ) from error
+    async with EPG_RECONCILIATION_LOCK:
+        try:
+            result = await asyncio.to_thread(_delete)
+        except sqlite3.DatabaseError as error:
+            raise EpgSourceManagementError(
+                "source_delete_failed",
+                "EPG 来源删除失败",
+                500,
+            ) from error
     preference_reconciled = await _reconcile_url_evidence_safely()
     return result, preference_reconciled
 

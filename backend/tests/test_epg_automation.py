@@ -190,6 +190,190 @@ class EpgAutomationTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(task_id, service.tasks)
         self.assertIsNone(await service.repository.get_config(task_id))
 
+    async def test_stale_deleted_snapshot_cannot_recreate_removed_task(self):
+        source = await self._source()
+        service = self._service()
+        await self.epg_tasks.reconcile_epg_automation_tasks(service, self.client)
+        stale_sources = await self.db.get_epg_sources()
+        task_id = self.epg_tasks.epg_task_id(source["id"])
+
+        await self.db.delete_epg_source(source["id"])
+        await self.epg_tasks.reconcile_epg_automation_tasks(service, self.client)
+        self.assertNotIn(task_id, service.registry)
+        self.assertIsNone(await service.repository.get_config(task_id))
+
+        # This is an in-flight old snapshot arriving after the delete path has
+        # already reconciled.  The production reconciliation entry point must
+        # use its final per-source durable read before any projection mutation.
+        with mock.patch.object(
+            self.db,
+            "get_epg_sources",
+            new=mock.AsyncMock(return_value=stale_sources),
+        ):
+            await self.epg_tasks.reconcile_epg_automation_tasks(
+                service,
+                self.client,
+            )
+        self.assertNotIn(task_id, service.registry)
+        self.assertIsNone(await service.repository.get_config(task_id))
+
+    async def test_stale_revision_reconciles_latest_source_configuration(self):
+        source = await self._source(enabled=False)
+        service = self._service()
+        await self.epg_tasks.reconcile_epg_automation_tasks(service, self.client)
+        stale_sources = await self.db.get_epg_sources()
+        task_id = self.epg_tasks.epg_task_id(source["id"])
+        self.assertFalse((await service.repository.get_config(task_id)).enabled)
+
+        await self.db.update_epg_source(source["id"], enabled=1)
+        with mock.patch.object(
+            self.db,
+            "get_epg_sources",
+            new=mock.AsyncMock(return_value=stale_sources),
+        ):
+            await self.epg_tasks.reconcile_epg_automation_tasks(service, self.client)
+        current = await self.db.get_epg_source(source["id"])
+        self.assertGreater(current["revision"], stale_sources[0]["revision"])
+        self.assertTrue((await service.repository.get_config(task_id)).enabled)
+
+    async def test_stale_enabled_snapshot_cannot_reenable_disabled_source(self):
+        source = await self._source()
+        service = self._service()
+        await self.epg_tasks.reconcile_epg_automation_tasks(service, self.client)
+        stale_sources = await self.db.get_epg_sources()
+        task_id = self.epg_tasks.epg_task_id(source["id"])
+
+        await self.db.update_epg_source(source["id"], enabled=0)
+        with mock.patch.object(
+            self.db,
+            "get_epg_sources",
+            new=mock.AsyncMock(return_value=stale_sources),
+        ):
+            await self.epg_tasks.reconcile_epg_automation_tasks(service, self.client)
+        self.assertFalse((await service.repository.get_config(task_id)).enabled)
+
+    async def test_delete_and_reconcile_waits_for_inflight_projection(self):
+        source = await self._source()
+        service = self._service()
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        delete_started = asyncio.Event()
+        task_id = self.epg_tasks.epg_task_id(source["id"])
+        original_add = service.add_definition
+
+        async def blocked_add(definition):
+            entered.set()
+            await release.wait()
+            return await original_add(definition)
+
+        async def delete_and_reconcile():
+            delete_started.set()
+            await self.source_management.delete_custom_epg_source(source["id"])
+            return await self.epg_tasks.reconcile_epg_automation_tasks(
+                service,
+                self.client,
+            )
+
+        self.source_management = importlib.import_module("epg_source_management")
+        with mock.patch.object(service, "add_definition", new=blocked_add):
+            reconcile_task = asyncio.create_task(
+                self.epg_tasks.reconcile_epg_automation_tasks(service, self.client)
+            )
+            await entered.wait()
+            self.assertTrue(self.epg_tasks.EPG_RECONCILIATION_LOCK.locked())
+            delete_task = asyncio.create_task(delete_and_reconcile())
+            await delete_started.wait()
+            release.set()
+            await asyncio.gather(reconcile_task, delete_task)
+
+        self.assertIsNone(await self.db.get_epg_source(source["id"]))
+        self.assertNotIn(task_id, service.registry)
+        self.assertIsNone(await service.repository.get_config(task_id))
+
+    async def test_reconciliation_cancellation_drains_projection(self):
+        source = await self._source()
+        service = self._service()
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        original_add = service.add_definition
+
+        async def blocked_add(definition):
+            entered.set()
+            await release.wait()
+            return await original_add(definition)
+
+        with mock.patch.object(service, "add_definition", new=blocked_add):
+            reconcile_task = asyncio.create_task(
+                self.epg_tasks.reconcile_epg_automation_tasks(service, self.client)
+            )
+            await entered.wait()
+            reconcile_task.cancel()
+            release.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await reconcile_task
+
+        task_id = self.epg_tasks.epg_task_id(source["id"])
+        self.assertIn(task_id, service.registry)
+        self.assertIsNotNone(await service.repository.get_config(task_id))
+
+    async def test_failed_projection_retries_against_current_source(self):
+        source = await self._source()
+        service = self._service()
+        await self.epg_tasks.reconcile_epg_automation_tasks(service, self.client)
+        task_id = self.epg_tasks.epg_task_id(source["id"])
+        await self.db.update_epg_source(source["id"], enabled=0)
+        original_update = service.repository.update_config
+
+        with mock.patch.object(
+            service.repository,
+            "update_config",
+            new=mock.AsyncMock(side_effect=RuntimeError("injected projection failure")),
+        ):
+            reconciled = await self.epg_tasks.reconcile_epg_tasks_after_source_change(
+                service,
+                self.client,
+                source_id=source["id"],
+                operation="disable",
+            )
+        self.assertFalse(reconciled)
+        self.assertTrue((await service.repository.get_config(task_id)).enabled)
+
+        with mock.patch.object(
+            service.repository,
+            "update_config",
+            new=original_update,
+        ):
+            await self.epg_tasks.reconcile_epg_automation_tasks(service, self.client)
+        self.assertFalse((await service.repository.get_config(task_id)).enabled)
+
+    async def test_failed_deleted_projection_recovers_on_next_reconcile(self):
+        source = await self._source()
+        service = self._service()
+        await self.epg_tasks.reconcile_epg_automation_tasks(service, self.client)
+        task_id = self.epg_tasks.epg_task_id(source["id"])
+        await self.db.delete_epg_source(source["id"])
+        original_remove = service.remove_definition
+
+        with mock.patch.object(
+            service,
+            "remove_definition",
+            new=mock.AsyncMock(side_effect=RuntimeError("injected removal failure")),
+        ):
+            reconciled = await self.epg_tasks.reconcile_epg_tasks_after_source_change(
+                service,
+                self.client,
+                source_id=source["id"],
+                operation="delete",
+            )
+        self.assertFalse(reconciled)
+        self.assertIn(task_id, service.registry)
+        self.assertIsNotNone(await service.repository.get_config(task_id))
+
+        with mock.patch.object(service, "remove_definition", new=original_remove):
+            await self.epg_tasks.reconcile_epg_automation_tasks(service, self.client)
+        self.assertNotIn(task_id, service.registry)
+        self.assertIsNone(await service.repository.get_config(task_id))
+
     async def test_orphan_persisted_task_is_removed(self):
         service = self._service()
         task_id = self.epg_tasks.epg_task_id(999)
