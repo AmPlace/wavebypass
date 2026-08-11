@@ -1,4 +1,5 @@
 import asyncio
+import json
 import inspect
 import os
 import sys
@@ -55,13 +56,13 @@ class MarketRefreshResultsTest(unittest.IsolatedAsyncioTestCase):
         _clear_modules()
         self._tmpdir.cleanup()
 
-    async def _create_source(self, key, url, *, enabled=True, name=None):
+    async def _create_source(self, key, url, *, enabled=True, allow_private=False, name=None):
         source_id = await self.db.create_market_source(
             name=name or key,
             url=url,
             source_key=key,
             enabled=1 if enabled else 0,
-            allow_private=0,
+            allow_private=1 if allow_private else 0,
         )
         return await self.db.get_market_source(source_id)
 
@@ -199,6 +200,67 @@ class MarketRefreshResultsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(source_after["last_status"], "")
         self.assertEqual(source_after["last_error"], "")
         self.assertEqual(self.market._market_cache["packages"], [])
+
+    async def test_allow_private_revoke_invalidates_cache_and_rechecks_stale_package(self):
+        source = await self._create_source(
+            "source-private",
+            "https://private-policy.test/market.json",
+            allow_private=True,
+        )
+        package = {
+            "id": "source-private::pkg",
+            "original_id": "pkg",
+            "name": "Private package",
+            "kind": "playlist",
+            "version": "1.0.0",
+            "manifest_url": "manifest.json",
+            "market_url": source["url"],
+            "market_source": self.market._source_public(source),
+            "_manifest_loaded": False,
+            "_allow_private_fetch": True,
+        }
+        key = self.market._source_cache_key(source)
+        self.market._source_entries()[key] = {
+            "source_id": source["id"],
+            "source_url": source["url"],
+            "source_allow_private": True,
+            "fetch_allow_private": True,
+            "market": {"schema_version": 1},
+            "packages": [package],
+            "has_successful_cache": True,
+        }
+        self.market._rebuild_market_cache([source])
+        self.assertEqual([item["id"] for item in self.market._market_cache["packages"]], [package["id"]])
+
+        await self.market.update_source(source["id"], {"allow_private": False})
+
+        self.assertNotIn(key, self.market._source_entries())
+        self.assertEqual(self.market._market_cache["packages"], [])
+
+        manifest = {
+            "id": "pkg",
+            "kind": "playlist",
+            "version": "1.0.0",
+            "channel_sources": [
+                {"type": "inline_channels", "channels": []},
+            ],
+        }
+        with mock.patch.object(
+            self.market,
+            "safe_http_fetch",
+            new=mock.AsyncMock(return_value=(
+                "https://private-policy.test/manifest.json",
+                json.dumps(manifest),
+                {},
+            )),
+        ) as fetch:
+            stale_loaded = await self.market._resolve_package_manifest(package)
+
+        self.assertFalse(fetch.await_args.kwargs["allow_private"])
+        self.assertFalse(stale_loaded["_allow_private_fetch"])
+
+        await self.market.update_source(source["id"], {"allow_private": True})
+        self.assertTrue(await self.market._package_allow_private(package))
 
     async def test_deleted_or_disabled_source_discards_late_result(self):
         for mutation in ("delete", "disable"):

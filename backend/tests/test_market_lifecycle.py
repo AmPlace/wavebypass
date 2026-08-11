@@ -478,6 +478,58 @@ class MarketLifecycleTest(unittest.IsolatedAsyncioTestCase):
             [(row["id"], row["name"], row["url"]) for row in rows_before],
         )
 
+    async def test_update_aborts_after_uninstall_commits_during_preflight(self):
+        initial = [{"name": "A", "url": "https://a.test/live.m3u8", "source_type": "hls"}]
+        await self.market.import_package("pkg", preview_id=self._set_preview(initial, version="1.0.0"))
+
+        preflight_entered = asyncio.Event()
+        release_preflight = asyncio.Event()
+        original_get_install = self.db.get_market_install
+        first_call = True
+
+        async def gated_get_install(package_id):
+            nonlocal first_call
+            install = await original_get_install(package_id)
+            if first_call:
+                first_call = False
+                preflight_entered.set()
+                await release_preflight.wait()
+            return install
+
+        with mock.patch.object(self.db, "get_market_install", side_effect=gated_get_install):
+            pending_update = asyncio.create_task(self.market.update_installed_package("pkg"))
+            await preflight_entered.wait()
+
+            uninstall = await self.market.uninstall_package("pkg")
+            self.assertTrue(uninstall["uninstalled"])
+
+            release_preflight.set()
+            with self.assertRaisesRegex(self.market.MarketError, "安装状态已变化"):
+                await pending_update
+
+        self.assertIsNone(await self.db.get_market_install("pkg"))
+
+    async def test_update_installed_package_revalidates_and_applies_normal_update(self):
+        initial = [{"name": "A", "url": "https://a.test/live.m3u8", "source_type": "hls"}]
+        await self.market.import_package("pkg", preview_id=self._set_preview(initial, version="1.0.0"))
+
+        updated = [{"name": "B", "url": "https://b.test/live.m3u8", "source_type": "hls"}]
+        self._set_preview(updated, version="1.1.0")
+        with mock.patch.object(
+            self.market,
+            "build_preview",
+            new=mock.AsyncMock(return_value={"preview_id": "preview"}),
+        ):
+            result = await self.market.update_installed_package("pkg")
+
+        self.assertEqual(result["channel_count"], 1)
+        install = await self.db.get_market_install("pkg")
+        self.assertEqual(install["installed_version"], "1.1.0")
+        self.assertEqual(
+            [row["url"] for row in await self.db.get_channels(result["subscription_id"])],
+            ["https://b.test/live.m3u8"],
+        )
+
     async def test_atomic_update_rolls_back_when_failure_occurs_after_channel_sync(self):
         initial = [{"name": "A", "url": "https://a.test/live.m3u8", "source_type": "hls"}]
         installed = await self.market.import_package("pkg", preview_id=self._set_preview(initial))

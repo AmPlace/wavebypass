@@ -31,7 +31,12 @@ async def create_admin_user(username: str, password_hash: str) -> dict[str, Any]
     def _create() -> dict[str, Any]:
         conn = _connect()
         try:
+            # Serialize the first-admin check with the insert at the database
+            # boundary.  An asyncio lock would not protect another worker or
+            # process using the same SQLite database.
+            conn.execute("BEGIN IMMEDIATE")
             if conn.execute("SELECT 1 FROM users WHERE role='admin' LIMIT 1").fetchone():
+                conn.rollback()
                 raise ValueError("管理员已初始化")
             now = _now_iso()
             cur = conn.execute(
@@ -44,6 +49,8 @@ async def create_admin_user(username: str, password_hash: str) -> dict[str, Any]
             conn.commit()
             return {"id": cur.lastrowid, "username": username, "role": "admin"}
         finally:
+            if conn.in_transaction:
+                conn.rollback()
             conn.close()
     return await asyncio.to_thread(_create)
 

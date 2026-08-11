@@ -382,6 +382,11 @@ def _source_fetch_revision(source: dict | None) -> tuple[int, str, bool, bool]:
     )
 
 
+def _source_allow_private(source: dict | None) -> bool:
+    source = source or {}
+    return bool(source.get("allow_private") or ALLOW_PRIVATE_MARKET_URLS)
+
+
 def _source_revision_value(source: dict | None) -> str:
     source_id, url, enabled, allow_private = _source_fetch_revision(source)
     return json.dumps(
@@ -414,6 +419,12 @@ def _sanitize_refresh_error(value: Any) -> str:
 
 def _has_successful_source_cache(entry: dict | None, source: dict) -> bool:
     if not entry or str(entry.get("source_url") or "") != str(source.get("url") or ""):
+        return False
+    cached_source_allow_private = entry.get("source_allow_private")
+    if cached_source_allow_private is not None and bool(cached_source_allow_private) != bool(source.get("allow_private")):
+        return False
+    cached_fetch_allow_private = entry.get("fetch_allow_private")
+    if cached_fetch_allow_private is not None and bool(cached_fetch_allow_private) != _source_allow_private(source):
         return False
     if entry.get("has_successful_cache") is False:
         return False
@@ -512,7 +523,19 @@ def _rebuild_market_cache(sources: list[dict], *, extra_errors: list[str] | None
     for key in list(entries):
         source = active_by_key.get(key)
         entry = entries.get(key) or {}
-        if not source or str(entry.get("source_url") or "") != str(source.get("url") or ""):
+        cached_source_allow_private = entry.get("source_allow_private")
+        if cached_source_allow_private is None:
+            cached_source_allow_private = any(
+                bool(item.get("_allow_private_fetch"))
+                for item in entry.get("packages") or []
+                if isinstance(item, dict)
+            )
+        if (
+            not source
+            or str(entry.get("source_url") or "") != str(source.get("url") or "")
+            or bool(cached_source_allow_private) != bool(source.get("allow_private"))
+            or bool(entry.get("fetch_allow_private", cached_source_allow_private)) != _source_allow_private(source)
+        ):
             entries.pop(key, None)
 
     markets: list[dict] = []
@@ -598,6 +621,7 @@ async def update_source(source_id: int, data: dict) -> dict:
     invalidate = (
         str(updated.get("url") or "") != str(source.get("url") or "")
         or not bool(updated.get("enabled"))
+        or bool(updated.get("allow_private")) != bool(source.get("allow_private"))
     )
     await _sync_source_cache_after_mutation(source_id, invalidate=invalidate)
     return _source_public(updated)
@@ -818,7 +842,7 @@ async def _resolve_package_manifest(package: dict) -> dict:
         return package
 
     manifest_url = urljoin(str(package.get("market_url") or ""), str(package.get("manifest_url") or ""))
-    allow_private = bool(package.get("_allow_private_fetch") or ALLOW_PRIVATE_MARKET_URLS)
+    allow_private = await _package_allow_private(package)
     final_url, text, _headers = await safe_http_fetch(manifest_url, allow_private=allow_private)
     try:
         manifest = json.loads(text)
@@ -841,12 +865,44 @@ async def _resolve_package_manifest(package: dict) -> dict:
     return loaded
 
 
+async def _package_allow_private(package: dict) -> bool:
+    """Resolve private-fetch authority from the current durable source policy.
+
+    The package cache is only a hint.  A source permission can be revoked
+    while a stale package object is still being resolved, so the final
+    decision must consult the current source row before any network fetch.
+    """
+    market_source = package.get("market_source") or {}
+    source = None
+    source_id = market_source.get("id")
+    if source_id is not None:
+        try:
+            source = await db.get_market_source(int(source_id))
+        except (TypeError, ValueError):
+            source = None
+    if source is None:
+        source_key = str(market_source.get("source_key") or "").strip()
+        if source_key:
+            source = await db.get_market_source_by_key(source_key)
+    if source is not None:
+        if not bool(source.get("enabled", 1)):
+            return False
+        return _source_allow_private(source)
+    if source_id is not None or str(market_source.get("source_key") or "").strip():
+        # A package carrying a durable source identity must not fall back to
+        # its stale cached permission after that source is deleted.
+        return False
+    if ALLOW_PRIVATE_MARKET_URLS:
+        return True
+    return bool(package.get("_allow_private_fetch"))
+
+
 async def _load_source_packages(source: dict) -> tuple[dict, list[dict]]:
     url = str(source.get("url") or "").strip()
     if not url:
         raise MarketError("Market 源 URL 不能为空", 400)
 
-    allow_private = bool(source.get("allow_private") or ALLOW_PRIVATE_MARKET_URLS)
+    allow_private = _source_allow_private(source)
     try:
         final_url, text, _headers = await safe_http_fetch(url, allow_private=allow_private)
     except Exception:
@@ -1032,6 +1088,8 @@ async def refresh_market(
                     cached = {
                         "source_id": source.get("id"),
                         "source_url": source.get("url", ""),
+                        "source_allow_private": bool(source.get("allow_private")),
+                        "fetch_allow_private": _source_allow_private(source),
                         "market": {},
                         "packages": [],
                         "fetched_at": time.time(),
@@ -1068,6 +1126,8 @@ async def refresh_market(
             entries[key] = {
                 "source_id": source.get("id"),
                 "source_url": source.get("url", ""),
+                "source_allow_private": bool(source.get("allow_private")),
+                "fetch_allow_private": _source_allow_private(source),
                 "market": market,
                 "packages": source_packages,
                 "fetched_at": success_at,
@@ -1423,10 +1483,27 @@ async def update_install_config(package_id: str, *, auto_update: bool | None = N
 
 
 async def update_installed_package(package_id: str) -> dict:
-    installed = await db.get_market_install(package_id)
-    if not installed:
+    preflight = await db.get_market_install(package_id)
+    if not preflight:
         raise MarketError("Market 包尚未安装", 404)
-    return await import_package(package_id, reinstall=True)
+
+    # The snapshot is only a preflight hint.  Re-read the durable install
+    # record after acquiring the same lifecycle lock used by uninstall and
+    # compare its durable generation before allowing reinstall=True.
+    lock = _package_update_locks.setdefault(package_id, asyncio.Lock())
+    async with lock:
+        installed = await db.get_market_install(package_id)
+        if not installed:
+            raise MarketError("Market 包安装状态已变化，更新已中止", 409)
+        if (
+            str(installed.get("installed_at") or "") != str(preflight.get("installed_at") or "")
+            or str(installed.get("installed_subscription_id") or "") != str(
+                preflight.get("installed_subscription_id") or ""
+            )
+            or str(installed.get("installed_version") or "") != str(preflight.get("installed_version") or "")
+        ):
+            raise MarketError("Market 包安装状态已变化，更新已中止", 409)
+        return await _import_package_locked(package_id, reinstall=True)
 
 
 async def run_installed_updates(auto_update_only: bool = False) -> dict:
@@ -1617,7 +1694,7 @@ async def _channels_from_inline(source: dict, package: dict) -> tuple[list[dict]
     warnings: list[str] = []
     channels = list(source.get("channels") or [])
     channels_url = str(source.get("channels_url") or "").strip()
-    allow_private = bool(package.get("_allow_private_fetch") or ALLOW_PRIVATE_MARKET_URLS)
+    allow_private = await _package_allow_private(package)
     if channels_url:
         headers = _clean_headers(source.get("headers") or {})
         final_url, text, _headers = await safe_http_fetch(
@@ -1645,7 +1722,7 @@ async def _channels_from_playlist(source: dict, package: dict) -> tuple[list[dic
     final_url, text, _resp_headers = await safe_http_fetch(
         url,
         headers=headers,
-        allow_private=bool(package.get("_allow_private_fetch") or ALLOW_PRIVATE_MARKET_URLS),
+        allow_private=await _package_allow_private(package),
     )
     channels = parse_m3u(text)
     warnings = [f"已解析动态订阅: {final_url}"]

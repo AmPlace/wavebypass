@@ -16,6 +16,7 @@ class SecuritySettingsLayeringTest(unittest.TestCase):
             if (
                 mod == "database"
                 or mod == "security"
+                or mod == "routers.setup"
                 or mod.startswith("security.")
                 or mod.startswith("core.config")
                 or mod.startswith("core.settings_service")
@@ -31,6 +32,7 @@ class SecuritySettingsLayeringTest(unittest.TestCase):
             if (
                 mod == "database"
                 or mod == "security"
+                or mod == "routers.setup"
                 or mod.startswith("security.")
                 or mod.startswith("core.config")
                 or mod.startswith("core.settings_service")
@@ -108,6 +110,47 @@ class SecuritySettingsLayeringTest(unittest.TestCase):
             self.assertIsNone(revoked)
 
         self._run(go())
+
+    def test_concurrent_setup_creates_one_admin_and_returns_conflict_to_loser(self):
+        import database as db
+        from fastapi import HTTPException, Response
+        from routers.setup import InitializeRequest, initialize_admin
+
+        async def initialize(username):
+            try:
+                result = await initialize_admin(
+                    InitializeRequest(username=username, password="password-123"),
+                    Response(),
+                )
+                return ("ok", result["user"]["username"])
+            except HTTPException as exc:
+                return ("error", exc.status_code)
+
+        async def count_admins():
+            conn = db._connect()
+            try:
+                rows = conn.execute(
+                    "SELECT username FROM users WHERE role='admin' ORDER BY id"
+                ).fetchall()
+                return [row["username"] for row in rows]
+            finally:
+                conn.close()
+
+        async def go():
+            await db.initialize()
+            results = await asyncio.gather(
+                initialize("admin-one"),
+                initialize("admin-two"),
+            )
+            admins = await count_admins()
+            return results, admins
+
+        results, admins = self._run(go())
+
+        self.assertEqual(sorted(item[0] for item in results), ["error", "ok"])
+        self.assertEqual([item[1] for item in results if item[0] == "error"], [409])
+        self.assertEqual(len(admins), 1)
+        self.assertIn(admins[0], {"admin-one", "admin-two"})
 
 
 if __name__ == "__main__":
