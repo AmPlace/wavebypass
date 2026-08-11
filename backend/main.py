@@ -1593,10 +1593,15 @@ async def add_subscription(request: Request):
         title = _guess_sub_title(url, channels)
 
     try:
-        sub_id = await db.add_subscription(title=title, url=url, channel_count=len(channels), custom_ua=custom_ua, force_proxy=force_proxy)
+        sub_id = await db.add_subscription_with_channels(
+            title=title,
+            url=url,
+            channels=channels,
+            custom_ua=custom_ua,
+            force_proxy=force_proxy,
+        )
     except db.DuplicateSubscriptionError as exc:
         raise HTTPException(status_code=409, detail="订阅源已存在") from exc
-    await db.add_channels_bulk(sub_id, channels)
     await _run_epg_preference_maintenance(sub_id, document.epg_url_hints)
     await _run_channel_binding_maintenance('subscription_add')
     # 频道数据变更后失效 Cover 缓存
@@ -1650,8 +1655,7 @@ async def _refresh_regular_subscription(sub: dict) -> dict:
             status_code=502,
             detail="刷新结果未解析到任何频道，已保留旧数据",
         )
-    await db.add_channels_bulk(sub['id'], channels)
-    await db.update_subscription(sub['id'], valid=1, channel_count=len(channels))
+    await db.replace_subscription_channels_atomic(sub['id'], channels, valid=1)
     await _run_epg_preference_maintenance(sub['id'], document.epg_url_hints)
     await _run_channel_binding_maintenance('subscription_refresh')
     # 频道数据变更后失效 Cover 缓存

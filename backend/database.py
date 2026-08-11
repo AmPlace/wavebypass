@@ -1700,6 +1700,68 @@ async def add_channels_bulk(sub_id: int, channels: list[dict]):
     await asyncio.to_thread(_add)
 
 
+async def add_subscription_with_channels(
+    *,
+    title: str,
+    url: str,
+    channels: list[dict],
+    custom_ua: str = '',
+    force_proxy: int = 0,
+) -> int:
+    """Create a subscription and its channels in one durable transaction."""
+    prepared = _prepare_channels(channels)
+
+    def _add():
+        conn = _connect()
+        try:
+            with conn:
+                now = datetime.now(timezone.utc).isoformat()
+                cursor = conn.execute(
+                    """
+                    INSERT INTO subscriptions(
+                        title, url, channel_count, created_at, custom_ua, force_proxy
+                    ) VALUES(?, ?, ?, ?, ?, ?)
+                    """,
+                    (title, url, len(prepared), now, custom_ua, force_proxy),
+                )
+                sub_id = int(cursor.lastrowid)
+                _sync_channels_conn(conn, sub_id, prepared)
+                return sub_id
+        except sqlite3.IntegrityError as exc:
+            if 'subscriptions.url' in str(exc):
+                raise DuplicateSubscriptionError(url) from exc
+            raise
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_add)
+
+
+async def replace_subscription_channels_atomic(
+    sub_id: int,
+    channels: list[dict],
+    *,
+    valid: int | None = None,
+) -> None:
+    """Replace channels and subscription refresh metadata atomically."""
+    prepared = _prepare_channels(channels)
+
+    def _replace():
+        conn = _connect()
+        try:
+            with conn:
+                _sync_channels_conn(conn, sub_id, prepared)
+                if valid is not None:
+                    conn.execute(
+                        "UPDATE subscriptions SET valid=? WHERE id=?",
+                        (valid, sub_id),
+                    )
+        finally:
+            conn.close()
+
+    await asyncio.to_thread(_replace)
+
+
 async def install_market_package_atomic(
     *,
     package_id: str,
