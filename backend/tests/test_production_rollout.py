@@ -419,6 +419,45 @@ class ProductionRolloutTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(subsystem.provider_resolver.mode("jstv"), "legacy")
         self.assertTrue(subsystem.provider_resolver.is_available("jstv"))
 
+    async def test_failed_plugin_preflight_reprojects_durable_legacy_immediately(self):
+        subsystem = await self._subsystem()
+        await subsystem.startup()
+        await subsystem.set_ownership("jstv", "legacy")
+        await subsystem.disable("org.waveflow/jstv")
+
+        with self.assertRaises(Exception) as blocked:
+            await subsystem.set_ownership("jstv", "plugin", "org.waveflow/jstv")
+        self.assertIn(blocked.exception.code, {"PLUGIN_UNAVAILABLE", "SCHEME_UNOWNED"})
+        owner = next(row for row in await self.db.list_plugin_scheme_ownership()
+                     if row["scheme"] == "jstv")
+        self.assertEqual((owner["mode"], owner["plugin_identity"]), ("legacy", ""))
+        self.assertEqual(subsystem.provider_resolver.mode("jstv"), "legacy")
+        self.assertTrue(subsystem.provider_resolver.is_available("jstv"))
+        resolved = await subsystem.provider_resolver.resolve("jstv://jsws", self.client)
+        self.assertEqual(resolved["url"], "https://legacy.example/live.m3u8")
+        self.legacy.assert_awaited_once()
+
+    async def test_failed_plugin_preflight_keeps_durable_plugin_explicitly_unavailable(self):
+        subsystem = await self._subsystem()
+        await subsystem.startup()
+        instance = subsystem.service.runtime.registry.route("jstv")
+        instance.process.process.kill()
+        await instance.process._wait_task
+        await self._wait_reconciliation(subsystem)
+
+        with self.assertRaises(Exception):
+            await subsystem.set_ownership("jstv", "plugin", "org.waveflow/jstv")
+        owner = next(row for row in await self.db.list_plugin_scheme_ownership()
+                     if row["scheme"] == "jstv")
+        self.assertEqual((owner["mode"], owner["plugin_identity"]),
+                         ("plugin", "org.waveflow/jstv"))
+        self.assertEqual(subsystem.provider_resolver.mode("jstv"), "plugin")
+        self.assertFalse(subsystem.provider_resolver.is_available("jstv"))
+        with self.assertRaises(Exception) as unavailable:
+            await subsystem.provider_resolver.resolve("jstv://jsws", self.client)
+        self.assertEqual(unavailable.exception.code, "PLUGIN_UNAVAILABLE")
+        self.legacy.assert_not_awaited()
+
     async def test_ownership_commit_then_error_reloads_durable_desired_state(self):
         subsystem = await self._subsystem()
         await subsystem.startup()
@@ -476,6 +515,37 @@ class ProductionRolloutTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(subsystem.provider_resolver.mode("jstv"), "plugin")
         self.assertTrue(subsystem.provider_resolver.is_available("jstv"))
         await subsystem.set_ownership("jstv", "legacy")
+
+    async def test_cancelled_caller_observes_sanitized_critical_task_failure_in_logs(self):
+        subsystem = await self._subsystem()
+        await subsystem.startup()
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        original = subsystem._set_ownership_serialized
+
+        async def fail_after_caller_leaves(*_args, **_kwargs):
+            entered.set()
+            await release.wait()
+            raise RuntimeError("/private/secret/path")
+
+        subsystem._set_ownership_serialized = fail_after_caller_leaves
+        try:
+            with self.assertLogs("plugin_production", level="ERROR") as captured:
+                caller = asyncio.create_task(subsystem.set_ownership("jstv", "legacy"))
+                await entered.wait()
+                caller.cancel()
+                await asyncio.sleep(0)
+                release.set()
+                with self.assertRaises(asyncio.CancelledError):
+                    await caller
+                await asyncio.sleep(0)
+            self.assertTrue(any("operation=ownership_transition" in value for value in captured.output))
+            self.assertTrue(any("target=jstv" in value for value in captured.output))
+            self.assertTrue(any("reconciliation_scheduled=false" in value for value in captured.output))
+            self.assertFalse(any("/private/secret/path" in value for value in captured.output))
+        finally:
+            release.set()
+            subsystem._set_ownership_serialized = original
 
     async def test_crash_restart_converges_runtime_database_settings_and_resolver(self):
         subsystem = await self._subsystem()

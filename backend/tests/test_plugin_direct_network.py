@@ -75,6 +75,50 @@ class DirectNetworkPermissionTest(unittest.IsolatedAsyncioTestCase):
             "plugin_manifest": manifest, "artifact_references": [{"sha256": digest, "local_path": str(FIXTURE)}],
             "market_source": {"source_key": "official"}}
 
+    async def _production_subsystem(self):
+        from plugin_production import ProductionPluginSubsystem
+        from provider_resolver import ProviderResolver
+
+        package = self.package()
+        await self.service.approve_permission(IDENTITY, [package], "network.direct", "test-admin")
+        await self.service.install_from_packages([package], IDENTITY)
+        return ProductionPluginSubsystem(
+            self.service, self.service.trust_policy, Path(self.tmp.name) / "downloads", None,
+            ProviderResolver(runtime=self.runtime), object(),
+        )
+
+    async def _crash_with_pending_restart(self, subsystem):
+        instance = self.service._active[IDENTITY]
+        instance.process.process.kill()
+        await instance.process._wait_task
+        for task in tuple(subsystem._lifecycle_reconcile_tasks.values()):
+            await asyncio.shield(task)
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def paused_backoff(_delay):
+            entered.set()
+            await release.wait()
+
+        self.runtime.sleep = paused_backoff
+        restart = asyncio.create_task(self.runtime.restart(instance))
+        await entered.wait()
+        return instance, restart, release
+
+    async def _wait_reconciliation(self, subsystem):
+        for _ in range(20):
+            pending = [
+                task for task in [
+                    *subsystem._lifecycle_reconcile_tasks.values(),
+                    *subsystem._ownership_reconcile_tasks.values(),
+                ] if not task.done()
+            ]
+            if not pending:
+                await asyncio.sleep(0)
+                return
+            await asyncio.gather(*(asyncio.shield(task) for task in pending))
+        self.fail("Plugin reconciliation did not finish")
+
     async def test_install_gate_approval_revoke_enable_and_recovery(self):
         from plugin_runtime import PluginError
         package = self.package()
@@ -100,6 +144,86 @@ class DirectNetworkPermissionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.service.recover_enabled())[0]["status"], "unavailable")
         await self.service.approve_permission(IDENTITY, [package], "network.direct", "test-admin")
         self.assertEqual((await self.service.enable(IDENTITY))["lifecycle_state"], "active")
+
+    async def test_pending_restart_cannot_bypass_permission_revoke(self):
+        from plugin_runtime import PluginError
+
+        subsystem = await self._production_subsystem()
+        _instance, restart, release = await self._crash_with_pending_restart(subsystem)
+        await subsystem.revoke_permission(IDENTITY, "network.direct", "test-admin")
+        release.set()
+        with self.assertRaises(PluginError):
+            await restart
+        with self.assertRaises(PluginError):
+            self.runtime.registry.route("direct-fixture")
+        approvals = await self.db.list_plugin_permission_approvals()
+        direct = next(row for row in approvals if row["permission_name"] == "network.direct")
+        self.assertFalse(direct["approved"])
+        self.assertNotIn(IDENTITY, self.service._active)
+
+    async def test_raw_runtime_enable_cannot_bypass_production_activation_authority(self):
+        from plugin_runtime import LifecycleState, PluginError
+
+        await self._production_subsystem()
+        active = self.service._active[IDENTITY]
+        rogue = self.runtime.install(
+            active.manifest,
+            self.runtime._commands[active.instance_id],
+            working_directory=self.runtime._execution[active.instance_id][1],
+        )
+        with self.assertRaises(PluginError) as denied:
+            await self.runtime.enable(rogue)
+        self.assertEqual(denied.exception.code, "PLUGIN_UNAVAILABLE")
+        self.assertEqual(rogue.state, LifecycleState.INSTALLED_DISABLED)
+        self.assertIs(self.runtime.registry.route("direct-fixture"), active)
+        await self.runtime.uninstall(rogue)
+
+    async def test_pending_restart_cannot_bypass_disable(self):
+        from plugin_runtime import PluginError
+
+        subsystem = await self._production_subsystem()
+        _instance, restart, release = await self._crash_with_pending_restart(subsystem)
+        await subsystem.disable(IDENTITY)
+        release.set()
+        with self.assertRaises(PluginError):
+            await restart
+        row = await self.db.get_plugin_installation("org.waveflow", "fixture-multi-provider")
+        self.assertEqual((row["enabled"], row["lifecycle_state"]), (0, "disabled"))
+        with self.assertRaises(PluginError):
+            self.runtime.registry.route("direct-fixture")
+
+    async def test_pending_restart_cannot_bypass_uninstall(self):
+        from plugin_runtime import PluginError
+
+        subsystem = await self._production_subsystem()
+        _instance, restart, release = await self._crash_with_pending_restart(subsystem)
+        self.assertTrue(await subsystem.uninstall(IDENTITY))
+        release.set()
+        with self.assertRaises(PluginError):
+            await restart
+        self.assertIsNone(await self.db.get_plugin_installation("org.waveflow", "fixture-multi-provider"))
+        with self.assertRaises(PluginError):
+            self.runtime.registry.route("direct-fixture")
+
+    async def test_approved_restart_converges_database_settings_and_plugin_resolver(self):
+        import importlib
+
+        subsystem = await self._production_subsystem()
+        await subsystem.set_ownership("direct-fixture", "plugin", IDENTITY)
+        _instance, restart, release = await self._crash_with_pending_restart(subsystem)
+        release.set()
+        await restart
+        await self._wait_reconciliation(subsystem)
+        row = await self.db.get_plugin_installation("org.waveflow", "fixture-multi-provider")
+        projection = await importlib.import_module("routers.plugins")._plugin_projection(
+            row, runtime=self.runtime,
+        )
+        self.assertEqual((row["lifecycle_state"], row["last_error"]), ("active", ""))
+        self.assertTrue(projection["runtime_available"])
+        self.assertTrue(subsystem.provider_resolver.is_available("direct-fixture"))
+        resolved = await subsystem.provider_resolver.resolve("direct-fixture://fixture", None)
+        self.assertEqual(resolved["stream_descriptor_version"], "1.0")
+        await subsystem.set_ownership("direct-fixture", "legacy")
 
     async def test_update_permission_escalation_keeps_old_active_and_reduction_is_allowed(self):
         v1 = self.package("1.0.0", direct=False)

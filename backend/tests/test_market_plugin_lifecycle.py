@@ -308,6 +308,93 @@ class MarketPluginLifecycleTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["active_version"], "1.1.0")
         self.assertEqual(self.runtime.registry.route("fixture-a").manifest.version, "1.1.0")
 
+    async def test_post_commit_cancellation_converges_forward_and_keeps_artifact(self):
+        from plugin_production import ProductionPluginSubsystem
+        from provider_resolver import ProviderResolver
+
+        identity = "org.waveflow/fixture-multi-provider"
+        await self.service.install_from_packages([self.package("1.0.0")], identity)
+        subsystem = ProductionPluginSubsystem(
+            service=self.service,
+            trust_policy=self.service.trust_policy,
+            download_root=Path(self.tmp.name) / "downloads",
+            http_client=None,
+            provider_resolver=ProviderResolver(runtime=self.runtime),
+            capability_gateway=object(),
+        )
+        await subsystem.set_ownership("fixture-a", "plugin", identity)
+        original_activate = self.db.activate_plugin_candidate
+        committed = asyncio.Event()
+        release = asyncio.Event()
+
+        async def commit_then_pause(**kwargs):
+            result = await original_activate(**kwargs)
+            committed.set()
+            await release.wait()
+            return result
+
+        with mock.patch.object(self.db, "activate_plugin_candidate", new=commit_then_pause):
+            update = asyncio.create_task(
+                self.service.install_from_packages([self.package("2.0.0")], identity),
+            )
+            await committed.wait()
+            update.cancel()
+            update.cancel()
+            await asyncio.sleep(0)
+            self.assertFalse(update.done())
+            release.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await update
+
+        row = await self.db.get_plugin_installation("org.waveflow", "fixture-multi-provider")
+        self.assertEqual((row["active_version"], row["candidate_version"]), ("2.0.0", ""))
+        self.assertEqual(self.runtime.registry.route("fixture-a").manifest.version, "2.0.0")
+        self.assertEqual(self.service._active[identity].manifest.version, "2.0.0")
+        self.assertTrue(Path(row["artifact_path"]).is_file())
+        owner = next(item for item in await self.db.list_plugin_scheme_ownership()
+                     if item["scheme"] == "fixture-a")
+        self.assertEqual((owner["mode"], owner["plugin_identity"]), ("plugin", identity))
+        self.assertTrue(subsystem.provider_resolver.is_available("fixture-a"))
+        await subsystem.set_ownership("fixture-a", "legacy")
+
+    async def test_post_commit_projection_failure_reconciles_without_candidate_cleanup(self):
+        identity = "org.waveflow/fixture-multi-provider"
+        await self.service.install_from_packages([self.package("1.0.0")], identity)
+        original_projection = self.service._project_committed_activation
+        attempts = 0
+
+        async def fail_once(plugin_identity, instance):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError("projection fault")
+            return await original_projection(plugin_identity, instance)
+
+        with mock.patch.object(self.service, "_project_committed_activation", new=fail_once):
+            result = await self.service.install_from_packages([self.package("2.0.0")], identity)
+        row = await self.db.get_plugin_installation("org.waveflow", "fixture-multi-provider")
+        self.assertEqual(result["active_version"], "2.0.0")
+        self.assertGreaterEqual(attempts, 2)
+        self.assertEqual(self.runtime.registry.route("fixture-a").manifest.version, "2.0.0")
+        self.assertEqual(self.service._active[identity].manifest.version, "2.0.0")
+        self.assertTrue(Path(row["artifact_path"]).is_file())
+
+    async def test_commit_then_repository_error_uses_durable_activation_boundary(self):
+        identity = "org.waveflow/fixture-multi-provider"
+        await self.service.install_from_packages([self.package("1.0.0")], identity)
+        original_activate = self.db.activate_plugin_candidate
+
+        async def commit_then_error(**kwargs):
+            await original_activate(**kwargs)
+            raise RuntimeError("repository return fault")
+
+        with mock.patch.object(self.db, "activate_plugin_candidate", new=commit_then_error):
+            result = await self.service.install_from_packages([self.package("2.0.0")], identity)
+        row = await self.db.get_plugin_installation("org.waveflow", "fixture-multi-provider")
+        self.assertEqual(result["active_version"], "2.0.0")
+        self.assertEqual(self.runtime.registry.route("fixture-a").manifest.version, "2.0.0")
+        self.assertTrue(Path(row["artifact_path"]).is_file())
+
     async def test_plugin_owned_update_failure_keeps_canonical_owner_and_old_runtime(self):
         from plugin_production import ProductionPluginSubsystem
         from provider_resolver import ProviderResolver

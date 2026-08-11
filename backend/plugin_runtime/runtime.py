@@ -5,7 +5,8 @@ import logging
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
-from typing import Any
+from contextlib import asynccontextmanager
+from typing import Any, AsyncContextManager
 
 from .errors import PluginError, invalid_response
 from .manifest import PluginManifest
@@ -24,7 +25,8 @@ class PluginRuntime:
                  sleep: Callable[[float], Awaitable[None]] | None = None,
                  restart_window: float = 600.0, max_starts: int = 3,
                  capability_dispatcher: Any | None = None,
-                 lifecycle_callback: Callable[[str, PluginInstance, int | None], Awaitable[None]] | None = None):
+                 lifecycle_callback: Callable[[str, PluginInstance, int | None], Awaitable[None]] | None = None,
+                 activation_context: Callable[[str, PluginInstance], AsyncContextManager[None]] | None = None):
         self.registry = registry or PluginRegistry()
         self.permission_policy = permission_policy or PermissionPolicy()
         self.clock = clock or time.monotonic
@@ -33,6 +35,7 @@ class PluginRuntime:
         self.max_starts = max_starts
         self.capability_dispatcher = capability_dispatcher
         self.lifecycle_callback = lifecycle_callback
+        self.activation_context = activation_context
         self._commands: dict[str, tuple[str, ...]] = {}
         self._execution: dict[str, tuple[dict[str, str] | None, str | None]] = {}
         self._gates: dict[str, PermissionGate] = {}
@@ -47,7 +50,25 @@ class PluginRuntime:
         self._gates[instance.instance_id] = PermissionGate(manifest, self.permission_policy)
         return instance
 
-    async def enable(self, instance: PluginInstance, *, activate: bool = True) -> None:
+    @asynccontextmanager
+    async def _activation_scope(self, operation: str, instance: PluginInstance):
+        if self.activation_context is None:
+            yield
+            return
+        async with self.activation_context(operation, instance):
+            yield
+
+    async def enable(
+        self, instance: PluginInstance, *, activate: bool = True,
+        activation_operation: str = "active_enable",
+    ) -> None:
+        if activate:
+            async with self._activation_scope(activation_operation, instance):
+                await self._enable_unchecked(instance, activate=True)
+            return
+        await self._enable_unchecked(instance, activate=False)
+
+    async def _enable_unchecked(self, instance: PluginInstance, *, activate: bool) -> None:
         if self._closed:
             raise PluginError("PLUGIN_UNAVAILABLE", "Plugin runtime is shutting down", category="lifecycle")
         if instance.state == LifecycleState.QUARANTINED:
@@ -187,7 +208,7 @@ class PluginRuntime:
             self.registry.unregister(instance)
             raise PluginError("PLUGIN_QUARANTINED", "Plugin restart limit exceeded", category="lifecycle")
         await self.sleep(2 ** max(0, len(instance.start_attempts) - 1))
-        await self.enable(instance)
+        await self.enable(instance, activation_operation="restart")
 
     async def activate_candidate(
         self,
@@ -198,26 +219,27 @@ class PluginRuntime:
     ) -> None:
         if old.state != LifecycleState.HEALTHY_ACTIVE:
             raise PluginError("PLUGIN_UNAVAILABLE", "Old plugin is not active", category="lifecycle")
-        try:
-            await self.enable(candidate, activate=False)
-            self.registry.replace(old, candidate)
-            if commit:
-                try:
-                    await commit()
-                except BaseException:
-                    self.registry.rollback_replace(old, candidate)
-                    candidate.transition(LifecycleState.STOPPING)
-                    if candidate.process:
-                        await candidate.process.stop(graceful=False)
-                    candidate.transition(LifecycleState.INSTALLED_DISABLED)
-                    raise
-            await self._emit_lifecycle("healthy_active", candidate)
-        except BaseException:
-            if candidate.process:
-                await candidate.process.stop(graceful=False)
-            if candidate.state in {LifecycleState.STARTING, LifecycleState.HANDSHAKING}:
-                self.registry.mark_unhealthy(candidate)
-            raise
+        async with self._activation_scope("candidate_activation", candidate):
+            try:
+                await self.enable(candidate, activate=False)
+                self.registry.replace(old, candidate)
+                if commit:
+                    try:
+                        await commit()
+                    except BaseException:
+                        self.registry.rollback_replace(old, candidate)
+                        candidate.transition(LifecycleState.STOPPING)
+                        if candidate.process:
+                            await candidate.process.stop(graceful=False)
+                        candidate.transition(LifecycleState.INSTALLED_DISABLED)
+                        raise
+                await self._emit_lifecycle("healthy_active", candidate)
+            except BaseException:
+                if candidate.process:
+                    await candidate.process.stop(graceful=False)
+                if candidate.state in {LifecycleState.STARTING, LifecycleState.HANDSHAKING}:
+                    self.registry.mark_unhealthy(candidate)
+                raise
         old.transition(LifecycleState.STOPPING)
         if old.process:
             try:

@@ -4,6 +4,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import logging
 import os
 import platform
 import shutil
@@ -11,7 +12,8 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Iterable, Sequence
+from contextlib import contextmanager
+from typing import Any, Awaitable, Callable, Iterable, Iterator, Sequence
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -26,6 +28,51 @@ from plugin_permissions import permission_projection, require_high_risk_approval
 PLUGIN_PACKAGE_TYPE = "plugin_package"
 CONTENT_PACKAGE_TYPE = "content_package"
 DEPENDENCY_STATES = frozenset({"ready", "dependency_missing", "plugin_incompatible", "provider_unavailable"})
+logger = logging.getLogger(__name__)
+
+
+class LifecycleLock:
+    """Task-reentrant lock used for one canonical Plugin lifecycle.
+
+    Runtime activation authorization re-enters the service lifecycle boundary
+    from the same task.  Other tasks still serialize on the underlying lock.
+    """
+
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._owner: asyncio.Task[Any] | None = None
+        self._depth = 0
+
+    async def acquire(self) -> bool:
+        current = asyncio.current_task()
+        if current is None:
+            raise RuntimeError("Plugin lifecycle lock requires an asyncio task")
+        if self._owner is current:
+            self._depth += 1
+            return True
+        await self._lock.acquire()
+        self._owner = current
+        self._depth = 1
+        return True
+
+    def release(self) -> None:
+        current = asyncio.current_task()
+        if self._owner is not current or self._depth <= 0:
+            raise RuntimeError("Plugin lifecycle lock released by non-owner")
+        self._depth -= 1
+        if self._depth == 0:
+            self._owner = None
+            self._lock.release()
+
+    def locked(self) -> bool:
+        return self._lock.locked()
+
+    async def __aenter__(self) -> "LifecycleLock":
+        await self.acquire()
+        return self
+
+    async def __aexit__(self, _type, _value, _traceback) -> None:
+        self.release()
 
 
 def _safe_error(error: BaseException) -> str:
@@ -337,19 +384,90 @@ class PluginMarketService:
         self.dependency_fetcher = dependency_fetcher
         self.runtime_command_factory = runtime_command_factory
         self._active: dict[str, PluginInstance] = {}
-        self._locks: dict[str, asyncio.Lock] = {}
+        self._locks: dict[str, LifecycleLock] = {}
         self._preparation_locks: dict[str, asyncio.Lock] = {}
+        self._critical_tasks: set[asyncio.Task[Any]] = set()
+        self._activation_expectations: dict[str, str] = {}
         self.destructive_guard: Callable[[str], Awaitable[None]] | None = None
         self.workspaces_root = self.store.root / "workspaces"
         self.workspaces_root.mkdir(parents=True, exist_ok=True)
 
-    def lifecycle_lock(self, identity: str) -> asyncio.Lock:
+    def lifecycle_lock(self, identity: str) -> LifecycleLock:
         """Return the process-wide lifecycle lock for one canonical Plugin."""
-        return self._locks.setdefault(str(identity), asyncio.Lock())
+        return self._locks.setdefault(str(identity), LifecycleLock())
 
     def preparation_lock(self, identity: str) -> asyncio.Lock:
         """Serialize filesystem preparation/removal without blocking lifecycle state changes."""
         return self._preparation_locks.setdefault(str(identity), asyncio.Lock())
+
+    def _track_critical(
+        self, task: asyncio.Task[Any], *, operation: str, identity: str,
+    ) -> asyncio.Task[Any]:
+        self._critical_tasks.add(task)
+
+        def done(value: asyncio.Task[Any]) -> None:
+            self._critical_tasks.discard(value)
+            if value.cancelled():
+                return
+            error = value.exception()
+            if error is not None and getattr(value, "_waveflow_log_failure", False):
+                logger.error(
+                    "Plugin critical lifecycle task failed: operation=%s plugin=%s "
+                    "error_type=%s error_code=%s reconciliation_scheduled=false",
+                    operation,
+                    identity,
+                    type(error).__name__,
+                    getattr(error, "code", "PLUGIN_LIFECYCLE_FAILED"),
+                )
+
+        task.add_done_callback(done)
+        return task
+
+    @staticmethod
+    async def _await_critical(task: asyncio.Task[Any]) -> Any:
+        """Wait for an independent lifecycle mutation before propagating cancellation."""
+        async def settle() -> None:
+            try:
+                await task
+            except BaseException:
+                return
+
+        settled = asyncio.create_task(settle(), name=f"settle:{task.get_name()}")
+        cancelled = False
+        while not settled.done():
+            try:
+                await asyncio.shield(settled)
+            except asyncio.CancelledError:
+                cancelled = True
+                setattr(task, "_waveflow_log_failure", True)
+                current = asyncio.current_task()
+                if current is not None:
+                    current.uncancel()
+        if cancelled:
+            raise asyncio.CancelledError
+        return task.result()
+
+    async def wait_for_critical_tasks(self) -> None:
+        while self._critical_tasks:
+            await asyncio.gather(
+                *(asyncio.shield(task) for task in tuple(self._critical_tasks)),
+                return_exceptions=True,
+            )
+
+    @contextmanager
+    def expect_activation(self, instance: PluginInstance, operation: str) -> Iterator[None]:
+        if instance.instance_id in self._activation_expectations:
+            raise PluginError(
+                "PLUGIN_UNAVAILABLE", "Plugin activation is already in progress", category="lifecycle",
+            )
+        self._activation_expectations[instance.instance_id] = operation
+        try:
+            yield
+        finally:
+            self._activation_expectations.pop(instance.instance_id, None)
+
+    def activation_expectation(self, instance: PluginInstance) -> str:
+        return self._activation_expectations.get(instance.instance_id, "")
 
     def _working_directory(self, manifest: PluginManifest, *, create: bool = True) -> Path:
         path = self.workspaces_root / self.store._part(manifest.publisher_id) / self.store._part(manifest.plugin_id)
@@ -423,17 +541,28 @@ class PluginMarketService:
         await require_high_risk_approvals(candidate.manifest)
         async with self.preparation_lock(identity):
             prepared = await self._prepare_candidate(candidate)
-            try:
-                async with self.lifecycle_lock(identity):
-                    # This is the authoritative permission check.  Preparation
-                    # deliberately happens outside the lifecycle lock, so a
-                    # concurrent revoke must be observed immediately before any
-                    # durable candidate/runtime activation is started.
-                    await require_high_risk_approvals(candidate.manifest)
-                    return await self._activate(prepared)
-            except BaseException:
-                await self._discard_prepared(prepared)
-                raise
+            task = self._track_critical(
+                asyncio.create_task(
+                    self._activate_prepared(prepared),
+                    name=f"plugin-activation:{identity}:{candidate.manifest.version}",
+                ),
+                operation="candidate_activation",
+                identity=identity,
+            )
+            return await self._await_critical(task)
+
+    async def _activate_prepared(self, prepared: PreparedPluginCandidate) -> dict:
+        candidate = prepared.candidate
+        try:
+            async with self.lifecycle_lock(candidate.identity):
+                # Preparation is intentionally outside the lifecycle lock.  The
+                # lock-local check is authoritative and the Runtime activation
+                # guard re-enters this same boundary immediately before spawn.
+                await require_high_risk_approvals(candidate.manifest)
+                return await self._activate(prepared)
+        except BaseException:
+            await self._discard_prepared(prepared)
+            raise
 
     async def _prepare_candidate(self, candidate: PluginCandidate) -> PreparedPluginCandidate:
         staged: Path | None = None
@@ -494,7 +623,7 @@ class PluginMarketService:
         staged: Path | None = prepared.staged_artifact
         promoted: Path | None = None
         instance: PluginInstance | None = None
-        committed = False
+        durably_committed = False
         environment = prepared.environment
         try:
             promoted = await asyncio.to_thread(self.store.promote, candidate, staged)
@@ -525,33 +654,54 @@ class PluginMarketService:
             instance = self.runtime.install(candidate.manifest, command,
                                             working_directory=str(self._working_directory(candidate.manifest)))
             async def persist_activation() -> None:
-                activated = await db.activate_plugin_candidate(
-                    publisher_id=candidate.manifest.publisher_id, plugin_id=candidate.manifest.plugin_id,
-                    candidate_version=candidate.manifest.version, trust_state=prepared.trust_state,
-                    source_key=candidate.source_key, source_package_id=candidate.package_id,
-                    manifest_json=manifest_json, manifest_sha256=_manifest_sha256(candidate.manifest),
-                    manifest_signature_json=manifest_signature_json,
-                    artifact_sha256=candidate.artifact["sha256"], artifact_path=str(promoted),
-                    runtime_type=candidate.artifact["runtime"], entrypoint=candidate.artifact["entrypoint"],
-                    platform_os=self.os_name, platform_arch=self.arch,
-                    environment={"runtime_identity": environment.runtime_identity,
-                                 "lock_digest": environment.lock_digest} if environment else None,
-                )
+                nonlocal durably_committed
+                try:
+                    activated = await db.activate_plugin_candidate(
+                        publisher_id=candidate.manifest.publisher_id, plugin_id=candidate.manifest.plugin_id,
+                        candidate_version=candidate.manifest.version, trust_state=prepared.trust_state,
+                        source_key=candidate.source_key, source_package_id=candidate.package_id,
+                        manifest_json=manifest_json, manifest_sha256=_manifest_sha256(candidate.manifest),
+                        manifest_signature_json=manifest_signature_json,
+                        artifact_sha256=candidate.artifact["sha256"], artifact_path=str(promoted),
+                        runtime_type=candidate.artifact["runtime"], entrypoint=candidate.artifact["entrypoint"],
+                        platform_os=self.os_name, platform_arch=self.arch,
+                        environment={"runtime_identity": environment.runtime_identity,
+                                     "lock_digest": environment.lock_digest} if environment else None,
+                    )
+                except BaseException:
+                    # A repository call may commit and then fail to return.  The
+                    # durable row, never the exception timing, defines whether
+                    # pre-commit cleanup is still legal.
+                    durable = await db.get_plugin_installation(
+                        candidate.manifest.publisher_id, candidate.manifest.plugin_id,
+                    )
+                    if not self._is_committed_candidate(durable, candidate, promoted):
+                        raise
+                    activated = True
                 if not activated:
                     raise PluginError("PLUGIN_UNAVAILABLE", "Plugin activation state changed concurrently", category="persistence")
+                durably_committed = True
 
-            if old:
-                await self.runtime.activate_candidate(old, instance, commit=persist_activation)
-            else:
-                await self.runtime.enable(instance)
-                await persist_activation()
-            self._active[identity] = instance
-            committed = True
+            with self.expect_activation(instance, "candidate_activation"):
+                if old:
+                    await self.runtime.activate_candidate(old, instance, commit=persist_activation)
+                else:
+                    await self.runtime.enable(
+                        instance, activation_operation="candidate_activation",
+                    )
+                    await persist_activation()
+            await self._project_committed_activation(identity, instance)
         except BaseException as error:
-            if committed:
+            if durably_committed:
+                # POST-COMMIT: the candidate is durable desired state.  Keep its
+                # artifact/environment and converge live projection forward;
+                # never run candidate rollback/cleanup.
+                await self._reconcile_committed_activation(identity, instance, old)
                 return self._public(await db.get_plugin_installation(
                     candidate.manifest.publisher_id, candidate.manifest.plugin_id
                 ))
+            # PRE-COMMIT: no durable active row references candidate resources,
+            # so rollback and cleanup are both permitted.
             await db.fail_plugin_candidate(
                 candidate.manifest.publisher_id, candidate.manifest.plugin_id, candidate.manifest.version, _safe_error(error)
             )
@@ -584,6 +734,82 @@ class PluginMarketService:
             except (OSError, RuntimeError):
                 pass
         return self._public(await db.get_plugin_installation(candidate.manifest.publisher_id, candidate.manifest.plugin_id))
+
+    @staticmethod
+    def _is_committed_candidate(
+        row: dict[str, Any] | None, candidate: PluginCandidate, artifact: Path | None,
+    ) -> bool:
+        return bool(
+            row
+            and str(row.get("active_version") or "") == candidate.manifest.version
+            and str(row.get("artifact_sha256") or "") == str(candidate.artifact["sha256"])
+            and artifact is not None
+            and str(row.get("artifact_path") or "") == str(artifact)
+            and str(row.get("manifest_sha256") or "") == _manifest_sha256(candidate.manifest)
+        )
+
+    async def _project_committed_activation(
+        self, identity: str, instance: PluginInstance,
+    ) -> None:
+        self._active[identity] = instance
+
+    async def _reconcile_committed_activation(
+        self, identity: str, instance: PluginInstance | None, old: PluginInstance | None,
+    ) -> None:
+        """Converge Runtime/service projection to an already committed version."""
+        delay = 0.0
+        while True:
+            try:
+                if instance is None:
+                    raise PluginError(
+                        "PLUGIN_UNAVAILABLE", "Committed Plugin instance is missing", category="lifecycle",
+                    )
+                row = await db.get_plugin_installation(
+                    instance.manifest.publisher_id, instance.manifest.plugin_id,
+                )
+                if (
+                    not row
+                    or str(row.get("active_version") or "") != instance.manifest.version
+                    or not row.get("enabled")
+                ):
+                    raise PluginError(
+                        "PLUGIN_CANDIDATE_CONFLICT", "Committed Plugin state changed", category="lifecycle",
+                    )
+
+                routed = True
+                for scheme, _contract in instance.manifest.owned_schemes:
+                    try:
+                        routed_instance = self.runtime.registry.route(scheme)
+                    except PluginError:
+                        routed = False
+                        break
+                    if routed_instance is not instance:
+                        routed = False
+                        break
+                if not routed:
+                    if old is not None and old is not instance and old.state in {
+                        LifecycleState.HEALTHY_ACTIVE, LifecycleState.UNHEALTHY,
+                    }:
+                        await self.runtime.disable(old)
+                    if instance.state == LifecycleState.HEALTHY_ACTIVE:
+                        await self.runtime.disable(instance)
+                    with self.expect_activation(instance, "candidate_activation"):
+                        await self.runtime.enable(
+                            instance, activation_operation="candidate_activation",
+                        )
+                await self._project_committed_activation(identity, instance)
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                logger.warning(
+                    "Committed Plugin activation reconciliation will retry: plugin=%s error_type=%s error_code=%s",
+                    identity,
+                    type(error).__name__,
+                    getattr(error, "code", "PLUGIN_RECONCILIATION_FAILED"),
+                )
+                delay = min(0.5, max(0.01, delay * 2 or 0.01))
+                await asyncio.sleep(delay)
 
     async def disable(self, identity: str) -> dict:
         async with self.lifecycle_lock(identity):
@@ -651,11 +877,19 @@ class PluginMarketService:
                     environment = await self.python_environments.rebuild(manifest, {})
             except PluginError as exc:
                 raise PluginError("PLUGIN_ENVIRONMENT_INVALID", "Installed Plugin environment is unavailable", category="runtime") from exc
+        # Manual enable and startup recovery first persist the desired enabled
+        # state.  The production activation authority then validates this same
+        # row immediately before spawning the process.
+        await db.set_plugin_enabled(
+            row["publisher_id"], row["plugin_id"], True,
+            lifecycle_state="starting", error="",
+        )
         instance = self.runtime.install(
             manifest, self._runtime_command(manifest, artifact, environment),
             working_directory=str(self._working_directory(manifest)))
         try:
-            await self.runtime.enable(instance)
+            with self.expect_activation(instance, "active_enable"):
+                await self.runtime.enable(instance, activation_operation="active_enable")
         except BaseException as error:
             await db.set_plugin_enabled(row["publisher_id"], row["plugin_id"], True, lifecycle_state="unavailable", error=_safe_error(error))
             raise

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import asyncio
 import hashlib
 import json
 import os
@@ -150,6 +151,36 @@ class NMTVPluginTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(str(self.envs.environments_root) in origin, origin)
         self.assertNotIn(str(Path(sys.prefix) / "lib"), origin)
         resolver.set_mode("nmtv", "legacy")
+
+    async def test_post_commit_cancellation_keeps_committed_python_environment(self):
+        await self.install("1.0.0")
+        original_activate = self.db.activate_plugin_candidate
+        committed = asyncio.Event()
+        release = asyncio.Event()
+
+        async def commit_then_pause(**kwargs):
+            result = await original_activate(**kwargs)
+            committed.set()
+            await release.wait()
+            return result
+
+        with mock.patch.object(self.db, "activate_plugin_candidate", new=commit_then_pause):
+            update = asyncio.create_task(self.install("1.1.0"))
+            await committed.wait()
+            update.cancel()
+            await asyncio.sleep(0)
+            self.assertFalse(update.done())
+            release.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await update
+
+        row = await self.db.get_plugin_installation("org.waveflow", "nmtv")
+        public = self.service._public(row)
+        active = self.runtime.registry.route("nmtv")
+        environment = self.envs.environment_path(active.manifest, public["runtime"]["lock_digest"])
+        self.assertEqual((row["active_version"], active.manifest.version), ("1.1.0", "1.1.0"))
+        self.assertTrue(Path(row["artifact_path"]).is_file())
+        self.assertTrue((environment / "waveflow-environment.json").is_file())
 
     async def test_errors_numeric_update_recovery_and_environment_damage_isolation(self):
         from plugin_runtime import PluginError, PermissionPolicy, PluginRuntime

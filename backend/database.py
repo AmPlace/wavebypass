@@ -2708,7 +2708,34 @@ async def activate_plugin_candidate(
                 return True
         finally:
             conn.close()
-    return await asyncio.to_thread(_activate)
+    # Candidate activation is the durable commit boundary.  SQLite work keeps
+    # running in a worker thread after coroutine cancellation, so retain and
+    # await that worker before propagating cancellation; callers can then
+    # reconcile against a final, not in-flight, durable outcome.
+    commit_task = asyncio.create_task(
+        asyncio.to_thread(_activate),
+        name=f"plugin-candidate-commit:{publisher_id}/{plugin_id}:{candidate_version}",
+    )
+
+    async def settle() -> None:
+        try:
+            await commit_task
+        except BaseException:
+            return
+
+    settled = asyncio.create_task(settle(), name=f"settle:{commit_task.get_name()}")
+    cancelled = False
+    while not settled.done():
+        try:
+            await asyncio.shield(settled)
+        except asyncio.CancelledError:
+            cancelled = True
+            current = asyncio.current_task()
+            if current is not None:
+                current.uncancel()
+    if cancelled:
+        raise asyncio.CancelledError
+    return commit_task.result()
 
 
 async def fail_plugin_candidate(
