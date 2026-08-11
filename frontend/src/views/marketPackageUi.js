@@ -31,6 +31,13 @@ export function providerContractLabels(pkg) {
   }).filter(Boolean)
 }
 
+export function pluginSchemeLabels(pkg) {
+  const values = pkg?.plugin?.owned_schemes || pkg?.plugin_manifest?.owned_schemes || []
+  return values.map((item) => typeof item === 'string' ? item : item?.scheme)
+    .filter(Boolean)
+    .map(String)
+}
+
 export function requestedPermissions(pkg) {
   const values = pkg?.plugin?.permissions || Object.keys(pkg?.plugin_manifest?.permissions || {})
   if (Array.isArray(values)) return values.map(String)

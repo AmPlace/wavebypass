@@ -363,7 +363,7 @@
 
             <section v-if="isPluginPackage(selectedPackage)" class="market-drawer-section">
               <h3 class="market-section-title">Capability</h3>
-              <dl class="grid grid-cols-[96px_minmax(0,1fr)] gap-y-1.5 text-[13px]"><dt class="text-[var(--text-tertiary)]">Contracts</dt><dd class="text-[var(--text-primary)]">{{ providerContractLabels(selectedPackage).join(', ') || '无' }}</dd><dt class="text-[var(--text-tertiary)]">Schemes</dt><dd class="text-[var(--text-primary)]">{{ selectedPackage?.plugin?.owned_schemes?.join(', ') || '无' }}</dd></dl>
+              <dl class="grid grid-cols-[96px_minmax(0,1fr)] gap-y-1.5 text-[13px]"><dt class="text-[var(--text-tertiary)]">Contracts</dt><dd class="text-[var(--text-primary)]">{{ providerContractLabels(selectedPackage).join(', ') || '无' }}</dd><dt class="text-[var(--text-tertiary)]">Schemes</dt><dd class="text-[var(--text-primary)]">{{ pluginSchemeLabels(selectedPackage).join(', ') || '无' }}</dd></dl>
             </section>
 
             <section v-if="isPluginPackage(selectedPackage)" class="market-drawer-section">
@@ -619,7 +619,7 @@ import { approvePluginPermission, pluginErrorCode, pluginErrorDetails, pluginErr
 import { useToastStore } from '../stores/toast'
 import MarketFilterDropdown from '../components/MarketFilterDropdown.vue'
 import AdaptiveTagList from '../components/AdaptiveTagList.vue'
-import { isPluginPackage, packageActionLabel, packageInstallable, permissionLabel, pluginDependencies, pluginIdentity, pluginRuntimeLabel, providerContractLabels, requestedPermissions } from './marketPackageUi'
+import { isPluginPackage, packageActionLabel, packageInstallable, permissionLabel, pluginDependencies, pluginIdentity, pluginRuntimeLabel, pluginSchemeLabels, providerContractLabels, requestedPermissions } from './marketPackageUi'
 
 const toastStore = useToastStore()
 const route = useRoute()
@@ -2207,7 +2207,7 @@ async function confirmPermissionAndRetry(pkg, error, retry) {
 function pluginTagItems(pkg) {
   return [
     ...providerContractLabels(pkg).map(label => ({ label, accentClass: 'market-tag-blue' })),
-    ...(pkg?.plugin?.owned_schemes || []).map(label => ({ label, accentClass: '' })),
+    ...pluginSchemeLabels(pkg).map(label => ({ label, accentClass: '' })),
     ...requestedPermissions(pkg).map(name => ({
       label: permissionLabel(name),
       accentClass: name === 'network.direct' ? 'market-tag-orange' : '',

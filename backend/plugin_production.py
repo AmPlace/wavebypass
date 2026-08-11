@@ -503,9 +503,39 @@ class ProductionPluginSubsystem:
             identity = manifest.identity
             existing = await db.get_plugin_installation(manifest.publisher_id, manifest.plugin_id)
             if existing:
-                if identity not in completed:
-                    completed.add(identity)
-                    changed = True
+                # Existing rows are not sufficient evidence of a healthy
+                # installation.  Recovery normally activates a complete row;
+                # a damaged referenced artifact is repaired only from this
+                # exact, already trusted bundled candidate.  Disabled or
+                # explicitly uninstalled installations remain untouched.
+                if not existing.get("enabled") or existing.get("lifecycle_state") in {
+                    "disabled", "quarantined",
+                }:
+                    if identity not in completed:
+                        completed.add(identity)
+                        changed = True
+                    continue
+                if self.service.installation_healthy(existing):
+                    if identity not in completed:
+                        completed.add(identity)
+                        changed = True
+                    continue
+                if not self.service.installed_artifact_valid(existing):
+                    try:
+                        repaired = await self.repair(identity, [package])
+                    except BaseException as error:
+                        results.append({
+                            "plugin": identity, "status": "unavailable", "error": _safe_bootstrap_error(error),
+                            "bootstrap": "repair_failed",
+                        })
+                    else:
+                        if identity not in completed:
+                            completed.add(identity)
+                            changed = True
+                        results.append({
+                            "plugin": identity, "status": repaired.get("lifecycle_state") or "active",
+                            "bootstrap": "repaired",
+                        })
                 continue
             if identity in completed:
                 # A completed entry with no installation is an explicit uninstall;
@@ -919,6 +949,14 @@ class ProductionPluginSubsystem:
         prepared, temp_paths = await self._prepare_packages(packages)
         try:
             return await self.service.install_from_packages(prepared, identity)
+        finally:
+            for path in temp_paths:
+                path.unlink(missing_ok=True)
+
+    async def repair(self, identity: str, packages: Iterable[dict[str, Any]]) -> dict[str, Any]:
+        prepared, temp_paths = await self._prepare_packages(packages)
+        try:
+            return await self.service.repair_from_packages(prepared, identity)
         finally:
             for path in temp_paths:
                 path.unlink(missing_ok=True)

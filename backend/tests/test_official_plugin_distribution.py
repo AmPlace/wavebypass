@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import importlib
 import json
 import os
+import sqlite3
 import shutil
 import sys
 import tempfile
@@ -446,6 +448,128 @@ class OfficialDistributionProductionTest(unittest.IsolatedAsyncioTestCase):
             rows = await self.db.list_plugin_python_environments("org.waveflow", plugin)
             self.assertEqual([row["state"] for row in rows], ["active"])
             self.assertEqual(second.service.runtime.registry.route(plugin).health, "healthy")
+
+    async def test_missing_official_artifact_is_repaired_from_exact_bundled_candidate(self):
+        subsystem = await self._subsystem()
+        await subsystem.startup()
+        await subsystem.set_ownership("fjtv", "plugin", "org.waveflow/fjtv")
+        rows = {
+            f"{item['publisher_id']}/{item['plugin_id']}": item
+            for item in await self.db.list_plugin_installations()
+        }
+        artifacts = {identity: Path(row["artifact_path"]) for identity, row in rows.items()}
+        expected_digests = {identity: row["artifact_sha256"] for identity, row in rows.items()}
+        for artifact in artifacts.values():
+            artifact.unlink()
+        await subsystem.shutdown()
+        self.subsystems.remove(subsystem)
+
+        restarted = await self._subsystem()
+        recovered = await restarted.startup()
+        repaired = {
+            item["plugin"]: item for item in recovered if item.get("bootstrap") == "repaired"
+        }
+        self.assertEqual(set(repaired), BASE_IDENTITIES)
+        self.assertTrue(all(item.get("status") == "active" for item in repaired.values()))
+        for identity, artifact in artifacts.items():
+            plugin_id = identity.rsplit("/", 1)[1]
+            row = await self.db.get_plugin_installation("org.waveflow", plugin_id)
+            self.assertEqual(row["artifact_sha256"], expected_digests[identity])
+            self.assertTrue(artifact.is_file())
+            self.assertEqual(hashlib.sha256(artifact.read_bytes()).hexdigest(), expected_digests[identity])
+            self.assertEqual(row["lifecycle_state"], "active")
+        self.assertEqual(restarted.provider_resolver.mode("fjtv"), "plugin")
+        self.assertTrue(all(restarted.provider_resolver.mode(scheme) == ("plugin" if scheme == "fjtv" else "legacy")
+                            for scheme in BASE_SCHEMES))
+        self.assertEqual(restarted.service.runtime.registry.route("fjtv").health, "healthy")
+
+    async def test_corrupt_official_artifact_repair_failure_remains_unavailable(self):
+        subsystem = await self._subsystem()
+        await subsystem.startup()
+        row = await self.db.get_plugin_installation("org.waveflow", "fjtv")
+        artifact = Path(row["artifact_path"])
+        artifact.write_bytes(b"corrupt")
+        await self.db.set_plugin_enabled("org.waveflow", "fjtv", True, lifecycle_state="unavailable")
+        await subsystem.shutdown()
+        with mock.patch.object(subsystem.service.store, "promote", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                await subsystem.repair("org.waveflow/fjtv", importlib.import_module("official_plugin_distribution").bundled_official_packages())
+        row = await self.db.get_plugin_installation("org.waveflow", "fjtv")
+        self.assertEqual((row["active_version"], row["lifecycle_state"], row["enabled"]), ("1.0.0", "unavailable", 1))
+        self.assertEqual(artifact.read_bytes(), b"corrupt")
+        self.assertIn(row["artifact_path"], await self.db.list_plugin_artifact_references())
+
+    async def test_repair_without_matching_candidate_is_immutable_conflict(self):
+        from plugin_runtime import PluginError
+
+        subsystem = await self._subsystem()
+        await subsystem.startup()
+        row = await self.db.get_plugin_installation("org.waveflow", "fjtv")
+        artifact = Path(row["artifact_path"])
+        artifact.unlink()
+        await self.db.set_plugin_enabled("org.waveflow", "fjtv", True, lifecycle_state="unavailable")
+        with self.assertRaises(PluginError) as missing:
+            await subsystem.service.repair_from_packages([], "org.waveflow/fjtv")
+        self.assertEqual(missing.exception.code, "RESOURCE_NOT_FOUND")
+        row = await self.db.get_plugin_installation("org.waveflow", "fjtv")
+        self.assertEqual((row["active_version"], row["lifecycle_state"]), ("1.0.0", "unavailable"))
+        self.assertFalse(artifact.exists())
+
+    async def test_recovery_cleanup_protects_installation_reference_without_artifact_row(self):
+        subsystem = await self._subsystem()
+        await subsystem.startup()
+        row = await self.db.get_plugin_installation("org.waveflow", "fjtv")
+        artifact = Path(row["artifact_path"])
+        orphan = artifact.parent.parent / ("f" * 64) / "artifact"
+        orphan.parent.mkdir(parents=True)
+        shutil.copyfile(artifact, orphan)
+        connection = sqlite3.connect(os.environ["WAVEFLOW_DB_PATH"])
+        try:
+            connection.execute(
+                "DELETE FROM plugin_artifacts WHERE publisher_id=? AND plugin_id=?",
+                ("org.waveflow", "fjtv"),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        await subsystem.service.recover_enabled()
+        self.assertTrue(artifact.is_file())
+        self.assertFalse(orphan.exists())
+
+    async def test_repair_promotion_io_failure_keeps_existing_artifact_bytes(self):
+        import plugin_market
+
+        subsystem = await self._subsystem()
+        await subsystem.startup()
+        row = await self.db.get_plugin_installation("org.waveflow", "fjtv")
+        target = Path(row["artifact_path"])
+        original = target.read_bytes()
+        packages = importlib.import_module("official_plugin_distribution").bundled_official_packages()
+        prepared_packages, temporary_paths = await subsystem._prepare_packages(packages)
+        try:
+            candidate = await subsystem.service._trusted_candidate_from_packages(
+                prepared_packages, "org.waveflow/fjtv",
+            )
+            staged, _trust = await asyncio.to_thread(
+                subsystem.service.store.stage, candidate, subsystem.service.trust_policy,
+            )
+            real_replace = plugin_market.os.replace
+
+            def fail_target(source, destination):
+                if Path(destination).resolve() == target.resolve():
+                    raise OSError("disk full")
+                return real_replace(source, destination)
+
+            with mock.patch.object(plugin_market.os, "replace", side_effect=fail_target):
+                with self.assertRaises(OSError):
+                    await asyncio.to_thread(
+                        subsystem.service.store.promote, candidate, staged,
+                    )
+            self.assertEqual(target.read_bytes(), original)
+            shutil.rmtree(staged.parent, ignore_errors=True)
+        finally:
+            for path in temporary_paths:
+                path.unlink(missing_ok=True)
 
     async def test_ptbtv_hnntv_official_approval_runtime_resolution_and_revoke_recovery(self):
         from official_plugin_distribution import bundled_official_packages

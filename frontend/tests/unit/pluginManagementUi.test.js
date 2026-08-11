@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 
 import { ApiError } from '../../src/api/client.js'
 import { pluginErrorCode, pluginErrorMessage } from '../../src/api/plugins.js'
-import { isPluginPackage, packageActionLabel, packageInstallable, pluginIdentity, providerContractLabels } from '../../src/views/marketPackageUi.js'
+import { isPluginPackage, packageActionLabel, packageInstallable, pluginIdentity, pluginSchemeLabels, providerContractLabels } from '../../src/views/marketPackageUi.js'
 
 const frontendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const source = relative => fs.readFileSync(path.join(frontendRoot, relative), 'utf8')
@@ -21,6 +21,7 @@ test('Market presenter 区分 Content 与 Plugin Package 语义', () => {
   assert.equal(packageInstallable(plugin), true)
   assert.equal(pluginIdentity(plugin), 'org.waveflow/ptbtv')
   assert.deepEqual(providerContractLabels(plugin), ['TVProvider'])
+  assert.deepEqual(pluginSchemeLabels({ plugin: { owned_schemes: [{ scheme: 'ptbtv', contract: 'tv_provider' }] } }), ['ptbtv'])
   assert.equal(packageActionLabel(plugin, 'install'), '安装 Plugin')
   assert.equal(packageActionLabel({ package_type: 'content_package' }, 'install'), '导入')
 })

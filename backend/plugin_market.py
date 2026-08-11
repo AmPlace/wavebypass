@@ -230,8 +230,22 @@ class PluginArtifactStore:
         target_dir = self.installed_root / identity_dir / self._part(candidate.manifest.version) / candidate.artifact["sha256"]
         target_dir.parent.mkdir(parents=True, exist_ok=True)
         if target_dir.exists():
-            shutil.rmtree(target_dir)
-        os.replace(staged.parent, target_dir)
+            # Repair can target the exact directory already referenced by the
+            # durable installation.  Replace only the artifact file so an I/O
+            # failure cannot first delete the last known-good directory.
+            if not target_dir.is_dir():
+                raise PluginError(
+                    "ARTIFACT_INTEGRITY_FAILED", "Installed plugin artifact path is invalid", category="artifact",
+                )
+            os.replace(staged, target_dir / "artifact")
+            try:
+                staged.parent.rmdir()
+            except OSError:
+                # The staged directory is not a durable reference and can be
+                # collected on the next recovery pass.
+                pass
+        else:
+            os.replace(staged.parent, target_dir)
         return target_dir / "artifact"
 
     def remove_path(self, value: str | Path) -> None:
@@ -491,7 +505,9 @@ class PluginMarketService:
                     "--version", manifest.version)
         return (str(artifact),)
 
-    async def install_from_packages(self, packages: Iterable[dict], identity: str) -> dict:
+    async def _trusted_candidate_from_packages(
+        self, packages: Iterable[dict], identity: str,
+    ) -> PluginCandidate:
         packages = list(packages)
         candidates = candidates_from_packages(packages, os_name=self.os_name, arch=self.arch)
         matching = [candidate for candidate in candidates if candidate.identity == identity]
@@ -537,7 +553,10 @@ class PluginMarketService:
         manifests = {_manifest_sha256(candidate.manifest) for candidate in trusted}
         if len(manifests) != 1:
             raise PluginError("PLUGIN_INCOMPATIBLE", "Conflicting trusted plugin manifests were published for the same version", category="market")
-        candidate = select_candidate(trusted, identity)
+        return select_candidate(trusted, identity)
+
+    async def install_from_packages(self, packages: Iterable[dict], identity: str) -> dict:
+        candidate = await self._trusted_candidate_from_packages(packages, identity)
         await require_high_risk_approvals(candidate.manifest)
         async with self.preparation_lock(identity):
             prepared = await self._prepare_candidate(candidate)
@@ -551,7 +570,100 @@ class PluginMarketService:
             )
             return await self._await_critical(task)
 
-    async def _activate_prepared(self, prepared: PreparedPluginCandidate) -> dict:
+    async def repair_from_packages(self, packages: Iterable[dict], identity: str) -> dict:
+        """Repair a damaged installation from an exact trusted artifact.
+
+        Repair is deliberately not an update path: the candidate must match
+        the durable active version, artifact digest, and manifest digest.  It
+        can therefore restore a missing/corrupt file without changing
+        ownership or silently moving the installation to a newer release.
+        """
+        candidate = await self._trusted_candidate_from_packages(packages, identity)
+        await require_high_risk_approvals(candidate.manifest)
+        async with self.preparation_lock(identity):
+            row = await db.get_plugin_installation(
+                candidate.manifest.publisher_id, candidate.manifest.plugin_id,
+            )
+            if not row or not row.get("active_version"):
+                raise PluginError(
+                    "PLUGIN_UNAVAILABLE", "Plugin installation has no active version to repair", category="lifecycle",
+                )
+            if not row.get("enabled"):
+                raise PluginError(
+                    "PLUGIN_UNAVAILABLE", "Disabled Plugin installation cannot be repaired", category="lifecycle",
+                )
+            if (
+                str(row.get("active_version") or "") != candidate.manifest.version
+                or str(row.get("artifact_sha256") or "") != str(candidate.artifact["sha256"])
+                or str(row.get("manifest_sha256") or "") != _manifest_sha256(candidate.manifest)
+            ):
+                raise PluginError(
+                    "PLUGIN_INCOMPATIBLE",
+                    "Trusted repair candidate does not match installed immutable package metadata",
+                    category="market",
+                )
+            await db.set_plugin_enabled(
+                candidate.manifest.publisher_id, candidate.manifest.plugin_id, True,
+                lifecycle_state="unavailable", error="Trusted Plugin artifact repair in progress",
+            )
+            prepared = await self._prepare_candidate(candidate)
+            task = self._track_critical(
+                asyncio.create_task(
+                    self._activate_prepared(prepared, repair=True),
+                    name=f"plugin-repair:{identity}:{candidate.manifest.version}",
+                ),
+                operation="artifact_repair",
+                identity=identity,
+            )
+            return await self._await_critical(task)
+
+    def installed_artifact_valid(self, row: dict[str, Any]) -> bool:
+        """Validate the durable artifact and persisted trust metadata only.
+
+        Runtime health is checked by the normal recovery path.  This helper is
+        used by bundled bootstrap to distinguish a damaged artifact, which is
+        eligible for exact trusted repair, from an unrelated runtime failure.
+        """
+        try:
+            manifest = validate_manifest(json.loads(row.get("manifest_json") or "{}"))
+            if manifest.identity != f"{row.get('publisher_id')}/{row.get('plugin_id')}" \
+                    or manifest.version != str(row.get("active_version") or ""):
+                return False
+            selected = next(
+                item for item in manifest.artifacts
+                if item["sha256"] == str(row.get("artifact_sha256") or "")
+            )
+            artifact = Path(str(row.get("artifact_path") or ""))
+            if not artifact.is_file() or artifact.stat().st_size != int(selected["size_bytes"]):
+                return False
+            payload = _read_artifact(artifact, max_bytes=int(selected["size_bytes"]))
+            if hashlib.sha256(payload).hexdigest() != str(row.get("artifact_sha256") or ""):
+                return False
+            try:
+                signature = json.loads(row.get("manifest_signature_json") or "{}")
+            except json.JSONDecodeError:
+                return False
+            self.trust_policy.verify_manifest(manifest, selected, signature or None)
+            self.trust_policy.verify(manifest, selected, payload)
+            if not row.get("trust_state") or not row.get("source_key"):
+                return False
+            return True
+        except (OSError, PluginError, StopIteration, TypeError, ValueError, json.JSONDecodeError):
+            return False
+
+    def installation_healthy(self, row: dict[str, Any]) -> bool:
+        identity = f"{row.get('publisher_id')}/{row.get('plugin_id')}"
+        instance = self._active.get(identity)
+        return bool(
+            row.get("enabled")
+            and row.get("lifecycle_state") == "active"
+            and instance is not None
+            and getattr(instance, "health", "") == "healthy"
+            and getattr(getattr(instance, "state", None), "value", "") == LifecycleState.HEALTHY_ACTIVE.value
+            and self.installed_artifact_valid(row)
+        )
+
+    async def _activate_prepared(self, prepared: PreparedPluginCandidate, *, repair: bool = False) -> dict:
         candidate = prepared.candidate
         try:
             async with self.lifecycle_lock(candidate.identity):
@@ -559,7 +671,7 @@ class PluginMarketService:
                 # lock-local check is authoritative and the Runtime activation
                 # guard re-enters this same boundary immediately before spawn.
                 await require_high_risk_approvals(candidate.manifest)
-                return await self._activate(prepared)
+                return await self._activate(prepared, repair=repair)
         except BaseException:
             await self._discard_prepared(prepared)
             raise
@@ -599,20 +711,30 @@ class PluginMarketService:
                     self.python_environments.remove_environment, prepared.environment.path,
                 )
 
-    async def _activate(self, prepared: PreparedPluginCandidate) -> dict:
+    async def _remove_artifact_if_unreferenced(self, path: str | Path) -> bool:
+        resolved = str(Path(path).resolve())
+        live = {str(Path(item).resolve()) for item in await db.list_plugin_artifact_references()}
+        if resolved in live:
+            return False
+        await asyncio.to_thread(self.store.remove_path, path)
+        return True
+
+    async def _activate(self, prepared: PreparedPluginCandidate, *, repair: bool = False) -> dict:
         candidate = prepared.candidate
         identity = candidate.identity
         existing = await db.get_plugin_installation(candidate.manifest.publisher_id, candidate.manifest.plugin_id)
         if existing and existing.get("active_version") == candidate.manifest.version:
             if (existing.get("artifact_sha256") == candidate.artifact["sha256"]
                     and existing.get("manifest_sha256") == _manifest_sha256(candidate.manifest)):
-                await self._discard_prepared(prepared)
-                return self._public(existing)
-            raise PluginError(
-                "PLUGIN_INCOMPATIBLE",
-                "Installed plugin version conflicts with different immutable package metadata",
-                category="market",
-            )
+                if not repair:
+                    await self._discard_prepared(prepared)
+                    return self._public(existing)
+            else:
+                raise PluginError(
+                    "PLUGIN_INCOMPATIBLE",
+                    "Installed plugin version conflicts with different immutable package metadata",
+                    category="market",
+                )
         if existing and existing.get("active_version"):
             try:
                 if _version_tuple(candidate.manifest.version) < _version_tuple(existing["active_version"]):
@@ -625,9 +747,19 @@ class PluginMarketService:
         instance: PluginInstance | None = None
         durably_committed = False
         environment = prepared.environment
+        environment_reused = False
+        if repair and environment and existing and existing.get("active_version") == candidate.manifest.version:
+            environment_reused = any(
+                item.get("state") == "active"
+                and str(item.get("path") or "") == str(environment.path)
+                and str(item.get("lock_digest") or "") == str(environment.lock_digest)
+                for item in await db.list_plugin_python_environments(
+                    candidate.manifest.publisher_id, candidate.manifest.plugin_id,
+                )
+            )
         try:
             promoted = await asyncio.to_thread(self.store.promote, candidate, staged)
-            if environment:
+            if environment and not environment_reused:
                 cache_by_digest = {path.parent.name: path for path in self.python_environments.cache_objects()}
                 await db.begin_plugin_python_environment(
                     publisher_id=candidate.manifest.publisher_id, plugin_id=candidate.manifest.plugin_id,
@@ -666,7 +798,8 @@ class PluginMarketService:
                         runtime_type=candidate.artifact["runtime"], entrypoint=candidate.artifact["entrypoint"],
                         platform_os=self.os_name, platform_arch=self.arch,
                         environment={"runtime_identity": environment.runtime_identity,
-                                     "lock_digest": environment.lock_digest} if environment else None,
+                                     "lock_digest": environment.lock_digest}
+                        if environment and not environment_reused else None,
                     )
                 except BaseException:
                     # A repository call may commit and then fail to return.  The
@@ -703,9 +836,10 @@ class PluginMarketService:
             # PRE-COMMIT: no durable active row references candidate resources,
             # so rollback and cleanup are both permitted.
             await db.fail_plugin_candidate(
-                candidate.manifest.publisher_id, candidate.manifest.plugin_id, candidate.manifest.version, _safe_error(error)
+                candidate.manifest.publisher_id, candidate.manifest.plugin_id, candidate.manifest.version,
+                _safe_error(error), preserve_unavailable=repair,
             )
-            if environment:
+            if environment and not environment_reused:
                 await db.fail_plugin_python_environment(
                     candidate.manifest.publisher_id, candidate.manifest.plugin_id, candidate.manifest.version,
                     environment.runtime_identity, environment.lock_digest,
@@ -718,7 +852,7 @@ class PluginMarketService:
                     if instance.process:
                         await instance.process.stop(graceful=False)
             if promoted:
-                await asyncio.to_thread(self.store.remove_path, promoted)
+                await self._remove_artifact_if_unreferenced(promoted)
             elif staged:
                 await asyncio.to_thread(self.store.remove_path, staged)
             raise
@@ -729,8 +863,12 @@ class PluginMarketService:
                 pass
         if existing and existing.get("artifact_path") and existing["artifact_path"] != str(promoted):
             try:
-                await asyncio.to_thread(self.store.remove_path, existing["artifact_path"])
+                # Drop the retained DB reference first; the guarded removal
+                # then cannot race a durable reference out of existence.  If
+                # either step fails, the unreferenced file is safe to collect
+                # during a later recovery pass.
                 await db.delete_retained_plugin_artifacts(candidate.manifest.publisher_id, candidate.manifest.plugin_id)
+                await self._remove_artifact_if_unreferenced(existing["artifact_path"])
             except (OSError, RuntimeError):
                 pass
         return self._public(await db.get_plugin_installation(candidate.manifest.publisher_id, candidate.manifest.plugin_id))
@@ -838,19 +976,36 @@ class PluginMarketService:
         manifest = validate_manifest(json.loads(row["manifest_json"]))
         await require_high_risk_approvals(manifest)
         artifact = Path(row["artifact_path"])
-        if not artifact.is_file():
-            await db.set_plugin_enabled(row["publisher_id"], row["plugin_id"], True, lifecycle_state="unavailable", error="Installed artifact integrity check failed")
-            raise PluginError("PLUGIN_UNAVAILABLE", "Installed plugin artifact failed integrity verification", category="artifact")
-        payload = await asyncio.to_thread(_read_artifact, artifact, max_bytes=int(artifact.stat().st_size))
-        if hashlib.sha256(payload).hexdigest() != row["artifact_sha256"]:
-            await db.set_plugin_enabled(row["publisher_id"], row["plugin_id"], True, lifecycle_state="unavailable", error="Installed artifact integrity check failed")
-            raise PluginError("ARTIFACT_INTEGRITY_FAILED", "Installed plugin artifact failed integrity verification", category="artifact")
         selected = next(
             (item for item in manifest.artifacts if item["sha256"] == row["artifact_sha256"]),
             None,
         )
         if selected is None:
+            await db.set_plugin_enabled(
+                row["publisher_id"], row["plugin_id"], True,
+                lifecycle_state="unavailable", error="Installed artifact integrity check failed",
+            )
             raise PluginError("ARTIFACT_INVALID", "Installed artifact is absent from the manifest", category="artifact")
+        if not artifact.is_file():
+            await db.set_plugin_enabled(row["publisher_id"], row["plugin_id"], True, lifecycle_state="unavailable", error="Installed artifact integrity check failed")
+            raise PluginError("PLUGIN_UNAVAILABLE", "Installed plugin artifact failed integrity verification", category="artifact")
+        expected_size = int(selected["size_bytes"])
+        try:
+            actual_size = artifact.stat().st_size
+        except OSError as exc:
+            await db.set_plugin_enabled(row["publisher_id"], row["plugin_id"], True, lifecycle_state="unavailable", error="Installed artifact integrity check failed")
+            raise PluginError("PLUGIN_UNAVAILABLE", "Installed plugin artifact failed integrity verification", category="artifact") from exc
+        if actual_size != expected_size:
+            await db.set_plugin_enabled(row["publisher_id"], row["plugin_id"], True, lifecycle_state="unavailable", error="Installed artifact integrity check failed")
+            raise PluginError("ARTIFACT_INTEGRITY_FAILED", "Installed plugin artifact failed integrity verification", category="artifact")
+        try:
+            payload = await asyncio.to_thread(_read_artifact, artifact, max_bytes=expected_size)
+        except (OSError, PluginError) as exc:
+            await db.set_plugin_enabled(row["publisher_id"], row["plugin_id"], True, lifecycle_state="unavailable", error="Installed artifact integrity check failed")
+            raise PluginError("ARTIFACT_INTEGRITY_FAILED", "Installed plugin artifact failed integrity verification", category="artifact") from exc
+        if hashlib.sha256(payload).hexdigest() != row["artifact_sha256"]:
+            await db.set_plugin_enabled(row["publisher_id"], row["plugin_id"], True, lifecycle_state="unavailable", error="Installed artifact integrity check failed")
+            raise PluginError("ARTIFACT_INTEGRITY_FAILED", "Installed plugin artifact failed integrity verification", category="artifact")
         try:
             try:
                 manifest_signature = json.loads(row.get("manifest_signature_json") or "{}")
@@ -953,7 +1108,7 @@ class PluginMarketService:
                     "Interrupted candidate was rolled back during startup recovery",
                 )
                 for artifact in artifacts:
-                    await asyncio.to_thread(self.store.remove_path, artifact["path"])
+                    await self._remove_artifact_if_unreferenced(artifact["path"])
                 for environment in environments:
                     await db.fail_plugin_python_environment(
                         environment["publisher_id"], environment["plugin_id"], environment["plugin_version"],
@@ -975,12 +1130,11 @@ class PluginMarketService:
                 results.append({"plugin": identity, "status": "active"})
             except BaseException as error:
                 results.append({"plugin": identity, "status": "unavailable", "error": _safe_error(error)})
-        live_artifact_paths: list[str] = []
-        for row in await db.list_plugin_installations():
-            live_artifact_paths.extend(
-                artifact["path"]
-                for artifact in await db.list_plugin_artifacts(row["publisher_id"], row["plugin_id"])
-            )
+        # Cleanup must protect both the active installation reference and
+        # retained/candidate artifact rows.  The installation row is included
+        # explicitly because a prior interrupted DB projection may have left
+        # the two tables temporarily out of sync.
+        live_artifact_paths = await db.list_plugin_artifact_references()
         await asyncio.to_thread(self.store.cleanup_orphan_staging, live_artifact_paths)
         await asyncio.to_thread(self.store.cleanup_orphan_installed, live_artifact_paths)
         return results

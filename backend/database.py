@@ -2603,6 +2603,34 @@ async def list_plugin_artifacts(publisher_id: str, plugin_id: str, *, state: str
     return await asyncio.to_thread(_list)
 
 
+async def list_plugin_artifact_references() -> list[str]:
+    """Return every durable artifact path that the database still references.
+
+    The installation row is the active authority, while ``plugin_artifacts``
+    also retains candidate/previous-version rows during lifecycle transitions.
+    Keeping both sets in one read prevents filesystem cleanup from treating a
+    temporarily inconsistent projection as an orphan.
+    """
+    def _list() -> list[str]:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                """
+                SELECT artifact_path AS path
+                  FROM plugin_installations
+                 WHERE artifact_path IS NOT NULL AND artifact_path != ''
+                UNION
+                SELECT path
+                  FROM plugin_artifacts
+                 WHERE path IS NOT NULL AND path != ''
+                """
+            ).fetchall()
+            return [str(row["path"]) for row in rows]
+        finally:
+            conn.close()
+    return await asyncio.to_thread(_list)
+
+
 async def begin_plugin_candidate(
     *,
     publisher_id: str,
@@ -2805,6 +2833,8 @@ async def fail_plugin_candidate(
     plugin_id: str,
     candidate_version: str,
     error: str,
+    *,
+    preserve_unavailable: bool = False,
 ) -> None:
     def _fail():
         conn = _connect()
@@ -2827,11 +2857,12 @@ async def fail_plugin_candidate(
                     conn.execute(
                         """
                         UPDATE plugin_installations SET
-                            candidate_version='', lifecycle_state='active',
+                            candidate_version='', lifecycle_state=?,
                             last_activation_status='failed', last_error=?, updated_at=?
                         WHERE publisher_id=? AND plugin_id=? AND candidate_version=?
                         """,
-                        (error[:1024], _utc_now(), publisher_id, plugin_id, candidate_version),
+                        ("unavailable" if preserve_unavailable else "active", error[:1024], _utc_now(),
+                         publisher_id, plugin_id, candidate_version),
                     )
                 else:
                     conn.execute(
