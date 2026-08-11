@@ -12,7 +12,13 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import json
+import os
 import socket
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from urllib.parse import urlparse
 
 from core.settings_service import get_effective_settings, get_effective_settings_sync
@@ -25,6 +31,23 @@ _HARD_BLOCKED_NETWORKS = (
     ipaddress.ip_network("0.0.0.0/8"),         # IPv4 unspecified
     ipaddress.ip_network("::/128"),            # IPv6 unspecified
 )
+
+# Clash/Mihomo Fake-IP uses the RFC 2544 benchmark range.  It is not an
+# allowlist: an answer in this range only selects the independent-resolution
+# path below.  Keep this list intentionally separate from the general private
+# address policy so future synthetic ranges can be added explicitly.
+_SYNTHETIC_DNS_NETWORKS = (
+    ipaddress.ip_network("198.18.0.0/15"),
+)
+_REAL_DNS_DEFAULT_ENDPOINTS = (
+    "https://cloudflare-dns.com/dns-query",
+    "https://dns.google/resolve",
+)
+_REAL_DNS_TIMEOUT_SECONDS = 2.0
+_REAL_DNS_MAX_ADDRESSES = 16
+_REAL_DNS_MAX_CNAME_DEPTH = 4
+_REAL_DNS_MAX_ANSWER_RECORDS = 64
+_REAL_DNS_MAX_RESPONSE_BYTES = 64 * 1024
 
 
 class UnsafeTargetError(ValueError):
@@ -72,6 +95,153 @@ async def resolve_host(host: str) -> list[str]:
     return await asyncio.to_thread(_resolve)
 
 
+def _is_synthetic_dns_ip(value: str | ipaddress._BaseAddress) -> bool:
+    try:
+        address = value if isinstance(value, ipaddress._BaseAddress) else ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return any(address in network for network in _SYNTHETIC_DNS_NETWORKS)
+
+
+def _configured_real_dns_endpoints() -> tuple[str, ...]:
+    configured = os.environ.get("WAVEFLOW_REAL_DNS_ENDPOINTS", "")
+    values = tuple(item.strip() for item in configured.split(",") if item.strip())
+    values = values or _REAL_DNS_DEFAULT_ENDPOINTS
+    endpoints: list[str] = []
+    for value in values:
+        try:
+            parsed = urllib.parse.urlparse(value)
+            if parsed.scheme.lower() != "https" or not parsed.hostname or parsed.username or parsed.password:
+                raise ValueError
+            _ = parsed.port
+        except (ValueError, TypeError):
+            # The resolver endpoint is controlled configuration, not caller
+            # input.  Invalid endpoints are ignored; if none remain, the
+            # authorization path fails closed.
+            continue
+        endpoints.append(parsed.geturl())
+    return tuple(dict.fromkeys(endpoints))
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        return None
+
+
+def _doh_query(endpoint: str, host: str, qtype: str, timeout: float) -> tuple[set[str], set[str]]:
+    separator = "&" if "?" in endpoint else "?"
+    url = f"{endpoint}{separator}{urllib.parse.urlencode({'name': host.rstrip('.'), 'type': qtype})}"
+    request = urllib.request.Request(
+        url,
+        headers={"Accept": "application/dns-json", "User-Agent": "WaveFlow-Core-DNS/1"},
+        method="GET",
+    )
+    opener = urllib.request.build_opener(_NoRedirect())
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            if response.status != 200:
+                raise OSError("Independent DNS endpoint returned an HTTP error")
+            body = response.read(_REAL_DNS_MAX_RESPONSE_BYTES + 1)
+    except (OSError, urllib.error.URLError, urllib.error.HTTPError) as exc:
+        raise OSError("Independent DNS endpoint is unavailable") from exc
+    if len(body) > _REAL_DNS_MAX_RESPONSE_BYTES:
+        raise OSError("Independent DNS response is too large")
+    try:
+        decoded = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise OSError("Independent DNS response is invalid") from exc
+    if not isinstance(decoded, dict) or decoded.get("Status") not in {0, None}:
+        raise OSError("Independent DNS response returned an error")
+    answers = decoded.get("Answer") or []
+    if not isinstance(answers, list) or len(answers) > _REAL_DNS_MAX_ANSWER_RECORDS:
+        raise OSError("Independent DNS answer count is invalid")
+    addresses: set[str] = set()
+    cnames: set[str] = set()
+    expected_type = 1 if qtype == "A" else 28
+    for answer in answers:
+        if not isinstance(answer, dict):
+            raise OSError("Independent DNS answer is invalid")
+        answer_type = answer.get("type")
+        data = answer.get("data")
+        if answer_type == expected_type and isinstance(data, str):
+            try:
+                address = ipaddress.ip_address(data.strip())
+            except ValueError as exc:
+                raise OSError("Independent DNS address is invalid") from exc
+            if (expected_type == 1 and address.version != 4) or (expected_type == 28 and address.version != 6):
+                raise OSError("Independent DNS address family is invalid")
+            addresses.add(str(address))
+        elif answer_type == 5 and isinstance(data, str):
+            target = data.strip().rstrip(".").lower()
+            if target:
+                cnames.add(target)
+    if len(addresses) > _REAL_DNS_MAX_ADDRESSES:
+        raise OSError("Independent DNS response contains too many addresses")
+    return addresses, cnames
+
+
+def _resolve_real_dns_sync(host: str, *, timeout: float) -> list[str]:
+    endpoints = _configured_real_dns_endpoints()
+    if not endpoints:
+        raise OSError("No independent DNS endpoint is configured")
+    deadline = time.monotonic() + max(0.01, timeout)
+    visited: set[str] = set()
+
+    def resolve(name: str, depth: int) -> set[str]:
+        normalized = name.rstrip(".").lower()
+        if not normalized or normalized in visited or depth > _REAL_DNS_MAX_CNAME_DEPTH:
+            raise OSError("DNS CNAME chain is invalid")
+        visited.add(normalized)
+        addresses: set[str] = set()
+        cname_targets: set[str] = set()
+        for qtype in ("A", "AAAA"):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Independent DNS resolution timed out")
+            query_failed = True
+            last_error: BaseException | None = None
+            for endpoint in endpoints:
+                try:
+                    found, aliases = _doh_query(endpoint, normalized, qtype, remaining)
+                except OSError as exc:
+                    last_error = exc
+                    continue
+                query_failed = False
+                addresses.update(found)
+                cname_targets.update(aliases)
+                break
+            if query_failed and last_error is not None and qtype == "AAAA" and not addresses and not cname_targets:
+                raise OSError("Independent DNS resolution failed") from last_error
+        if len(addresses) > _REAL_DNS_MAX_ADDRESSES:
+            raise OSError("Independent DNS response contains too many addresses")
+        if addresses:
+            return addresses
+        for target in cname_targets:
+            addresses.update(resolve(target, depth + 1))
+        return addresses
+
+    resolved = resolve(host, 0)
+    if not resolved:
+        raise OSError("Independent DNS returned no A or AAAA records")
+    if len(resolved) > _REAL_DNS_MAX_ADDRESSES:
+        raise OSError("Independent DNS response contains too many addresses")
+    return sorted(resolved)
+
+
+async def resolve_host_independently(host: str, *, timeout: float = _REAL_DNS_TIMEOUT_SECONDS) -> list[str]:
+    """Resolve with explicitly configured DNS servers, not system getaddrinfo."""
+    return await asyncio.to_thread(_resolve_real_dns_sync, host, timeout=timeout)
+
+
+async def _resolve_host_for_policy(host: str) -> list[str]:
+    system_ips = await resolve_host(host)
+    if any(_is_synthetic_dns_ip(value) for value in system_ips):
+        # Do not return the synthetic answer and do not accept a caller-supplied
+        # replacement.  The independent result is the only authorization input.
+        return await resolve_host_independently(host)
+    return system_ips
+
+
 async def assert_safe_target_url(
     url: str,
     *,
@@ -113,11 +283,14 @@ async def assert_safe_target_url(
 
     # 2. DNS 解析后二次校验（防 rebinding）
     try:
-        ips = [ipaddress.ip_address(x) for x in await resolve_host(host)]
+        ips = [ipaddress.ip_address(x) for x in await _resolve_host_for_policy(host)]
     except OSError as exc:
         raise UnsafeTargetError(f"域名解析失败: {exc}") from exc
     if not ips:
         raise UnsafeTargetError("域名没有可用解析结果")
+
+    if any(_is_synthetic_dns_ip(ip) for ip in ips):
+        raise UnsafeTargetError("安全策略已阻止 synthetic DNS 地址")
 
     for ip in ips:
         if _is_hard_blocked(ip):
