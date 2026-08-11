@@ -20,6 +20,7 @@ if (!(Test-Path ".venv")) {
   --clean `
   --onedir `
   --add-data "config;config" `
+  --add-data "official_plugins;official_plugins" `
   --name waveflow-backend `
   desktop_entry.py
 

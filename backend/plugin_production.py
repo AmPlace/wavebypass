@@ -18,12 +18,17 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 import database as db
 import market
-from plugin_market import PluginArtifactStore, PluginMarketService, current_platform
+from plugin_market import (
+    PluginArtifactStore, PluginMarketService, current_platform, manifest_signature_payload,
+)
 from plugin_python_runtime import PythonEnvironmentManager
 from plugin_runtime import LifecycleState, PluginError, PluginRuntime, validate_manifest
 from plugin_runtime.permissions import PermissionPolicy
 from provider_resolver import ProviderResolver
 from plugin_capabilities import CapabilityGateway, CoreCapabilityDispatcher
+from official_plugin_distribution import (
+    OFFICIAL_PUBLISHER_ID, OFFICIAL_RELEASE_ROOT, bundled_official_packages, load_official_trust_rows,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -31,6 +36,7 @@ MAX_PLUGIN_ARTIFACT_BYTES = 64 * 1024 * 1024
 MAX_DEPENDENCY_ARTIFACT_BYTES = 64 * 1024 * 1024
 PLUGIN_DOWNLOAD_TIMEOUT_SECONDS = 60.0
 PLUGIN_DOWNLOAD_REDIRECTS = 3
+OFFICIAL_PLUGIN_BOOTSTRAP_SETTING = "official_plugin_bootstrap_v1"
 
 
 class ProductionTrustPolicy:
@@ -38,7 +44,7 @@ class ProductionTrustPolicy:
         self.replace(rows)
 
     def replace(self, rows: Iterable[dict[str, Any]]) -> None:
-        keys: dict[tuple[str, str], tuple[bytes, str]] = {}
+        keys: dict[tuple[str, str], tuple[bytes, str, bool]] = {}
         for row in rows:
             if not row.get("enabled"):
                 continue
@@ -49,7 +55,7 @@ class ProductionTrustPolicy:
             except (KeyError, ValueError):
                 continue
             keys[(str(row["publisher_id"]), str(row["key_id"]))] = (
-                key, str(row["trust_level"]),
+                key, str(row["trust_level"]), bool(row.get("require_manifest_signature")),
             )
         self._keys = keys
 
@@ -59,7 +65,7 @@ class ProductionTrustPolicy:
         trusted = self._keys.get((manifest.publisher_id, key_id))
         if trusted is None:
             raise PluginError("PLUGIN_UNTRUSTED", "Plugin publisher key is not trusted", category="trust")
-        key, level = trusted
+        key, level, _require_manifest_signature = trusted
         try:
             signature_bytes = base64.b64decode(str(signature.get("value") or ""), validate=True)
             Ed25519PublicKey.from_public_bytes(key).verify(signature_bytes, payload)
@@ -68,6 +74,33 @@ class ProductionTrustPolicy:
                 "ARTIFACT_SIGNATURE_INVALID", "Plugin artifact signature is invalid", category="trust"
             ) from exc
         return level
+
+    def verify_manifest(
+        self, manifest, artifact: dict[str, Any], signature: dict[str, Any] | None,
+    ) -> None:
+        artifact_key_id = str((artifact.get("signature") or {}).get("key_id") or "")
+        trusted = self._keys.get((manifest.publisher_id, artifact_key_id))
+        if trusted is None:
+            raise PluginError("PLUGIN_UNTRUSTED", "Plugin publisher key is not trusted", category="trust")
+        key, _level, required = trusted
+        if signature is None:
+            if required:
+                raise PluginError(
+                    "ARTIFACT_SIGNATURE_INVALID", "Official Plugin manifest signature is required", category="trust",
+                )
+            return
+        if (not isinstance(signature, dict)
+                or set(signature) != {"algorithm", "key_id", "value"}
+                or signature.get("algorithm") != "ed25519"
+                or str(signature.get("key_id") or "") != artifact_key_id):
+            raise PluginError("ARTIFACT_SIGNATURE_INVALID", "Plugin manifest signature is invalid", category="trust")
+        try:
+            encoded = base64.b64decode(str(signature.get("value") or ""), validate=True)
+            Ed25519PublicKey.from_public_bytes(key).verify(encoded, manifest_signature_payload(manifest))
+        except (ValueError, InvalidSignature) as exc:
+            raise PluginError(
+                "ARTIFACT_SIGNATURE_INVALID", "Plugin manifest signature is invalid", category="trust",
+            ) from exc
 
 
 async def download_plugin_artifact(
@@ -148,6 +181,7 @@ class ProductionPluginSubsystem:
     http_client: httpx.AsyncClient
     provider_resolver: ProviderResolver
     capability_gateway: CapabilityGateway
+    official_release_root: Path = OFFICIAL_RELEASE_ROOT
 
     @classmethod
     async def create(
@@ -157,7 +191,8 @@ class ProductionPluginSubsystem:
         root = Path(root).resolve()
         downloads = root / "downloads"
         downloads.mkdir(parents=True, exist_ok=True)
-        trust_rows = await db.list_plugin_publisher_trust()
+        trust_rows = [row for row in await db.list_plugin_publisher_trust()
+                      if row.get("publisher_id") != OFFICIAL_PUBLISHER_ID]
         trust_rows.extend(_official_trust_rows())
         trust = ProductionTrustPolicy(trust_rows)
         gateway = CapabilityGateway(client=http_client)
@@ -185,16 +220,72 @@ class ProductionPluginSubsystem:
 
     async def startup(self) -> list[dict[str, Any]]:
         try:
-            return await self.service.recover_enabled()
+            results = await self.service.recover_enabled()
         except BaseException:
             await self.service.runtime.shutdown()
             raise
+        try:
+            results.extend(await self.bootstrap_official_plugins())
+        except BaseException as error:
+            # A corrupt/missing release-local catalog must not tear down
+            # already recovered installations or the rest of Core.
+            results.append({
+                "plugin": f"{OFFICIAL_PUBLISHER_ID}/*", "status": "unavailable",
+                "error": _safe_bootstrap_error(error),
+            })
+        return results
+
+    async def bootstrap_official_plugins(self) -> list[dict[str, Any]]:
+        """Preinstall release-bundled official Plugins once, without taking ownership."""
+        enabled = os.environ.get("WAVEFLOW_OFFICIAL_PLUGIN_BOOTSTRAP", "1").strip().lower()
+        if enabled in {"0", "false", "no", "off"}:
+            return []
+        try:
+            state = json.loads(await db.get_setting(OFFICIAL_PLUGIN_BOOTSTRAP_SETTING, "{}"))
+        except json.JSONDecodeError:
+            state = {}
+        completed = set(state.get("completed") or []) if isinstance(state, dict) else set()
+        results: list[dict[str, Any]] = []
+        changed = False
+        for package in bundled_official_packages(self.official_release_root):
+            manifest = validate_manifest(package.get("plugin_manifest"))
+            identity = manifest.identity
+            existing = await db.get_plugin_installation(manifest.publisher_id, manifest.plugin_id)
+            if existing:
+                if identity not in completed:
+                    completed.add(identity)
+                    changed = True
+                continue
+            if identity in completed:
+                # A completed entry with no installation is an explicit uninstall;
+                # startup must not silently reinstall it.
+                continue
+            try:
+                installed = await self.install(identity, [package])
+            except BaseException as error:
+                results.append({
+                    "plugin": identity, "status": "unavailable", "error": _safe_bootstrap_error(error),
+                })
+                continue
+            completed.add(identity)
+            changed = True
+            results.append({
+                "plugin": identity, "status": installed.get("lifecycle_state") or "active",
+                "bootstrap": "installed",
+            })
+        if changed:
+            await db.set_setting(
+                OFFICIAL_PLUGIN_BOOTSTRAP_SETTING,
+                json.dumps({"version": 1, "completed": sorted(completed)}, separators=(",", ":"), sort_keys=True),
+            )
+        return results
 
     async def shutdown(self) -> None:
         await self.service.runtime.shutdown()
 
     async def reload_trust(self) -> None:
-        rows = await db.list_plugin_publisher_trust()
+        rows = [row for row in await db.list_plugin_publisher_trust()
+                if row.get("publisher_id") != OFFICIAL_PUBLISHER_ID]
         rows.extend(_official_trust_rows())
         self.trust_policy.replace(rows)
 
@@ -262,7 +353,23 @@ class ProductionPluginSubsystem:
                for item in await db.list_plugin_scheme_ownership()):
             raise PluginError("SCHEME_CONFLICT", "Plugin owns a scheme and must be rolled back before uninstall",
                               category="routing")
-        return await self.service.uninstall(identity)
+        removed = await self.service.uninstall(identity)
+        if removed and identity.startswith(f"{OFFICIAL_PUBLISHER_ID}/"):
+            await self._remember_official_bootstrap(identity)
+        return removed
+
+    @staticmethod
+    async def _remember_official_bootstrap(identity: str) -> None:
+        try:
+            state = json.loads(await db.get_setting(OFFICIAL_PLUGIN_BOOTSTRAP_SETTING, "{}"))
+        except json.JSONDecodeError:
+            state = {}
+        completed = set(state.get("completed") or []) if isinstance(state, dict) else set()
+        completed.add(identity)
+        await db.set_setting(
+            OFFICIAL_PLUGIN_BOOTSTRAP_SETTING,
+            json.dumps({"version": 1, "completed": sorted(completed)}, separators=(",", ":"), sort_keys=True),
+        )
 
     async def approve_permission(self, identity: str, packages: Iterable[dict[str, Any]],
                                  permission: str, actor: str) -> dict[str, Any]:
@@ -301,13 +408,24 @@ class ProductionPluginSubsystem:
                 if artifact.get("os") != os_name or artifact.get("arch") != arch:
                     continue
                 remote = next((item for item in references if item.get("sha256") == artifact.get("sha256")), None)
-                if not remote or not remote.get("url"):
+                if not remote:
                     continue
-                path = await download_plugin_artifact(
-                    str(remote["url"]), self.download_root,
-                    expected_size=int(artifact["size_bytes"]), expected_sha256=str(artifact["sha256"]),
-                    client=self.http_client,
-                )
+                bundled_path = remote.get("_bundled_path")
+                if bundled_path and package.get("_bundled_release") is True:
+                    path = await asyncio.to_thread(
+                        _stage_bundled_plugin_artifact,
+                        Path(str(bundled_path)), self.official_release_root, self.download_root,
+                        int(artifact["size_bytes"]), str(artifact["sha256"]),
+                    )
+                elif remote.get("url"):
+                    base_url = str(package.get("manifest_url") or package.get("market_url") or "")
+                    path = await download_plugin_artifact(
+                        urljoin(base_url, str(remote["url"])), self.download_root,
+                        expected_size=int(artifact["size_bytes"]), expected_sha256=str(artifact["sha256"]),
+                        client=self.http_client,
+                    )
+                else:
+                    continue
                 temp_paths.append(path)
                 local_references.append({"sha256": artifact["sha256"], "local_path": str(path)})
             package["artifact_references"] = local_references
@@ -342,25 +460,72 @@ def default_plugin_root() -> Path:
 
 
 def _official_trust_rows() -> list[dict[str, Any]]:
-    """Load public official keys from deployment config; private keys never enter Core."""
+    """Load built-in and deployment public keys; private keys never enter Core."""
+    try:
+        rows = load_official_trust_rows()
+    except PluginError:
+        logger.exception("Bundled official Plugin trust anchor is invalid")
+        rows = []
     raw = os.environ.get("WAVEFLOW_OFFICIAL_PLUGIN_KEYS", "")
     if not raw:
-        return []
+        return rows
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
         logger.warning("Ignoring invalid WAVEFLOW_OFFICIAL_PLUGIN_KEYS configuration")
-        return []
-    rows = []
+        return rows
     if not isinstance(data, dict):
         return rows
     for publisher_id, keys in data.items():
+        if str(publisher_id) != OFFICIAL_PUBLISHER_ID:
+            logger.warning("Ignoring non-official publisher in WAVEFLOW_OFFICIAL_PLUGIN_KEYS")
+            continue
         if not isinstance(keys, dict):
             continue
         for key_id, public_key in keys.items():
+            if any(row["publisher_id"] == publisher_id and row["key_id"] == key_id for row in rows):
+                logger.warning("Ignoring deployment key that attempts to replace a bundled official trust anchor")
+                continue
             rows.append({
                 "publisher_id": str(publisher_id), "key_id": str(key_id),
                 "public_key": str(public_key), "trust_level": "official",
-                "enabled": 1,
+                "enabled": 1, "require_manifest_signature": True,
             })
     return rows
+
+
+def _stage_bundled_plugin_artifact(
+    source: Path, release_root: Path, destination_dir: Path, expected_size: int, expected_sha256: str,
+) -> Path:
+    release_root = release_root.resolve()
+    source = source.resolve(strict=True)
+    if not source.is_file() or not source.is_relative_to(release_root):
+        raise PluginError("CAPABILITY_DENIED", "Bundled Plugin artifact path is not trusted", category="artifact")
+    if expected_size < 1 or expected_size > MAX_PLUGIN_ARTIFACT_BYTES:
+        raise PluginError("ARTIFACT_INVALID", "Plugin artifact size is outside the allowed limit", category="artifact")
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix="plugin-bundled-", dir=destination_dir)
+    os.close(fd)
+    target = Path(name)
+    digest = hashlib.sha256()
+    size = 0
+    try:
+        with source.open("rb") as read, target.open("wb") as write:
+            for chunk in iter(lambda: read.read(1024 * 1024), b""):
+                size += len(chunk)
+                if size > MAX_PLUGIN_ARTIFACT_BYTES:
+                    raise PluginError("ARTIFACT_INVALID", "Plugin artifact exceeds the size limit", category="artifact")
+                digest.update(chunk)
+                write.write(chunk)
+        if size != expected_size or digest.hexdigest() != expected_sha256:
+            raise PluginError("ARTIFACT_INTEGRITY_FAILED", "Plugin artifact integrity check failed", category="artifact")
+        return target
+    except BaseException:
+        target.unlink(missing_ok=True)
+        raise
+
+
+def _safe_bootstrap_error(error: BaseException) -> str:
+    if isinstance(error, PluginError):
+        return f"{error.code}: {error.message}"[:1024]
+    return "Official Plugin bootstrap failed"

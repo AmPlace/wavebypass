@@ -146,6 +146,12 @@ class PluginSDKCLITest(unittest.IsolatedAsyncioTestCase):
         artifact = Path(package["artifact_references"][0]["local_path"]).read_bytes()
         signature = base64.b64decode(package["plugin_manifest"]["artifacts"][0]["signature"]["value"])
         private.public_key().verify(signature, artifact)
+        from plugin_market import manifest_signature_payload
+        from plugin_runtime import validate_manifest
+        manifest_signature = base64.b64decode(package["manifest_signature"]["value"])
+        private.public_key().verify(
+            manifest_signature, manifest_signature_payload(validate_manifest(package["plugin_manifest"])),
+        )
         self.assertNotIn(private.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw,
                                                serialization.NoEncryption()), artifact)
         self.assertEqual(package["package_type"], "plugin_package")

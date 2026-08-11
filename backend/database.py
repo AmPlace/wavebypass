@@ -419,6 +419,7 @@ CREATE TABLE IF NOT EXISTS plugin_installations (
     source_package_id     TEXT DEFAULT '',
     manifest_json         TEXT NOT NULL,
     manifest_sha256       TEXT NOT NULL,
+    manifest_signature_json TEXT NOT NULL DEFAULT '{}',
     artifact_sha256       TEXT NOT NULL,
     artifact_path         TEXT NOT NULL,
     runtime_type          TEXT NOT NULL,
@@ -862,6 +863,13 @@ async def initialize():
         ]:
             try:
                 conn.execute(f"ALTER TABLE epg_sources ADD COLUMN {col} {typ} DEFAULT {default}")
+            except sqlite3.OperationalError:
+                pass
+        for col, typ, default in [
+            ('manifest_signature_json', 'TEXT', "'{}'"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE plugin_installations ADD COLUMN {col} {typ} NOT NULL DEFAULT {default}")
             except sqlite3.OperationalError:
                 pass
         # One-time development migration for the exact pre-5B default row.
@@ -2543,6 +2551,7 @@ async def begin_plugin_candidate(
     source_package_id: str,
     manifest_json: str,
     manifest_sha256: str,
+    manifest_signature_json: str = '{}',
     artifact_sha256: str,
     artifact_path: str,
     runtime_type: str,
@@ -2589,10 +2598,10 @@ async def begin_plugin_candidate(
                         publisher_id, plugin_id, installed_version, active_version,
                         candidate_version, enabled, trust_state, source_key,
                         source_package_id, manifest_json, manifest_sha256,
-                        artifact_sha256, artifact_path, runtime_type, entrypoint,
+                        manifest_signature_json, artifact_sha256, artifact_path, runtime_type, entrypoint,
                         platform_os, platform_arch, lifecycle_state, quarantined,
                         last_activation_status, last_error, created_at, updated_at
-                    ) VALUES(?, ?, ?, '', ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ) VALUES(?, ?, ?, '', ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                              'candidate', 0, 'pending', '', ?, ?)
                     ON CONFLICT(publisher_id, plugin_id) DO UPDATE SET
                         candidate_version=excluded.candidate_version,
@@ -2604,7 +2613,7 @@ async def begin_plugin_candidate(
                     (
                         publisher_id, plugin_id, version, version, trust_state,
                         source_key, source_package_id, manifest_json, manifest_sha256,
-                        artifact_sha256, artifact_path, runtime_type, entrypoint,
+                        manifest_signature_json, artifact_sha256, artifact_path, runtime_type, entrypoint,
                         platform_os, platform_arch, now, now,
                     ),
                 )
@@ -2628,6 +2637,7 @@ async def activate_plugin_candidate(
     source_package_id: str,
     manifest_json: str,
     manifest_sha256: str,
+    manifest_signature_json: str = '{}',
     artifact_sha256: str,
     artifact_path: str,
     runtime_type: str,
@@ -2646,7 +2656,7 @@ async def activate_plugin_candidate(
                     UPDATE plugin_installations SET
                         installed_version=?, active_version=?, candidate_version='',
                         enabled=1, trust_state=?, source_key=?, source_package_id=?,
-                        manifest_json=?, manifest_sha256=?, artifact_sha256=?,
+                        manifest_json=?, manifest_sha256=?, manifest_signature_json=?, artifact_sha256=?,
                         artifact_path=?, runtime_type=?, entrypoint=?, platform_os=?,
                         platform_arch=?, lifecycle_state='active', quarantined=0,
                         last_activation_status='success', last_error='', updated_at=?
@@ -2655,7 +2665,7 @@ async def activate_plugin_candidate(
                     (
                         candidate_version, candidate_version, trust_state, source_key,
                         source_package_id, manifest_json, manifest_sha256,
-                        artifact_sha256, artifact_path, runtime_type, entrypoint,
+                        manifest_signature_json, artifact_sha256, artifact_path, runtime_type, entrypoint,
                         platform_os, platform_arch, now, publisher_id, plugin_id,
                         candidate_version,
                     ),

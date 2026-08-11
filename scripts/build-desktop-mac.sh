@@ -23,7 +23,7 @@ fi
 .venv/bin/pyinstaller \
   --clean \
   --onedir \
-  --hidden-import adapters.17live --add-data "config:config" \
+  --hidden-import adapters.17live --add-data "config:config" --add-data "official_plugins:official_plugins" \
   --name waveflow-backend \
   desktop_entry.py
 

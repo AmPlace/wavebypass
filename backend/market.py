@@ -847,7 +847,12 @@ async def _load_source_packages(source: dict) -> tuple[dict, list[dict]]:
         raise MarketError("Market 源 URL 不能为空", 400)
 
     allow_private = bool(source.get("allow_private") or ALLOW_PRIVATE_MARKET_URLS)
-    final_url, text, _headers = await safe_http_fetch(url, allow_private=allow_private)
+    try:
+        final_url, text, _headers = await safe_http_fetch(url, allow_private=allow_private)
+    except Exception:
+        if str(source.get("source_key") or "") == OFFICIAL_MARKET_SOURCE_KEY:
+            return _load_bundled_official_source(source)
+        raise
     try:
         market = json.loads(text)
     except json.JSONDecodeError as exc:
@@ -892,7 +897,45 @@ async def _load_source_packages(source: dict) -> tuple[dict, list[dict]]:
             packages.append(_attach_source(broken, source_with_defs, fallback_id))
     for package in packages:
         package["_allow_private_fetch"] = allow_private
+    if str(source.get("source_key") or "") == OFFICIAL_MARKET_SOURCE_KEY:
+        try:
+            _bundled_market, bundled = _load_bundled_official_source(source)
+        except Exception:
+            logger.exception("Bundled official Plugin fallback is unavailable; using remote official Market")
+        else:
+            by_id = {str(item.get("original_id") or item.get("id") or ""): index
+                     for index, item in enumerate(packages)}
+            for fallback in bundled:
+                identity = str(fallback.get("original_id") or fallback.get("id") or "")
+                current_index = by_id.get(identity)
+                if current_index is None:
+                    packages.append(fallback)
+                    continue
+                remote = packages[current_index]
+                if _version_status(str(remote.get("version") or ""), str(fallback.get("version") or "")) != "upgrade":
+                    # The release-local copy is the immutable baseline for the same
+                    # version. Remote sources can only supersede it with a newer one.
+                    packages[current_index] = fallback
+            market["distribution"] = "remote_with_bundled_fallback"
     market["_source"] = _source_public({**source_with_defs, "url": final_url})
+    return market, packages
+
+
+def _load_bundled_official_source(source: dict) -> tuple[dict, list[dict]]:
+    from official_plugin_distribution import load_bundled_official_market
+
+    market, raw_packages = load_bundled_official_market()
+    source_with_defs = dict(source)
+    packages = []
+    for item in raw_packages:
+        _validate_package_minimal(item, context="bundled official market")
+        raw_id = str(item.get("id") or "")
+        loaded = _normalize_package(item, market_url=str(source.get("url") or ""))
+        loaded["_manifest_loaded"] = True
+        loaded["_allow_private_fetch"] = False
+        packages.append(_attach_source(loaded, source_with_defs, raw_id))
+    market["_source"] = _source_public(source_with_defs)
+    market["_bundled_fallback"] = True
     return market, packages
 
 
@@ -1021,6 +1064,7 @@ async def refresh_market(
                 ))
                 continue
             success_at = time.time()
+            refresh_status = "bundled" if market.get("_bundled_fallback") else "success"
             entries[key] = {
                 "source_id": source.get("id"),
                 "source_url": source.get("url", ""),
@@ -1035,13 +1079,13 @@ async def refresh_market(
             await db.update_market_source(
                 source["id"],
                 last_fetched_at=_now_iso(),
-                last_status="ok",
+                last_status="bundled" if refresh_status == "bundled" else "ok",
                 last_error="",
             )
             source_results.append(_source_refresh_result(
                 source,
                 current=current,
-                status="success",
+                status=refresh_status,
                 cache_updated=True,
                 packages=source_packages,
             ))

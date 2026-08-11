@@ -22,6 +22,7 @@ from packaging.utils import canonicalize_name, parse_wheel_filename
 
 from plugin_runtime import PluginError, load_manifest, validate_manifest, validate_stream_descriptor
 from plugin_runtime.process import PluginProcess
+from plugin_market import manifest_signature_payload
 
 
 SDK_ROOT = Path(__file__).with_name("waveflow_plugin_sdk")
@@ -225,10 +226,16 @@ def sign_build(manifest_path: str | Path, key_path: str | Path, *, key_id: str) 
             raise PluginError("ARTIFACT_INTEGRITY_FAILED", "Build contains inconsistent platform artifacts",
                               category="cli")
         candidate["signature"] = dict(signature)
+    signed_manifest = validate_manifest(data)
+    manifest_signature = {
+        "algorithm": "ed25519", "key_id": key_id,
+        "value": base64.b64encode(key.sign(manifest_signature_payload(signed_manifest))).decode(),
+    }
     manifest_file.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     package = {"schema_version": 1, "id": f"local::{manifest.plugin_id}", "name": manifest.display_name,
                "kind": "plugin_package", "package_type": "plugin_package", "version": manifest.version,
                "plugin_manifest": data,
+               "manifest_signature": manifest_signature,
                "artifact_references": [{"sha256": artifact["sha256"], "local_path": str(artifact_path)}],
                "market_source": {"source_key": "local"}}
     package_path = manifest_file.parent / "market-package.json"

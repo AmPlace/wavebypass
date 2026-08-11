@@ -1,0 +1,126 @@
+{
+  "artifact_references": [
+    {
+      "sha256": "7b8def14a4cb3469f44d557a57ed1f3040db07332281428678e2239ed2949bfc",
+      "url": "payloads/jstv-1.0.0.pyz"
+    }
+  ],
+  "description": "WaveFlow official JSTV TV Provider.",
+  "id": "official::jstv-plugin",
+  "kind": "plugin_package",
+  "manifest_signature": {
+    "algorithm": "ed25519",
+    "key_id": "org.waveflow.release.2026-01",
+    "value": "P2Zr9XEuOn0AGIe8+fWaEscZJKHe94teWOyS65ntFTgDSlpL0GTqkXN0I/J5blYjMSHDAmUzKaD/PdjXVwyhCQ=="
+  },
+  "name": "JSTV Provider Plugin",
+  "package_type": "plugin_package",
+  "plugin_manifest": {
+    "artifacts": [
+      {
+        "arch": "x86_64",
+        "entrypoint": "jstv-1.0.0.pyz",
+        "os": "linux",
+        "runtime": "python",
+        "sha256": "7b8def14a4cb3469f44d557a57ed1f3040db07332281428678e2239ed2949bfc",
+        "signature": {
+          "algorithm": "ed25519",
+          "key_id": "org.waveflow.release.2026-01",
+          "value": "dxkI/mU2+urN7Nil/IissrJ/dklWpDs+UiSMWD4d4lF9KRDzgsRFvdcp22yDJAg2TUq/HwfRultCt28bRrxqBw=="
+        },
+        "size_bytes": 8493
+      },
+      {
+        "arch": "arm64",
+        "entrypoint": "jstv-1.0.0.pyz",
+        "os": "linux",
+        "runtime": "python",
+        "sha256": "7b8def14a4cb3469f44d557a57ed1f3040db07332281428678e2239ed2949bfc",
+        "signature": {
+          "algorithm": "ed25519",
+          "key_id": "org.waveflow.release.2026-01",
+          "value": "dxkI/mU2+urN7Nil/IissrJ/dklWpDs+UiSMWD4d4lF9KRDzgsRFvdcp22yDJAg2TUq/HwfRultCt28bRrxqBw=="
+        },
+        "size_bytes": 8493
+      },
+      {
+        "arch": "x86_64",
+        "entrypoint": "jstv-1.0.0.pyz",
+        "os": "macos",
+        "runtime": "python",
+        "sha256": "7b8def14a4cb3469f44d557a57ed1f3040db07332281428678e2239ed2949bfc",
+        "signature": {
+          "algorithm": "ed25519",
+          "key_id": "org.waveflow.release.2026-01",
+          "value": "dxkI/mU2+urN7Nil/IissrJ/dklWpDs+UiSMWD4d4lF9KRDzgsRFvdcp22yDJAg2TUq/HwfRultCt28bRrxqBw=="
+        },
+        "size_bytes": 8493
+      },
+      {
+        "arch": "arm64",
+        "entrypoint": "jstv-1.0.0.pyz",
+        "os": "macos",
+        "runtime": "python",
+        "sha256": "7b8def14a4cb3469f44d557a57ed1f3040db07332281428678e2239ed2949bfc",
+        "signature": {
+          "algorithm": "ed25519",
+          "key_id": "org.waveflow.release.2026-01",
+          "value": "dxkI/mU2+urN7Nil/IissrJ/dklWpDs+UiSMWD4d4lF9KRDzgsRFvdcp22yDJAg2TUq/HwfRultCt28bRrxqBw=="
+        },
+        "size_bytes": 8493
+      },
+      {
+        "arch": "x86_64",
+        "entrypoint": "jstv-1.0.0.pyz",
+        "os": "windows",
+        "runtime": "python",
+        "sha256": "7b8def14a4cb3469f44d557a57ed1f3040db07332281428678e2239ed2949bfc",
+        "signature": {
+          "algorithm": "ed25519",
+          "key_id": "org.waveflow.release.2026-01",
+          "value": "dxkI/mU2+urN7Nil/IissrJ/dklWpDs+UiSMWD4d4lF9KRDzgsRFvdcp22yDJAg2TUq/HwfRultCt28bRrxqBw=="
+        },
+        "size_bytes": 8493
+      }
+    ],
+    "capabilities": [
+      "tv.resolve_stream"
+    ],
+    "core_version_range": ">=0.1.0 <1.0.0",
+    "dependencies": [],
+    "display_name": "JSTV Provider",
+    "manifest_version": 1,
+    "owned_schemes": [
+      {
+        "contract": "tv_provider",
+        "scheme": "jstv"
+      }
+    ],
+    "permissions": {},
+    "plugin_api_version": "1.0",
+    "plugin_id": "jstv",
+    "provider_contracts": [
+      {
+        "contract": "tv_provider",
+        "contract_version": "1.0",
+        "features": [
+          "resolve_stream"
+        ]
+      }
+    ],
+    "publisher_id": "org.waveflow",
+    "runtime": {
+      "ipc": "stdio_framed_json_v1",
+      "type": "subprocess"
+    },
+    "state_schema_version": 1,
+    "version": "1.0.0"
+  },
+  "risk_level": "official_signed_not_sandboxed",
+  "schema_version": 1,
+  "source_origin": "official",
+  "source_policy": "signed_release",
+  "status": "active",
+  "updated_at": "2026-08-11T00:00:00Z",
+  "version": "1.0.0"
+}

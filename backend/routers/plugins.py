@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 
 import database as db
 import market
+from official_plugin_distribution import OFFICIAL_PUBLISHER_ID, load_official_trust_rows
 from plugin_tasks import reconcile_plugin_update_task
 from plugin_runtime import PluginError
 from security.dependencies import require_admin
@@ -52,7 +53,7 @@ def _subsystem(request: Request):
 def _error(exc: PluginError) -> HTTPException:
     statuses = {
         "RESOURCE_NOT_FOUND": 404, "ARTIFACT_NOT_FOUND": 404,
-        "PLUGIN_UNTRUSTED": 403, "CAPABILITY_DENIED": 403,
+        "PLUGIN_UNTRUSTED": 403, "ARTIFACT_SIGNATURE_INVALID": 403, "CAPABILITY_DENIED": 403,
         "SCHEME_CONFLICT": 409, "PLUGIN_CANDIDATE_CONFLICT": 409,
         "PLUGIN_UNAVAILABLE": 503,
         "PLUGIN_INCOMPATIBLE": 422, "PLATFORM_UNSUPPORTED": 422,
@@ -154,8 +155,16 @@ async def list_plugins() -> dict[str, Any]:
 
 @router.get("/trust")
 async def list_trust() -> dict[str, Any]:
-    rows = await db.list_plugin_publisher_trust()
-    return {"publishers": [{k: row[k] for k in ("publisher_id", "key_id", "trust_level", "enabled", "description")} for row in rows]}
+    rows = [row for row in await db.list_plugin_publisher_trust()
+            if row.get("publisher_id") != OFFICIAL_PUBLISHER_ID]
+    official = load_official_trust_rows()
+    return {"publishers": [
+        {
+            **{k: row[k] for k in ("publisher_id", "key_id", "trust_level", "enabled", "description")},
+            "builtin": row in official,
+        }
+        for row in [*official, *rows]
+    ]}
 
 
 @router.put("/trust")
@@ -164,6 +173,11 @@ async def put_trust(body: PublisherTrustRequest, request: Request) -> dict[str, 
         raise HTTPException(status_code=422, detail={"code": "INVALID_PLUGIN_RESPONSE", "message": "Invalid publisher identity"})
     if body.trust_level not in {"official", "third_party"}:
         raise HTTPException(status_code=422, detail={"code": "INVALID_PLUGIN_RESPONSE", "message": "Invalid trust level"})
+    if body.publisher_id == OFFICIAL_PUBLISHER_ID or body.trust_level == "official":
+        raise HTTPException(status_code=409, detail={
+            "code": "PLUGIN_UNTRUSTED",
+            "message": "Official publisher trust is managed by the WaveFlow distribution",
+        })
     try:
         decoded = base64.b64decode(body.public_key, validate=True)
     except ValueError as exc:

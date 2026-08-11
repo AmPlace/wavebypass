@@ -1,0 +1,536 @@
+{
+  "market_version": "1.0.0",
+  "packages": [
+    {
+      "artifact_references": [
+        {
+          "sha256": "3f0f00898a637fdd6b6100af0c0af09e679627830cdc84573061368e05578ee0",
+          "url": "payloads/fjtv-1.0.0.pyz"
+        }
+      ],
+      "description": "WaveFlow official FJTV TV Provider.",
+      "id": "official::fjtv-plugin",
+      "kind": "plugin_package",
+      "manifest_signature": {
+        "algorithm": "ed25519",
+        "key_id": "org.waveflow.release.2026-01",
+        "value": "gyvnhoahPb0zwQOp9iW5pkCSszOf4uxKkvx3mUsZLsPbtfqctEpQ2PXFm+Zys0QgHkDQFt4YJtR1v7oQybeyBg=="
+      },
+      "name": "FJTV Provider Plugin",
+      "package_type": "plugin_package",
+      "plugin_manifest": {
+        "artifacts": [
+          {
+            "arch": "x86_64",
+            "entrypoint": "fjtv-1.0.0.pyz",
+            "os": "linux",
+            "runtime": "python",
+            "sha256": "3f0f00898a637fdd6b6100af0c0af09e679627830cdc84573061368e05578ee0",
+            "signature": {
+              "algorithm": "ed25519",
+              "key_id": "org.waveflow.release.2026-01",
+              "value": "1iLAiHTyqBAShFVANvyZVuYFW7Nao8p6yW1bigoqhsvVrxCKdilaNQefLwVTcg33FdHNrG+kusiZdfaMt8vTCQ=="
+            },
+            "size_bytes": 8812
+          },
+          {
+            "arch": "arm64",
+            "entrypoint": "fjtv-1.0.0.pyz",
+            "os": "linux",
+            "runtime": "python",
+            "sha256": "3f0f00898a637fdd6b6100af0c0af09e679627830cdc84573061368e05578ee0",
+            "signature": {
+              "algorithm": "ed25519",
+              "key_id": "org.waveflow.release.2026-01",
+              "value": "1iLAiHTyqBAShFVANvyZVuYFW7Nao8p6yW1bigoqhsvVrxCKdilaNQefLwVTcg33FdHNrG+kusiZdfaMt8vTCQ=="
+            },
+            "size_bytes": 8812
+          },
+          {
+            "arch": "x86_64",
+            "entrypoint": "fjtv-1.0.0.pyz",
+            "os": "macos",
+            "runtime": "python",
+            "sha256": "3f0f00898a637fdd6b6100af0c0af09e679627830cdc84573061368e05578ee0",
+            "signature": {
+              "algorithm": "ed25519",
+              "key_id": "org.waveflow.release.2026-01",
+              "value": "1iLAiHTyqBAShFVANvyZVuYFW7Nao8p6yW1bigoqhsvVrxCKdilaNQefLwVTcg33FdHNrG+kusiZdfaMt8vTCQ=="
+            },
+            "size_bytes": 8812
+          },
+          {
+            "arch": "arm64",
+            "entrypoint": "fjtv-1.0.0.pyz",
+            "os": "macos",
+            "runtime": "python",
+            "sha256": "3f0f00898a637fdd6b6100af0c0af09e679627830cdc84573061368e05578ee0",
+            "signature": {
+              "algorithm": "ed25519",
+              "key_id": "org.waveflow.release.2026-01",
+              "value": "1iLAiHTyqBAShFVANvyZVuYFW7Nao8p6yW1bigoqhsvVrxCKdilaNQefLwVTcg33FdHNrG+kusiZdfaMt8vTCQ=="
+            },
+            "size_bytes": 8812
+          },
+          {
+            "arch": "x86_64",
+            "entrypoint": "fjtv-1.0.0.pyz",
+            "os": "windows",
+            "runtime": "python",
+            "sha256": "3f0f00898a637fdd6b6100af0c0af09e679627830cdc84573061368e05578ee0",
+            "signature": {
+              "algorithm": "ed25519",
+              "key_id": "org.waveflow.release.2026-01",
+              "value": "1iLAiHTyqBAShFVANvyZVuYFW7Nao8p6yW1bigoqhsvVrxCKdilaNQefLwVTcg33FdHNrG+kusiZdfaMt8vTCQ=="
+            },
+            "size_bytes": 8812
+          }
+        ],
+        "capabilities": [
+          "tv.resolve_stream"
+        ],
+        "core_version_range": ">=0.1.0 <1.0.0",
+        "dependencies": [],
+        "display_name": "FJTV Provider",
+        "manifest_version": 1,
+        "owned_schemes": [
+          {
+            "contract": "tv_provider",
+            "scheme": "fjtv"
+          }
+        ],
+        "permissions": {
+          "network": {
+            "allowed_hosts": [
+              "live.fjtv.net",
+              "mapi-plus.fjtv.net",
+              "mapi1.kxm.xmtv.cn",
+              "mapi.ijjnews.com",
+              "mapi-new.chinashishi.net"
+            ],
+            "managed": true
+          }
+        },
+        "plugin_api_version": "1.0",
+        "plugin_id": "fjtv",
+        "provider_contracts": [
+          {
+            "contract": "tv_provider",
+            "contract_version": "1.0",
+            "features": [
+              "resolve_stream"
+            ]
+          }
+        ],
+        "publisher_id": "org.waveflow",
+        "runtime": {
+          "ipc": "stdio_framed_json_v1",
+          "type": "subprocess"
+        },
+        "state_schema_version": 1,
+        "version": "1.0.0"
+      },
+      "risk_level": "official_signed_not_sandboxed",
+      "schema_version": 1,
+      "source_origin": "official",
+      "source_policy": "signed_release",
+      "status": "active",
+      "updated_at": "2026-08-11T00:00:00Z",
+      "version": "1.0.0"
+    },
+    {
+      "artifact_references": [
+        {
+          "sha256": "ad5fa15eea01786e81149f01a5b2fc6e02b66867c340c643a0f724c95c3e5790",
+          "url": "payloads/gzstv-1.0.0.pyz"
+        }
+      ],
+      "description": "WaveFlow official GZSTV TV Provider.",
+      "id": "official::gzstv-plugin",
+      "kind": "plugin_package",
+      "manifest_signature": {
+        "algorithm": "ed25519",
+        "key_id": "org.waveflow.release.2026-01",
+        "value": "68jC3y0TIsfujrbZPdCHVcM1Rg2rZqujFk31KtiL+AeVvRtNNm7jePD5HrV0+aC3b1n7Nl6f3pGdZU+/nzoDDg=="
+      },
+      "name": "GZSTV Provider Plugin",
+      "package_type": "plugin_package",
+      "plugin_manifest": {
+        "artifacts": [
+          {
+            "arch": "x86_64",
+            "entrypoint": "gzstv-1.0.0.pyz",
+            "os": "linux",
+            "runtime": "python",
+            "sha256": "ad5fa15eea01786e81149f01a5b2fc6e02b66867c340c643a0f724c95c3e5790",
+            "signature": {
+              "algorithm": "ed25519",
+              "key_id": "org.waveflow.release.2026-01",
+              "value": "b9zLMQQrZ/QIW7iraAlxxxpTnBcJd4Rh7/lJa4zPHR5YdP9/lGebIDjHq4f110zMz0AprkguMStXFY0NtH6mCw=="
+            },
+            "size_bytes": 9216
+          },
+          {
+            "arch": "arm64",
+            "entrypoint": "gzstv-1.0.0.pyz",
+            "os": "linux",
+            "runtime": "python",
+            "sha256": "ad5fa15eea01786e81149f01a5b2fc6e02b66867c340c643a0f724c95c3e5790",
+            "signature": {
+              "algorithm": "ed25519",
+              "key_id": "org.waveflow.release.2026-01",
+              "value": "b9zLMQQrZ/QIW7iraAlxxxpTnBcJd4Rh7/lJa4zPHR5YdP9/lGebIDjHq4f110zMz0AprkguMStXFY0NtH6mCw=="
+            },
+            "size_bytes": 9216
+          },
+          {
+            "arch": "x86_64",
+            "entrypoint": "gzstv-1.0.0.pyz",
+            "os": "macos",
+            "runtime": "python",
+            "sha256": "ad5fa15eea01786e81149f01a5b2fc6e02b66867c340c643a0f724c95c3e5790",
+            "signature": {
+              "algorithm": "ed25519",
+              "key_id": "org.waveflow.release.2026-01",
+              "value": "b9zLMQQrZ/QIW7iraAlxxxpTnBcJd4Rh7/lJa4zPHR5YdP9/lGebIDjHq4f110zMz0AprkguMStXFY0NtH6mCw=="
+            },
+            "size_bytes": 9216
+          },
+          {
+            "arch": "arm64",
+            "entrypoint": "gzstv-1.0.0.pyz",
+            "os": "macos",
+            "runtime": "python",
+            "sha256": "ad5fa15eea01786e81149f01a5b2fc6e02b66867c340c643a0f724c95c3e5790",
+            "signature": {
+              "algorithm": "ed25519",
+              "key_id": "org.waveflow.release.2026-01",
+              "value": "b9zLMQQrZ/QIW7iraAlxxxpTnBcJd4Rh7/lJa4zPHR5YdP9/lGebIDjHq4f110zMz0AprkguMStXFY0NtH6mCw=="
+            },
+            "size_bytes": 9216
+          },
+          {
+            "arch": "x86_64",
+            "entrypoint": "gzstv-1.0.0.pyz",
+            "os": "windows",
+            "runtime": "python",
+            "sha256": "ad5fa15eea01786e81149f01a5b2fc6e02b66867c340c643a0f724c95c3e5790",
+            "signature": {
+              "algorithm": "ed25519",
+              "key_id": "org.waveflow.release.2026-01",
+              "value": "b9zLMQQrZ/QIW7iraAlxxxpTnBcJd4Rh7/lJa4zPHR5YdP9/lGebIDjHq4f110zMz0AprkguMStXFY0NtH6mCw=="
+            },
+            "size_bytes": 9216
+          }
+        ],
+        "capabilities": [
+          "tv.resolve_stream"
+        ],
+        "core_version_range": ">=0.1.0 <1.0.0",
+        "dependencies": [],
+        "display_name": "GZSTV Provider",
+        "manifest_version": 1,
+        "owned_schemes": [
+          {
+            "contract": "tv_provider",
+            "scheme": "gzstv"
+          }
+        ],
+        "permissions": {
+          "network": {
+            "allowed_hosts": [
+              "api.gzstv.com"
+            ],
+            "managed": true
+          }
+        },
+        "plugin_api_version": "1.0",
+        "plugin_id": "gzstv",
+        "provider_contracts": [
+          {
+            "contract": "tv_provider",
+            "contract_version": "1.0",
+            "features": [
+              "resolve_stream"
+            ]
+          }
+        ],
+        "publisher_id": "org.waveflow",
+        "runtime": {
+          "ipc": "stdio_framed_json_v1",
+          "type": "subprocess"
+        },
+        "state_schema_version": 1,
+        "version": "1.0.0"
+      },
+      "risk_level": "official_signed_not_sandboxed",
+      "schema_version": 1,
+      "source_origin": "official",
+      "source_policy": "signed_release",
+      "status": "active",
+      "updated_at": "2026-08-11T00:00:00Z",
+      "version": "1.0.0"
+    },
+    {
+      "artifact_references": [
+        {
+          "sha256": "7b8def14a4cb3469f44d557a57ed1f3040db07332281428678e2239ed2949bfc",
+          "url": "payloads/jstv-1.0.0.pyz"
+        }
+      ],
+      "description": "WaveFlow official JSTV TV Provider.",
+      "id": "official::jstv-plugin",
+      "kind": "plugin_package",
+      "manifest_signature": {
+        "algorithm": "ed25519",
+        "key_id": "org.waveflow.release.2026-01",
+        "value": "P2Zr9XEuOn0AGIe8+fWaEscZJKHe94teWOyS65ntFTgDSlpL0GTqkXN0I/J5blYjMSHDAmUzKaD/PdjXVwyhCQ=="
+      },
+      "name": "JSTV Provider Plugin",
+      "package_type": "plugin_package",
+      "plugin_manifest": {
+        "artifacts": [
+          {
+            "arch": "x86_64",
+            "entrypoint": "jstv-1.0.0.pyz",
+            "os": "linux",
+            "runtime": "python",
+            "sha256": "7b8def14a4cb3469f44d557a57ed1f3040db07332281428678e2239ed2949bfc",
+            "signature": {
+              "algorithm": "ed25519",
+              "key_id": "org.waveflow.release.2026-01",
+              "value": "dxkI/mU2+urN7Nil/IissrJ/dklWpDs+UiSMWD4d4lF9KRDzgsRFvdcp22yDJAg2TUq/HwfRultCt28bRrxqBw=="
+            },
+            "size_bytes": 8493
+          },
+          {
+            "arch": "arm64",
+            "entrypoint": "jstv-1.0.0.pyz",
+            "os": "linux",
+            "runtime": "python",
+            "sha256": "7b8def14a4cb3469f44d557a57ed1f3040db07332281428678e2239ed2949bfc",
+            "signature": {
+              "algorithm": "ed25519",
+              "key_id": "org.waveflow.release.2026-01",
+              "value": "dxkI/mU2+urN7Nil/IissrJ/dklWpDs+UiSMWD4d4lF9KRDzgsRFvdcp22yDJAg2TUq/HwfRultCt28bRrxqBw=="
+            },
+            "size_bytes": 8493
+          },
+          {
+            "arch": "x86_64",
+            "entrypoint": "jstv-1.0.0.pyz",
+            "os": "macos",
+            "runtime": "python",
+            "sha256": "7b8def14a4cb3469f44d557a57ed1f3040db07332281428678e2239ed2949bfc",
+            "signature": {
+              "algorithm": "ed25519",
+              "key_id": "org.waveflow.release.2026-01",
+              "value": "dxkI/mU2+urN7Nil/IissrJ/dklWpDs+UiSMWD4d4lF9KRDzgsRFvdcp22yDJAg2TUq/HwfRultCt28bRrxqBw=="
+            },
+            "size_bytes": 8493
+          },
+          {
+            "arch": "arm64",
+            "entrypoint": "jstv-1.0.0.pyz",
+            "os": "macos",
+            "runtime": "python",
+            "sha256": "7b8def14a4cb3469f44d557a57ed1f3040db07332281428678e2239ed2949bfc",
+            "signature": {
+              "algorithm": "ed25519",
+              "key_id": "org.waveflow.release.2026-01",
+              "value": "dxkI/mU2+urN7Nil/IissrJ/dklWpDs+UiSMWD4d4lF9KRDzgsRFvdcp22yDJAg2TUq/HwfRultCt28bRrxqBw=="
+            },
+            "size_bytes": 8493
+          },
+          {
+            "arch": "x86_64",
+            "entrypoint": "jstv-1.0.0.pyz",
+            "os": "windows",
+            "runtime": "python",
+            "sha256": "7b8def14a4cb3469f44d557a57ed1f3040db07332281428678e2239ed2949bfc",
+            "signature": {
+              "algorithm": "ed25519",
+              "key_id": "org.waveflow.release.2026-01",
+              "value": "dxkI/mU2+urN7Nil/IissrJ/dklWpDs+UiSMWD4d4lF9KRDzgsRFvdcp22yDJAg2TUq/HwfRultCt28bRrxqBw=="
+            },
+            "size_bytes": 8493
+          }
+        ],
+        "capabilities": [
+          "tv.resolve_stream"
+        ],
+        "core_version_range": ">=0.1.0 <1.0.0",
+        "dependencies": [],
+        "display_name": "JSTV Provider",
+        "manifest_version": 1,
+        "owned_schemes": [
+          {
+            "contract": "tv_provider",
+            "scheme": "jstv"
+          }
+        ],
+        "permissions": {},
+        "plugin_api_version": "1.0",
+        "plugin_id": "jstv",
+        "provider_contracts": [
+          {
+            "contract": "tv_provider",
+            "contract_version": "1.0",
+            "features": [
+              "resolve_stream"
+            ]
+          }
+        ],
+        "publisher_id": "org.waveflow",
+        "runtime": {
+          "ipc": "stdio_framed_json_v1",
+          "type": "subprocess"
+        },
+        "state_schema_version": 1,
+        "version": "1.0.0"
+      },
+      "risk_level": "official_signed_not_sandboxed",
+      "schema_version": 1,
+      "source_origin": "official",
+      "source_policy": "signed_release",
+      "status": "active",
+      "updated_at": "2026-08-11T00:00:00Z",
+      "version": "1.0.0"
+    },
+    {
+      "artifact_references": [
+        {
+          "sha256": "da093936d9a67743a5095be570ae0210779979cf3a05bb2647ac545a4c44cb73",
+          "url": "payloads/nd0593tv-1.0.0.pyz"
+        }
+      ],
+      "description": "WaveFlow official ND0593TV TV Provider.",
+      "id": "official::nd0593tv-plugin",
+      "kind": "plugin_package",
+      "manifest_signature": {
+        "algorithm": "ed25519",
+        "key_id": "org.waveflow.release.2026-01",
+        "value": "VsMKggSC/Q2dOqnLMLIfPiAvOym3HiM70OjT0mLP/5W1Ga6c3Lwn/vWDcqy+iGswxTFt30l57EHYbizMM9PiDA=="
+      },
+      "name": "ND0593TV Provider Plugin",
+      "package_type": "plugin_package",
+      "plugin_manifest": {
+        "artifacts": [
+          {
+            "arch": "x86_64",
+            "entrypoint": "nd0593tv-1.0.0.pyz",
+            "os": "linux",
+            "runtime": "python",
+            "sha256": "da093936d9a67743a5095be570ae0210779979cf3a05bb2647ac545a4c44cb73",
+            "signature": {
+              "algorithm": "ed25519",
+              "key_id": "org.waveflow.release.2026-01",
+              "value": "fm0a2jI6fC/Ahjg452xD0+sEKx/GJOvMp5kAs7KNcjusb0nPu0hd55+wd2Sx25qv+AXS4Rhb/nIGCD7z6DxPCA=="
+            },
+            "size_bytes": 8739
+          },
+          {
+            "arch": "arm64",
+            "entrypoint": "nd0593tv-1.0.0.pyz",
+            "os": "linux",
+            "runtime": "python",
+            "sha256": "da093936d9a67743a5095be570ae0210779979cf3a05bb2647ac545a4c44cb73",
+            "signature": {
+              "algorithm": "ed25519",
+              "key_id": "org.waveflow.release.2026-01",
+              "value": "fm0a2jI6fC/Ahjg452xD0+sEKx/GJOvMp5kAs7KNcjusb0nPu0hd55+wd2Sx25qv+AXS4Rhb/nIGCD7z6DxPCA=="
+            },
+            "size_bytes": 8739
+          },
+          {
+            "arch": "x86_64",
+            "entrypoint": "nd0593tv-1.0.0.pyz",
+            "os": "macos",
+            "runtime": "python",
+            "sha256": "da093936d9a67743a5095be570ae0210779979cf3a05bb2647ac545a4c44cb73",
+            "signature": {
+              "algorithm": "ed25519",
+              "key_id": "org.waveflow.release.2026-01",
+              "value": "fm0a2jI6fC/Ahjg452xD0+sEKx/GJOvMp5kAs7KNcjusb0nPu0hd55+wd2Sx25qv+AXS4Rhb/nIGCD7z6DxPCA=="
+            },
+            "size_bytes": 8739
+          },
+          {
+            "arch": "arm64",
+            "entrypoint": "nd0593tv-1.0.0.pyz",
+            "os": "macos",
+            "runtime": "python",
+            "sha256": "da093936d9a67743a5095be570ae0210779979cf3a05bb2647ac545a4c44cb73",
+            "signature": {
+              "algorithm": "ed25519",
+              "key_id": "org.waveflow.release.2026-01",
+              "value": "fm0a2jI6fC/Ahjg452xD0+sEKx/GJOvMp5kAs7KNcjusb0nPu0hd55+wd2Sx25qv+AXS4Rhb/nIGCD7z6DxPCA=="
+            },
+            "size_bytes": 8739
+          },
+          {
+            "arch": "x86_64",
+            "entrypoint": "nd0593tv-1.0.0.pyz",
+            "os": "windows",
+            "runtime": "python",
+            "sha256": "da093936d9a67743a5095be570ae0210779979cf3a05bb2647ac545a4c44cb73",
+            "signature": {
+              "algorithm": "ed25519",
+              "key_id": "org.waveflow.release.2026-01",
+              "value": "fm0a2jI6fC/Ahjg452xD0+sEKx/GJOvMp5kAs7KNcjusb0nPu0hd55+wd2Sx25qv+AXS4Rhb/nIGCD7z6DxPCA=="
+            },
+            "size_bytes": 8739
+          }
+        ],
+        "capabilities": [
+          "tv.resolve_stream"
+        ],
+        "core_version_range": ">=0.1.0 <1.0.0",
+        "dependencies": [],
+        "display_name": "ND0593TV Provider",
+        "manifest_version": 1,
+        "owned_schemes": [
+          {
+            "contract": "tv_provider",
+            "scheme": "nd0593tv"
+          }
+        ],
+        "permissions": {
+          "network": {
+            "allowed_hosts": [
+              "app.0593tv.cn"
+            ],
+            "managed": true
+          }
+        },
+        "plugin_api_version": "1.0",
+        "plugin_id": "nd0593tv",
+        "provider_contracts": [
+          {
+            "contract": "tv_provider",
+            "contract_version": "1.0",
+            "features": [
+              "resolve_stream"
+            ]
+          }
+        ],
+        "publisher_id": "org.waveflow",
+        "runtime": {
+          "ipc": "stdio_framed_json_v1",
+          "type": "subprocess"
+        },
+        "state_schema_version": 1,
+        "version": "1.0.0"
+      },
+      "risk_level": "official_signed_not_sandboxed",
+      "schema_version": 1,
+      "source_origin": "official",
+      "source_policy": "signed_release",
+      "status": "active",
+      "updated_at": "2026-08-11T00:00:00Z",
+      "version": "1.0.0"
+    }
+  ],
+  "schema_version": 1,
+  "updated_at": "2026-08-11T00:00:00Z"
+}

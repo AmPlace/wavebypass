@@ -42,6 +42,11 @@ def _manifest_sha256(manifest: PluginManifest) -> str:
     return hashlib.sha256(_manifest_json(manifest).encode("utf-8")).hexdigest()
 
 
+def manifest_signature_payload(manifest: PluginManifest) -> bytes:
+    """Canonical release statement covered by a Market Package signature."""
+    return b"waveflow-plugin-manifest-v1\0" + _manifest_json(manifest).encode("utf-8")
+
+
 def current_platform() -> tuple[str, str]:
     system = platform.system().lower()
     os_name = {"darwin": "macos", "linux": "linux", "windows": "windows"}.get(system, system)
@@ -58,6 +63,7 @@ class PluginCandidate:
     artifact: dict[str, Any]
     local_reference: Path
     dependency_references: dict[str, Path]
+    manifest_signature: dict[str, Any] | None
 
     @property
     def identity(self) -> str:
@@ -84,6 +90,30 @@ class FixtureTrustPolicy:
         except (ValueError, InvalidSignature) as exc:
             raise PluginError("AUTH_FAILED", "Plugin signature verification failed", category="trust") from exc
         return "fixture_trusted"
+
+    def verify_manifest(
+        self, manifest: PluginManifest, artifact: dict[str, Any], signature: dict[str, Any] | None,
+    ) -> None:
+        # Manifest signatures are a compatible Market Package extension. Old
+        # fixture/third-party packages remain valid, while fixtures that opt in
+        # are checked by the same publisher key as their artifact.
+        if signature is None:
+            return
+        if (not isinstance(signature, dict)
+                or set(signature) != {"algorithm", "key_id", "value"}
+                or signature.get("algorithm") != "ed25519"):
+            raise PluginError("AUTH_FAILED", "Plugin manifest signature is invalid", category="trust")
+        key_id = str(signature.get("key_id") or "")
+        if key_id != str((artifact.get("signature") or {}).get("key_id") or ""):
+            raise PluginError("AUTH_FAILED", "Plugin manifest signer does not match its artifact", category="trust")
+        key = self._keys.get((manifest.publisher_id, key_id))
+        if key is None:
+            raise PluginError("AUTH_FAILED", "Plugin publisher is not trusted", category="trust")
+        try:
+            encoded = base64.b64decode(str(signature.get("value") or ""), validate=True)
+            Ed25519PublicKey.from_public_bytes(key).verify(encoded, manifest_signature_payload(manifest))
+        except (ValueError, InvalidSignature) as exc:
+            raise PluginError("AUTH_FAILED", "Plugin manifest signature verification failed", category="trust") from exc
 
 
 def _read_artifact(path: Path, *, max_bytes: int | None = None) -> bytes:
@@ -207,6 +237,7 @@ def candidates_from_packages(
                 str(package.get("id") or ""), str(source.get("source_key") or ""), manifest,
                 artifact, _artifact_reference(package, artifact["sha256"]),
                 _dependency_references(package, manifest),
+                dict(package["manifest_signature"]) if isinstance(package.get("manifest_signature"), dict) else None,
             ))
     return candidates
 
@@ -319,7 +350,10 @@ class PluginMarketService:
     @staticmethod
     def _default_command(manifest: PluginManifest, artifact: Path) -> Sequence[str]:
         selected = next(item for item in manifest.artifacts if item["sha256"] == artifact.parent.name)
-        return (sys.executable, str(artifact)) if selected["runtime"] == "python" else (str(artifact),)
+        if selected["runtime"] == "python":
+            return (sys.executable, str(artifact), "--identity", manifest.identity,
+                    "--version", manifest.version)
+        return (str(artifact),)
 
     async def install_from_packages(self, packages: Iterable[dict], identity: str) -> dict:
         packages = list(packages)
@@ -354,6 +388,9 @@ class PluginMarketService:
                 )
                 if hashlib.sha256(payload).hexdigest() != candidate.artifact["sha256"]:
                     raise PluginError("INVALID_PLUGIN_RESPONSE", "Plugin artifact digest or size mismatch", category="artifact")
+                self.trust_policy.verify_manifest(
+                    candidate.manifest, candidate.artifact, candidate.manifest_signature,
+                )
                 self.trust_policy.verify(candidate.manifest, candidate.artifact, payload)
             except PluginError as error:
                 trust_errors.append(error)
@@ -411,11 +448,15 @@ class PluginMarketService:
                                   for item in environment.dependencies],
                 )
             manifest_json = _manifest_json(candidate.manifest)
+            manifest_signature_json = json.dumps(
+                candidate.manifest_signature or {}, ensure_ascii=False, separators=(",", ":"), sort_keys=True,
+            )
             await db.begin_plugin_candidate(
                 publisher_id=candidate.manifest.publisher_id, plugin_id=candidate.manifest.plugin_id,
                 version=candidate.manifest.version, trust_state=trust_state,
                 source_key=candidate.source_key, source_package_id=candidate.package_id,
                 manifest_json=manifest_json, manifest_sha256=_manifest_sha256(candidate.manifest),
+                manifest_signature_json=manifest_signature_json,
                 artifact_sha256=candidate.artifact["sha256"], artifact_path=str(promoted),
                 runtime_type=candidate.artifact["runtime"], entrypoint=candidate.artifact["entrypoint"],
                 platform_os=self.os_name, platform_arch=self.arch,
@@ -429,6 +470,7 @@ class PluginMarketService:
                     candidate_version=candidate.manifest.version, trust_state=trust_state,
                     source_key=candidate.source_key, source_package_id=candidate.package_id,
                     manifest_json=manifest_json, manifest_sha256=_manifest_sha256(candidate.manifest),
+                    manifest_signature_json=manifest_signature_json,
                     artifact_sha256=candidate.artifact["sha256"], artifact_path=str(promoted),
                     runtime_type=candidate.artifact["runtime"], entrypoint=candidate.artifact["entrypoint"],
                     platform_os=self.os_name, platform_arch=self.arch,
@@ -514,6 +556,13 @@ class PluginMarketService:
         if selected is None:
             raise PluginError("ARTIFACT_INVALID", "Installed artifact is absent from the manifest", category="artifact")
         try:
+            try:
+                manifest_signature = json.loads(row.get("manifest_signature_json") or "{}")
+            except json.JSONDecodeError as exc:
+                raise PluginError(
+                    "ARTIFACT_SIGNATURE_INVALID", "Installed Plugin manifest signature is invalid", category="trust",
+                ) from exc
+            self.trust_policy.verify_manifest(manifest, selected, manifest_signature or None)
             self.trust_policy.verify(manifest, selected, payload)
         except PluginError as error:
             await db.set_plugin_enabled(

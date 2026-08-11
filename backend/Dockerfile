@@ -18,6 +18,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+RUN test -f /app/official_plugins/publisher-trust.json \
+    && test -f /app/official_plugins/distribution/market.json
+
 RUN mkdir -p /app/data
 
 EXPOSE 8000

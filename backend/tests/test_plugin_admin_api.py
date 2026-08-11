@@ -70,7 +70,23 @@ class PluginAdminApiTest(unittest.IsolatedAsyncioTestCase):
         listed = await self.client.get("/api/admin/plugins/trust")
         self.assertEqual(listed.status_code, 200)
         self.assertNotIn(public_key, listed.text)
+        official = next(item for item in listed.json()["publishers"] if item["publisher_id"] == "org.waveflow")
+        self.assertTrue(official["builtin"])
+        self.assertEqual(official["trust_level"], "official")
         self.subsystem.reload_trust.assert_awaited_once()
+
+    async def test_official_publisher_trust_cannot_be_replaced_by_admin(self):
+        async def admin():
+            return {"id": 1, "role": "admin"}
+        self.main.app.dependency_overrides[self.main.require_admin] = admin
+        response = await self.client.put("/api/admin/plugins/trust", json={
+            "publisher_id": "org.waveflow", "key_id": "test-key",
+            "public_key": base64.b64encode(b"x" * 32).decode(),
+            "trust_level": "official", "enabled": True,
+        })
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()["detail"]["code"], "PLUGIN_UNTRUSTED")
+        self.subsystem.reload_trust.assert_not_awaited()
 
     async def test_installed_projection_hides_artifact_and_process_details(self):
         async def admin():

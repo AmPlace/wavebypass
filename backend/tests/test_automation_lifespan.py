@@ -22,6 +22,8 @@ def _clear_modules():
                 "epg_preference_evidence", "epg_source_management",
                 "epg_source_model", "epg_source_preference", "epg_tasks",
                 "market", "market_tasks",
+                "plugin_market", "plugin_production", "plugin_tasks",
+                "official_plugin_distribution",
             }
             or name == "security"
             or name.startswith("security.")
@@ -80,12 +82,16 @@ class AutomationLifespanTest(unittest.IsolatedAsyncioTestCase):
                 "WAVEFLOW_PROXY_HANDLE_SECRET",
                 "WAVEFLOW_ANONYMOUS_BROWSE",
                 "WAVEFLOW_ANONYMOUS_PLAYBACK",
+                "WAVEFLOW_OFFICIAL_PLUGIN_BOOTSTRAP",
             )
         }
         os.environ["WAVEFLOW_DB_PATH"] = os.path.join(self._tmpdir.name, "waveflow.db")
         os.environ["WAVEFLOW_PROXY_HANDLE_SECRET"] = "automation-lifespan-test-secret-32-bytes"
         os.environ["WAVEFLOW_ANONYMOUS_BROWSE"] = "1"
         os.environ["WAVEFLOW_ANONYMOUS_PLAYBACK"] = "1"
+        # These tests cover automation lifespan ordering, not fresh-install
+        # official Plugin bootstrap or Plugin automation registration.
+        os.environ["WAVEFLOW_OFFICIAL_PLUGIN_BOOTSTRAP"] = "0"
         _clear_modules()
 
         self.db = importlib.import_module("database")

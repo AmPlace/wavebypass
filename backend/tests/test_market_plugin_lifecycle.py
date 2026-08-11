@@ -149,6 +149,8 @@ class MarketPluginLifecycleTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn("plugin_python_environments", tables)
             self.assertIn("plugin_environment_dependencies", tables)
             self.assertIn("market_packages_installed", tables)
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(plugin_installations)")}
+            self.assertIn("manifest_signature_json", columns)
         finally:
             conn.close()
 

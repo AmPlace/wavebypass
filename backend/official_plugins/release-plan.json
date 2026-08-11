@@ -1,0 +1,32 @@
+{
+  "plugins": [
+    {
+      "description": "WaveFlow official JSTV TV Provider.",
+      "name": "JSTV Provider Plugin",
+      "plugin_id": "jstv",
+      "source": "../bundled_plugins/jstv"
+    },
+    {
+      "description": "WaveFlow official FJTV TV Provider.",
+      "name": "FJTV Provider Plugin",
+      "plugin_id": "fjtv",
+      "source": "../bundled_plugins/fjtv"
+    },
+    {
+      "description": "WaveFlow official ND0593TV TV Provider.",
+      "name": "ND0593TV Provider Plugin",
+      "plugin_id": "nd0593tv",
+      "source": "../bundled_plugins/nd0593tv"
+    },
+    {
+      "description": "WaveFlow official GZSTV TV Provider.",
+      "name": "GZSTV Provider Plugin",
+      "plugin_id": "gzstv",
+      "source": "../bundled_plugins/gzstv"
+    }
+  ],
+  "publisher_id": "org.waveflow",
+  "release_version": "1.0.0",
+  "schema_version": 1,
+  "updated_at": "2026-08-11T00:00:00Z"
+}
