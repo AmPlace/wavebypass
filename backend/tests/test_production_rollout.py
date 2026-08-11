@@ -100,6 +100,29 @@ class ProductionRolloutTest(unittest.IsolatedAsyncioTestCase):
         results = await restarted.startup()
         return restarted, results
 
+    async def _wait_reconciliation(self, subsystem):
+        for _ in range(20):
+            tasks = [
+                *subsystem._lifecycle_reconcile_tasks.values(),
+                *subsystem._ownership_reconcile_tasks.values(),
+                *subsystem._critical_tasks,
+            ]
+            pending = [task for task in tasks if not task.done()]
+            if not pending:
+                await asyncio.sleep(0)
+                if not any(
+                    not task.done()
+                    for task in [
+                        *subsystem._lifecycle_reconcile_tasks.values(),
+                        *subsystem._ownership_reconcile_tasks.values(),
+                        *subsystem._critical_tasks,
+                    ]
+                ):
+                    return
+                continue
+            await asyncio.gather(*(asyncio.shield(task) for task in pending))
+        self.fail("Plugin reconciliation did not become idle")
+
     async def _assert_plugin_routing(self, subsystem, suffix: str) -> None:
         for scheme, identity, reference in TARGETS:
             result = await subsystem.provider_resolver.resolve(reference, self.client)
@@ -259,6 +282,7 @@ class ProductionRolloutTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(process)
         process.kill()
         await instance.process._wait_task
+        await self._wait_reconciliation(subsystem)
         self.assertEqual(instance.state.value, "UNHEALTHY")
         crashed_row = await self.db.get_plugin_installation("org.waveflow", "jstv")
         self.assertEqual(crashed_row["lifecycle_state"], "unavailable")
@@ -320,6 +344,8 @@ class ProductionRolloutTest(unittest.IsolatedAsyncioTestCase):
             )
             await committed.wait()
             task.cancel()
+            task.cancel()
+            task.cancel()
             release.set()
             with self.assertRaises(asyncio.CancelledError):
                 await task
@@ -329,23 +355,180 @@ class ProductionRolloutTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(subsystem.provider_resolver.mode("jstv"), "plugin")
         await subsystem.set_ownership("jstv", "legacy")
 
-    async def test_ownership_resolver_failure_rolls_back_durable_row(self):
+    async def test_ownership_resolver_failure_fails_closed_then_reconciles_durable_row(self):
         subsystem = await self._subsystem()
         await subsystem.startup()
         await subsystem.set_ownership("jstv", "legacy")
         original_set_mode = subsystem.provider_resolver.set_mode
+        failures = 0
 
-        def fail_plugin_mode(scheme, mode, plugin_identity=""):
-            if mode == "plugin":
+        def fail_plugin_mode(scheme, mode, plugin_identity="", **kwargs):
+            nonlocal failures
+            if mode == "plugin" and failures == 0:
+                failures += 1
                 raise RuntimeError("resolver failure")
-            return original_set_mode(scheme, mode, plugin_identity)
+            return original_set_mode(scheme, mode, plugin_identity, **kwargs)
 
-        with mock.patch.object(subsystem.provider_resolver, "set_mode", side_effect=fail_plugin_mode):
-            with self.assertRaises(RuntimeError):
+        with mock.patch.object(subsystem.provider_resolver, "set_mode", side_effect=fail_plugin_mode), \
+                mock.patch.object(
+                    self.db, "set_plugin_scheme_ownership",
+                    wraps=self.db.set_plugin_scheme_ownership,
+                ) as ownership_write:
+            with self.assertRaises(Exception) as unavailable:
                 await subsystem.set_ownership("jstv", "plugin", "org.waveflow/jstv")
+            self.assertEqual(unavailable.exception.code, "PLUGIN_UNAVAILABLE")
+            self.assertEqual(ownership_write.await_count, 1)
+            self.assertFalse(subsystem.provider_resolver.is_available("jstv"))
+            with self.assertRaises(Exception) as routed:
+                await subsystem.provider_resolver.resolve("jstv://jsws", self.client)
+            self.assertEqual(routed.exception.code, "PLUGIN_UNAVAILABLE")
+            self.legacy.assert_not_awaited()
+        await self._wait_reconciliation(subsystem)
         row = next(item for item in await self.db.list_plugin_scheme_ownership() if item["scheme"] == "jstv")
-        self.assertEqual((row["mode"], row["plugin_identity"]), ("legacy", ""))
+        self.assertEqual((row["mode"], row["plugin_identity"]), ("plugin", "org.waveflow/jstv"))
+        self.assertEqual(subsystem.provider_resolver.mode("jstv"), "plugin")
+        self.assertTrue(subsystem.provider_resolver.is_available("jstv"))
+        await subsystem.set_ownership("jstv", "legacy")
+
+    async def test_ownership_read_failure_stays_fail_closed_then_restores_durable_legacy(self):
+        subsystem = await self._subsystem()
+        await subsystem.startup()
+        await subsystem.set_ownership("jstv", "legacy")
+        original_read = subsystem._ownership_row
+        failures = 0
+
+        async def fail_once(scheme):
+            nonlocal failures
+            if failures == 0:
+                failures += 1
+                raise RuntimeError("ownership DB unavailable")
+            return await original_read(scheme)
+
+        with mock.patch.object(subsystem, "_ownership_row", new=fail_once):
+            with self.assertRaises(Exception) as unavailable:
+                await subsystem.set_ownership("jstv", "plugin", "org.waveflow/jstv")
+            self.assertEqual(unavailable.exception.code, "PLUGIN_UNAVAILABLE")
+            self.assertFalse(subsystem.provider_resolver.is_available("jstv"))
+            with self.assertRaises(Exception) as routed:
+                await subsystem.provider_resolver.resolve("jstv://jsws", self.client)
+            self.assertEqual(routed.exception.code, "PLUGIN_UNAVAILABLE")
+            self.legacy.assert_not_awaited()
+        await self._wait_reconciliation(subsystem)
+        owner = next(row for row in await self.db.list_plugin_scheme_ownership() if row["scheme"] == "jstv")
+        self.assertEqual((owner["mode"], owner["plugin_identity"]), ("legacy", ""))
         self.assertEqual(subsystem.provider_resolver.mode("jstv"), "legacy")
+        self.assertTrue(subsystem.provider_resolver.is_available("jstv"))
+
+    async def test_ownership_commit_then_error_reloads_durable_desired_state(self):
+        subsystem = await self._subsystem()
+        await subsystem.startup()
+        await subsystem.set_ownership("jstv", "legacy")
+        original_write = self.db.set_plugin_scheme_ownership
+
+        async def commit_then_error(scheme, mode, plugin_identity=""):
+            await original_write(scheme, mode, plugin_identity)
+            raise RuntimeError("post-commit transport failure")
+
+        with mock.patch.object(self.db, "set_plugin_scheme_ownership", new=commit_then_error):
+            result = await subsystem.set_ownership("jstv", "plugin", "org.waveflow/jstv")
+        self.assertEqual((result["mode"], result["plugin"]), ("plugin", "org.waveflow/jstv"))
+        self.assertEqual(subsystem.provider_resolver.mode("jstv"), "plugin")
+        self.assertTrue(subsystem.provider_resolver.is_available("jstv"))
+        await subsystem.set_ownership("jstv", "legacy")
+
+    async def test_repeated_cancellation_during_reconciliation_cannot_expose_legacy(self):
+        subsystem = await self._subsystem()
+        await subsystem.startup()
+        await subsystem.set_ownership("jstv", "legacy")
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        original_project = subsystem._project_durable_ownership_locked
+
+        async def paused_project(scheme):
+            entered.set()
+            await release.wait()
+            return await original_project(scheme)
+
+        subsystem._project_durable_ownership_locked = paused_project
+        task = asyncio.create_task(
+            subsystem.set_ownership("jstv", "plugin", "org.waveflow/jstv"),
+        )
+        try:
+            await entered.wait()
+            task.cancel()
+            await asyncio.sleep(0)
+            task.cancel()
+            await asyncio.sleep(0)
+            task.cancel()
+            self.assertFalse(subsystem.provider_resolver.is_available("jstv"))
+            with self.assertRaises(Exception) as routed:
+                await subsystem.provider_resolver.resolve("jstv://jsws", self.client)
+            self.assertEqual(routed.exception.code, "PLUGIN_UNAVAILABLE")
+            self.legacy.assert_not_awaited()
+            release.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        finally:
+            release.set()
+            subsystem._project_durable_ownership_locked = original_project
+        row = next(item for item in await self.db.list_plugin_scheme_ownership() if item["scheme"] == "jstv")
+        self.assertEqual((row["mode"], row["plugin_identity"]), ("plugin", "org.waveflow/jstv"))
+        self.assertEqual(subsystem.provider_resolver.mode("jstv"), "plugin")
+        self.assertTrue(subsystem.provider_resolver.is_available("jstv"))
+        await subsystem.set_ownership("jstv", "legacy")
+
+    async def test_crash_restart_converges_runtime_database_settings_and_resolver(self):
+        subsystem = await self._subsystem()
+        await subsystem.startup()
+        instance = subsystem.service.runtime.registry.route("jstv")
+        instance.process.process.kill()
+        await instance.process._wait_task
+        await self._wait_reconciliation(subsystem)
+        crashed = await self.db.get_plugin_installation("org.waveflow", "jstv")
+        self.assertEqual(crashed["lifecycle_state"], "unavailable")
+        self.assertFalse(subsystem.provider_resolver.is_available("jstv"))
+
+        subsystem.service.runtime.sleep = lambda _delay: asyncio.sleep(0)
+        await subsystem.service.runtime.restart(instance)
+        await self._wait_reconciliation(subsystem)
+        recovered = await self.db.get_plugin_installation("org.waveflow", "jstv")
+        self.assertEqual((recovered["lifecycle_state"], recovered["last_error"]), ("active", ""))
+        router = importlib.import_module("routers.plugins")
+        projection = await router._plugin_projection(recovered, runtime=subsystem.service.runtime)
+        self.assertTrue(projection["runtime_available"])
+        self.assertTrue(subsystem.provider_resolver.is_available("jstv"))
+        resolved = await subsystem.provider_resolver.resolve("jstv://jsws", self.client)
+        self.assertEqual(resolved["stream_descriptor_version"], "1.0")
+        self.legacy.assert_not_awaited()
+
+    async def test_crash_persistence_failure_is_retried_and_sanitized(self):
+        subsystem = await self._subsystem()
+        await subsystem.startup()
+        instance = subsystem.service.runtime.registry.route("jstv")
+        original_set_enabled = self.db.set_plugin_enabled
+        attempts = 0
+
+        async def flaky_set_enabled(publisher, plugin_id, enabled, *, lifecycle_state, error=""):
+            nonlocal attempts
+            if plugin_id == "jstv" and lifecycle_state == "unavailable":
+                attempts += 1
+                if attempts == 1:
+                    raise RuntimeError("/private/path/should-not-be-logged")
+            return await original_set_enabled(
+                publisher, plugin_id, enabled, lifecycle_state=lifecycle_state, error=error,
+            )
+
+        with self.assertLogs("plugin_production", level="WARNING") as captured, mock.patch.object(
+            self.db, "set_plugin_enabled", new=flaky_set_enabled,
+        ):
+            instance.process.process.kill()
+            await instance.process._wait_task
+            await self._wait_reconciliation(subsystem)
+        self.assertGreaterEqual(attempts, 2)
+        self.assertTrue(any("will retry" in message for message in captured.output))
+        self.assertFalse(any("/private/path" in message for message in captured.output))
+        row = await self.db.get_plugin_installation("org.waveflow", "jstv")
+        self.assertEqual(row["lifecycle_state"], "unavailable")
 
     async def test_missing_installation_never_writes_owner_and_desktop_stays_legacy(self):
         subsystem = await self._subsystem()

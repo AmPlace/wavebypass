@@ -70,6 +70,14 @@ class PluginCandidate:
         return self.manifest.identity
 
 
+@dataclass(frozen=True)
+class PreparedPluginCandidate:
+    candidate: PluginCandidate
+    staged_artifact: Path
+    trust_state: str
+    environment: Any | None = None
+
+
 class FixtureTrustPolicy:
     """Explicit publisher/key trust for local fixtures; no remote trust inference."""
 
@@ -330,6 +338,7 @@ class PluginMarketService:
         self.runtime_command_factory = runtime_command_factory
         self._active: dict[str, PluginInstance] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        self._preparation_locks: dict[str, asyncio.Lock] = {}
         self.destructive_guard: Callable[[str], Awaitable[None]] | None = None
         self.workspaces_root = self.store.root / "workspaces"
         self.workspaces_root.mkdir(parents=True, exist_ok=True)
@@ -337,6 +346,10 @@ class PluginMarketService:
     def lifecycle_lock(self, identity: str) -> asyncio.Lock:
         """Return the process-wide lifecycle lock for one canonical Plugin."""
         return self._locks.setdefault(str(identity), asyncio.Lock())
+
+    def preparation_lock(self, identity: str) -> asyncio.Lock:
+        """Serialize filesystem preparation/removal without blocking lifecycle state changes."""
+        return self._preparation_locks.setdefault(str(identity), asyncio.Lock())
 
     def _working_directory(self, manifest: PluginManifest, *, create: bool = True) -> Path:
         path = self.workspaces_root / self.store._part(manifest.publisher_id) / self.store._part(manifest.plugin_id)
@@ -408,16 +421,63 @@ class PluginMarketService:
             raise PluginError("PLUGIN_INCOMPATIBLE", "Conflicting trusted plugin manifests were published for the same version", category="market")
         candidate = select_candidate(trusted, identity)
         await require_high_risk_approvals(candidate.manifest)
-        lock = self.lifecycle_lock(identity)
-        async with lock:
-            return await self._activate(candidate)
+        async with self.preparation_lock(identity):
+            prepared = await self._prepare_candidate(candidate)
+            try:
+                async with self.lifecycle_lock(identity):
+                    # This is the authoritative permission check.  Preparation
+                    # deliberately happens outside the lifecycle lock, so a
+                    # concurrent revoke must be observed immediately before any
+                    # durable candidate/runtime activation is started.
+                    await require_high_risk_approvals(candidate.manifest)
+                    return await self._activate(prepared)
+            except BaseException:
+                await self._discard_prepared(prepared)
+                raise
 
-    async def _activate(self, candidate: PluginCandidate) -> dict:
+    async def _prepare_candidate(self, candidate: PluginCandidate) -> PreparedPluginCandidate:
+        staged: Path | None = None
+        environment = None
+        try:
+            staged, trust_state = await asyncio.to_thread(self.store.stage, candidate, self.trust_policy)
+            if candidate.manifest.runtime.get("type") == "python":
+                safe_references = {
+                    digest: self.store._source(path)
+                    for digest, path in candidate.dependency_references.items()
+                }
+                environment = await self.python_environments.prepare(
+                    candidate.manifest, safe_references, fetch=self.dependency_fetcher,
+                )
+            return PreparedPluginCandidate(candidate, staged, trust_state, environment)
+        except BaseException:
+            if staged:
+                await asyncio.to_thread(self.store.remove_path, staged)
+            raise
+
+    async def _discard_prepared(self, prepared: PreparedPluginCandidate) -> None:
+        if prepared.staged_artifact.exists():
+            await asyncio.to_thread(self.store.remove_path, prepared.staged_artifact)
+        if prepared.environment:
+            candidate = prepared.candidate
+            row = await db.get_plugin_installation(
+                candidate.manifest.publisher_id, candidate.manifest.plugin_id,
+            )
+            # Never remove an environment reused by the durable active version.
+            # A lock-losing/revoked candidate has no durable reference and can
+            # be discarded immediately.
+            if not row or str(row.get("active_version") or "") != candidate.manifest.version:
+                await asyncio.to_thread(
+                    self.python_environments.remove_environment, prepared.environment.path,
+                )
+
+    async def _activate(self, prepared: PreparedPluginCandidate) -> dict:
+        candidate = prepared.candidate
         identity = candidate.identity
         existing = await db.get_plugin_installation(candidate.manifest.publisher_id, candidate.manifest.plugin_id)
         if existing and existing.get("active_version") == candidate.manifest.version:
             if (existing.get("artifact_sha256") == candidate.artifact["sha256"]
                     and existing.get("manifest_sha256") == _manifest_sha256(candidate.manifest)):
+                await self._discard_prepared(prepared)
                 return self._public(existing)
             raise PluginError(
                 "PLUGIN_INCOMPATIBLE",
@@ -431,19 +491,14 @@ class PluginMarketService:
             except ValueError as exc:
                 raise PluginError("PLUGIN_INCOMPATIBLE", "Installed plugin version is invalid", category="persistence") from exc
         old = self._active.get(identity)
-        staged: Path | None = None
+        staged: Path | None = prepared.staged_artifact
         promoted: Path | None = None
         instance: PluginInstance | None = None
         committed = False
-        environment = None
+        environment = prepared.environment
         try:
-            staged, trust_state = await asyncio.to_thread(self.store.stage, candidate, self.trust_policy)
             promoted = await asyncio.to_thread(self.store.promote, candidate, staged)
-            if candidate.manifest.runtime.get("type") == "python":
-                safe_references = {digest: self.store._source(path)
-                                   for digest, path in candidate.dependency_references.items()}
-                environment = await self.python_environments.prepare(
-                    candidate.manifest, safe_references, fetch=self.dependency_fetcher)
+            if environment:
                 cache_by_digest = {path.parent.name: path for path in self.python_environments.cache_objects()}
                 await db.begin_plugin_python_environment(
                     publisher_id=candidate.manifest.publisher_id, plugin_id=candidate.manifest.plugin_id,
@@ -458,7 +513,7 @@ class PluginMarketService:
             )
             await db.begin_plugin_candidate(
                 publisher_id=candidate.manifest.publisher_id, plugin_id=candidate.manifest.plugin_id,
-                version=candidate.manifest.version, trust_state=trust_state,
+                version=candidate.manifest.version, trust_state=prepared.trust_state,
                 source_key=candidate.source_key, source_package_id=candidate.package_id,
                 manifest_json=manifest_json, manifest_sha256=_manifest_sha256(candidate.manifest),
                 manifest_signature_json=manifest_signature_json,
@@ -472,7 +527,7 @@ class PluginMarketService:
             async def persist_activation() -> None:
                 activated = await db.activate_plugin_candidate(
                     publisher_id=candidate.manifest.publisher_id, plugin_id=candidate.manifest.plugin_id,
-                    candidate_version=candidate.manifest.version, trust_state=trust_state,
+                    candidate_version=candidate.manifest.version, trust_state=prepared.trust_state,
                     source_key=candidate.source_key, source_package_id=candidate.package_id,
                     manifest_json=manifest_json, manifest_sha256=_manifest_sha256(candidate.manifest),
                     manifest_signature_json=manifest_signature_json,
@@ -624,10 +679,14 @@ class PluginMarketService:
         return self._public(await db.get_plugin_installation(row["publisher_id"], row["plugin_id"]))
 
     async def uninstall(self, identity: str) -> bool:
-        async with self.lifecycle_lock(identity):
-            if self.destructive_guard is not None:
-                await self.destructive_guard(identity)
-            return await self._uninstall_unlocked(identity)
+        # Filesystem preparation/removal always takes this order.  Permission
+        # revoke/disable only need the lifecycle lock and therefore cannot form
+        # the reverse edge of a deadlock.
+        async with self.preparation_lock(identity):
+            async with self.lifecycle_lock(identity):
+                if self.destructive_guard is not None:
+                    await self.destructive_guard(identity)
+                return await self._uninstall_unlocked(identity)
 
     async def _uninstall_unlocked(self, identity: str) -> bool:
         row = await self._row(identity)

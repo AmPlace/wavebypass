@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
@@ -14,13 +15,16 @@ from .registry import LifecycleState, PluginInstance, PluginRegistry
 from .validation import validate_station_ref, validate_stream_descriptor
 
 
+logger = logging.getLogger("waveflow.plugin_runtime")
+
+
 class PluginRuntime:
     def __init__(self, *, registry: PluginRegistry | None = None, permission_policy: PermissionPolicy | None = None,
                  clock: Callable[[], float] | None = None,
                  sleep: Callable[[float], Awaitable[None]] | None = None,
                  restart_window: float = 600.0, max_starts: int = 3,
                  capability_dispatcher: Any | None = None,
-                 lifecycle_callback: Callable[[PluginInstance, int | None], Awaitable[None]] | None = None):
+                 lifecycle_callback: Callable[[str, PluginInstance, int | None], Awaitable[None]] | None = None):
         self.registry = registry or PluginRegistry()
         self.permission_policy = permission_policy or PermissionPolicy()
         self.clock = clock or time.monotonic
@@ -76,6 +80,7 @@ class PluginRuntime:
                 raise invalid_response("Plugin health check failed")
             if activate:
                 self.registry.activate(instance)
+                await self._emit_lifecycle("healthy_active", instance)
         except BaseException:
             await process.stop(graceful=False)
             self.registry.mark_unhealthy(instance)
@@ -148,13 +153,24 @@ class PluginRuntime:
     async def _on_exit(self, instance: PluginInstance, _code: int | None) -> None:
         if instance.state == LifecycleState.HEALTHY_ACTIVE:
             self.registry.mark_unhealthy(instance)
-            if self.lifecycle_callback is not None:
-                try:
-                    await self.lifecycle_callback(instance, _code)
-                except Exception:
-                    # Runtime state must remain unhealthy even if the production
-                    # persistence observer is temporarily unavailable.
-                    pass
+            await self._emit_lifecycle("unexpected_exit", instance, _code)
+
+    async def _emit_lifecycle(
+        self, event: str, instance: PluginInstance, exit_code: int | None = None,
+    ) -> None:
+        if self.lifecycle_callback is None:
+            return
+        try:
+            await self.lifecycle_callback(event, instance, exit_code)
+        except Exception:
+            # Live Runtime state remains authoritative for routing.  Production
+            # observers own durable retry/reconciliation and callback failures
+            # must not crash the process monitor itself.
+            logger.warning(
+                "Plugin lifecycle callback failed: plugin=%s event=%s",
+                instance.manifest.identity,
+                event,
+            )
 
     def _record_start(self, instance: PluginInstance) -> None:
         now = self.clock()
@@ -195,6 +211,7 @@ class PluginRuntime:
                         await candidate.process.stop(graceful=False)
                     candidate.transition(LifecycleState.INSTALLED_DISABLED)
                     raise
+            await self._emit_lifecycle("healthy_active", candidate)
         except BaseException:
             if candidate.process:
                 await candidate.process.stop(graceful=False)

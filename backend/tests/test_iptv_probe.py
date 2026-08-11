@@ -1,5 +1,6 @@
 import unittest
 import types
+from unittest import mock
 
 from adapters import AdapterResolveError, parse_adapter_url
 from adapters.youtube import resolve_youtube
@@ -39,6 +40,41 @@ Input #0, rtsp, from 'rtsp://example/live':
 
 
 class IptvProbeRealtimeStreamTest(unittest.IsolatedAsyncioTestCase):
+    async def test_production_probe_fails_closed_for_plugin_owner_but_keeps_legacy_owner(self):
+        from provider_resolver import ProviderResolver
+
+        legacy = mock.AsyncMock(return_value={
+            "adapter": "jstv", "url": "https://legacy.example/live.m3u8",
+            "source_type": "hls", "headers": {},
+        })
+        plugin_owned = ProviderResolver.from_ownership_rows([{
+            "scheme": "jstv", "mode": "plugin", "plugin_identity": "org.waveflow/jstv",
+        }], runtime=None, legacy_resolver=legacy)
+        unavailable = await probe_channel_source(
+            {"url": "jstv://jsws", "source_type": "adapter"}, None,
+            provider_resolver=plugin_owned,
+        )
+        self.assertEqual((unavailable["probe_status"], unavailable["probe_method"]),
+                         ("error", "adapter_resolve"))
+        self.assertIn('"error_code":"PLUGIN_UNAVAILABLE"', unavailable["probe_meta_json"])
+        legacy.assert_not_awaited()
+
+        legacy_owned = ProviderResolver.from_ownership_rows([{
+            "scheme": "jstv", "mode": "legacy", "plugin_identity": "",
+        }], runtime=None, legacy_resolver=legacy)
+        with mock.patch.object(
+            iptv_probe, "_probe_hls",
+            new=mock.AsyncMock(return_value=_empty_result(
+                probe_status="online", live_status="live", probe_method="http_segment",
+            )),
+        ), mock.patch.object(iptv_probe, "_enrich_with_ffprobe", new=mock.AsyncMock(side_effect=lambda result, *_: result)):
+            available = await probe_channel_source(
+                {"url": "jstv://jsws", "source_type": "adapter"}, None,
+                provider_resolver=legacy_owned,
+            )
+        self.assertEqual(available["probe_status"], "online")
+        legacy.assert_awaited_once()
+
     async def test_plugin_not_live_maps_to_existing_probe_taxonomy(self):
         class Resolver:
             async def resolve(self, _url, _client):

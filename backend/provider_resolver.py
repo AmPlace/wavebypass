@@ -45,6 +45,7 @@ class ProviderResolver:
         self.legacy_resolver = legacy_resolver
         self._ownership = {str(k).lower(): str(v) for k, v in (ownership or {}).items()}
         self._expected_plugins: dict[str, str] = {}
+        self._unavailable: set[str] = set()
         if any(mode not in OWNERSHIP_MODES for mode in self._ownership.values()):
             raise ValueError("invalid provider ownership mode")
 
@@ -58,27 +59,53 @@ class ProviderResolver:
     ) -> "ProviderResolver":
         resolver = cls(runtime=runtime, legacy_resolver=legacy_resolver)
         for row in rows:
+            mode = str(row.get("mode") or "legacy")
             resolver.set_mode(
                 str(row.get("scheme") or ""),
-                str(row.get("mode") or "legacy"),
+                mode,
                 str(row.get("plugin_identity") or ""),
+                # Durable Plugin ownership is desired state.  It is only made
+                # routable after production recovery proves the matching
+                # installation/runtime healthy.  Legacy remains immediately
+                # available and does not depend on the Plugin subsystem.
+                available=mode == "legacy",
             )
         return resolver
 
     def mode(self, scheme: str) -> str:
         return self._ownership.get(scheme.lower(), "legacy")
 
-    def set_mode(self, scheme: str, mode: str, plugin_identity: str = "") -> None:
+    def set_mode(
+        self, scheme: str, mode: str, plugin_identity: str = "", *, available: bool = True,
+    ) -> None:
         if mode not in OWNERSHIP_MODES:
             raise ValueError("invalid provider ownership mode")
-        self._ownership[scheme.lower()] = mode
+        normalized = scheme.lower()
+        self._ownership[normalized] = mode
         if mode == "legacy":
-            self._expected_plugins.pop(scheme.lower(), None)
+            self._expected_plugins.pop(normalized, None)
         elif plugin_identity:
-            self._expected_plugins[scheme.lower()] = plugin_identity
+            self._expected_plugins[normalized] = plugin_identity
+        if available:
+            self._unavailable.discard(normalized)
+        else:
+            self._unavailable.add(normalized)
+
+    def fail_closed(self, scheme: str) -> None:
+        self._unavailable.add(str(scheme).lower())
+
+    def mark_available(self, scheme: str) -> None:
+        self._unavailable.discard(str(scheme).lower())
+
+    def is_available(self, scheme: str) -> bool:
+        return str(scheme).lower() not in self._unavailable
 
     async def resolve(self, target_url: str, client: httpx.AsyncClient) -> dict[str, Any]:
         reference = parse_tv_reference(target_url)
+        if reference.scheme in self._unavailable:
+            raise PluginError(
+                "PLUGIN_UNAVAILABLE", "Provider ownership is reconciling", category="lifecycle",
+            )
         mode = self.mode(reference.scheme)
         if mode == "legacy":
             return await self.legacy_resolver(target_url, client)

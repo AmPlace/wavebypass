@@ -186,6 +186,12 @@ class ProductionPluginSubsystem:
     capability_gateway: CapabilityGateway
     official_release_root: Path = OFFICIAL_RELEASE_ROOT
     _scheme_locks: dict[str, asyncio.Lock] = field(default_factory=dict, init=False, repr=False)
+    _critical_tasks: set[asyncio.Task[Any]] = field(default_factory=set, init=False, repr=False)
+    _ownership_reconcile_tasks: dict[str, asyncio.Task[Any]] = field(default_factory=dict, init=False, repr=False)
+    _ownership_reconcile_generation: dict[str, int] = field(default_factory=dict, init=False, repr=False)
+    _lifecycle_reconcile_tasks: dict[str, asyncio.Task[Any]] = field(default_factory=dict, init=False, repr=False)
+    _lifecycle_reconcile_generation: dict[str, int] = field(default_factory=dict, init=False, repr=False)
+    _shutting_down: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         # These callbacks are installed on the same service/runtime objects used
@@ -193,7 +199,7 @@ class ProductionPluginSubsystem:
         # and crash persistence on the generic lifecycle path rather than in
         # provider-specific routers.
         self.service.destructive_guard = self._assert_identity_not_owned
-        self.service.runtime.lifecycle_callback = self._on_runtime_unexpected_exit
+        self.service.runtime.lifecycle_callback = self._on_runtime_lifecycle_event
 
     def _scheme_lock(self, scheme: str) -> asyncio.Lock:
         return self._scheme_locks.setdefault(str(scheme).lower(), asyncio.Lock())
@@ -217,28 +223,116 @@ class ProductionPluginSubsystem:
                     details={"scheme": str(row.get("scheme") or ""), "plugin": identity},
                 )
 
-    async def _on_runtime_unexpected_exit(self, instance, exit_code: int | None) -> None:
-        """Persist an unexpected active-process exit without changing ownership."""
+    @staticmethod
+    def _consume_task(task: asyncio.Task[Any]) -> None:
+        if task.cancelled():
+            return
+        try:
+            task.exception()
+        except asyncio.CancelledError:
+            return
+
+    def _track_critical(self, task: asyncio.Task[Any]) -> asyncio.Task[Any]:
+        self._critical_tasks.add(task)
+
+        def done(value: asyncio.Task[Any]) -> None:
+            self._critical_tasks.discard(value)
+            self._consume_task(value)
+
+        task.add_done_callback(done)
+        return task
+
+    @staticmethod
+    async def _await_critical(task: asyncio.Task[Any]) -> Any:
+        """Defer caller cancellation until the independent critical task converges."""
+        cancelled = False
+        while True:
+            try:
+                result = await asyncio.shield(task)
+                break
+            except asyncio.CancelledError:
+                if task.cancelled():
+                    raise
+                cancelled = True
+                current = asyncio.current_task()
+                if current is not None:
+                    current.uncancel()
+            except BaseException:
+                if cancelled:
+                    raise asyncio.CancelledError
+                raise
+        if cancelled:
+            raise asyncio.CancelledError
+        return result
+
+    async def _on_runtime_lifecycle_event(
+        self, event: str, instance, exit_code: int | None,
+    ) -> None:
+        """Queue durable Runtime projection; process monitoring never waits on SQLite."""
+        if event not in {"unexpected_exit", "healthy_active"} or self._shutting_down:
+            return
         identity = instance.manifest.identity
-        async with self.service.lifecycle_lock(identity):
-            # Candidate/retained/removed instances must not overwrite the state
-            # of the currently active instance during an update or shutdown.
-            if self.service._active.get(identity) is not instance:
-                return
-            publisher, separator, plugin_id = identity.partition("/")
-            if not separator:
-                return
-            row = await db.get_plugin_installation(publisher, plugin_id)
-            if not row or not row.get("enabled"):
-                return
-            suffix = "unknown" if exit_code is None else str(exit_code)
-            await db.set_plugin_enabled(
-                publisher,
-                plugin_id,
-                True,
-                lifecycle_state="unavailable",
-                error=f"PLUGIN_CRASHED: Plugin process exited unexpectedly ({suffix})",
+        generation = self._lifecycle_reconcile_generation.get(identity, 0) + 1
+        self._lifecycle_reconcile_generation[identity] = generation
+        task = self._lifecycle_reconcile_tasks.get(identity)
+        if task is None or task.done():
+            task = asyncio.create_task(
+                self._lifecycle_reconcile_worker(identity),
+                name=f"plugin-lifecycle-reconcile:{identity}",
             )
+            self._lifecycle_reconcile_tasks[identity] = task
+            task.add_done_callback(self._consume_task)
+
+    async def _lifecycle_reconcile_worker(self, identity: str) -> None:
+        delay = 0.0
+        try:
+            while not self._shutting_down:
+                generation = self._lifecycle_reconcile_generation.get(identity, 0)
+                try:
+                    await self._reconcile_runtime_identity(identity)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    # Do not leak SQLite paths, subprocess stderr, or upstream
+                    # details.  A later retry or restart deterministically
+                    # projects the current Runtime state again.
+                    logger.warning("Plugin lifecycle persistence will retry: plugin=%s", identity)
+                    delay = min(0.5, max(0.01, delay * 2 or 0.01))
+                    await asyncio.sleep(delay)
+                    continue
+                delay = 0.0
+                if generation == self._lifecycle_reconcile_generation.get(identity, 0):
+                    return
+        finally:
+            current = self._lifecycle_reconcile_tasks.get(identity)
+            if current is asyncio.current_task():
+                self._lifecycle_reconcile_tasks.pop(identity, None)
+
+    async def _reconcile_runtime_identity(self, identity: str) -> None:
+        publisher, separator, plugin_id = identity.partition("/")
+        if not separator:
+            return
+        async with self.service.lifecycle_lock(identity):
+            instance = self.service._active.get(identity)
+            row = await db.get_plugin_installation(publisher, plugin_id)
+            if not row or not row.get("enabled") or instance is None:
+                return
+            if (instance.state == LifecycleState.HEALTHY_ACTIVE
+                    and instance.health == "healthy"):
+                await db.set_plugin_enabled(
+                    publisher, plugin_id, True, lifecycle_state="active", error="",
+                )
+            elif instance.state == LifecycleState.UNHEALTHY:
+                await db.set_plugin_enabled(
+                    publisher, plugin_id, True, lifecycle_state="unavailable",
+                    error="PLUGIN_CRASHED: Plugin process exited unexpectedly",
+                )
+            else:
+                return
+        for ownership in await db.list_plugin_scheme_ownership():
+            if (str(ownership.get("plugin_identity") or "") == identity
+                    and str(ownership.get("mode") or "legacy") != "legacy"):
+                self._schedule_ownership_reconcile(str(ownership.get("scheme") or ""))
 
     @classmethod
     async def create(
@@ -292,6 +386,11 @@ class ProductionPluginSubsystem:
                 "plugin": f"{OFFICIAL_PUBLISHER_ID}/*", "status": "unavailable",
                 "error": _safe_bootstrap_error(error), "rollout": "failed",
             })
+        # Ownership rows are durable desired state.  Resolver construction keeps
+        # every non-legacy row fail-closed until recovery/bootstrap/rollout has
+        # completed and this final production preflight proves it routable.
+        for ownership in await db.list_plugin_scheme_ownership():
+            await self._reconcile_ownership_serialized(str(ownership.get("scheme") or ""))
         return results
 
     async def bootstrap_official_plugins(self) -> list[dict[str, Any]]:
@@ -419,7 +518,21 @@ class ProductionPluginSubsystem:
         return results
 
     async def shutdown(self) -> None:
+        if self._critical_tasks:
+            await asyncio.gather(
+                *(asyncio.shield(task) for task in tuple(self._critical_tasks)),
+                return_exceptions=True,
+            )
         await self.service.runtime.shutdown()
+        self._shutting_down = True
+        workers = [
+            *self._ownership_reconcile_tasks.values(),
+            *self._lifecycle_reconcile_tasks.values(),
+        ]
+        for task in workers:
+            task.cancel()
+        if workers:
+            await asyncio.gather(*workers, return_exceptions=True)
 
     async def reload_trust(self) -> None:
         rows = [row for row in await db.list_plugin_publisher_trust()
@@ -432,12 +545,31 @@ class ProductionPluginSubsystem:
         if mode not in {"legacy", "plugin", "migration_test"}:
             raise PluginError("INVALID_PLUGIN_RESPONSE", "Invalid provider ownership mode", category="routing")
 
-        # Ownership changes and destructive lifecycle operations use the same
-        # canonical-Plugin lock.  The scheme lock serializes two ownership
-        # writers while the identity lock closes the ownership/disable,
-        # ownership/uninstall and ownership/permission-revoke TOCTOU window.
+        # The caller owns only the wait, never the commit.  Once accepted, this
+        # operation retains an independent task through durable write and
+        # resolver reconciliation, so repeated request cancellation cannot
+        # split SQLite desired state from the in-memory projection.
+        task = self._track_critical(asyncio.create_task(
+            self._set_ownership_serialized(scheme, mode, plugin_identity),
+            name=f"plugin-ownership:{scheme}:{mode}",
+        ))
+        return await self._await_critical(task)
+
+    async def _set_ownership_serialized(
+        self, scheme: str, mode: str, plugin_identity: str,
+    ) -> dict[str, Any]:
+        # Lock order is always scheme -> canonical identity.  Destructive
+        # lifecycle operations only acquire identity, never scheme, so there is
+        # no reverse dependency.
         async with self._scheme_lock(scheme):
-            current = await self._ownership_row(scheme)
+            self.provider_resolver.fail_closed(scheme)
+            try:
+                current = await self._ownership_row(scheme)
+            except BaseException as error:
+                self._schedule_ownership_reconcile(scheme)
+                raise PluginError(
+                    "PLUGIN_UNAVAILABLE", "Plugin ownership state is unavailable", category="persistence",
+                ) from error
             identity = ""
             if mode != "legacy":
                 identity = str(plugin_identity or "")
@@ -453,65 +585,121 @@ class ProductionPluginSubsystem:
 
             if identity:
                 async with self.service.lifecycle_lock(identity):
-                    return await self._set_ownership_locked(scheme, mode, plugin_identity, current)
-            return await self._set_ownership_locked(scheme, mode, plugin_identity, current)
+                    return await self._set_ownership_locked(scheme, mode, plugin_identity)
+            return await self._set_ownership_locked(scheme, mode, plugin_identity)
 
     async def _set_ownership_locked(
-        self, scheme: str, mode: str, plugin_identity: str, current: dict[str, Any] | None,
+        self, scheme: str, mode: str, plugin_identity: str,
     ) -> dict[str, Any]:
         if mode != "legacy":
             plugin_identity, _instance = await self._ownership_preflight(scheme, plugin_identity)
         else:
             plugin_identity = ''
-        previous_mode = str((current or {}).get("mode") or "legacy")
-        previous_identity = str((current or {}).get("plugin_identity") or "")
-        row = await self._persist_ownership(
-            scheme, mode, plugin_identity, previous_mode, previous_identity,
-        )
-        return {"scheme": row["scheme"], "mode": row["mode"], "plugin": row["plugin_identity"]}
-
-    async def _persist_ownership(
-        self, scheme: str, mode: str, plugin_identity: str,
-        previous_mode: str, previous_identity: str,
-    ) -> dict[str, Any]:
-        """Keep durable ownership and in-memory routing reconciled on cancellation."""
-        write_task = asyncio.create_task(
-            db.set_plugin_scheme_ownership(scheme, mode, plugin_identity),
-            name=f"plugin-ownership-write:{scheme}",
-        )
         try:
-            row = await asyncio.shield(write_task)
-        except asyncio.CancelledError:
-            # A cancellation after SQLite commits must not leave the resolver
-            # stale.  Finish the write, reconcile memory, then preserve cancel.
-            row = await asyncio.shield(write_task)
+            await db.set_plugin_scheme_ownership(scheme, mode, plugin_identity)
+        except BaseException as write_error:
+            # The database operation can commit and still surface an exception
+            # (for example cancellation/fault injection after SQLite returns).
+            # Reload desired state instead of guessing or issuing a rollback.
             try:
-                self.provider_resolver.set_mode(scheme, mode, plugin_identity)
-            except BaseException as error:
-                await self._rollback_ownership(scheme, previous_mode, previous_identity)
-                raise error
-            raise
-
+                durable = await self._project_durable_ownership_locked(scheme)
+            except BaseException as reconcile_error:
+                self._schedule_ownership_reconcile(scheme)
+                raise PluginError(
+                    "PLUGIN_UNAVAILABLE", "Plugin ownership reconciliation failed", category="persistence",
+                ) from reconcile_error
+            if (str(durable.get("mode") or "legacy") == mode
+                    and str(durable.get("plugin_identity") or "") == plugin_identity):
+                return self._public_ownership(durable)
+            raise PluginError(
+                "PLUGIN_UNAVAILABLE", "Plugin ownership update failed", category="persistence",
+            ) from write_error
         try:
-            self.provider_resolver.set_mode(scheme, mode, plugin_identity)
-        except BaseException as error:
-            await self._rollback_ownership(scheme, previous_mode, previous_identity)
-            raise error
-        return row
-
-    async def _rollback_ownership(self, scheme: str, mode: str, plugin_identity: str) -> None:
-        rollback = asyncio.create_task(
-            db.set_plugin_scheme_ownership(scheme, mode, plugin_identity),
-            name=f"plugin-ownership-rollback:{scheme}",
-        )
-        try:
-            await asyncio.shield(rollback)
-            self.provider_resolver.set_mode(scheme, mode, plugin_identity)
-        except BaseException as rollback_error:
-            logger.exception("Plugin ownership rollback failed for %s", scheme)
+            durable = await self._project_durable_ownership_locked(scheme)
+        except BaseException as reconcile_error:
+            self._schedule_ownership_reconcile(scheme)
             raise PluginError(
                 "PLUGIN_UNAVAILABLE", "Plugin ownership reconciliation failed", category="persistence",
-            ) from rollback_error
+            ) from reconcile_error
+        return self._public_ownership(durable)
+
+    @staticmethod
+    def _public_ownership(row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "scheme": str(row.get("scheme") or ""),
+            "mode": str(row.get("mode") or "legacy"),
+            "plugin": str(row.get("plugin_identity") or ""),
+        }
+
+    async def _project_durable_ownership_locked(self, scheme: str) -> dict[str, Any]:
+        """Project durable desired state; Plugin state remains unavailable until preflight passes."""
+        self.provider_resolver.fail_closed(scheme)
+        row = await self._ownership_row(scheme)
+        if row is None:
+            row = {"scheme": scheme, "mode": "legacy", "plugin_identity": ""}
+        mode = str(row.get("mode") or "legacy")
+        identity = str(row.get("plugin_identity") or "")
+        self.provider_resolver.set_mode(scheme, mode, identity, available=False)
+        if mode == "legacy":
+            self.provider_resolver.mark_available(scheme)
+            return row
+        try:
+            await self._ownership_preflight(scheme, identity)
+        except PluginError:
+            # Desired ownership remains visible, but routing fails closed until
+            # a healthy lifecycle event schedules another reconciliation.
+            return row
+        self.provider_resolver.mark_available(scheme)
+        return row
+
+    def _schedule_ownership_reconcile(self, scheme: str) -> None:
+        scheme = str(scheme or "").strip().lower()
+        if not scheme or self._shutting_down:
+            return
+        self._ownership_reconcile_generation[scheme] = (
+            self._ownership_reconcile_generation.get(scheme, 0) + 1
+        )
+        task = self._ownership_reconcile_tasks.get(scheme)
+        if task is None or task.done():
+            task = asyncio.create_task(
+                self._ownership_reconcile_worker(scheme),
+                name=f"plugin-ownership-reconcile:{scheme}",
+            )
+            self._ownership_reconcile_tasks[scheme] = task
+            task.add_done_callback(self._consume_task)
+
+    async def _ownership_reconcile_worker(self, scheme: str) -> None:
+        delay = 0.0
+        try:
+            while not self._shutting_down:
+                generation = self._ownership_reconcile_generation.get(scheme, 0)
+                try:
+                    await self._reconcile_ownership_serialized(scheme)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.warning("Plugin ownership reconciliation will retry: scheme=%s", scheme)
+                    delay = min(0.5, max(0.01, delay * 2 or 0.01))
+                    await asyncio.sleep(delay)
+                    continue
+                delay = 0.0
+                if generation == self._ownership_reconcile_generation.get(scheme, 0):
+                    return
+        finally:
+            current = self._ownership_reconcile_tasks.get(scheme)
+            if current is asyncio.current_task():
+                self._ownership_reconcile_tasks.pop(scheme, None)
+
+    async def _reconcile_ownership_serialized(self, scheme: str) -> dict[str, Any]:
+        async with self._scheme_lock(scheme):
+            self.provider_resolver.fail_closed(scheme)
+            row = await self._ownership_row(scheme)
+            identity = "" if row is None else str(row.get("plugin_identity") or "")
+            mode = "legacy" if row is None else str(row.get("mode") or "legacy")
+            if identity and mode != "legacy":
+                async with self.service.lifecycle_lock(identity):
+                    return await self._project_durable_ownership_locked(scheme)
+            return await self._project_durable_ownership_locked(scheme)
 
     async def _ownership_preflight(self, scheme: str, plugin_identity: str = '') -> tuple[str, Any]:
         """Require a healthy, durable installation before routing production traffic."""
