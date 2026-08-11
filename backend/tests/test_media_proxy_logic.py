@@ -311,9 +311,11 @@ class MediaProxyLogicTest(unittest.TestCase):
 
         fake_main = types.SimpleNamespace(
             _source_type=lambda s: s.get("source_type") or "hls",
-            resolve_adapter_source=fake_resolve,
             http_client=object(),
             AdapterResolveError=AdapterResolveError,
+        )
+        fake_main.app = types.SimpleNamespace(
+            state=types.SimpleNamespace(provider_resolver=types.SimpleNamespace(resolve=fake_resolve)),
         )
         old_main = sys.modules.get("main")
         old_resolved = media_proxy._serve_resolved_source_playlist
@@ -351,9 +353,11 @@ class MediaProxyLogicTest(unittest.TestCase):
                 {"canonical_key": "虎牙", "urls": [source]},
             ], [])),
             _source_type=lambda s: s.get("source_type") or "hls",
-            resolve_adapter_source=fake_resolve,
             http_client=object(),
             AdapterResolveError=AdapterResolveError,
+        )
+        fake_main.app = types.SimpleNamespace(
+            state=types.SimpleNamespace(provider_resolver=types.SimpleNamespace(resolve=fake_resolve)),
         )
         old_main = sys.modules.get("main")
         old_assert_safe = media_proxy.assert_safe_target_url

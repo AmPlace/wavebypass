@@ -146,9 +146,11 @@ class SourceIdRefreshTest(unittest.TestCase):
                 _get_aggregated_iptv_channels=lambda: asyncio.sleep(0, result=(aggregated, [])),
                 _sorted_sources=lambda sources: list(sources),
                 _source_type=lambda source: source.get('source_type') or 'hls',
-                resolve_adapter_source=fake_resolve,
                 http_client=object(),
                 AdapterResolveError=AdapterResolveError,
+            )
+            fake_main.app = types.SimpleNamespace(
+                state=types.SimpleNamespace(provider_resolver=types.SimpleNamespace(resolve=fake_resolve)),
             )
             try:
                 sys.modules['main'] = fake_main

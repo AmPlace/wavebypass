@@ -19,7 +19,8 @@ class PluginRuntime:
                  clock: Callable[[], float] | None = None,
                  sleep: Callable[[float], Awaitable[None]] | None = None,
                  restart_window: float = 600.0, max_starts: int = 3,
-                 capability_dispatcher: Any | None = None):
+                 capability_dispatcher: Any | None = None,
+                 lifecycle_callback: Callable[[PluginInstance, int | None], Awaitable[None]] | None = None):
         self.registry = registry or PluginRegistry()
         self.permission_policy = permission_policy or PermissionPolicy()
         self.clock = clock or time.monotonic
@@ -27,6 +28,7 @@ class PluginRuntime:
         self.restart_window = restart_window
         self.max_starts = max_starts
         self.capability_dispatcher = capability_dispatcher
+        self.lifecycle_callback = lifecycle_callback
         self._commands: dict[str, tuple[str, ...]] = {}
         self._execution: dict[str, tuple[dict[str, str] | None, str | None]] = {}
         self._gates: dict[str, PermissionGate] = {}
@@ -146,6 +148,13 @@ class PluginRuntime:
     async def _on_exit(self, instance: PluginInstance, _code: int | None) -> None:
         if instance.state == LifecycleState.HEALTHY_ACTIVE:
             self.registry.mark_unhealthy(instance)
+            if self.lifecycle_callback is not None:
+                try:
+                    await self.lifecycle_callback(instance, _code)
+                except Exception:
+                    # Runtime state must remain unhealthy even if the production
+                    # persistence observer is temporarily unavailable.
+                    pass
 
     def _record_start(self, instance: PluginInstance) -> None:
         now = self.clock()

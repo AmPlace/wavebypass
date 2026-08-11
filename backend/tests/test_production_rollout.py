@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import asyncio
 import os
 import sys
 import tempfile
@@ -108,6 +109,53 @@ class ProductionRolloutTest(unittest.IsolatedAsyncioTestCase):
                 identity,
             )
 
+    async def _assert_destructive_operation_is_serialized(self, subsystem, operation) -> None:
+        identity = "org.waveflow/jstv"
+        await subsystem.set_ownership("jstv", "legacy")
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        original_preflight = subsystem._ownership_preflight
+
+        async def paused_preflight(scheme, plugin_identity=""):
+            result = await original_preflight(scheme, plugin_identity)
+            entered.set()
+            await release.wait()
+            return result
+
+        subsystem._ownership_preflight = paused_preflight
+        owner_task = asyncio.create_task(
+            subsystem.set_ownership("jstv", "plugin", identity),
+        )
+        operation_started = asyncio.Event()
+
+        async def run_operation():
+            operation_started.set()
+            return await operation(identity)
+
+        operation_task = None
+        try:
+            await entered.wait()
+            operation_task = asyncio.create_task(run_operation())
+            await operation_started.wait()
+            # The ownership task holds the same canonical identity lock while
+            # its preflight is paused; the destructive task must not pass its
+            # guard against the old durable row.
+            self.assertFalse(operation_task.done())
+            release.set()
+            await owner_task
+            with self.assertRaises(Exception) as blocked:
+                await operation_task
+            self.assertEqual(blocked.exception.code, "SCHEME_CONFLICT")
+            row = next(item for item in await self.db.list_plugin_scheme_ownership() if item["scheme"] == "jstv")
+            self.assertEqual((row["mode"], row["plugin_identity"]), ("plugin", identity))
+        finally:
+            release.set()
+            if not owner_task.done():
+                await owner_task
+            if operation_task is not None and not operation_task.done():
+                await operation_task
+            subsystem._ownership_preflight = original_preflight
+
     async def test_signed_fresh_rollout_restart_offline_routing_and_reversible_ownership(self):
         from adapters import _ADAPTER_REGISTRY
 
@@ -207,7 +255,20 @@ class ProductionRolloutTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(revoke.exception.code, "SCHEME_CONFLICT")
 
         instance = subsystem.service.runtime.registry.route("jstv")
-        await instance.process.stop()
+        process = instance.process.process
+        self.assertIsNotNone(process)
+        process.kill()
+        await instance.process._wait_task
+        self.assertEqual(instance.state.value, "UNHEALTHY")
+        crashed_row = await self.db.get_plugin_installation("org.waveflow", "jstv")
+        self.assertEqual(crashed_row["lifecycle_state"], "unavailable")
+        self.assertTrue(crashed_row["enabled"])
+        self.assertIn("PLUGIN_CRASHED", crashed_row["last_error"])
+        router = importlib.import_module("routers.plugins")
+        crashed_projection = await router._plugin_projection(
+            crashed_row, runtime=subsystem.service.runtime,
+        )
+        self.assertFalse(crashed_projection["runtime_available"])
         with self.assertRaises(PluginError):
             await subsystem.provider_resolver.resolve("jstv://jsws", self.client)
         self.legacy.assert_not_awaited()
@@ -223,6 +284,68 @@ class ProductionRolloutTest(unittest.IsolatedAsyncioTestCase):
             (await subsystem.provider_resolver.resolve("jstv://jsws", self.client))["stream_descriptor_version"],
             "1.0",
         )
+
+    async def test_intentional_disable_does_not_persist_crash_state(self):
+        subsystem = await self._subsystem()
+        await subsystem.startup()
+        await subsystem.set_ownership("jstv", "legacy")
+        await subsystem.disable("org.waveflow/jstv")
+        row = await self.db.get_plugin_installation("org.waveflow", "jstv")
+        self.assertEqual(row["lifecycle_state"], "disabled")
+        self.assertNotIn("PLUGIN_CRASHED", row["last_error"])
+
+    async def test_ownership_and_destructive_lifecycle_share_identity_lock(self):
+        subsystem = await self._subsystem()
+        await subsystem.startup()
+        await self._assert_destructive_operation_is_serialized(subsystem, subsystem.disable)
+        await self._assert_destructive_operation_is_serialized(subsystem, subsystem.uninstall)
+
+    async def test_ownership_cancellation_reconciles_db_and_resolver(self):
+        subsystem = await self._subsystem()
+        await subsystem.startup()
+        await subsystem.set_ownership("jstv", "legacy")
+        original_write = self.db.set_plugin_scheme_ownership
+        committed = asyncio.Event()
+        release = asyncio.Event()
+
+        async def delayed_write(scheme, mode, plugin_identity=""):
+            row = await original_write(scheme, mode, plugin_identity)
+            committed.set()
+            await release.wait()
+            return row
+
+        with mock.patch.object(self.db, "set_plugin_scheme_ownership", new=delayed_write):
+            task = asyncio.create_task(
+                subsystem.set_ownership("jstv", "plugin", "org.waveflow/jstv"),
+            )
+            await committed.wait()
+            task.cancel()
+            release.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+        row = next(item for item in await self.db.list_plugin_scheme_ownership() if item["scheme"] == "jstv")
+        self.assertEqual((row["mode"], row["plugin_identity"]), ("plugin", "org.waveflow/jstv"))
+        self.assertEqual(subsystem.provider_resolver.mode("jstv"), "plugin")
+        await subsystem.set_ownership("jstv", "legacy")
+
+    async def test_ownership_resolver_failure_rolls_back_durable_row(self):
+        subsystem = await self._subsystem()
+        await subsystem.startup()
+        await subsystem.set_ownership("jstv", "legacy")
+        original_set_mode = subsystem.provider_resolver.set_mode
+
+        def fail_plugin_mode(scheme, mode, plugin_identity=""):
+            if mode == "plugin":
+                raise RuntimeError("resolver failure")
+            return original_set_mode(scheme, mode, plugin_identity)
+
+        with mock.patch.object(subsystem.provider_resolver, "set_mode", side_effect=fail_plugin_mode):
+            with self.assertRaises(RuntimeError):
+                await subsystem.set_ownership("jstv", "plugin", "org.waveflow/jstv")
+        row = next(item for item in await self.db.list_plugin_scheme_ownership() if item["scheme"] == "jstv")
+        self.assertEqual((row["mode"], row["plugin_identity"]), ("legacy", ""))
+        self.assertEqual(subsystem.provider_resolver.mode("jstv"), "legacy")
 
     async def test_missing_installation_never_writes_owner_and_desktop_stays_legacy(self):
         subsystem = await self._subsystem()

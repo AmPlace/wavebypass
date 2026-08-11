@@ -8,7 +8,7 @@ import logging
 import os
 import sys
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import urljoin, urlparse
@@ -185,6 +185,60 @@ class ProductionPluginSubsystem:
     provider_resolver: ProviderResolver
     capability_gateway: CapabilityGateway
     official_release_root: Path = OFFICIAL_RELEASE_ROOT
+    _scheme_locks: dict[str, asyncio.Lock] = field(default_factory=dict, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        # These callbacks are installed on the same service/runtime objects used
+        # by all production lifecycle entry points.  That keeps ownership guards
+        # and crash persistence on the generic lifecycle path rather than in
+        # provider-specific routers.
+        self.service.destructive_guard = self._assert_identity_not_owned
+        self.service.runtime.lifecycle_callback = self._on_runtime_unexpected_exit
+
+    def _scheme_lock(self, scheme: str) -> asyncio.Lock:
+        return self._scheme_locks.setdefault(str(scheme).lower(), asyncio.Lock())
+
+    async def _ownership_row(self, scheme: str) -> dict[str, Any] | None:
+        normalized = str(scheme or "").strip().lower()
+        return next(
+            (row for row in await db.list_plugin_scheme_ownership()
+             if str(row.get("scheme") or "").lower() == normalized),
+            None,
+        )
+
+    async def _assert_identity_not_owned(self, identity: str) -> None:
+        for row in await db.list_plugin_scheme_ownership():
+            if (str(row.get("plugin_identity") or "") == identity
+                    and str(row.get("mode") or "legacy") != "legacy"):
+                raise PluginError(
+                    "SCHEME_CONFLICT",
+                    "Plugin owns a scheme and must be rolled back before this lifecycle operation",
+                    category="routing",
+                    details={"scheme": str(row.get("scheme") or ""), "plugin": identity},
+                )
+
+    async def _on_runtime_unexpected_exit(self, instance, exit_code: int | None) -> None:
+        """Persist an unexpected active-process exit without changing ownership."""
+        identity = instance.manifest.identity
+        async with self.service.lifecycle_lock(identity):
+            # Candidate/retained/removed instances must not overwrite the state
+            # of the currently active instance during an update or shutdown.
+            if self.service._active.get(identity) is not instance:
+                return
+            publisher, separator, plugin_id = identity.partition("/")
+            if not separator:
+                return
+            row = await db.get_plugin_installation(publisher, plugin_id)
+            if not row or not row.get("enabled"):
+                return
+            suffix = "unknown" if exit_code is None else str(exit_code)
+            await db.set_plugin_enabled(
+                publisher,
+                plugin_id,
+                True,
+                lifecycle_state="unavailable",
+                error=f"PLUGIN_CRASHED: Plugin process exited unexpectedly ({suffix})",
+            )
 
     @classmethod
     async def create(
@@ -213,12 +267,7 @@ class ProductionPluginSubsystem:
                 expected_sha256=item["sha256"], client=http_client),
         )
         ownership_rows = await db.list_plugin_scheme_ownership()
-        resolver = ProviderResolver(
-            runtime=runtime,
-            ownership={row["scheme"]: row["mode"] for row in ownership_rows},
-        )
-        for row in ownership_rows:
-            resolver.set_mode(row["scheme"], row["mode"], str(row.get("plugin_identity") or ""))
+        resolver = ProviderResolver.from_ownership_rows(ownership_rows, runtime=runtime)
         return cls(service, trust, downloads, http_client, resolver, gateway)
 
     async def startup(self) -> list[dict[str, Any]]:
@@ -382,13 +431,87 @@ class ProductionPluginSubsystem:
         scheme = str(scheme or '').strip().lower()
         if mode not in {"legacy", "plugin", "migration_test"}:
             raise PluginError("INVALID_PLUGIN_RESPONSE", "Invalid provider ownership mode", category="routing")
+
+        # Ownership changes and destructive lifecycle operations use the same
+        # canonical-Plugin lock.  The scheme lock serializes two ownership
+        # writers while the identity lock closes the ownership/disable,
+        # ownership/uninstall and ownership/permission-revoke TOCTOU window.
+        async with self._scheme_lock(scheme):
+            current = await self._ownership_row(scheme)
+            identity = ""
+            if mode != "legacy":
+                identity = str(plugin_identity or "")
+                if not identity and current and current.get("mode") != "legacy":
+                    identity = str(current.get("plugin_identity") or "")
+                if not identity:
+                    try:
+                        identity = self.service.runtime.registry.route(scheme).manifest.identity
+                    except PluginError:
+                        identity = ""
+            elif current and current.get("mode") != "legacy":
+                identity = str(current.get("plugin_identity") or "")
+
+            if identity:
+                async with self.service.lifecycle_lock(identity):
+                    return await self._set_ownership_locked(scheme, mode, plugin_identity, current)
+            return await self._set_ownership_locked(scheme, mode, plugin_identity, current)
+
+    async def _set_ownership_locked(
+        self, scheme: str, mode: str, plugin_identity: str, current: dict[str, Any] | None,
+    ) -> dict[str, Any]:
         if mode != "legacy":
             plugin_identity, _instance = await self._ownership_preflight(scheme, plugin_identity)
         else:
             plugin_identity = ''
-        row = await db.set_plugin_scheme_ownership(scheme, mode, plugin_identity)
-        self.provider_resolver.set_mode(scheme, mode, plugin_identity)
+        previous_mode = str((current or {}).get("mode") or "legacy")
+        previous_identity = str((current or {}).get("plugin_identity") or "")
+        row = await self._persist_ownership(
+            scheme, mode, plugin_identity, previous_mode, previous_identity,
+        )
         return {"scheme": row["scheme"], "mode": row["mode"], "plugin": row["plugin_identity"]}
+
+    async def _persist_ownership(
+        self, scheme: str, mode: str, plugin_identity: str,
+        previous_mode: str, previous_identity: str,
+    ) -> dict[str, Any]:
+        """Keep durable ownership and in-memory routing reconciled on cancellation."""
+        write_task = asyncio.create_task(
+            db.set_plugin_scheme_ownership(scheme, mode, plugin_identity),
+            name=f"plugin-ownership-write:{scheme}",
+        )
+        try:
+            row = await asyncio.shield(write_task)
+        except asyncio.CancelledError:
+            # A cancellation after SQLite commits must not leave the resolver
+            # stale.  Finish the write, reconcile memory, then preserve cancel.
+            row = await asyncio.shield(write_task)
+            try:
+                self.provider_resolver.set_mode(scheme, mode, plugin_identity)
+            except BaseException as error:
+                await self._rollback_ownership(scheme, previous_mode, previous_identity)
+                raise error
+            raise
+
+        try:
+            self.provider_resolver.set_mode(scheme, mode, plugin_identity)
+        except BaseException as error:
+            await self._rollback_ownership(scheme, previous_mode, previous_identity)
+            raise error
+        return row
+
+    async def _rollback_ownership(self, scheme: str, mode: str, plugin_identity: str) -> None:
+        rollback = asyncio.create_task(
+            db.set_plugin_scheme_ownership(scheme, mode, plugin_identity),
+            name=f"plugin-ownership-rollback:{scheme}",
+        )
+        try:
+            await asyncio.shield(rollback)
+            self.provider_resolver.set_mode(scheme, mode, plugin_identity)
+        except BaseException as rollback_error:
+            logger.exception("Plugin ownership rollback failed for %s", scheme)
+            raise PluginError(
+                "PLUGIN_UNAVAILABLE", "Plugin ownership reconciliation failed", category="persistence",
+            ) from rollback_error
 
     async def _ownership_preflight(self, scheme: str, plugin_identity: str = '') -> tuple[str, Any]:
         """Require a healthy, durable installation before routing production traffic."""
@@ -439,17 +562,9 @@ class ProductionPluginSubsystem:
         return resolved_identity, instance
 
     async def disable(self, identity: str) -> dict[str, Any]:
-        if any(item.get("mode") == "plugin" and item.get("plugin_identity") == identity
-               for item in await db.list_plugin_scheme_ownership()):
-            raise PluginError("SCHEME_CONFLICT", "Plugin owns a scheme and must be rolled back before disable",
-                              category="routing")
         return await self.service.disable(identity)
 
     async def uninstall(self, identity: str) -> bool:
-        if any(item.get("mode") == "plugin" and item.get("plugin_identity") == identity
-               for item in await db.list_plugin_scheme_ownership()):
-            raise PluginError("SCHEME_CONFLICT", "Plugin owns a scheme and must be rolled back before uninstall",
-                              category="routing")
         removed = await self.service.uninstall(identity)
         if removed and identity.startswith(f"{OFFICIAL_PUBLISHER_ID}/"):
             await self._remember_official_bootstrap(identity)
@@ -472,16 +587,13 @@ class ProductionPluginSubsystem:
                                  permission: str, actor: str) -> dict[str, Any]:
         prepared, temp_paths = await self._prepare_packages(packages)
         try:
-            return await self.service.approve_permission(identity, prepared, permission, actor)
+            async with self.service.lifecycle_lock(identity):
+                return await self.service.approve_permission(identity, prepared, permission, actor)
         finally:
             for path in temp_paths:
                 path.unlink(missing_ok=True)
 
     async def revoke_permission(self, identity: str, permission: str, actor: str) -> dict[str, Any]:
-        if any(item.get("mode") == "plugin" and item.get("plugin_identity") == identity
-               for item in await db.list_plugin_scheme_ownership()):
-            raise PluginError("SCHEME_CONFLICT", "Plugin owns a scheme and must be rolled back before permission revoke",
-                              category="routing")
         return await self.service.revoke_permission(identity, permission, actor)
 
     async def install(self, identity: str, packages: Iterable[dict[str, Any]]) -> dict[str, Any]:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import asyncio
 import hashlib
 import json
 import os
@@ -103,6 +104,65 @@ class DirectNetworkPermissionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.runtime.registry.route("direct-fixture").manifest.version, "2.0.0")
         await self.service.install_from_packages([self.package("3.0.0", direct=False)], IDENTITY)
         self.assertEqual(self.runtime.registry.route("direct-fixture").manifest.version, "3.0.0")
+
+    async def test_ownership_and_permission_revoke_share_identity_lock(self):
+        from plugin_production import ProductionPluginSubsystem
+        from provider_resolver import ProviderResolver
+        from plugin_runtime import PluginError
+
+        package = self.package()
+        await self.service.approve_permission(IDENTITY, [package], "network.direct", "test-admin")
+        await self.service.install_from_packages([package], IDENTITY)
+        subsystem = ProductionPluginSubsystem(
+            self.service, self.service.trust_policy, Path(self.tmp.name) / "downloads", None,
+            ProviderResolver(runtime=self.runtime), object(),
+        )
+        await subsystem.set_ownership("direct-fixture", "legacy")
+
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        original_preflight = subsystem._ownership_preflight
+
+        async def paused_preflight(scheme, plugin_identity=""):
+            result = await original_preflight(scheme, plugin_identity)
+            entered.set()
+            await release.wait()
+            return result
+
+        subsystem._ownership_preflight = paused_preflight
+        owner_task = asyncio.create_task(subsystem.set_ownership("direct-fixture", "plugin", IDENTITY))
+        revoke_started = asyncio.Event()
+
+        async def revoke():
+            revoke_started.set()
+            return await subsystem.revoke_permission(IDENTITY, "network.direct", "test-admin")
+
+        revoke_task = None
+        try:
+            await entered.wait()
+            revoke_task = asyncio.create_task(revoke())
+            await revoke_started.wait()
+            self.assertFalse(revoke_task.done())
+            release.set()
+            await owner_task
+            with self.assertRaises(PluginError) as blocked:
+                await revoke_task
+            self.assertEqual(blocked.exception.code, "SCHEME_CONFLICT")
+            row = next(item for item in await self.db.list_plugin_scheme_ownership()
+                       if item["scheme"] == "direct-fixture")
+            self.assertEqual((row["mode"], row["plugin_identity"]), ("plugin", IDENTITY))
+            # The ownership guard must run before the permission mutation.  The
+            # fingerprint is checked through the persisted approval rows.
+            approvals = await self.db.list_plugin_permission_approvals()
+            self.assertTrue(any(item["permission_name"] == "network.direct" and item["approved"] for item in approvals))
+        finally:
+            release.set()
+            if not owner_task.done():
+                await owner_task
+            if revoke_task is not None and not revoke_task.done():
+                await revoke_task
+            subsystem._ownership_preflight = original_preflight
+            await subsystem.set_ownership("direct-fixture", "legacy")
 
     def test_subprocess_environment_allowlist_removes_core_secrets(self):
         from plugin_runtime.process import sanitized_plugin_environment

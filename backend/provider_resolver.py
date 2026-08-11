@@ -48,6 +48,23 @@ class ProviderResolver:
         if any(mode not in OWNERSHIP_MODES for mode in self._ownership.values()):
             raise ValueError("invalid provider ownership mode")
 
+    @classmethod
+    def from_ownership_rows(
+        cls,
+        rows: list[dict[str, Any]],
+        *,
+        runtime: PluginRuntime | None,
+        legacy_resolver: Callable[[str, httpx.AsyncClient], Awaitable[dict[str, Any]]] = resolve_adapter_source,
+    ) -> "ProviderResolver":
+        resolver = cls(runtime=runtime, legacy_resolver=legacy_resolver)
+        for row in rows:
+            resolver.set_mode(
+                str(row.get("scheme") or ""),
+                str(row.get("mode") or "legacy"),
+                str(row.get("plugin_identity") or ""),
+            )
+        return resolver
+
     def mode(self, scheme: str) -> str:
         return self._ownership.get(scheme.lower(), "legacy")
 

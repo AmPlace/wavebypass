@@ -11,7 +11,7 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any, Awaitable, Callable, Iterable, Sequence
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -330,8 +330,13 @@ class PluginMarketService:
         self.runtime_command_factory = runtime_command_factory
         self._active: dict[str, PluginInstance] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        self.destructive_guard: Callable[[str], Awaitable[None]] | None = None
         self.workspaces_root = self.store.root / "workspaces"
         self.workspaces_root.mkdir(parents=True, exist_ok=True)
+
+    def lifecycle_lock(self, identity: str) -> asyncio.Lock:
+        """Return the process-wide lifecycle lock for one canonical Plugin."""
+        return self._locks.setdefault(str(identity), asyncio.Lock())
 
     def _working_directory(self, manifest: PluginManifest, *, create: bool = True) -> Path:
         path = self.workspaces_root / self.store._part(manifest.publisher_id) / self.store._part(manifest.plugin_id)
@@ -403,7 +408,7 @@ class PluginMarketService:
             raise PluginError("PLUGIN_INCOMPATIBLE", "Conflicting trusted plugin manifests were published for the same version", category="market")
         candidate = select_candidate(trusted, identity)
         await require_high_risk_approvals(candidate.manifest)
-        lock = self._locks.setdefault(identity, asyncio.Lock())
+        lock = self.lifecycle_lock(identity)
         async with lock:
             return await self._activate(candidate)
 
@@ -526,6 +531,12 @@ class PluginMarketService:
         return self._public(await db.get_plugin_installation(candidate.manifest.publisher_id, candidate.manifest.plugin_id))
 
     async def disable(self, identity: str) -> dict:
+        async with self.lifecycle_lock(identity):
+            if self.destructive_guard is not None:
+                await self.destructive_guard(identity)
+            return await self._disable_unlocked(identity)
+
+    async def _disable_unlocked(self, identity: str) -> dict:
         row = await self._row(identity)
         instance = self._active.pop(identity, None)
         if instance:
@@ -534,6 +545,10 @@ class PluginMarketService:
         return self._public(await db.get_plugin_installation(row["publisher_id"], row["plugin_id"]))
 
     async def enable(self, identity: str) -> dict:
+        async with self.lifecycle_lock(identity):
+            return await self._enable_unlocked(identity)
+
+    async def _enable_unlocked(self, identity: str) -> dict:
         row = await self._row(identity)
         if row.get("quarantined"):
             raise PluginError("PLUGIN_QUARANTINED", "Plugin requires explicit recovery", category="lifecycle")
@@ -594,6 +609,10 @@ class PluginMarketService:
         return self._public(await db.get_plugin_installation(row["publisher_id"], row["plugin_id"]))
 
     async def recover_quarantine(self, identity: str) -> dict:
+        async with self.lifecycle_lock(identity):
+            return await self._recover_quarantine_unlocked(identity)
+
+    async def _recover_quarantine_unlocked(self, identity: str) -> dict:
         row = await self._row(identity)
         if not row.get("quarantined"):
             raise PluginError("PLUGIN_UNAVAILABLE", "Plugin is not quarantined", category="lifecycle")
@@ -605,6 +624,12 @@ class PluginMarketService:
         return self._public(await db.get_plugin_installation(row["publisher_id"], row["plugin_id"]))
 
     async def uninstall(self, identity: str) -> bool:
+        async with self.lifecycle_lock(identity):
+            if self.destructive_guard is not None:
+                await self.destructive_guard(identity)
+            return await self._uninstall_unlocked(identity)
+
+    async def _uninstall_unlocked(self, identity: str) -> bool:
         row = await self._row(identity)
         instance = self._active.pop(identity, None)
         if instance:
@@ -688,6 +713,12 @@ class PluginMarketService:
         return await permission_projection(candidate.manifest)
 
     async def revoke_permission(self, identity: str, permission: str, actor: str) -> dict[str, Any]:
+        async with self.lifecycle_lock(identity):
+            if self.destructive_guard is not None:
+                await self.destructive_guard(identity)
+            return await self._revoke_permission_unlocked(identity, permission, actor)
+
+    async def _revoke_permission_unlocked(self, identity: str, permission: str, actor: str) -> dict[str, Any]:
         row = await self._row(identity)
         manifest = validate_manifest(json.loads(row["manifest_json"]))
         request = next((item for item in requested_permissions(manifest) if item.name == permission), None)

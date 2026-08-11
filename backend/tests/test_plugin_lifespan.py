@@ -72,10 +72,70 @@ class PluginLifespanTest(unittest.IsolatedAsyncioTestCase):
         automation = SimpleNamespace(registry=SimpleNamespace(), start=mock.AsyncMock(), stop=mock.AsyncMock())
         with self.patches(automation), mock.patch.object(
             self.main.ProductionPluginSubsystem, "create", new=mock.AsyncMock(side_effect=RuntimeError("bad plugin")),
+        ), mock.patch.object(
+            self.main.database, "list_plugin_scheme_ownership", new=mock.AsyncMock(return_value=[
+                {"scheme": "jstv", "mode": "plugin", "plugin_identity": "org.waveflow/jstv"},
+            ]),
         ):
             async with self.main.lifespan(self.main.app):
                 self.assertIsNone(self.main.app.state.plugin_subsystem)
+                resolver = self.main.app.state.provider_resolver
+                self.assertIsNotNone(resolver)
+                self.assertEqual(resolver.mode("jstv"), "plugin")
+                self.assertIsNone(resolver.runtime)
+                with self.assertRaises(Exception) as unavailable:
+                    await resolver.resolve("jstv://jsws", self.main.http_client)
+                self.assertEqual(unavailable.exception.code, "PLUGIN_UNAVAILABLE")
                 automation.start.assert_awaited_once()
+
+    async def test_startup_failure_rebuilds_fail_closed_resolver(self):
+        automation = SimpleNamespace(registry=SimpleNamespace(), start=mock.AsyncMock(), stop=mock.AsyncMock())
+        subsystem = SimpleNamespace(
+            provider_resolver=object(),
+            startup=mock.AsyncMock(side_effect=RuntimeError("recovery failed")),
+            shutdown=mock.AsyncMock(),
+        )
+        with self.patches(automation), mock.patch.object(
+            self.main.ProductionPluginSubsystem, "create", new=mock.AsyncMock(return_value=subsystem),
+        ), mock.patch.object(
+            self.main.database, "list_plugin_scheme_ownership", new=mock.AsyncMock(return_value=[
+                {"scheme": "jstv", "mode": "plugin", "plugin_identity": "org.waveflow/jstv"},
+            ]),
+        ):
+            async with self.main.lifespan(self.main.app):
+                self.assertIsNone(self.main.app.state.plugin_subsystem)
+                self.assertEqual(self.main.app.state.provider_resolver.mode("jstv"), "plugin")
+                self.assertIsNone(self.main.app.state.provider_resolver.runtime)
+                with self.assertRaises(Exception) as unavailable:
+                    await self.main.app.state.provider_resolver.resolve("jstv://jsws", self.main.http_client)
+                self.assertEqual(unavailable.exception.code, "PLUGIN_UNAVAILABLE")
+            subsystem.shutdown.assert_awaited_once()
+
+    async def test_startup_failure_preserves_legacy_routing(self):
+        automation = SimpleNamespace(registry=SimpleNamespace(), start=mock.AsyncMock(), stop=mock.AsyncMock())
+        legacy = mock.AsyncMock(return_value={"url": "https://legacy.example/live.m3u8"})
+        with self.patches(automation), mock.patch.object(
+            self.main.ProductionPluginSubsystem, "create", new=mock.AsyncMock(side_effect=RuntimeError("bad plugin")),
+        ), mock.patch.object(
+            self.main.database, "list_plugin_scheme_ownership", new=mock.AsyncMock(return_value=[
+                {"scheme": "jstv", "mode": "legacy", "plugin_identity": ""},
+            ]),
+        ), mock.patch.object(self.main, "resolve_adapter_source", new=legacy):
+            async with self.main.lifespan(self.main.app):
+                result = await self.main.app.state.provider_resolver.resolve("jstv://jsws", self.main.http_client)
+                self.assertEqual(result["url"], "https://legacy.example/live.m3u8")
+                legacy.assert_awaited_once()
+
+    async def test_ownership_read_failure_does_not_assume_legacy(self):
+        automation = SimpleNamespace(registry=SimpleNamespace(), start=mock.AsyncMock(), stop=mock.AsyncMock())
+        with self.patches(automation), mock.patch.object(
+            self.main.ProductionPluginSubsystem, "create", new=mock.AsyncMock(side_effect=RuntimeError("bad plugin")),
+        ), mock.patch.object(
+            self.main.database, "list_plugin_scheme_ownership", new=mock.AsyncMock(side_effect=RuntimeError("db unavailable")),
+        ):
+            async with self.main.lifespan(self.main.app):
+                self.assertIsNone(self.main.app.state.plugin_subsystem)
+                self.assertIsNone(self.main.app.state.provider_resolver)
 
 
 if __name__ == "__main__":

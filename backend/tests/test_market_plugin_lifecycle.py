@@ -281,6 +281,7 @@ class MarketPluginLifecycleTest(unittest.IsolatedAsyncioTestCase):
         row = await self.db.get_plugin_installation("org.waveflow", "fixture-multi-provider")
         self.assertEqual(row["active_version"], "1.1.0")
         self.assertEqual(self.runtime.registry.route("fixture-a").manifest.version, "1.1.0")
+
         with self.assertRaises(self.pm.PluginError):
             await self.service.install_from_packages([self.package("1.0.0")], "org.waveflow/fixture-multi-provider")
         conn = sqlite3.connect(os.environ["WAVEFLOW_DB_PATH"])
@@ -306,6 +307,37 @@ class MarketPluginLifecycleTest(unittest.IsolatedAsyncioTestCase):
         row = await self.db.get_plugin_installation("org.waveflow", "fixture-multi-provider")
         self.assertEqual(row["active_version"], "1.1.0")
         self.assertEqual(self.runtime.registry.route("fixture-a").manifest.version, "1.1.0")
+
+    async def test_plugin_owned_update_failure_keeps_canonical_owner_and_old_runtime(self):
+        from plugin_production import ProductionPluginSubsystem
+        from provider_resolver import ProviderResolver
+
+        await self.service.install_from_packages([self.package("1.0.0")], "org.waveflow/fixture-multi-provider")
+        subsystem = ProductionPluginSubsystem(
+            service=self.service,
+            trust_policy=self.service.trust_policy,
+            download_root=Path(self.tmp.name) / "downloads",
+            http_client=None,
+            provider_resolver=ProviderResolver(runtime=self.runtime),
+            capability_gateway=object(),
+        )
+        try:
+            await subsystem.set_ownership("fixture-a", "plugin", "org.waveflow/fixture-multi-provider")
+            self.modes["1.1.0"] = "health_fail"
+            with self.assertRaises(self.pm.PluginError):
+                await self.service.install_from_packages(
+                    [self.package("1.1.0")], "org.waveflow/fixture-multi-provider",
+                )
+            row = await self.db.get_plugin_installation("org.waveflow", "fixture-multi-provider")
+            owner = next(item for item in await self.db.list_plugin_scheme_ownership()
+                         if item["scheme"] == "fixture-a")
+            self.assertEqual(row["active_version"], "1.0.0")
+            self.assertEqual(self.runtime.registry.route("fixture-a").manifest.version, "1.0.0")
+            self.assertEqual((owner["mode"], owner["plugin_identity"]),
+                             ("plugin", "org.waveflow/fixture-multi-provider"))
+            self.assertEqual(subsystem.provider_resolver.mode("fixture-a"), "plugin")
+        finally:
+            await subsystem.set_ownership("fixture-a", "legacy")
 
     async def test_scheme_conflict_is_atomic(self):
         await self.service.install_from_packages([self.package(schemes=("occupied",))], "org.waveflow/fixture-multi-provider")

@@ -324,11 +324,7 @@ async def media_channel_source_resolve(
 
     try:
         provider_resolver = _provider_resolver(_m, request)
-        resolved = await (
-            provider_resolver.resolve(adapter_url, _m.http_client)
-            if provider_resolver is not None
-            else _m.resolve_adapter_source(adapter_url, _m.http_client)
-        )
+        resolved = await provider_resolver.resolve(adapter_url, _m.http_client)
     except _m.AdapterResolveError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.to_payload()) from exc
     except PluginError as exc:
@@ -546,11 +542,7 @@ async def _serve_iptv_source_playlist(
             adapter_url = raw_url if raw_url.lower().startswith("youtube://") else f"youtube://resolve?url={quote(raw_url, safe='')}"
         try:
             provider_resolver = _provider_resolver(_m)
-            resolved = await (
-                provider_resolver.resolve(adapter_url, _m.http_client)
-                if provider_resolver is not None
-                else _m.resolve_adapter_source(adapter_url, _m.http_client)
-            )
+            resolved = await provider_resolver.resolve(adapter_url, _m.http_client)
         except _m.AdapterResolveError as exc:
             raise HTTPException(status_code=exc.status_code, detail=exc.to_payload()) from exc
         except PluginError as exc:
@@ -1028,4 +1020,7 @@ def _provider_resolver(main_module, request: Request | None = None):
     request_app = getattr(request, "app", None) if request is not None else None
     app = request_app or getattr(main_module, "app", None)
     state = getattr(app, "state", None)
-    return getattr(state, "provider_resolver", None)
+    resolver = getattr(state, "provider_resolver", None)
+    if resolver is None:
+        raise PluginError("PLUGIN_UNAVAILABLE", "Provider resolver is unavailable", category="lifecycle")
+    return resolver

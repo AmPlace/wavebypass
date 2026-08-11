@@ -8,7 +8,7 @@ from urllib.parse import quote, urljoin
 
 import httpx
 
-from adapters import AdapterResolveError, resolve_adapter_source
+from adapters import AdapterResolveError
 from plugin_runtime import PluginError
 from m3u8_parser import adapter_provider, detect_source_type, is_youtube_url
 from media_tools import media_tool_bin
@@ -674,11 +674,9 @@ async def probe_channel_source(ch: dict[str, Any], client: httpx.AsyncClient, *,
 
     if source_type == "adapter":
         try:
-            resolved = await (
-                provider_resolver.resolve(original_url, client)
-                if provider_resolver is not None
-                else resolve_adapter_source(original_url, client)
-            )
+            if provider_resolver is None:
+                raise PluginError("PLUGIN_UNAVAILABLE", "Provider resolver is unavailable", category="lifecycle")
+            resolved = await provider_resolver.resolve(original_url, client)
             url = str(resolved.get("url") or "")
             source_type = str(resolved.get("source_type") or detect_source_type(url)).strip().lower()
             resolved_headers = resolved.get("headers") if isinstance(resolved.get("headers"), dict) else {}

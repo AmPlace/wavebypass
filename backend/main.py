@@ -66,6 +66,7 @@ from routers.settings import router as settings_router
 from routers.plugins import router as plugins_router
 from plugin_production import ProductionPluginSubsystem, default_plugin_root
 from plugin_tasks import register_plugin_update_task
+from provider_resolver import ProviderResolver
 from routers.setup import router as setup_router
 from security.dependencies import require_admin, require_browse_access, require_media_access, resolve_media_access
 from security.source_ids import source_id_for
@@ -685,6 +686,17 @@ async def lifespan(app: FastAPI):
     try:
         await database.initialize()
         try:
+            app.state.provider_resolver = ProviderResolver.from_ownership_rows(
+                await database.list_plugin_scheme_ownership(), runtime=None,
+                legacy_resolver=resolve_adapter_source,
+            )
+        except Exception:
+            # If the durable ownership read itself fails, do not guess that
+            # every scheme is legacy.  A missing resolver is now an explicit
+            # fail-closed state in media/probe callers.
+            logger.exception("Unable to load durable Plugin ownership before startup")
+            app.state.provider_resolver = None
+        try:
             plugin_subsystem = await ProductionPluginSubsystem.create(
                 root=default_plugin_root(), http_client=http_client,
             )
@@ -695,10 +707,22 @@ async def lifespan(app: FastAPI):
             if unavailable:
                 logger.warning("Plugin startup recovery completed with %d unavailable provider(s)", len(unavailable))
         except Exception:
-            logger.exception("Plugin subsystem startup failed; Core will continue without Plugin providers")
+            logger.exception("Plugin subsystem startup failed; Plugin ownership will fail closed")
+            if plugin_subsystem is not None:
+                try:
+                    await plugin_subsystem.shutdown()
+                except Exception:
+                    logger.exception("Plugin subsystem cleanup after startup failure failed")
             plugin_subsystem = None
             app.state.plugin_subsystem = None
-            app.state.provider_resolver = None
+            try:
+                app.state.provider_resolver = ProviderResolver.from_ownership_rows(
+                    await database.list_plugin_scheme_ownership(), runtime=None,
+                    legacy_resolver=resolve_adapter_source,
+                )
+            except Exception:
+                logger.exception("Unable to reconcile Plugin ownership after startup failure")
+                app.state.provider_resolver = None
         automation_service = await create_production_automation_service(http_client)
         if plugin_subsystem is not None:
             if await database.list_plugin_installations():

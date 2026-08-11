@@ -12,7 +12,7 @@ import database as db
 import market
 from official_plugin_distribution import OFFICIAL_PUBLISHER_ID, load_official_trust_rows
 from plugin_tasks import reconcile_plugin_update_task
-from plugin_runtime import PluginError
+from plugin_runtime import LifecycleState, PluginError
 from security.dependencies import require_admin
 
 
@@ -65,27 +65,53 @@ def _error(exc: PluginError) -> HTTPException:
     return HTTPException(status_code=statuses.get(exc.code, 400), detail=exc.as_contract())
 
 
-def _manifest_projection(row: dict[str, Any]) -> dict[str, Any]:
+def _manifest_projection(
+    row: dict[str, Any], *, runtime=None, runtime_available: bool | None = None,
+) -> dict[str, Any]:
     try:
         manifest = json.loads(row.get("manifest_json") or "{}")
     except json.JSONDecodeError:
         manifest = {}
-    runtime = manifest.get("runtime") or {}
-    lock = runtime.get("dependency_lock") or {}
+    manifest_runtime = manifest.get("runtime") or {}
+    lock = manifest_runtime.get("dependency_lock") or {}
     dependencies = lock.get("artifacts") if isinstance(lock.get("artifacts"), list) else []
-    if runtime.get("type") == "python":
+    if manifest_runtime.get("type") == "python":
         try:
             from plugin_python_runtime import select_dependency_artifacts
             dependencies = list(select_dependency_artifacts(lock))
         except PluginError:
             dependencies = []
+    persisted_runtime_available = bool(
+        row.get("enabled") and row.get("lifecycle_state") == "active" and not row.get("quarantined")
+    )
+    effective_runtime_available = persisted_runtime_available
+    if runtime_available is not None:
+        effective_runtime_available = effective_runtime_available and bool(runtime_available)
+    if runtime is not None:
+        identity = f"{row['publisher_id']}/{row['plugin_id']}"
+        for item in manifest.get("owned_schemes", []):
+            scheme = str(item.get("scheme") or "").strip().lower() if isinstance(item, dict) else ""
+            if not scheme:
+                effective_runtime_available = False
+                break
+            try:
+                instance = runtime.registry.route(scheme)
+            except PluginError:
+                effective_runtime_available = False
+                break
+            if (instance.manifest.identity != identity
+                    or instance.state != LifecycleState.HEALTHY_ACTIVE
+                    or instance.health != "healthy"):
+                effective_runtime_available = False
+                break
     return {
         "plugin": f"{row['publisher_id']}/{row['plugin_id']}",
         "display_name": manifest.get("display_name") or row["plugin_id"],
         "version": row.get("active_version") or row.get("installed_version") or "",
         "enabled": bool(row.get("enabled")),
         "lifecycle_state": row.get("lifecycle_state") or "",
-        "runtime_available": row.get("lifecycle_state") == "active",
+        "runtime_available": effective_runtime_available,
+        "runtime_health": "healthy" if effective_runtime_available else "unavailable",
         "quarantined": bool(row.get("quarantined")),
         "owned_schemes": [item.get("scheme") for item in manifest.get("owned_schemes", []) if isinstance(item, dict)],
         "provider_contracts": manifest.get("provider_contracts") or [],
@@ -93,10 +119,10 @@ def _manifest_projection(row: dict[str, Any]) -> dict[str, Any]:
         "trust_state": row.get("trust_state") or "",
         "last_error": str(row.get("last_error") or "")[:1024],
         "runtime": {
-            "type": runtime.get("type") or row.get("runtime_type") or "unknown",
-            "python_version_range": runtime.get("python_version_range") or "",
-            "environment_status": "ready" if runtime.get("type") == "python" and row.get("lifecycle_state") == "active"
-                                  else "not_applicable" if runtime.get("type") != "python" else "unavailable",
+            "type": manifest_runtime.get("type") or row.get("runtime_type") or "unknown",
+            "python_version_range": manifest_runtime.get("python_version_range") or "",
+            "environment_status": "ready" if manifest_runtime.get("type") == "python" and effective_runtime_available
+                                  else "not_applicable" if manifest_runtime.get("type") != "python" else "unavailable",
             "dependency_count": len(dependencies),
             "dependencies": [{"name": item.get("name"), "version": item.get("version")}
                              for item in dependencies if isinstance(item, dict)],
@@ -104,8 +130,13 @@ def _manifest_projection(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-async def _plugin_projection(row: dict[str, Any], *, include_permissions: bool = True) -> dict[str, Any]:
-    projection = _manifest_projection(row)
+async def _plugin_projection(
+    row: dict[str, Any], *, include_permissions: bool = True,
+    runtime=None, runtime_available: bool | None = None,
+) -> dict[str, Any]:
+    projection = _manifest_projection(
+        row, runtime=runtime, runtime_available=runtime_available,
+    )
     ownership_rows = await db.list_plugin_scheme_ownership()
     by_scheme = {str(item.get("scheme") or ""): item for item in ownership_rows}
     projection["ownership"] = [
@@ -148,9 +179,14 @@ async def _packages(package_id: str = "") -> list[dict[str, Any]]:
 
 
 @router.get("")
-async def list_plugins() -> dict[str, Any]:
+async def list_plugins(request: Request) -> dict[str, Any]:
     rows = await db.list_plugin_installations()
-    return {"plugins": [await _plugin_projection(row) for row in rows]}
+    subsystem = getattr(request.app.state, "plugin_subsystem", None)
+    runtime = getattr(getattr(subsystem, "service", None), "runtime", None)
+    available = None if subsystem is not None else False
+    return {
+        "plugins": [await _plugin_projection(row, runtime=runtime, runtime_available=available) for row in rows]
+    }
 
 
 @router.get("/trust")
@@ -198,11 +234,14 @@ async def content_dependencies(package_id: str, request: Request) -> dict[str, A
 
 
 @router.get("/{publisher_id}/{plugin_id}")
-async def plugin_detail(publisher_id: str, plugin_id: str) -> dict[str, Any]:
+async def plugin_detail(publisher_id: str, plugin_id: str, request: Request) -> dict[str, Any]:
     row = await db.get_plugin_installation(publisher_id, plugin_id)
     if not row:
         raise HTTPException(status_code=404, detail={"code": "RESOURCE_NOT_FOUND", "message": "Plugin is not installed"})
-    return await _plugin_projection(row)
+    subsystem = getattr(request.app.state, "plugin_subsystem", None)
+    runtime = getattr(getattr(subsystem, "service", None), "runtime", None)
+    available = None if subsystem is not None else False
+    return await _plugin_projection(row, runtime=runtime, runtime_available=available)
 
 
 @router.get("/{publisher_id}/{plugin_id}/permissions")

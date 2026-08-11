@@ -1,4 +1,5 @@
 import unittest
+import types
 
 from adapters import AdapterResolveError, parse_adapter_url
 from adapters.youtube import resolve_youtube
@@ -90,7 +91,6 @@ class IptvProbeRealtimeStreamTest(unittest.IsolatedAsyncioTestCase):
     async def test_youtube_probe_resolves_before_stream_probe(self):
         resolved_targets = []
         probed_urls = []
-        original_resolve = iptv_probe.resolve_adapter_source
         original_probe_hls = iptv_probe._probe_hls
         original_enrich = iptv_probe._enrich_with_ffprobe
 
@@ -111,16 +111,16 @@ class IptvProbeRealtimeStreamTest(unittest.IsolatedAsyncioTestCase):
         async def fake_enrich(result, url, headers):
             return result
 
-        iptv_probe.resolve_adapter_source = fake_resolve
+        resolver = types.SimpleNamespace(resolve=fake_resolve)
+
         iptv_probe._probe_hls = fake_probe_hls
         iptv_probe._enrich_with_ffprobe = fake_enrich
         try:
             result = await probe_channel_source(
                 {"url": "https://www.youtube.com/live/abcDEF123_4", "source_type": "youtube"},
-                None,
+                None, provider_resolver=resolver,
             )
         finally:
-            iptv_probe.resolve_adapter_source = original_resolve
             iptv_probe._probe_hls = original_probe_hls
             iptv_probe._enrich_with_ffprobe = original_enrich
 
@@ -129,7 +129,6 @@ class IptvProbeRealtimeStreamTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(probed_urls, ["https://example.com/live.m3u8"])
 
     async def test_youtube_probe_only_counts_online_without_stream_probe(self):
-        original_resolve = iptv_probe.resolve_adapter_source
         original_probe_hls = iptv_probe._probe_hls
 
         async def fake_resolve(target_url, client):
@@ -145,15 +144,15 @@ class IptvProbeRealtimeStreamTest(unittest.IsolatedAsyncioTestCase):
         async def fail_probe_hls(client, url, headers):
             raise AssertionError("probe_only must not read the YouTube stream")
 
-        iptv_probe.resolve_adapter_source = fake_resolve
+        resolver = types.SimpleNamespace(resolve=fake_resolve)
+
         iptv_probe._probe_hls = fail_probe_hls
         try:
             result = await probe_channel_source(
                 {"url": "https://www.youtube.com/live/abcDEF123_4", "source_type": "youtube"},
-                None,
+                None, provider_resolver=resolver,
             )
         finally:
-            iptv_probe.resolve_adapter_source = original_resolve
             iptv_probe._probe_hls = original_probe_hls
 
         self.assertEqual(result["probe_status"], "online")
