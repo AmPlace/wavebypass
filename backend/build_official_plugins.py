@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import shutil
 import tempfile
@@ -34,6 +35,58 @@ def _json(path: Path) -> dict[str, Any]:
 def _write_json(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _dependency_sources(item: dict[str, Any], manifest: Any, staging: Path, plugin_id: str) -> list[dict[str, str]]:
+    lock = manifest.runtime.get("dependency_lock") if manifest.runtime.get("type") == "python" else None
+    lock_artifacts = list((lock or {}).get("artifacts") or [])
+    source_items = item.get("dependency_sources") or []
+    if not lock_artifacts:
+        if source_items:
+            raise PluginError("DEPENDENCY_LOCK_INVALID", "Dependency sources exist without a Python lock", category="dependency")
+        return []
+    if not isinstance(source_items, list):
+        raise PluginError("DEPENDENCY_LOCK_INVALID", "Official dependency sources are invalid", category="dependency")
+    by_filename: dict[str, Path] = {}
+    for source_item in source_items:
+        if not isinstance(source_item, dict) or set(source_item) != {"filename", "source"}:
+            raise PluginError("DEPENDENCY_LOCK_INVALID", "Official dependency source metadata is invalid", category="dependency")
+        filename = str(source_item.get("filename") or "")
+        filename_path = Path(filename)
+        if (not filename or filename_path.is_absolute() or filename_path.name != filename
+                or ".." in filename_path.parts):
+            raise PluginError("DEPENDENCY_LOCK_INVALID", "Official dependency filename is unsafe", category="dependency")
+        source = (OFFICIAL_DISTRIBUTION_ROOT / str(source_item.get("source") or "")).resolve()
+        if filename in by_filename or not source.is_file() or not source.is_relative_to(REPOSITORY_ROOT):
+            raise PluginError("DEPENDENCY_ARTIFACT_NOT_FOUND", "Official dependency artifact is unavailable", category="dependency")
+        by_filename[filename] = source
+    expected_filenames = {str(artifact.get("filename") or "") for artifact in lock_artifacts}
+    if set(by_filename) != expected_filenames:
+        raise PluginError("DEPENDENCY_LOCK_INVALID", "Official dependency sources do not match the Plugin lock", category="dependency")
+    references: list[dict[str, str]] = []
+    for artifact in lock_artifacts:
+        filename = str(artifact.get("filename") or "")
+        source = by_filename.get(filename)
+        if source is None:
+            raise PluginError("DEPENDENCY_ARTIFACT_NOT_FOUND", f"Official dependency artifact is unavailable: {filename}", category="dependency")
+        if source.stat().st_size != artifact["size_bytes"] or _sha256(source) != artifact["sha256"]:
+            raise PluginError("DEPENDENCY_ARTIFACT_INTEGRITY_FAILED", f"Official dependency artifact is invalid: {filename}", category="dependency")
+        target = staging / "payloads" / "dependencies" / plugin_id / filename
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
+        references.append({
+            "sha256": artifact["sha256"],
+            "url": f"payloads/dependencies/{plugin_id}/{filename}",
+        })
+    return references
 
 
 def _private_key(path: Path) -> Ed25519PrivateKey:
@@ -119,6 +172,7 @@ def build_release(
                     "sha256": package["plugin_manifest"]["artifacts"][0]["sha256"],
                     "url": f"payloads/{artifact_name}",
                 }],
+                "dependency_references": _dependency_sources(item, manifest, staging, plugin_id),
             })
             rollout = item.get("rollout")
             if rollout is not None:

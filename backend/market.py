@@ -1313,6 +1313,12 @@ def _package_card(package: dict) -> dict:
                     for artifact in manifest.get("artifacts") or [] if isinstance(artifact, dict)
                 ],
                 "permissions": sorted(set(permissions)),
+                "dependencies": [
+                    {"name": item.get("name"), "version": item.get("version")}
+                    for item in (manifest.get("runtime", {}).get("dependency_lock", {}).get("artifacts", [])
+                                 if isinstance(manifest.get("runtime"), dict) else [])
+                    if isinstance(item, dict)
+                ],
             }
     return card
 
@@ -1337,6 +1343,7 @@ async def get_package(package_id: str) -> dict:
         # Local artifact references are lifecycle-service inputs, not an admin
         # read projection. In particular, never expose Core filesystem paths.
         result.pop("artifact_references", None)
+        result.pop("dependency_references", None)
     install = installed.get(package_id)
     result["installed"] = bool(install)
     result["installed_version"] = install.get("installed_version", "") if install else ""

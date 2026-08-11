@@ -20,6 +20,9 @@ TARGETS = (
 )
 TARGET_IDENTITIES = {identity for _scheme, identity, _reference in TARGETS}
 TARGET_SCHEMES = {scheme for scheme, _identity, _reference in TARGETS}
+OFFICIAL_IDENTITIES = TARGET_IDENTITIES | {
+    "org.waveflow/nowtv", "org.waveflow/nmtv", "org.waveflow/sdtv",
+}
 STREAMS = {
     "fjtv": "https://media.example/fjtv/live.m3u8",
     "nd0593tv": "https://media.example/nd0593tv/live.m3u8",
@@ -186,7 +189,7 @@ class ProductionRolloutTest(unittest.IsolatedAsyncioTestCase):
         startup = await subsystem.startup()
         self.assertEqual(
             {item["plugin"] for item in startup if item.get("bootstrap") == "installed"},
-            TARGET_IDENTITIES,
+            OFFICIAL_IDENTITIES,
         )
         self.assertEqual(
             {item["plugin"] for item in startup if item.get("rollout") == "plugin"},
@@ -195,7 +198,7 @@ class ProductionRolloutTest(unittest.IsolatedAsyncioTestCase):
         installations = await self.db.list_plugin_installations()
         self.assertEqual(
             {f"{row['publisher_id']}/{row['plugin_id']}" for row in installations},
-            TARGET_IDENTITIES,
+            OFFICIAL_IDENTITIES,
         )
         self.assertTrue(all(
             row["enabled"] and row["lifecycle_state"] == "active"
@@ -216,10 +219,12 @@ class ProductionRolloutTest(unittest.IsolatedAsyncioTestCase):
 
         router = importlib.import_module("routers.plugins")
         projections = [await router._plugin_projection(row) for row in installations]
-        self.assertTrue(all(item["ownership"] == [{
-            "scheme": item["owned_schemes"][0], "mode": "plugin",
-            "plugin": item["plugin"],
-        }] for item in projections))
+        for item in projections:
+            expected_mode = "plugin" if item["plugin"] in TARGET_IDENTITIES else "legacy"
+            self.assertEqual(item["ownership"], [{
+                "scheme": item["owned_schemes"][0], "mode": expected_mode,
+                "plugin": item["plugin"] if expected_mode == "plugin" else "",
+            }])
         self.assertTrue(all(not item["permissions"]["pending"] for item in projections))
         self.assertTrue(all(
             item["permissions"]["approved"] == item["permissions"]["requested"] for item in projections
@@ -230,7 +235,7 @@ class ProductionRolloutTest(unittest.IsolatedAsyncioTestCase):
         subsystem, recovered = await self._restart(subsystem)
         self.assertEqual(
             {item["plugin"] for item in recovered if item.get("status") == "active"},
-            TARGET_IDENTITIES,
+            OFFICIAL_IDENTITIES,
         )
         self.assertFalse(any(item.get("rollout") == "plugin" for item in recovered))
         await self._assert_plugin_routing(subsystem, "restart")
@@ -616,7 +621,7 @@ class ProductionRolloutTest(unittest.IsolatedAsyncioTestCase):
         startup = await desktop.startup()
         self.assertEqual(
             {item["plugin"] for item in startup if item.get("bootstrap") == "installed"},
-            TARGET_IDENTITIES,
+            OFFICIAL_IDENTITIES,
         )
         self.assertFalse(any(item.get("rollout") for item in startup))
         self.assertEqual(await self.db.list_plugin_scheme_ownership(), [])

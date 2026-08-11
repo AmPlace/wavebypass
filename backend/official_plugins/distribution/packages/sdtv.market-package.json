@@ -1,0 +1,136 @@
+{
+  "artifact_references": [
+    {
+      "sha256": "34441a88e5d8e248eda93cc3c9dfd71e9c3171373c6ea529dda5db2911c255b4",
+      "url": "payloads/sdtv-1.0.0.pyz"
+    }
+  ],
+  "dependency_references": [
+    {
+      "sha256": "3e4a1a3232eef2e6c732827d5722db29a0cc8b27af2a4d865b094cf954be9ca1",
+      "url": "payloads/dependencies/sdtv/cryptography-48.0.1-cp311-abi3-macosx_10_9_universal2.whl"
+    },
+    {
+      "sha256": "c654de545946e0db659b3400168c9ad31b5d29593291482c43e3564effbcee13",
+      "url": "payloads/dependencies/sdtv/cffi-2.0.0-cp314-cp314-macosx_11_0_arm64.whl"
+    },
+    {
+      "sha256": "b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992",
+      "url": "payloads/dependencies/sdtv/pycparser-3.0-py3-none-any.whl"
+    }
+  ],
+  "description": "WaveFlow official SDTV TV Provider.",
+  "id": "official::sdtv-plugin",
+  "kind": "plugin_package",
+  "manifest_signature": {
+    "algorithm": "ed25519",
+    "key_id": "org.waveflow.release.2026-01",
+    "value": "PBZCNBQCnqviDMssPL/za5wxCuuz/trv9ti13X2ENpgyuU1zA/7OTfgahWVaRLG32uZ1Eqzu1X/7M5ez1LI6AA=="
+  },
+  "name": "SDTV Provider Plugin",
+  "package_type": "plugin_package",
+  "plugin_manifest": {
+    "artifacts": [
+      {
+        "arch": "arm64",
+        "entrypoint": "sdtv-1.0.0.pyz",
+        "os": "macos",
+        "runtime": "python",
+        "sha256": "34441a88e5d8e248eda93cc3c9dfd71e9c3171373c6ea529dda5db2911c255b4",
+        "signature": {
+          "algorithm": "ed25519",
+          "key_id": "org.waveflow.release.2026-01",
+          "value": "ytJHUsLht04qjDIOh7ebpzNEaCS8zDNtw6jtZnwzafEvYvZoS6DeRGMWi4Me59gzs84FWAGqMRd3fSB31q1tDA=="
+        },
+        "size_bytes": 9462
+      }
+    ],
+    "capabilities": [
+      "tv.resolve_stream"
+    ],
+    "core_version_range": ">=0.1.0 <1.0.0",
+    "dependencies": [],
+    "display_name": "SDTV Provider",
+    "manifest_version": 1,
+    "owned_schemes": [
+      {
+        "contract": "tv_provider",
+        "scheme": "sdtv"
+      }
+    ],
+    "permissions": {
+      "network": {
+        "allowed_hosts": [
+          "v.iqilu.com",
+          "feiying.litenews.cn"
+        ],
+        "managed": true
+      }
+    },
+    "plugin_api_version": "1.0",
+    "plugin_id": "sdtv",
+    "provider_contracts": [
+      {
+        "contract": "tv_provider",
+        "contract_version": "1.0",
+        "features": [
+          "resolve_stream"
+        ]
+      }
+    ],
+    "publisher_id": "org.waveflow",
+    "runtime": {
+      "dependency_lock": {
+        "artifacts": [
+          {
+            "abi_tag": "abi3",
+            "filename": "cryptography-48.0.1-cp311-abi3-macosx_10_9_universal2.whl",
+            "name": "cryptography",
+            "platform_tag": "macosx_10_9_universal2",
+            "python_tag": "cp311",
+            "sha256": "3e4a1a3232eef2e6c732827d5722db29a0cc8b27af2a4d865b094cf954be9ca1",
+            "size_bytes": 8008324,
+            "url": "https://files.pythonhosted.org/packages/1b/bc/ee4137cbbe105652c0ee4252792b78fc8e7afa4b8e61d9d5dc05a7f45731/cryptography-48.0.1-cp311-abi3-macosx_10_9_universal2.whl",
+            "version": "48.0.1"
+          },
+          {
+            "abi_tag": "cp314",
+            "filename": "cffi-2.0.0-cp314-cp314-macosx_11_0_arm64.whl",
+            "name": "cffi",
+            "platform_tag": "macosx_11_0_arm64",
+            "python_tag": "cp314",
+            "sha256": "c654de545946e0db659b3400168c9ad31b5d29593291482c43e3564effbcee13",
+            "size_bytes": 181487,
+            "url": "https://files.pythonhosted.org/packages/59/dd/27e9fa567a23931c838c6b02d0764611c62290062a6d4e8ff7863daf9730/cffi-2.0.0-cp314-cp314-macosx_11_0_arm64.whl",
+            "version": "2.0.0"
+          },
+          {
+            "abi_tag": "none",
+            "filename": "pycparser-3.0-py3-none-any.whl",
+            "name": "pycparser",
+            "platform_tag": "any",
+            "python_tag": "py3",
+            "sha256": "b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992",
+            "size_bytes": 48172,
+            "url": "https://files.pythonhosted.org/packages/0c/c3/44f3fbbfa403ea2a7c779186dc20772604442dde72947e7d01069cbe98e3/pycparser-3.0-py3-none-any.whl",
+            "version": "3.0"
+          }
+        ],
+        "lock_version": 1
+      },
+      "entrypoint": "sdtv-1.0.0.pyz",
+      "ipc": "stdio_framed_json_v1",
+      "python_version_range": ">=3.14.0 <3.15.0",
+      "type": "python"
+    },
+    "state_schema_version": 1,
+    "version": "1.0.0"
+  },
+  "risk_level": "official_signed_not_sandboxed",
+  "schema_version": 1,
+  "source_origin": "official",
+  "source_policy": "signed_release",
+  "status": "active",
+  "updated_at": "2026-08-11T00:00:00Z",
+  "version": "1.0.0"
+}

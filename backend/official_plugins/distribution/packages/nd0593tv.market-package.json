@@ -5,6 +5,7 @@
       "url": "payloads/nd0593tv-1.0.0.pyz"
     }
   ],
+  "dependency_references": [],
   "description": "WaveFlow official ND0593TV TV Provider.",
   "id": "official::nd0593tv-plugin",
   "kind": "plugin_package",

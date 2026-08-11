@@ -19,8 +19,14 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 IDENTITIES = {
     "org.waveflow/jstv", "org.waveflow/fjtv", "org.waveflow/nd0593tv", "org.waveflow/gzstv",
+    "org.waveflow/nowtv", "org.waveflow/nmtv", "org.waveflow/sdtv",
 }
 SCHEMES = {identity.rsplit("/", 1)[1] for identity in IDENTITIES}
+DEPENDENCIES = {
+    "org.waveflow/nowtv": [],
+    "org.waveflow/nmtv": [("xxtea", "5.0.0")],
+    "org.waveflow/sdtv": [("cryptography", "48.0.1"), ("cffi", "2.0.0"), ("pycparser", "3.0")],
+}
 
 
 def _clear_modules() -> None:
@@ -53,6 +59,7 @@ class OfficialReleaseBuildTest(unittest.TestCase):
         _market, packages = load_bundled_official_market()
         self.assertEqual({f"{p['plugin_manifest']['publisher_id']}/{p['plugin_manifest']['plugin_id']}"
                           for p in packages}, IDENTITIES)
+        self.assertEqual(_market["market_version"], "1.1.0")
         policy = ProductionTrustPolicy(rows)
         for package in packages:
             manifest = validate_manifest(package["plugin_manifest"])
@@ -62,6 +69,23 @@ class OfficialReleaseBuildTest(unittest.TestCase):
                 payload = Path(reference["_bundled_path"]).read_bytes()
                 policy.verify_manifest(manifest, artifact, package["manifest_signature"])
                 self.assertEqual(policy.verify(manifest, artifact, payload), "official")
+            identity = manifest.identity
+            lock = manifest.runtime.get("dependency_lock", {})
+            expected = DEPENDENCIES.get(identity, [])
+            self.assertEqual(
+                [(item["name"], item["version"]) for item in lock.get("artifacts", [])],
+                expected,
+            )
+            dependency_refs = package.get("dependency_references", [])
+            self.assertEqual(
+                {item["sha256"] for item in dependency_refs},
+                {item["sha256"] for item in lock.get("artifacts", [])},
+            )
+            for reference in dependency_refs:
+                dependency = next(item for item in lock["artifacts"] if item["sha256"] == reference["sha256"])
+                dependency_payload = Path(reference["_bundled_path"]).read_bytes()
+                self.assertEqual(len(dependency_payload), dependency["size_bytes"])
+                self.assertEqual(hashlib.sha256(dependency_payload).hexdigest(), dependency["sha256"])
 
     def test_release_builder_is_deterministic_with_a_test_only_key(self):
         from build_official_plugins import build_release
@@ -138,7 +162,7 @@ class OfficialDistributionProductionTest(unittest.IsolatedAsyncioTestCase):
         self.subsystems.append(subsystem)
         return subsystem
 
-    async def test_fresh_bootstrap_installs_four_keeps_legacy_and_projects_settings(self):
+    async def test_fresh_bootstrap_installs_official_plugins_keeps_legacy_and_projects_settings(self):
         subsystem = await self._subsystem()
         results = await subsystem.startup()
         self.assertEqual({item["plugin"] for item in results if item.get("bootstrap") == "installed"}, IDENTITIES)
@@ -152,6 +176,20 @@ class OfficialDistributionProductionTest(unittest.IsolatedAsyncioTestCase):
         projections = [await router._plugin_projection(row) for row in rows]
         self.assertTrue(all(item["runtime_available"] and item["trust_state"] == "official" for item in projections))
         self.assertTrue(all(item["source_provenance"]["source_key"] == "official" for item in projections))
+        projection_by_plugin = {item["plugin"]: item for item in projections}
+        self.assertEqual(
+            projection_by_plugin["org.waveflow/nmtv"]["runtime"],
+            {
+                "type": "python", "python_version_range": ">=3.14.0 <3.15.0",
+                "environment_status": "ready", "dependency_count": 1,
+                "dependencies": [{"name": "xxtea", "version": "5.0.0"}],
+            },
+        )
+        self.assertEqual(
+            projection_by_plugin["org.waveflow/sdtv"]["runtime"]["dependencies"],
+            [{"name": name, "version": version} for name, version in DEPENDENCIES["org.waveflow/sdtv"]],
+        )
+        self.assertEqual(projection_by_plugin["org.waveflow/nowtv"]["runtime"]["dependency_count"], 0)
         self.assertTrue(all(item["ownership"] == [{
             "scheme": item["owned_schemes"][0], "mode": "legacy", "plugin": "",
         }] for item in projections))
@@ -159,9 +197,19 @@ class OfficialDistributionProductionTest(unittest.IsolatedAsyncioTestCase):
         with mock.patch.object(market, "safe_http_fetch", new=mock.AsyncMock(side_effect=market.MarketError("offline", 502))):
             await market.refresh_market()
         cards = [item for item in await market.list_packages({}) if item.get("package_type") == "plugin_package"]
-        self.assertEqual(len(cards), 4)
+        self.assertEqual(len(cards), len(IDENTITIES))
         self.assertTrue(all(item["installed"] and item["installed_trust_state"] == "official" for item in cards))
         self.assertEqual(self.network_requests, [])
+        card_by_plugin = {
+            f"{item['plugin']['publisher_id']}/{item['plugin']['plugin_id']}": item for item in cards
+        }
+        self.assertEqual(card_by_plugin["org.waveflow/nmtv"]["plugin"]["dependencies"],
+                         [{"name": "xxtea", "version": "5.0.0"}])
+        self.assertEqual(card_by_plugin["org.waveflow/sdtv"]["plugin"]["dependencies"],
+                         [{"name": name, "version": version} for name, version in DEPENDENCIES["org.waveflow/sdtv"]])
+        detail = await market.get_package("official::nmtv-plugin")
+        self.assertNotIn("artifact_references", detail)
+        self.assertNotIn("dependency_references", detail)
 
     async def test_restart_recovers_without_market_and_uninstall_is_not_reversed(self):
         first = await self._subsystem()
@@ -181,7 +229,40 @@ class OfficialDistributionProductionTest(unittest.IsolatedAsyncioTestCase):
         third = await self._subsystem()
         await third.startup()
         self.assertIsNone(await self.db.get_plugin_installation("org.waveflow", "jstv"))
-        self.assertEqual(len(await self.db.list_plugin_installations()), 3)
+        self.assertEqual(len(await self.db.list_plugin_installations()), len(IDENTITIES) - 1)
+
+    async def test_python_dependency_cold_cache_warm_restart_and_environment_projection(self):
+        first = await self._subsystem()
+        await first.startup()
+        environments = first.service.python_environments
+        expected_digests = {
+            item["sha256"]
+            for identity in ("org.waveflow/nmtv", "org.waveflow/sdtv")
+            for item in first.service.runtime.registry.route(identity.rsplit("/", 1)[1]).manifest.runtime[
+                "dependency_lock"
+            ]["artifacts"]
+        }
+        self.assertEqual({path.parent.name for path in environments.cache_objects()}, expected_digests)
+        dependency_rows = await self.db.list_plugin_dependency_artifacts()
+        self.assertEqual({row["sha256"] for row in dependency_rows}, expected_digests)
+        for identity in ("org.waveflow/nmtv", "org.waveflow/sdtv"):
+            rows = await self.db.list_plugin_python_environments("org.waveflow", identity.rsplit("/", 1)[1])
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["state"], "active")
+            self.assertTrue(Path(rows[0]["path"], "waveflow-environment.json").is_file())
+
+        await first.shutdown()
+        self.subsystems.remove(first)
+        second = await self._subsystem()
+        recovered = await second.startup()
+        self.assertEqual({item["plugin"] for item in recovered if item.get("status") == "active"}, IDENTITIES)
+        self.assertEqual({path.parent.name for path in second.service.python_environments.cache_objects()}, expected_digests)
+        self.assertEqual(self.network_requests, [])
+        for identity in ("org.waveflow/nmtv", "org.waveflow/sdtv"):
+            plugin = identity.rsplit("/", 1)[1]
+            rows = await self.db.list_plugin_python_environments("org.waveflow", plugin)
+            self.assertEqual([row["state"] for row in rows], ["active"])
+            self.assertEqual(second.service.runtime.registry.route(plugin).health, "healthy")
 
     async def test_corrupt_bundled_catalog_does_not_tear_down_recovered_installations(self):
         from official_plugin_distribution import OFFICIAL_RELEASE_ROOT
@@ -211,7 +292,7 @@ class OfficialDistributionProductionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({f"{item['plugin']['publisher_id']}/{item['plugin']['plugin_id']}" for item in official}, IDENTITIES)
         source = next(item for item in result["source_results"] if item["source_key"] == "official")
         self.assertEqual((source["status"], source["usable_for_update"], source["package_count"]),
-                         ("bundled", False, 4))
+                         ("bundled", False, len(IDENTITIES)))
         subsystem = await self._subsystem()
         installed = await subsystem.install("org.waveflow/fjtv", market.market_packages_snapshot())
         self.assertEqual((installed["trust_state"], installed["source_key"], installed["active_version"]),
@@ -246,6 +327,18 @@ class OfficialDistributionProductionTest(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(PluginError) as artifact_error:
                 load_bundled_official_market(copied)
             self.assertEqual(artifact_error.exception.code, "ARTIFACT_INTEGRITY_FAILED")
+
+            dependency_copy = Path(directory) / "dependency-distribution"
+            shutil.copytree(OFFICIAL_RELEASE_ROOT, dependency_copy)
+            dependency_package = next(
+                item for item in load_bundled_official_market(dependency_copy)[1]
+                if item["plugin_manifest"]["plugin_id"] == "nmtv"
+            )
+            dependency_path = Path(dependency_package["dependency_references"][0]["_bundled_path"])
+            dependency_path.write_bytes(dependency_path.read_bytes() + b"tamper")
+            with self.assertRaises(PluginError) as dependency_error:
+                load_bundled_official_market(dependency_copy)
+            self.assertEqual(dependency_error.exception.code, "DEPENDENCY_ARTIFACT_INTEGRITY_FAILED")
 
         test_key = Ed25519PrivateKey.generate()
         test_public = base64.b64encode(test_key.public_key().public_bytes(

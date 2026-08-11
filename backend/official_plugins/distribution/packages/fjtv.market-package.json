@@ -5,6 +5,7 @@
       "url": "payloads/fjtv-1.0.0.pyz"
     }
   ],
+  "dependency_references": [],
   "description": "WaveFlow official FJTV TV Provider.",
   "id": "official::fjtv-plugin",
   "kind": "plugin_package",

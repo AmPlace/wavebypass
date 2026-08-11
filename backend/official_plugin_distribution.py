@@ -132,6 +132,54 @@ def load_bundled_official_market(root: str | Path | None = None) -> tuple[dict[s
                 "_bundled_path": str(path),
             })
         package["artifact_references"] = local_references
+        runtime = manifest.runtime
+        if runtime.get("type") == "python":
+            lock_artifacts = runtime.get("dependency_lock", {}).get("artifacts", [])
+            dependency_references = package.get("dependency_references")
+            if not isinstance(dependency_references, list):
+                raise PluginError(
+                    "DEPENDENCY_LOCK_INVALID", "Bundled Python dependency references are invalid", category="dependency",
+                )
+            if len(dependency_references) != len(lock_artifacts):
+                raise PluginError(
+                    "DEPENDENCY_LOCK_INVALID", "Bundled dependency references do not exactly match the Plugin lock", category="dependency",
+                )
+            local_dependencies = []
+            seen_digests: set[str] = set()
+            for reference in dependency_references:
+                if (not isinstance(reference, dict)
+                        or set(reference) != {"sha256", "url"}
+                        or not isinstance(reference.get("url"), str)):
+                    raise PluginError(
+                        "DEPENDENCY_LOCK_INVALID", "Bundled dependency reference is invalid", category="dependency",
+                    )
+                matching = [item for item in lock_artifacts if item.get("sha256") == reference.get("sha256")]
+                if len(matching) != 1:
+                    raise PluginError(
+                        "DEPENDENCY_LOCK_INVALID", "Bundled dependency is absent from the Plugin lock", category="dependency",
+                    )
+                if reference["sha256"] in seen_digests:
+                    raise PluginError(
+                        "DEPENDENCY_LOCK_INVALID", "Bundled dependency references contain a duplicate artifact", category="dependency",
+                    )
+                seen_digests.add(reference["sha256"])
+                path = _release_artifact(release_root, reference["url"])
+                digest = _sha256(path)
+                if digest != reference["sha256"] or path.stat().st_size != matching[0]["size_bytes"]:
+                    raise PluginError(
+                        "DEPENDENCY_ARTIFACT_INTEGRITY_FAILED", "Bundled dependency artifact was modified", category="dependency",
+                    )
+                local_dependencies.append({
+                    "sha256": digest,
+                    "url": reference["url"],
+                    "_bundled_path": str(path),
+                })
+            expected_digests = {item["sha256"] for item in lock_artifacts}
+            if {item["sha256"] for item in local_dependencies} != expected_digests:
+                raise PluginError(
+                    "DEPENDENCY_LOCK_INVALID", "Bundled dependency references do not cover the Plugin lock", category="dependency",
+                )
+            package["dependency_references"] = local_dependencies
         package["market_source"] = {
             "source_key": OFFICIAL_SOURCE_KEY,
             "name": "WaveFlow 官方 Market",

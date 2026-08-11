@@ -23,7 +23,7 @@ import market
 from plugin_market import (
     PluginArtifactStore, PluginMarketService, current_platform, manifest_signature_payload,
 )
-from plugin_python_runtime import PythonEnvironmentManager
+from plugin_python_runtime import PythonEnvironmentManager, select_dependency_artifacts
 from plugin_runtime import LifecycleState, PluginError, PluginRuntime, validate_manifest
 from plugin_runtime.permissions import PermissionPolicy
 from provider_resolver import ProviderResolver
@@ -944,6 +944,40 @@ class ProductionPluginSubsystem:
                 temp_paths.append(path)
                 local_references.append({"sha256": artifact["sha256"], "local_path": str(path)})
             package["artifact_references"] = local_references
+            dependency_references = package.get("dependency_references") or []
+            local_dependencies = []
+            lock = (manifest.get("runtime") or {}).get("dependency_lock") or {}
+            selected = {
+                item["sha256"]: item
+                for item in select_dependency_artifacts(lock)
+            } if lock.get("artifacts") else {}
+            for digest, dependency in selected.items():
+                remote = next(
+                    (item for item in dependency_references
+                     if isinstance(item, dict) and item.get("sha256") == digest),
+                    None,
+                )
+                if not remote:
+                    continue
+                bundled_path = remote.get("_bundled_path")
+                if bundled_path and package.get("_bundled_release") is True:
+                    path = await asyncio.to_thread(
+                        _stage_bundled_plugin_artifact,
+                        Path(str(bundled_path)), self.official_release_root, self.download_root,
+                        int(dependency["size_bytes"]), str(dependency["sha256"]),
+                    )
+                elif remote.get("url"):
+                    base_url = str(package.get("manifest_url") or package.get("market_url") or "")
+                    path = await download_dependency_artifact(
+                        urljoin(base_url, str(remote["url"])), self.download_root,
+                        expected_size=int(dependency["size_bytes"]), expected_sha256=str(dependency["sha256"]),
+                        client=self.http_client,
+                    )
+                else:
+                    continue
+                temp_paths.append(path)
+                local_dependencies.append({"sha256": digest, "local_path": str(path)})
+            package["dependency_references"] = local_dependencies
             prepared.append(package)
         return prepared, temp_paths
 

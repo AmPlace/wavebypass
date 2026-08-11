@@ -1,0 +1,105 @@
+{
+  "artifact_references": [
+    {
+      "sha256": "cce981adc5ccf07837beae361547e30d2c58979a8517a49415f8973b0eb901c5",
+      "url": "payloads/nmtv-1.0.0.pyz"
+    }
+  ],
+  "dependency_references": [
+    {
+      "sha256": "83212c868cd88decde39467579282464853942e36764031f9507ee81e803ac9a",
+      "url": "payloads/dependencies/nmtv/xxtea-5.0.0-cp314-cp314-macosx_11_0_arm64.whl"
+    }
+  ],
+  "description": "WaveFlow official NMTV TV Provider.",
+  "id": "official::nmtv-plugin",
+  "kind": "plugin_package",
+  "manifest_signature": {
+    "algorithm": "ed25519",
+    "key_id": "org.waveflow.release.2026-01",
+    "value": "bW5i70PuWmL9m2RBxJSuz7JXhv4fNrwTy2kNs53pR76QASv+7nqgqoBrDssdSZTvg4z3rBmfT92Yffuj4mcVBQ=="
+  },
+  "name": "NMTV Provider Plugin",
+  "package_type": "plugin_package",
+  "plugin_manifest": {
+    "artifacts": [
+      {
+        "arch": "arm64",
+        "entrypoint": "nmtv-1.0.0.pyz",
+        "os": "macos",
+        "runtime": "python",
+        "sha256": "cce981adc5ccf07837beae361547e30d2c58979a8517a49415f8973b0eb901c5",
+        "signature": {
+          "algorithm": "ed25519",
+          "key_id": "org.waveflow.release.2026-01",
+          "value": "VGYBd62XEWLyBS5BFGacBUustqrMamU6APprnXHkzgococyP5Jf8HSqL7cYaghf9pku6NGHDqxias3C4LoefAQ=="
+        },
+        "size_bytes": 7789
+      }
+    ],
+    "capabilities": [
+      "tv.resolve_stream"
+    ],
+    "core_version_range": ">=0.1.0 <1.0.0",
+    "dependencies": [],
+    "display_name": "NMTV Provider",
+    "manifest_version": 1,
+    "owned_schemes": [
+      {
+        "contract": "tv_provider",
+        "scheme": "nmtv"
+      }
+    ],
+    "permissions": {
+      "network": {
+        "allowed_hosts": [
+          "api-bt.nmtv.cn"
+        ],
+        "managed": true
+      }
+    },
+    "plugin_api_version": "1.0",
+    "plugin_id": "nmtv",
+    "provider_contracts": [
+      {
+        "contract": "tv_provider",
+        "contract_version": "1.0",
+        "features": [
+          "resolve_stream"
+        ]
+      }
+    ],
+    "publisher_id": "org.waveflow",
+    "runtime": {
+      "dependency_lock": {
+        "artifacts": [
+          {
+            "abi_tag": "cp314",
+            "filename": "xxtea-5.0.0-cp314-cp314-macosx_11_0_arm64.whl",
+            "name": "xxtea",
+            "platform_tag": "macosx_11_0_arm64",
+            "python_tag": "cp314",
+            "sha256": "83212c868cd88decde39467579282464853942e36764031f9507ee81e803ac9a",
+            "size_bytes": 12565,
+            "url": "https://files.pythonhosted.org/packages/7c/76/1e4ced8038904aada6716ec729ddffbce509c12784c6b3f659cd8206e544/xxtea-5.0.0-cp314-cp314-macosx_11_0_arm64.whl",
+            "version": "5.0.0"
+          }
+        ],
+        "lock_version": 1
+      },
+      "entrypoint": "nmtv-1.0.0.pyz",
+      "ipc": "stdio_framed_json_v1",
+      "python_version_range": ">=3.14.0 <3.15.0",
+      "type": "python"
+    },
+    "state_schema_version": 1,
+    "version": "1.0.0"
+  },
+  "risk_level": "official_signed_not_sandboxed",
+  "schema_version": 1,
+  "source_origin": "official",
+  "source_policy": "signed_release",
+  "status": "active",
+  "updated_at": "2026-08-11T00:00:00Z",
+  "version": "1.0.0"
+}

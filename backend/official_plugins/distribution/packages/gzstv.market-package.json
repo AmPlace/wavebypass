@@ -5,6 +5,7 @@
       "url": "payloads/gzstv-1.0.0.pyz"
     }
   ],
+  "dependency_references": [],
   "description": "WaveFlow official GZSTV TV Provider.",
   "id": "official::gzstv-plugin",
   "kind": "plugin_package",

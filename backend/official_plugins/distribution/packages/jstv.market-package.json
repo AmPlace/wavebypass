@@ -5,6 +5,7 @@
       "url": "payloads/jstv-1.0.0.pyz"
     }
   ],
+  "dependency_references": [],
   "description": "WaveFlow official JSTV TV Provider.",
   "id": "official::jstv-plugin",
   "kind": "plugin_package",
