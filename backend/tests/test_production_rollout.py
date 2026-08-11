@@ -20,6 +20,12 @@ TARGETS = (
 )
 TARGET_IDENTITIES = {identity for _scheme, identity, _reference in TARGETS}
 TARGET_SCHEMES = {scheme for scheme, _identity, _reference in TARGETS}
+ROLLOUT2_IDENTITIES = {
+    "org.waveflow/nowtv", "org.waveflow/nmtv", "org.waveflow/sdtv",
+}
+ROLLOUT2_SCHEMES = {identity.rsplit("/", 1)[1] for identity in ROLLOUT2_IDENTITIES}
+ROLLOUT_IDENTITIES = TARGET_IDENTITIES | ROLLOUT2_IDENTITIES
+ROLLOUT_SCHEMES = TARGET_SCHEMES | ROLLOUT2_SCHEMES
 OFFICIAL_IDENTITIES = TARGET_IDENTITIES | {
     "org.waveflow/nowtv", "org.waveflow/nmtv", "org.waveflow/sdtv",
 }
@@ -193,7 +199,7 @@ class ProductionRolloutTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             {item["plugin"] for item in startup if item.get("rollout") == "plugin"},
-            TARGET_IDENTITIES,
+            ROLLOUT_IDENTITIES,
         )
         installations = await self.db.list_plugin_installations()
         self.assertEqual(
@@ -206,21 +212,21 @@ class ProductionRolloutTest(unittest.IsolatedAsyncioTestCase):
             for row in installations
         ))
         owners = {row["scheme"]: row for row in await self.db.list_plugin_scheme_ownership()}
-        self.assertEqual(set(owners), TARGET_SCHEMES)
+        self.assertEqual(set(owners), ROLLOUT_SCHEMES)
         self.assertTrue(all(
             owners[scheme]["mode"] == "plugin" and owners[scheme]["plugin_identity"] == identity
             for scheme, identity, _reference in TARGETS
         ))
         self.assertEqual(
             {scheme for scheme in _ADAPTER_REGISTRY if subsystem.provider_resolver.mode(scheme) == "plugin"},
-            TARGET_SCHEMES,
+            ROLLOUT_SCHEMES,
         )
         self.assertEqual(len(_ADAPTER_REGISTRY), 61)
 
         router = importlib.import_module("routers.plugins")
         projections = [await router._plugin_projection(row) for row in installations]
         for item in projections:
-            expected_mode = "plugin" if item["plugin"] in TARGET_IDENTITIES else "legacy"
+            expected_mode = "plugin" if item["plugin"] in ROLLOUT_IDENTITIES else "legacy"
             self.assertEqual(item["ownership"], [{
                 "scheme": item["owned_schemes"][0], "mode": expected_mode,
                 "plugin": item["plugin"] if expected_mode == "plugin" else "",
@@ -609,7 +615,7 @@ class ProductionRolloutTest(unittest.IsolatedAsyncioTestCase):
         subsystem = await self._subsystem()
         os.environ["WAVEFLOW_OFFICIAL_PLUGIN_BOOTSTRAP"] = "0"
         blocked = await subsystem.rollout_official_plugins()
-        self.assertEqual({item["plugin"] for item in blocked}, TARGET_IDENTITIES)
+        self.assertEqual({item["plugin"] for item in blocked}, ROLLOUT_IDENTITIES)
         self.assertTrue(all(item["rollout"] == "blocked" for item in blocked))
         self.assertEqual(await self.db.list_plugin_scheme_ownership(), [])
         await subsystem.shutdown()

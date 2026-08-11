@@ -31,6 +31,7 @@ from plugin_capabilities import CapabilityGateway, CoreCapabilityDispatcher
 from plugin_permissions import permission_projection, require_high_risk_approvals
 from official_plugin_distribution import (
     OFFICIAL_PUBLISHER_ID, OFFICIAL_RELEASE_ROOT, bundled_official_packages, load_official_trust_rows,
+    rollout_policy_allows_runtime,
 )
 
 
@@ -542,10 +543,11 @@ class ProductionPluginSubsystem:
         ownership = {row["scheme"]: row for row in await db.list_plugin_scheme_ownership()}
         results: list[dict[str, Any]] = []
         changed = False
+        rollout_os, rollout_arch = current_platform()
+        rollout_python = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
         for package in bundled_official_packages(self.official_release_root):
-            if package.get("rollout") != {
-                "deployment": "python_backed", "default_ownership": "plugin",
-            }:
+            rollout = package.get("rollout")
+            if not isinstance(rollout, dict):
                 continue
             baseline = validate_manifest(package.get("plugin_manifest"))
             identity = baseline.identity
@@ -553,6 +555,17 @@ class ProductionPluginSubsystem:
             pending_keys = [f"{identity}:{scheme}" for scheme in schemes
                             if f"{identity}:{scheme}" not in completed]
             if not pending_keys:
+                continue
+            if not rollout_policy_allows_runtime(
+                rollout, os_name=rollout_os, arch=rollout_arch, python_version=rollout_python,
+            ):
+                results.append({
+                    "plugin": identity, "status": "unavailable", "rollout": "blocked",
+                    "error": (
+                        "PLATFORM_UNSUPPORTED: official Plugin rollout requires a runtime acceptance "
+                        f"for {rollout_os}/{rollout_arch}/cp{sys.version_info.major}{sys.version_info.minor}"
+                    ),
+                })
                 continue
             row = await db.get_plugin_installation(baseline.publisher_id, baseline.plugin_id)
             if (not row or row.get("trust_state") != "official"

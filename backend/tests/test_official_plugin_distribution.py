@@ -46,6 +46,7 @@ class OfficialReleaseBuildTest(unittest.TestCase):
     def test_production_anchor_and_committed_packages_verify_without_private_material(self):
         from official_plugin_distribution import (
             OFFICIAL_DISTRIBUTION_ROOT, load_bundled_official_market, load_official_trust_rows,
+            rollout_policy_allows_runtime,
         )
         from plugin_production import ProductionTrustPolicy
         from plugin_runtime import validate_manifest
@@ -84,6 +85,23 @@ class OfficialReleaseBuildTest(unittest.TestCase):
                 dependency_payload = Path(reference["_bundled_path"]).read_bytes()
                 self.assertEqual(len(dependency_payload), dependency["size_bytes"])
                 self.assertEqual(hashlib.sha256(dependency_payload).hexdigest(), dependency["sha256"])
+
+        by_identity = {
+            f"{item['plugin_manifest']['publisher_id']}/{item['plugin_manifest']['plugin_id']}": item
+            for item in packages
+        }
+        for identity in ("org.waveflow/nowtv", "org.waveflow/nmtv", "org.waveflow/sdtv"):
+            policy = by_identity[identity]["rollout"]
+            self.assertTrue(rollout_policy_allows_runtime(
+                policy, os_name="macos", arch="arm64", python_version="3.14.4",
+            ))
+            self.assertFalse(rollout_policy_allows_runtime(
+                policy, os_name="linux", arch="x86_64", python_version="3.11.9",
+            ))
+        self.assertTrue(rollout_policy_allows_runtime(
+            by_identity["org.waveflow/jstv"]["rollout"],
+            os_name="linux", arch="x86_64", python_version="3.11.9",
+        ))
 
     def test_nmtv_sdtv_candidates_cover_published_targets_without_cross_platform_fallback(self):
         from plugin_python_runtime import select_dependency_artifacts

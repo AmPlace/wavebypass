@@ -14,7 +14,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from official_plugin_distribution import (
     OFFICIAL_DISTRIBUTION_ROOT, OFFICIAL_PUBLISHER_ID, load_bundled_official_market,
-    load_official_trust_rows,
+    load_official_trust_rows, validate_rollout_policy,
 )
 from plugin_runtime import PluginError, validate_manifest
 from waveflow_plugin_cli import build_project, sign_build, validate_project
@@ -176,11 +176,10 @@ def build_release(
             })
             rollout = item.get("rollout")
             if rollout is not None:
-                if rollout != {"deployment": "python_backed", "default_ownership": "plugin"}:
-                    raise PluginError(
-                        "INVALID_PLUGIN_RESPONSE", "Official rollout policy is invalid", category="release",
-                    )
-                package["rollout"] = dict(rollout)
+                try:
+                    package["rollout"] = validate_rollout_policy(rollout)
+                except PluginError as exc:
+                    raise PluginError(exc.code, exc.message, category="release") from exc
             package.pop("market_source", None)
             _write_json(staging / "packages" / f"{plugin_id}.market-package.json", package)
             packages.append(package)

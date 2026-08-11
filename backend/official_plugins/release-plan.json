@@ -44,6 +44,17 @@
       "description": "WaveFlow official NOW TV Provider.",
       "name": "NOW TV Provider Plugin",
       "plugin_id": "nowtv",
+      "rollout": {
+        "default_ownership": "plugin",
+        "deployment": "python_backed",
+        "eligible_platforms": [
+          {
+            "arch": "arm64",
+            "os": "macos",
+            "python_version_range": ">=3.14.0 <3.15.0"
+          }
+        ]
+      },
       "source": "../bundled_plugins/nowtv"
     },
     {
@@ -60,6 +71,17 @@
       "description": "WaveFlow official NMTV TV Provider.",
       "name": "NMTV Provider Plugin",
       "plugin_id": "nmtv",
+      "rollout": {
+        "default_ownership": "plugin",
+        "deployment": "python_backed",
+        "eligible_platforms": [
+          {
+            "arch": "arm64",
+            "os": "macos",
+            "python_version_range": ">=3.14.0 <3.15.0"
+          }
+        ]
+      },
       "source": "../bundled_plugins/nmtv"
     },
     {
@@ -88,6 +110,17 @@
       "description": "WaveFlow official SDTV TV Provider.",
       "name": "SDTV Provider Plugin",
       "plugin_id": "sdtv",
+      "rollout": {
+        "default_ownership": "plugin",
+        "deployment": "python_backed",
+        "eligible_platforms": [
+          {
+            "arch": "arm64",
+            "os": "macos",
+            "python_version_range": ">=3.14.0 <3.15.0"
+          }
+        ]
+      },
       "source": "../bundled_plugins/sdtv"
     }
   ],

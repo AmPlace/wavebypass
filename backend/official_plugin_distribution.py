@@ -9,6 +9,7 @@ from typing import Any
 from urllib.parse import unquote, urlparse
 
 from plugin_runtime import PluginError, validate_manifest
+from plugin_runtime.manifest import RANGE_PART_RE, SUPPORTED_ARCH, SUPPORTED_OS, _range_allows
 
 
 OFFICIAL_PUBLISHER_ID = "org.waveflow"
@@ -16,6 +17,74 @@ OFFICIAL_SOURCE_KEY = "official"
 OFFICIAL_DISTRIBUTION_ROOT = Path(__file__).resolve().with_name("official_plugins")
 OFFICIAL_RELEASE_ROOT = OFFICIAL_DISTRIBUTION_ROOT / "distribution"
 OFFICIAL_TRUST_PATH = OFFICIAL_DISTRIBUTION_ROOT / "publisher-trust.json"
+
+
+def validate_rollout_policy(value: Any) -> dict[str, Any] | None:
+    """Validate the deployment policy carried by an official Market package.
+
+    The policy is deliberately package-generic.  It describes where a
+    release has completed runtime acceptance; it does not name providers or
+    add a second ownership mechanism.  An omitted ``eligible_platforms``
+    field preserves the original rollout behavior for the first official
+    Python-backed rollout.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise PluginError("ARTIFACT_INVALID", "Bundled Plugin rollout policy is invalid", category="distribution")
+    required = {"deployment", "default_ownership"}
+    if not required.issubset(value) or not set(value).issubset(required | {"eligible_platforms"}):
+        raise PluginError("ARTIFACT_INVALID", "Bundled Plugin rollout policy is invalid", category="distribution")
+    if value.get("deployment") != "python_backed" or value.get("default_ownership") != "plugin":
+        raise PluginError("ARTIFACT_INVALID", "Bundled Plugin rollout policy is invalid", category="distribution")
+    targets = value.get("eligible_platforms")
+    if targets is None:
+        return {"deployment": "python_backed", "default_ownership": "plugin"}
+    if not isinstance(targets, list) or not targets:
+        raise PluginError("ARTIFACT_INVALID", "Bundled Plugin rollout platforms are invalid", category="distribution")
+    normalized: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for target in targets:
+        if not isinstance(target, dict) or set(target) != {"os", "arch", "python_version_range"}:
+            raise PluginError("ARTIFACT_INVALID", "Bundled Plugin rollout platform is invalid", category="distribution")
+        os_name = target.get("os")
+        arch = target.get("arch")
+        python_range = target.get("python_version_range")
+        if (os_name not in SUPPORTED_OS or arch not in SUPPORTED_ARCH
+                or not isinstance(python_range, str) or not python_range
+                or not all(RANGE_PART_RE.fullmatch(part) for part in python_range.split())):
+            raise PluginError("ARTIFACT_INVALID", "Bundled Plugin rollout platform is invalid", category="distribution")
+        key = (os_name, arch, python_range)
+        if key in seen:
+            raise PluginError("ARTIFACT_INVALID", "Bundled Plugin rollout platforms contain duplicates", category="distribution")
+        seen.add(key)
+        normalized.append({"os": os_name, "arch": arch, "python_version_range": python_range})
+    return {
+        "deployment": "python_backed",
+        "default_ownership": "plugin",
+        "eligible_platforms": normalized,
+    }
+
+
+def rollout_policy_allows_runtime(
+    value: dict[str, Any] | None, *, os_name: str, arch: str, python_version: str,
+) -> bool:
+    """Return whether a validated rollout policy permits this runtime.
+
+    A policy without an explicit acceptance matrix retains the legacy
+    semantics: the normal artifact/runtime preflight remains authoritative.
+    An explicit matrix is an allow-list, so an unvalidated deployment cannot
+    take ownership merely because its wheel tags happen to be compatible.
+    """
+    policy = validate_rollout_policy(value)
+    if policy is None or "eligible_platforms" not in policy:
+        return True
+    return any(
+        target["os"] == os_name
+        and target["arch"] == arch
+        and _range_allows(python_version, target["python_version_range"])
+        for target in policy["eligible_platforms"]
+    )
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -105,11 +174,9 @@ def load_bundled_official_market(root: str | Path | None = None) -> tuple[dict[s
             raise PluginError("PLUGIN_UNTRUSTED", "Bundled Plugin publisher is not official", category="trust")
         if package.get("version") != manifest.version:
             raise PluginError("PLUGIN_INCOMPATIBLE", "Bundled Plugin package version is inconsistent", category="distribution")
-        rollout = package.get("rollout")
-        if rollout is not None and rollout != {
-            "deployment": "python_backed", "default_ownership": "plugin",
-        }:
-            raise PluginError("ARTIFACT_INVALID", "Bundled Plugin rollout policy is invalid", category="distribution")
+        rollout = validate_rollout_policy(package.get("rollout"))
+        if rollout is not None:
+            package["rollout"] = rollout
         references = package.get("artifact_references")
         if not isinstance(references, list):
             raise PluginError("ARTIFACT_INVALID", "Bundled official artifact references are invalid", category="artifact")
