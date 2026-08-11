@@ -75,7 +75,12 @@ def _wheel_metadata(path: Path, *, base_url: str) -> dict[str, Any]:
         metadata = BytesParser().parsebytes(archive.read(metadata_name))
     name = canonicalize_name(metadata.get("Name") or str(parsed_name))
     version = str(metadata.get("Version") or parsed_version)
-    tag = sorted(tags, key=str)[0]
+    # A ``py2.py3`` wheel is represented by both interpreter tags by
+    # packaging.  The lock describes the Python 3 runtime we support; picking
+    # the lexicographically first tag would incorrectly freeze ``py2`` and
+    # make an otherwise universal wheel unusable by the runtime selector.
+    tag = next((candidate for candidate in tags if candidate.interpreter == "py3"), None)
+    tag = tag or sorted(tags, key=str)[0]
     digest = _sha256(path)
     return {"name": name, "version": version, "filename": path.name,
             "url": f"{base_url.rstrip('/')}/{path.name}", "sha256": digest,

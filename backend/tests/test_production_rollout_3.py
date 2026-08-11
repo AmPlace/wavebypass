@@ -232,7 +232,8 @@ class ProductionRollout3Test(unittest.IsolatedAsyncioTestCase):
         startup = await subsystem.startup()
         self.assertEqual(
             {item["plugin"] for item in startup if item.get("status") == "unavailable"},
-            {identity for _scheme, identity, _reference in TARGETS},
+            {identity for _scheme, identity, _reference in TARGETS}
+            | {"org.waveflow/streamget-providers"},
         )
         self.assertEqual(await self.db.list_plugin_scheme_ownership(), [])
 
