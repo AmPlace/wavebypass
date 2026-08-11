@@ -841,22 +841,49 @@ class AutomationService:
         async with self._lifecycle_lock:
             if self._started:
                 return 0
-            self._schedulers.clear()
-            self._tasks.clear()
+            if self._schedulers or self._tasks:
+                await self._cleanup_owned_locked(
+                    phase="startup-precondition",
+                    cancel_tasks=True,
+                    clear_errors=True,
+                )
             self._scheduler_errors.clear()
-            recovered_count = await self.repository.recover_interrupted()
-            definitions = tuple(
-                definition
-                for definition in self.registry.list_definitions()
-                if definition.allow_automatic_scheduling
-            )
-            for definition in definitions:
-                config = await self.repository.ensure_config(definition)
-                _validate_schedule_config(definition, config)
-            for definition in definitions:
-                self._start_scheduler_locked(definition)
-            self._started = True
-            return recovered_count
+            staged_schedulers: dict[str, AutomationScheduler] = {}
+            staged_tasks: dict[str, asyncio.Task[None]] = {}
+            try:
+                recovered_count = await self.repository.recover_interrupted()
+                definitions = tuple(
+                    definition
+                    for definition in self.registry.list_definitions()
+                    if definition.allow_automatic_scheduling
+                )
+                for definition in definitions:
+                    config = await self.repository.ensure_config(definition)
+                    _validate_schedule_config(definition, config)
+                for definition in definitions:
+                    scheduler, task = self._create_scheduler_locked(definition)
+                    staged_schedulers[definition.task_id] = scheduler
+                    staged_tasks[definition.task_id] = task
+
+                # Publish only after every scheduler and task has been created.
+                # There is no await between this publication and _started=True.
+                self._schedulers = staged_schedulers
+                self._tasks = staged_tasks
+                self._started = True
+                return recovered_count
+            except BaseException:
+                try:
+                    await self._cleanup_staged(
+                        staged_schedulers,
+                        staged_tasks,
+                        phase="startup-failure",
+                    )
+                finally:
+                    self._schedulers.clear()
+                    self._tasks.clear()
+                    self._scheduler_errors.clear()
+                    self._started = False
+                raise
 
     async def add_definition(
         self,
@@ -898,31 +925,15 @@ class AutomationService:
 
     async def stop(self, *, timeout_seconds: float | None = None) -> None:
         async with self._lifecycle_lock:
-            if not self._started and not self._tasks:
+            if not self._started and not self._schedulers and not self._tasks:
                 return
             if timeout_seconds is not None and timeout_seconds <= 0:
                 raise ValueError("timeout_seconds 必须大于 0")
-            schedulers = tuple(self._schedulers.values())
-            tasks = tuple(self._tasks.values())
-            for scheduler in schedulers:
-                scheduler.stop()
-            if tasks:
-                if timeout_seconds is None:
-                    await asyncio.gather(*tasks, return_exceptions=True)
-                else:
-                    try:
-                        await asyncio.wait_for(
-                            asyncio.gather(*tasks, return_exceptions=True),
-                            timeout=timeout_seconds,
-                        )
-                    except asyncio.TimeoutError:
-                        for task in tasks:
-                            if not task.done():
-                                task.cancel()
-                        await asyncio.gather(*tasks, return_exceptions=True)
-            self._schedulers.clear()
-            self._tasks.clear()
-            self._started = False
+            await self._cleanup_owned_locked(
+                phase="stop",
+                timeout_seconds=timeout_seconds,
+                cancel_tasks=False,
+            )
 
     def notify_config_changed(self, task_id: str) -> None:
         scheduler = self._schedulers.get(task_id)
@@ -930,7 +941,10 @@ class AutomationService:
             raise AutomationTaskNotFoundError(f"没有运行中的自动调度任务: {task_id}")
         scheduler.notify_config_changed()
 
-    def _start_scheduler_locked(self, definition: AutomationTaskDefinition) -> None:
+    def _create_scheduler_locked(
+        self,
+        definition: AutomationTaskDefinition,
+    ) -> tuple[AutomationScheduler, asyncio.Task[None]]:
         if definition.task_id in self._tasks:
             raise AutomationRegistrationError(f"自动任务 Scheduler 已存在: {definition.task_id}")
         waiter = self._waiter_factory(definition)
@@ -940,15 +954,161 @@ class AutomationService:
             self.repository,
             waiter=waiter,
         )
-        task = asyncio.create_task(
-            scheduler.run(),
-            name=f"automation-scheduler:{definition.task_id}",
-        )
-        task.add_done_callback(
-            lambda completed, task_id=definition.task_id: self._observe_task(task_id, completed)
-        )
+        task: asyncio.Task[None] | None = None
+        run_coro = scheduler.run()
+        try:
+            task = asyncio.create_task(
+                run_coro,
+                name=f"automation-scheduler:{definition.task_id}",
+            )
+            task.add_done_callback(
+                lambda completed, task_id=definition.task_id: self._observe_task(task_id, completed)
+            )
+        except BaseException:
+            if task is None:
+                run_coro.close()
+            if task is not None and not task.done():
+                task.cancel()
+            try:
+                scheduler.stop()
+            except BaseException:
+                logger.exception(
+                    "自动任务 Scheduler 创建失败后的清理失败: %s",
+                    definition.task_id,
+                )
+            raise
+        assert task is not None
+        return scheduler, task
+
+    def _start_scheduler_locked(self, definition: AutomationTaskDefinition) -> None:
+        scheduler, task = self._create_scheduler_locked(definition)
         self._schedulers[definition.task_id] = scheduler
         self._tasks[definition.task_id] = task
+
+    async def _cleanup_staged(
+        self,
+        schedulers: Mapping[str, AutomationScheduler],
+        tasks: Mapping[str, asyncio.Task[None]],
+        *,
+        phase: str,
+    ) -> None:
+        cleanup_task = asyncio.ensure_future(
+            self._cleanup_resources(
+                schedulers,
+                tasks,
+                phase=phase,
+                cancel_tasks=True,
+            )
+        )
+        await self._await_cleanup_task(cleanup_task, phase=phase)
+
+    async def _cleanup_owned_locked(
+        self,
+        *,
+        phase: str,
+        timeout_seconds: float | None = None,
+        cancel_tasks: bool,
+        clear_errors: bool = False,
+    ) -> None:
+        schedulers = dict(self._schedulers)
+        tasks = dict(self._tasks)
+        cleanup_task = asyncio.ensure_future(
+            self._cleanup_resources(
+                schedulers,
+                tasks,
+                phase=phase,
+                timeout_seconds=timeout_seconds,
+                cancel_tasks=cancel_tasks,
+            )
+        )
+        try:
+            await self._await_cleanup_task(cleanup_task, phase=phase)
+        finally:
+            self._schedulers.clear()
+            self._tasks.clear()
+            if clear_errors:
+                self._scheduler_errors.clear()
+            self._started = False
+
+    async def _cleanup_resources(
+        self,
+        schedulers: Mapping[str, AutomationScheduler],
+        tasks: Mapping[str, asyncio.Task[None]],
+        *,
+        phase: str,
+        timeout_seconds: float | None = None,
+        cancel_tasks: bool,
+    ) -> None:
+        stop_failed: set[str] = set()
+        for task_id, scheduler in schedulers.items():
+            try:
+                scheduler.stop()
+            except BaseException:
+                stop_failed.add(task_id)
+                logger.exception(
+                    "自动任务 Scheduler 清理失败: phase=%s task=%s",
+                    phase,
+                    task_id,
+                )
+
+        for task_id, task in tasks.items():
+            if cancel_tasks or task_id in stop_failed:
+                if not task.done():
+                    task.cancel()
+
+        task_values = tuple(tasks.values())
+        if not task_values:
+            return
+        if timeout_seconds is None:
+            results = await asyncio.gather(*task_values, return_exceptions=True)
+        else:
+            try:
+                results = await asyncio.wait_for(
+                    asyncio.gather(*task_values, return_exceptions=True),
+                    timeout=timeout_seconds,
+                )
+            except asyncio.TimeoutError:
+                for task in task_values:
+                    if not task.done():
+                        task.cancel()
+                results = await asyncio.gather(*task_values, return_exceptions=True)
+
+        for task_id, result in zip(tasks, results):
+            if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
+                logger.error(
+                    "自动任务 Scheduler task 清理完成但带有异常: phase=%s task=%s error=%s",
+                    phase,
+                    task_id,
+                    _sanitize_error(str(result)) or result.__class__.__name__,
+                )
+
+    async def _await_cleanup_task(
+        self,
+        cleanup_task: asyncio.Future,
+        *,
+        phase: str,
+    ) -> None:
+        caller_cancelled = False
+        try:
+            await asyncio.shield(cleanup_task)
+        except asyncio.CancelledError:
+            caller_cancelled = True
+            while not cleanup_task.done():
+                try:
+                    await asyncio.shield(cleanup_task)
+                except asyncio.CancelledError:
+                    continue
+        except BaseException:
+            logger.exception("自动任务生命周期清理任务异常: phase=%s", phase)
+
+        try:
+            cleanup_task.result()
+        except asyncio.CancelledError:
+            logger.error("自动任务生命周期清理任务被取消: phase=%s", phase)
+        except BaseException:
+            logger.exception("自动任务生命周期清理任务异常: phase=%s", phase)
+        if caller_cancelled:
+            raise asyncio.CancelledError
 
     def _observe_task(self, task_id: str, task: asyncio.Task[None]) -> None:
         if task.cancelled():

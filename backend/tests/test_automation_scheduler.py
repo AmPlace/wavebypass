@@ -48,6 +48,32 @@ class ControlledWaiter:
         raise AssertionError("没有等待中的 waiter")
 
 
+class LifecycleProbeScheduler:
+    def __init__(self, *, fail_on_stop=False, hold_on_stop=False):
+        self.started = asyncio.Event()
+        self.finished = asyncio.Event()
+        self.stop_called = asyncio.Event()
+        self.stop_event = asyncio.Event()
+        self.stop_calls = 0
+        self.fail_on_stop = fail_on_stop
+        self.hold_on_stop = hold_on_stop
+
+    def stop(self):
+        self.stop_calls += 1
+        self.stop_called.set()
+        if self.fail_on_stop:
+            raise RuntimeError("injected scheduler stop failure")
+        if not self.hold_on_stop:
+            self.stop_event.set()
+
+    async def run(self):
+        self.started.set()
+        try:
+            await self.stop_event.wait()
+        finally:
+            self.finished.set()
+
+
 class AutomationSchedulerTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tmpdir = tempfile.TemporaryDirectory()
@@ -457,6 +483,194 @@ class AutomationSchedulerTest(unittest.IsolatedAsyncioTestCase):
         await service.start()
         self.assertEqual(len(service.tasks), 1)
         await service.stop()
+
+    async def test_staged_start_cleans_scheduler_when_later_factory_fails(self):
+        first = self.definition(task_id="first", group="first-group")
+        second = self.definition(task_id="second", group="second-group")
+        repository, runner = self.runner([first, second])
+        await repository.ensure_config(first)
+        await repository.ensure_config(second)
+        first_scheduler = LifecycleProbeScheduler()
+
+        def factory(definition, *_args, **_kwargs):
+            if definition.task_id == "second":
+                raise RuntimeError("injected scheduler construction failure")
+            return first_scheduler
+
+        service = self.automation.AutomationService(
+            registry=self._registry(first, second),
+            repository=repository,
+            runner=runner,
+            scheduler_factory=factory,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "construction failure"):
+            await service.start()
+
+        self.assertFalse(service.is_started)
+        self.assertEqual(service.schedulers, {})
+        self.assertEqual(service.tasks, {})
+        self.assertEqual(first_scheduler.stop_calls, 1)
+        self.assertFalse(
+            any(
+                task.get_name() in {
+                    "automation-scheduler:first",
+                    "automation-scheduler:second",
+                }
+                for task in asyncio.all_tasks()
+                if task is not asyncio.current_task()
+            )
+        )
+
+    async def test_staged_start_cancellation_cleans_partial_resources(self):
+        first = self.definition(task_id="first", group="first-group")
+        second = self.definition(task_id="second", group="second-group")
+        repository, runner = self.runner([first, second])
+        await repository.ensure_config(first)
+        await repository.ensure_config(second)
+        first_scheduler = LifecycleProbeScheduler()
+
+        def factory(definition, *_args, **_kwargs):
+            if definition.task_id == "second":
+                asyncio.current_task().cancel()
+                raise asyncio.CancelledError
+            return first_scheduler
+
+        service = self.automation.AutomationService(
+            registry=self._registry(first, second),
+            repository=repository,
+            runner=runner,
+            scheduler_factory=factory,
+        )
+
+        with self.assertRaises(asyncio.CancelledError):
+            await service.start()
+
+        self.assertFalse(service.is_started)
+        self.assertEqual(service.schedulers, {})
+        self.assertEqual(service.tasks, {})
+        self.assertEqual(first_scheduler.stop_calls, 1)
+        self.assertFalse(
+            any(
+                task.get_name() == "automation-scheduler:first"
+                for task in asyncio.all_tasks()
+                if task is not asyncio.current_task()
+            )
+        )
+
+    async def test_partial_start_retry_publishes_one_scheduler_set_and_stops_all(self):
+        first = self.definition(task_id="first", group="first-group")
+        second = self.definition(task_id="second", group="second-group")
+        repository, runner = self.runner([first, second])
+        await repository.ensure_config(first)
+        await repository.ensure_config(second)
+        failed_first = LifecycleProbeScheduler()
+        successful = []
+        fail_once = True
+
+        def factory(definition, *_args, **_kwargs):
+            nonlocal fail_once
+            if fail_once and definition.task_id == "second":
+                fail_once = False
+                raise RuntimeError("injected retry failure")
+            if fail_once and definition.task_id == "first":
+                return failed_first
+            scheduler = LifecycleProbeScheduler()
+            successful.append(scheduler)
+            return scheduler
+
+        service = self.automation.AutomationService(
+            registry=self._registry(first, second),
+            repository=repository,
+            runner=runner,
+            scheduler_factory=factory,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "retry failure"):
+            await service.start()
+        self.assertEqual(failed_first.stop_calls, 1)
+        self.assertEqual(service.tasks, {})
+
+        await service.start()
+        self.assertTrue(service.is_started)
+        self.assertEqual(set(service.schedulers), {"first", "second"})
+        self.assertEqual(set(service.tasks), {"first", "second"})
+        await asyncio.gather(*(scheduler.started.wait() for scheduler in successful))
+        live_scheduler_tasks = [
+            task
+            for task in asyncio.all_tasks()
+            if task is not asyncio.current_task()
+            and task.get_name().startswith("automation-scheduler:")
+        ]
+        self.assertEqual(
+            {task.get_name() for task in live_scheduler_tasks},
+            {"automation-scheduler:first", "automation-scheduler:second"},
+        )
+
+        task_handles = tuple(service.tasks.values())
+        await service.stop()
+
+        self.assertEqual(service.schedulers, {})
+        self.assertEqual(service.tasks, {})
+        self.assertTrue(all(task.done() for task in task_handles))
+        self.assertTrue(all(scheduler.stop_calls == 1 for scheduler in successful))
+
+    async def test_cleanup_continues_after_one_scheduler_stop_failure(self):
+        first = self.definition(task_id="first", group="first-group")
+        second = self.definition(task_id="second", group="second-group")
+        repository, runner = self.runner([first, second])
+        await repository.ensure_config(first)
+        await repository.ensure_config(second)
+        schedulers = {
+            "first": LifecycleProbeScheduler(fail_on_stop=True),
+            "second": LifecycleProbeScheduler(),
+        }
+
+        service = self.automation.AutomationService(
+            registry=self._registry(first, second),
+            repository=repository,
+            runner=runner,
+            scheduler_factory=lambda definition, *_args, **_kwargs: schedulers[definition.task_id],
+        )
+        await service.start()
+        await asyncio.gather(*(scheduler.started.wait() for scheduler in schedulers.values()))
+        task_handles = tuple(service.tasks.values())
+
+        with self.assertLogs(self.automation.logger, level="ERROR") as logs:
+            await service.stop()
+
+        self.assertIn("清理失败", "\n".join(logs.output))
+        self.assertEqual(schedulers["first"].stop_calls, 1)
+        self.assertEqual(schedulers["second"].stop_calls, 1)
+        self.assertTrue(all(task.done() for task in task_handles))
+        self.assertEqual(service.schedulers, {})
+        self.assertEqual(service.tasks, {})
+
+    async def test_stop_cancellation_drains_cleanup_before_releasing_lifecycle(self):
+        definition = self.definition()
+        repository, runner = self.runner([definition])
+        await repository.ensure_config(definition)
+        scheduler = LifecycleProbeScheduler(hold_on_stop=True)
+        service = self.automation.AutomationService(
+            registry=self._registry(definition),
+            repository=repository,
+            runner=runner,
+            scheduler_factory=lambda *_args, **_kwargs: scheduler,
+        )
+        await service.start()
+        await scheduler.started.wait()
+
+        stop_task = asyncio.create_task(service.stop())
+        await scheduler.stop_called.wait()
+        stop_task.cancel()
+        scheduler.stop_event.set()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await stop_task
+        await scheduler.finished.wait()
+        self.assertFalse(service.is_started)
+        self.assertEqual(service.schedulers, {})
+        self.assertEqual(service.tasks, {})
 
     async def test_service_only_schedules_automatic_definitions_and_notifies_one_task(self):
         automatic = self.definition(task_id="automatic")
