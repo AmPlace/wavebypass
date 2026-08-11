@@ -742,6 +742,7 @@ async def lifespan(app: FastAPI):
         _load_tingfm_streams()
         yield
     finally:
+        await _shutdown_wide_playlist_state()
         try:
             if automation_service is not None:
                 await automation_service.stop()
@@ -2830,6 +2831,19 @@ async def test_status(sub_id: int):
 
 # 扩展窗口代理：定期拉上游 playlist
 _wide_cache: dict[str, dict] = {}
+# Cold initialization is single-flight per stable cache key.  The locks are
+# intentionally per-key rather than global so unrelated channels can start in
+# parallel.  They are retained after eviction as a small synchronization
+# registry; removing a lock while a waiter is acquiring it would reintroduce
+# the duplicate-initializer race.
+_wide_initialization_locks: dict[str, asyncio.Lock] = {}
+# Request tasks waiting for or performing cold initialization.  Lifespan
+# shutdown cancels these before clearing the lock registry, so an in-flight
+# request cannot publish a cache after the HTTP client has been closed.
+_wide_initialization_tasks: dict[str, set[asyncio.Task]] = {}
+# Every live refresher is owned by this map.  Cache eviction/shutdown cancels
+# through this map instead of leaving an untracked asyncio task behind.
+_wide_refresher_tasks: dict[str, asyncio.Task] = {}
 # 扩展窗口设计目标：维持「比上游 sliding window 略大但不要长到老 segment 404」。
 # 实际上游窗口典型 3~6 段；这里取 8 既能覆盖瞬时缺段，又能让 hls.js 看到一个稳定的
 # live edge。``_WIDE_WINDOW`` 只是上限，实际 deque 仍然按 seq 推进。
@@ -2954,9 +2968,114 @@ def _wide_refresh_interval_for(target_duration: int) -> float:
     return min(_WIDE_REFRESH_INTERVAL_MAX, max(_WIDE_REFRESH_INTERVAL_MIN, base))
 
 
+def _wide_initialization_lock_for(cache_key: str) -> asyncio.Lock:
+    return _wide_initialization_locks.setdefault(cache_key, asyncio.Lock())
+
+
+def _track_wide_initializer(cache_key: str) -> asyncio.Task | None:
+    try:
+        task = asyncio.current_task()
+    except RuntimeError:
+        return None
+    if task is not None:
+        _wide_initialization_tasks.setdefault(cache_key, set()).add(task)
+    return task
+
+
+def _untrack_wide_initializer(cache_key: str, task: asyncio.Task | None) -> None:
+    if task is None:
+        return
+    tasks = _wide_initialization_tasks.get(cache_key)
+    if not tasks:
+        return
+    tasks.discard(task)
+    if not tasks:
+        _wide_initialization_tasks.pop(cache_key, None)
+
+
+def _wide_refresher_done(cache_key: str, task: asyncio.Task) -> None:
+    """Remove a completed refresher and invalidate an unexpected failure."""
+    owns_cache = _wide_refresher_tasks.get(cache_key) is task
+    if owns_cache:
+        _wide_refresher_tasks.pop(cache_key, None)
+    if task.cancelled():
+        return
+    try:
+        error = task.exception()
+    except BaseException:
+        return
+    if error is not None and owns_cache:
+        logger.error(
+            "IPTV wide playlist refresher exited unexpectedly: key=%s error=%s",
+            cache_key,
+            type(error).__name__,
+        )
+        # A completed task cannot refresh this cache anymore.  Drop the cache
+        # so the next request can perform a clean initialization.
+        _drop_wide_cache(cache_key)
+
+
+def _start_wide_refresher(
+    cache_key: str,
+    target_url: str,
+    ctx_id: str,
+    src_id: str,
+    src_label: str,
+) -> asyncio.Task:
+    existing = _wide_refresher_tasks.get(cache_key)
+    if existing is not None and not existing.done():
+        return existing
+    if existing is not None and _wide_refresher_tasks.get(cache_key) is existing:
+        _wide_refresher_tasks.pop(cache_key, None)
+    task = asyncio.create_task(
+        _wide_refresher(cache_key, target_url, ctx_id, src_id, src_label),
+        name=f"wide-refresher:{cache_key[:96]}",
+    )
+    _wide_refresher_tasks[cache_key] = task
+    task.add_done_callback(lambda done: _wide_refresher_done(cache_key, done))
+    return task
+
+
 def _drop_wide_cache(cache_key: str) -> None:
     _wide_cache.pop(cache_key, None)
     _wide_cache.pop(cache_key + '_ts', None)
+    _wide_cache.pop(cache_key + '_err', None)
+    task = _wide_refresher_tasks.pop(cache_key, None)
+    if task is None or task.done():
+        return
+    try:
+        current = asyncio.current_task()
+    except RuntimeError:
+        current = None
+    if task is not current:
+        task.cancel()
+
+
+async def _shutdown_wide_playlist_state() -> None:
+    """Cancel and await every tracked wide refresher before HTTP shutdown."""
+    try:
+        current = asyncio.current_task()
+    except RuntimeError:
+        current = None
+    initializers = {
+        task
+        for tasks in _wide_initialization_tasks.values()
+        for task in tasks
+        if task is not current and not task.done()
+    }
+    for task in initializers:
+        task.cancel()
+    if initializers:
+        await asyncio.gather(*initializers, return_exceptions=True)
+    tasks = list(_wide_refresher_tasks.values())
+    for cache_key in list(_wide_refresher_tasks):
+        _drop_wide_cache(cache_key)
+    _wide_cache.clear()
+    _wide_initialization_locks.clear()
+    _wide_initialization_tasks.clear()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    _wide_refresher_tasks.clear()
 
 
 def _ensure_hls_playlist_text(text: str, url: str) -> None:
@@ -3436,6 +3555,31 @@ def _parse_live_segments(text: str, base_url: str) -> tuple[list[dict], int, int
 
 
 async def _wide_refresher(cache_key: str, target_url: str, ctx_id: str, src_id: str, src_label: str):
+    try:
+        await _run_wide_refresher(cache_key, target_url, ctx_id, src_id, src_label)
+    except asyncio.CancelledError:
+        # Direct task cancellation is treated like eviction: the cache is no
+        # longer valid without its owner, and a later request may retry cleanly.
+        # An external eviction removes the old task from the ownership map
+        # before cancelling it.  Do not let that stale cancellation invalidate
+        # a new cache/refresher already initialized for the same key.
+        if _wide_refresher_tasks.get(cache_key) is asyncio.current_task():
+            _drop_wide_cache(cache_key)
+        raise
+    except Exception as error:
+        logger.exception(
+            "IPTV wide playlist refresher crashed: key=%s error=%s",
+            cache_key,
+            type(error).__name__,
+        )
+        if _wide_refresher_tasks.get(cache_key) is asyncio.current_task():
+            _drop_wide_cache(cache_key)
+    finally:
+        if _wide_refresher_tasks.get(cache_key) is asyncio.current_task():
+            _wide_refresher_tasks.pop(cache_key, None)
+
+
+async def _run_wide_refresher(cache_key: str, target_url: str, ctx_id: str, src_id: str, src_label: str):
     """后台任务：按 target_duration 自适应频率拉上游 playlist，更新分片队列。
 
     上游 header 由 ProxyContext (按 ctx_id 索引) 提供；access_token 在生成
@@ -3530,6 +3674,8 @@ async def _wide_refresher(cache_key: str, target_url: str, ctx_id: str, src_id: 
             cache = _wide_cache.get(cache_key)
             if cache:
                 now = time.time()
+                consecutive_errors = int(_wide_cache.get(_consec_error_key, 0)) + 1
+                _wide_cache[_consec_error_key] = consecutive_errors
                 if not cache.get('stale_since'):
                     cache['stale_since'] = now
                 last_log = float(cache.get('last_refresh_log_at') or 0)
@@ -3540,6 +3686,13 @@ async def _wide_refresher(cache_key: str, target_url: str, ctx_id: str, src_id: 
                         exc,
                     )
                     cache['last_refresh_log_at'] = now
+                if consecutive_errors >= _WIDE_MAX_CONSECUTIVE_ERRORS:
+                    logger.warning(
+                        "IPTV wide playlist refresher exceeded consecutive failure limit: key=%s",
+                        cache_key,
+                    )
+                    _drop_wide_cache(cache_key)
+                    return
         # 自适应：按 target_duration 折算，避免对 8s targetDuration 的源 2s 一刷的过密流量。
         cache_now = _wide_cache.get(cache_key) or {}
         sleep_for = _wide_refresh_interval_for(cache_now.get('target_duration', 6))
@@ -3550,7 +3703,19 @@ def release_iptv_wide_playlist_by_key(cache_key: str) -> bool:
     """供 router 调用的稳定 cache_key 释放接口。"""
     if not cache_key:
         return False
-    released = cache_key in _wide_cache or cache_key + '_ts' in _wide_cache
+    initializer_tasks = list(_wide_initialization_tasks.get(cache_key, ()))
+    released = bool(
+        cache_key in _wide_cache
+        or cache_key + '_ts' in _wide_cache
+        or initializer_tasks
+    )
+    try:
+        current = asyncio.current_task()
+    except RuntimeError:
+        current = None
+    for task in initializer_tasks:
+        if task is not current and not task.done():
+            task.cancel()
     _drop_wide_cache(cache_key)
     return released
 
@@ -3575,6 +3740,116 @@ def _wide_cache_key_for(upstream_url: str, ctx_id: str, *, source_id: str = "", 
         ctx_id or "",
     ]
     return quote("\x1f".join(parts), safe='')
+
+
+async def _initialize_wide_playlist_cache(
+    *,
+    cache_key: str,
+    upstream_url: str,
+    ctx_id: str,
+    src_id: str,
+    src_label: str,
+    headers: dict[str, str],
+    access_token: str,
+) -> Response | None:
+    """Perform one cold initialization while the caller owns the key lock.
+
+    A live segment playlist publishes the cache and exactly one refresher.  A
+    master/empty or failed playlist is served without publishing an empty
+    cache, so it cannot create a phantom refresher; the next request may retry
+    initialization.
+    """
+    from collections import deque
+
+    queue = deque(maxlen=_WIDE_WINDOW)
+    seen = set()
+    target_dur = 6
+    playlist_base_url = upstream_url
+    last_text = ""
+    for attempt in range(4):
+        try:
+            resp = await http_client.get(
+                upstream_url,
+                follow_redirects=True,
+                timeout=8,
+                headers=headers,
+            )
+            resp.raise_for_status()
+            playlist_base_url = str(resp.url)
+            last_text = resp.text
+            fresh_segs, fresh_target, _ = _parse_live_segments(resp.text, playlist_base_url)
+            if fresh_target:
+                target_dur = fresh_target
+            tail_seq = queue[-1]['seq'] if queue else -1
+            for seg in fresh_segs:
+                if seg['seq'] > tail_seq:
+                    queue.append(seg)
+                    seen.add(seg['url'])
+                    tail_seq = seg['seq']
+        except Exception:
+            pass
+        if attempt < 3:
+            await asyncio.sleep(0.3)
+
+    if not queue:
+        # Preserve the existing master-playlist fallback, but do not publish
+        # an empty cache or background task for it.
+        try:
+            resp = await http_client.get(
+                upstream_url,
+                follow_redirects=True,
+                timeout=8,
+                headers=headers,
+            )
+            _ensure_hls_playlist_text(resp.text, str(resp.url))
+            rewritten = _rewrite_iptv_wide_m3u8_text(
+                resp.text,
+                str(resp.url),
+                ctx_id,
+                src_id,
+                src_label,
+                access_token=access_token,
+                proxy_ts=1,
+            )
+            return Response(
+                content=rewritten,
+                media_type="application/x-mpegURL",
+                headers={'Cache-Control': 'no-cache, no-store, must-revalidate'},
+            )
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=502, detail=f"拉取失败: {exc}") from exc
+
+    meta_lines = _extract_hls_meta_lines(
+        last_text,
+        playlist_base_url,
+        ctx_id,
+        src_id,
+        src_label,
+        access_token=access_token,
+        proxy_ts=1,
+    ) if last_text else []
+    _wide_cache[cache_key] = {
+        'queue': queue,
+        'seen': seen,
+        'target_duration': target_dur,
+        'meta': meta_lines,
+        'base_url': playlist_base_url,
+        'raw_meta_text': last_text,
+        'target_url': upstream_url,
+        'last_refresh_at': time.time(),
+        'stale_since': 0,
+        'last_refresh_log_at': 0,
+    }
+    _wide_cache[cache_key + '_ts'] = time.time()
+    try:
+        _start_wide_refresher(cache_key, upstream_url, ctx_id, src_id, src_label)
+    except BaseException:
+        # Cache publication and refresher ownership form one initialization
+        # unit.  If task creation is rejected during shutdown or loop teardown,
+        # do not leave a cache that can never be refreshed.
+        _drop_wide_cache(cache_key)
+        raise
+    return None
 
 
 async def serve_iptv_wide_playlist_by_source(
@@ -3666,78 +3941,23 @@ async def serve_iptv_wide_playlist_by_source(
         return out
 
     if cache_key not in _wide_cache:
-        from collections import deque
-        queue = deque(maxlen=_WIDE_WINDOW)
-        seen = set()
-        target_dur = 6
-
-        playlist_base_url = upstream_url
-        last_text = ""
-        for attempt in range(4):
-            try:
-                resp = await http_client.get(upstream_url, follow_redirects=True, timeout=8, headers=_headers)
-                resp.raise_for_status()
-                playlist_base_url = str(resp.url)
-                last_text = resp.text
-                fresh_segs, fresh_target, _ = _parse_live_segments(resp.text, playlist_base_url)
-                if fresh_target:
-                    target_dur = fresh_target
-                tail_seq = queue[-1]['seq'] if queue else -1
-                for seg in fresh_segs:
-                    if seg['seq'] > tail_seq:
-                        queue.append(seg)
-                        seen.add(seg['url'])
-                        tail_seq = seg['seq']
-            except Exception:
-                pass
-            if attempt < 3:
-                await asyncio.sleep(0.3)
-
-        meta_lines = _extract_hls_meta_lines(last_text, playlist_base_url, ctx_id, src_id, src_label, access_token=access_token, proxy_ts=1) if last_text else []
-
-        cache = {
-            'queue': queue,
-            'seen': seen,
-            'target_duration': target_dur,
-            'meta': meta_lines,
-            'base_url': playlist_base_url,
-            'raw_meta_text': last_text,
-            'target_url': upstream_url,
-            'last_refresh_at': time.time(),
-            'stale_since': 0,
-            'last_refresh_log_at': 0,
-        }
-        _wide_cache[cache_key] = cache
-        _wide_cache[cache_key + '_ts'] = time.time()
-        asyncio.create_task(_wide_refresher(cache_key, upstream_url, ctx_id, src_id, src_label))
-
-        if queue:
-            first_seq = queue[0]["seq"]
-            out_lines = [
-                '#EXTM3U', '#EXT-X-VERSION:3',
-                f'#EXT-X-TARGETDURATION:{target_dur}',
-                f'#EXT-X-MEDIA-SEQUENCE:{first_seq}',
-            ]
-            for m in meta_lines:
-                if not m.upper().startswith('#EXT-X-VERSION:'):
-                    out_lines.append(m)
-            for seg in queue:
-                out_lines.extend(_emit_segment_lines(seg))
-            content = '\n'.join(out_lines)
-            return Response(content=content, media_type="application/x-mpegURL",
-                headers={'Cache-Control': 'no-cache, no-store, must-revalidate'})
-        # 没拿到 segment（可能是 master playlist），直接重写转发
+        initializer = _track_wide_initializer(cache_key)
         try:
-            resp = await http_client.get(upstream_url, follow_redirects=True, timeout=8, headers=_headers)
-            _ensure_hls_playlist_text(resp.text, str(resp.url))
-            rewritten = _rewrite_iptv_wide_m3u8_text(resp.text, str(resp.url), ctx_id, src_id, src_label, access_token=access_token, proxy_ts=1)
-            return Response(
-                content=rewritten,
-                media_type="application/x-mpegURL",
-                headers={'Cache-Control': 'no-cache, no-store, must-revalidate'},
-            )
-        except httpx.HTTPError as exc:
-            raise HTTPException(status_code=502, detail=f"拉取失败: {exc}") from exc
+            async with _wide_initialization_lock_for(cache_key):
+                if cache_key not in _wide_cache:
+                    fallback = await _initialize_wide_playlist_cache(
+                        cache_key=cache_key,
+                        upstream_url=upstream_url,
+                        ctx_id=ctx_id,
+                        src_id=src_id,
+                        src_label=src_label,
+                        headers=_headers,
+                        access_token=access_token,
+                    )
+                    if fallback is not None:
+                        return fallback
+        finally:
+            _untrack_wide_initializer(cache_key, initializer)
 
     # 命中缓存：返回扩展窗口 playlist。重写时根据当前请求的 access_token 重生成（meta + chunk）
     _wide_cache[cache_key + '_ts'] = time.time()

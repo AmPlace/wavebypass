@@ -3,6 +3,9 @@ import os
 import unittest
 from unittest import mock
 
+import httpx
+from fastapi import HTTPException
+
 os.environ.setdefault("WAVEFLOW_PROXY_HANDLE_SECRET", "test-handle-secret-32bytes!!!")
 os.environ.setdefault("WAVEFLOW_MODE", "nas")
 os.environ.setdefault("WAVEFLOW_DB_PATH", ":memory:")
@@ -204,6 +207,347 @@ class WidePlaylistSegmentInjectionTest(unittest.TestCase):
             main._drop_wide_cache(key)
         proxy_handles.clear_handle_cache_for_tests()
         proxy_context.reset_for_tests()
+
+
+class WidePlaylistLifecycleTest(unittest.IsolatedAsyncioTestCase):
+    URL_BASE = "https://up.example/"
+
+    async def asyncSetUp(self):
+        await main._shutdown_wide_playlist_state()
+        self._old_wide_enabled = main.WIDE_ENABLED
+        main.WIDE_ENABLED = True
+
+    async def asyncTearDown(self):
+        await main._shutdown_wide_playlist_state()
+        main.WIDE_ENABLED = self._old_wide_enabled
+        proxy_handles.clear_handle_cache_for_tests()
+        proxy_context.reset_for_tests()
+
+    def _url(self, key: str) -> str:
+        return f"{self.URL_BASE}{key}.m3u8"
+
+    def _cache_key(self, key: str) -> str:
+        return main._wide_cache_key_for(
+            self._url(key),
+            "",
+            source_id=f"src:{key}",
+            source_revision="1",
+        )
+
+    def _response(self, url: str, sequence: int = 100) -> mock.MagicMock:
+        response = mock.MagicMock()
+        response.url = url
+        response.text = (
+            "#EXTM3U\n"
+            "#EXT-X-VERSION:3\n"
+            f"#EXT-X-MEDIA-SEQUENCE:{sequence}\n"
+            "#EXT-X-TARGETDURATION:2\n"
+            "#EXTINF:2.0,\n"
+            "/segment-a.ts\n"
+            "#EXTINF:2.0,\n"
+            "/segment-b.ts\n"
+        )
+        response.raise_for_status = mock.MagicMock()
+        return response
+
+    async def _serve(self, key: str):
+        return await main.serve_iptv_wide_playlist_by_source(
+            upstream_url=self._url(key),
+            ctx_id="",
+            src_label=f"channel:{key}",
+            canonical_key=key,
+            source_id=f"src:{key}",
+            source_revision="1",
+            access=MediaAccessContext(source="anonymous"),
+        )
+
+    async def _noop_ssrf(self, *_args, **_kwargs):
+        return None
+
+    async def test_same_key_cold_start_is_single_flight_and_single_refresher(self):
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        refresher_release = asyncio.Event()
+        calls = 0
+
+        async def fake_get(url, **_kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                entered.set()
+                await release.wait()
+            return self._response(url)
+
+        async def hold_refresher(*_args):
+            await refresher_release.wait()
+
+        with mock.patch.object(main, "assert_safe_target_url", new=self._noop_ssrf), \
+             mock.patch.object(main.http_client, "get", side_effect=fake_get), \
+             mock.patch.object(main, "_run_wide_refresher", new=hold_refresher):
+            first = asyncio.create_task(self._serve("same"))
+            await entered.wait()
+            second = asyncio.create_task(self._serve("same"))
+            await asyncio.sleep(0)
+            self.assertEqual(calls, 1)
+            release.set()
+            responses = await asyncio.gather(first, second)
+
+        self.assertEqual(len(responses), 2)
+        self.assertEqual(calls, 4)
+        cache_key = self._cache_key("same")
+        self.assertIn(cache_key, main._wide_cache)
+        self.assertIsNotNone(main._wide_refresher_tasks.get(cache_key))
+        self.assertEqual(
+            len([key for key in main._wide_refresher_tasks if key == cache_key]),
+            1,
+        )
+        body = responses[0].body.decode("utf-8")
+        self.assertEqual(
+            len([line for line in body.splitlines() if "/api/media/proxy/chunk/" in line]),
+            2,
+        )
+        refresher_release.set()
+
+    async def test_different_keys_initialize_in_parallel(self):
+        entered = {key: asyncio.Event() for key in ("a", "b")}
+        release = asyncio.Event()
+        calls: dict[str, int] = {"a": 0, "b": 0}
+        active = 0
+        maximum_active = 0
+        refresher_release = asyncio.Event()
+
+        async def fake_get(url, **_kwargs):
+            nonlocal active, maximum_active
+            key = "a" if "/a.m3u8" in url else "b"
+            calls[key] += 1
+            if calls[key] == 1:
+                active += 1
+                maximum_active = max(maximum_active, active)
+                entered[key].set()
+                await release.wait()
+                active -= 1
+            return self._response(url, sequence=100 if key == "a" else 200)
+
+        async def hold_refresher(*_args):
+            await refresher_release.wait()
+
+        with mock.patch.object(main, "assert_safe_target_url", new=self._noop_ssrf), \
+             mock.patch.object(main.http_client, "get", side_effect=fake_get), \
+             mock.patch.object(main, "_run_wide_refresher", new=hold_refresher):
+            first = asyncio.create_task(self._serve("a"))
+            second = asyncio.create_task(self._serve("b"))
+            await entered["a"].wait()
+            await entered["b"].wait()
+            self.assertEqual(maximum_active, 2)
+            release.set()
+            await asyncio.gather(first, second)
+
+        self.assertEqual(calls, {"a": 4, "b": 4})
+        self.assertEqual(len(main._wide_refresher_tasks), 2)
+        refresher_release.set()
+
+    async def test_waiter_cancellation_does_not_cancel_initializer(self):
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        refresher_release = asyncio.Event()
+        calls = 0
+
+        async def fake_get(url, **_kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                entered.set()
+                await release.wait()
+            return self._response(url)
+
+        async def hold_refresher(*_args):
+            await refresher_release.wait()
+
+        with mock.patch.object(main, "assert_safe_target_url", new=self._noop_ssrf), \
+             mock.patch.object(main.http_client, "get", side_effect=fake_get), \
+             mock.patch.object(main, "_run_wide_refresher", new=hold_refresher):
+            owner = asyncio.create_task(self._serve("cancel-waiter"))
+            await entered.wait()
+            waiter = asyncio.create_task(self._serve("cancel-waiter"))
+            await asyncio.sleep(0)
+            waiter.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await waiter
+            self.assertFalse(owner.done())
+            release.set()
+            await owner
+
+        self.assertEqual(calls, 4)
+        self.assertIn(self._cache_key("cancel-waiter"), main._wide_cache)
+        refresher_release.set()
+
+    async def test_initializer_cancellation_leaves_no_cache_or_refresher(self):
+        entered = asyncio.Event()
+
+        async def blocked_get(_url, **_kwargs):
+            entered.set()
+            await asyncio.Event().wait()
+
+        with mock.patch.object(main, "assert_safe_target_url", new=self._noop_ssrf), \
+             mock.patch.object(main.http_client, "get", side_effect=blocked_get):
+            owner = asyncio.create_task(self._serve("cancel-owner"))
+            await entered.wait()
+            owner.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await owner
+
+        self.assertEqual(main._wide_cache, {})
+        self.assertEqual(main._wide_refresher_tasks, {})
+
+    async def test_eviction_cancels_inflight_initializer(self):
+        entered = asyncio.Event()
+
+        async def blocked_get(_url, **_kwargs):
+            entered.set()
+            await asyncio.Event().wait()
+
+        with mock.patch.object(main, "assert_safe_target_url", new=self._noop_ssrf), \
+             mock.patch.object(main.http_client, "get", side_effect=blocked_get):
+            owner = asyncio.create_task(self._serve("evict-owner"))
+            await entered.wait()
+            self.assertTrue(main.release_iptv_wide_playlist_by_key(self._cache_key("evict-owner")))
+            with self.assertRaises(asyncio.CancelledError):
+                await owner
+
+        self.assertEqual(main._wide_cache, {})
+        self.assertEqual(main._wide_initialization_tasks, {})
+        self.assertEqual(main._wide_refresher_tasks, {})
+
+    async def test_shutdown_cancels_inflight_initializer_before_clearing_state(self):
+        entered = asyncio.Event()
+
+        async def blocked_get(_url, **_kwargs):
+            entered.set()
+            await asyncio.Event().wait()
+
+        with mock.patch.object(main, "assert_safe_target_url", new=self._noop_ssrf), \
+             mock.patch.object(main.http_client, "get", side_effect=blocked_get):
+            owner = asyncio.create_task(self._serve("shutdown-owner"))
+            await entered.wait()
+            self.assertTrue(main._wide_initialization_tasks)
+            await main._shutdown_wide_playlist_state()
+            self.assertTrue(owner.cancelled())
+
+        self.assertEqual(main._wide_cache, {})
+        self.assertEqual(main._wide_refresher_tasks, {})
+        self.assertEqual(main._wide_initialization_tasks, {})
+
+    async def test_initializer_failure_releases_key_for_retry(self):
+        calls = 0
+        should_fail = True
+        refresher_release = asyncio.Event()
+
+        async def fake_get(url, **_kwargs):
+            nonlocal calls
+            calls += 1
+            if should_fail:
+                raise httpx.ConnectError("fixture failure", request=httpx.Request("GET", url))
+            return self._response(url)
+
+        async def hold_refresher(*_args):
+            await refresher_release.wait()
+
+        with mock.patch.object(main, "assert_safe_target_url", new=self._noop_ssrf), \
+             mock.patch.object(main.http_client, "get", side_effect=fake_get), \
+             mock.patch.object(main, "_run_wide_refresher", new=hold_refresher):
+            with self.assertRaises(HTTPException) as failure:
+                await self._serve("retry")
+            self.assertEqual(failure.exception.status_code, 502)
+            self.assertEqual(main._wide_cache, {})
+            self.assertEqual(main._wide_refresher_tasks, {})
+
+            should_fail = False
+            await self._serve("retry")
+
+        self.assertEqual(calls, 9)
+        self.assertIn(self._cache_key("retry"), main._wide_refresher_tasks)
+        refresher_release.set()
+
+    async def test_refresher_failure_cleans_tracking_and_cache(self):
+        crashed = asyncio.Event()
+
+        async def failing_refresher(*_args):
+            crashed.set()
+            raise RuntimeError("fixture refresher failure")
+
+        async def fake_get(url, **_kwargs):
+            return self._response(url)
+
+        with mock.patch.object(main, "assert_safe_target_url", new=self._noop_ssrf), \
+             mock.patch.object(main.http_client, "get", side_effect=fake_get), \
+             mock.patch.object(main, "_run_wide_refresher", new=failing_refresher):
+            await self._serve("refresher-failure")
+            await crashed.wait()
+            await asyncio.sleep(0)
+
+        cache_key = self._cache_key("refresher-failure")
+        self.assertNotIn(cache_key, main._wide_cache)
+        self.assertNotIn(cache_key, main._wide_refresher_tasks)
+
+    async def test_eviction_and_shutdown_reclaim_refresher_tasks(self):
+        refresher_release = asyncio.Event()
+
+        async def hold_refresher(*_args):
+            await refresher_release.wait()
+
+        async def fake_get(url, **_kwargs):
+            return self._response(url)
+
+        with mock.patch.object(main, "assert_safe_target_url", new=self._noop_ssrf), \
+             mock.patch.object(main.http_client, "get", side_effect=fake_get), \
+             mock.patch.object(main, "_run_wide_refresher", new=hold_refresher):
+            await self._serve("evict")
+            await self._serve("shutdown")
+            evict_key = self._cache_key("evict")
+            shutdown_key = self._cache_key("shutdown")
+            self.assertEqual(len(main._wide_refresher_tasks), 2)
+            self.assertTrue(main.release_iptv_wide_playlist_by_key(evict_key))
+            self.assertNotIn(evict_key, main._wide_cache)
+            await asyncio.sleep(0)
+            self.assertNotIn(evict_key, main._wide_refresher_tasks)
+            await main._shutdown_wide_playlist_state()
+
+        self.assertEqual(main._wide_cache, {})
+        self.assertEqual(main._wide_refresher_tasks, {})
+        self.assertNotIn(shutdown_key, main._wide_cache)
+
+    async def test_stale_refresher_cancellation_cannot_drop_new_cache(self):
+        refresher_started = asyncio.Event()
+        refresher_release = asyncio.Event()
+
+        async def hold_refresher(*_args):
+            refresher_started.set()
+            await refresher_release.wait()
+
+        async def fake_get(url, **_kwargs):
+            return self._response(url)
+
+        with mock.patch.object(main, "assert_safe_target_url", new=self._noop_ssrf), \
+             mock.patch.object(main.http_client, "get", side_effect=fake_get), \
+             mock.patch.object(main, "_run_wide_refresher", new=hold_refresher):
+            await self._serve("recycle")
+            await refresher_started.wait()
+            cache_key = self._cache_key("recycle")
+            old_task = main._wide_refresher_tasks[cache_key]
+            self.assertTrue(main.release_iptv_wide_playlist_by_key(cache_key))
+
+            # The old task is cancelled but has not yet received cancellation.
+            # Reinitialization must publish a new owner before that stale task
+            # gets a chance to run its cancellation handler.
+            await self._serve("recycle")
+            new_task = main._wide_refresher_tasks[cache_key]
+            self.assertIsNot(old_task, new_task)
+            await asyncio.sleep(0)
+
+            self.assertIn(cache_key, main._wide_cache)
+            self.assertIs(main._wide_refresher_tasks.get(cache_key), new_task)
+
+        refresher_release.set()
 
 
 if __name__ == "__main__":
