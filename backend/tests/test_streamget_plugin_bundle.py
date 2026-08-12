@@ -27,6 +27,7 @@ EXPECTED_SCHEMES = {
     "laixiu", "picarto",
 }
 EXCLUDED_SCHEMES = {"haixiu", "liveme", "lehai"}
+EXPECTED_SCHEME_COUNT = 32
 
 
 def _load_plugin_module():
@@ -78,6 +79,7 @@ class StreamGetBundleContractTest(unittest.TestCase):
     def test_manifest_and_project_are_exactly_the_bundle_boundary(self):
         manifest = load_manifest(PLUGIN_DIR / "manifest.json")
         self.assertEqual(manifest.identity, "org.waveflow/streamget-providers")
+        self.assertEqual(len(EXPECTED_SCHEMES), EXPECTED_SCHEME_COUNT)
         self.assertEqual({scheme for scheme, _contract in manifest.owned_schemes}, EXPECTED_SCHEMES)
         self.assertTrue(EXPECTED_SCHEMES.isdisjoint(EXCLUDED_SCHEMES))
         self.assertEqual(set(manifest.permissions), {"network"})

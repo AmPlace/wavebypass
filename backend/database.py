@@ -769,10 +769,76 @@ def _finalize_legacy_epg_map_upgrade(conn: sqlite3.Connection) -> dict[str, int]
     return {'legacy_rows': len(rows), 'migrated_rows': migrated, 'skipped_rows': skipped}
 
 
+def _migrate_plugin_permission_approval_key(conn: sqlite3.Connection) -> None:
+    """Upgrade the pre-fingerprint permission approval primary key.
+
+    Older production databases keyed an approval only by publisher, plugin,
+    and permission name.  The current permission contract also persists the
+    manifest-derived fingerprint, so the write path targets all four columns.
+    SQLite cannot alter a table primary key in place; rebuild this small table
+    inside the initialization transaction and preserve every existing row.
+    """
+    table = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='plugin_permission_approvals'"
+    ).fetchone()
+    if table is None:
+        return
+    columns = conn.execute("PRAGMA table_info(plugin_permission_approvals)").fetchall()
+    primary_key = tuple(
+        row['name'] for row in sorted(columns, key=lambda value: int(value['pk']))
+        if int(row['pk']) > 0
+    )
+    expected = (
+        'publisher_id', 'plugin_id', 'permission_name', 'permission_fingerprint',
+    )
+    if primary_key == expected:
+        return
+    if primary_key != ('publisher_id', 'plugin_id', 'permission_name'):
+        raise sqlite3.OperationalError(
+            'plugin_permission_approvals has an unsupported primary key'
+        )
+
+    conn.execute("ALTER TABLE plugin_permission_approvals RENAME TO plugin_permission_approvals_legacy")
+    conn.execute(
+        """
+        CREATE TABLE plugin_permission_approvals (
+            publisher_id           TEXT NOT NULL,
+            plugin_id              TEXT NOT NULL,
+            permission_name        TEXT NOT NULL,
+            permission_fingerprint TEXT NOT NULL,
+            approved              INTEGER NOT NULL DEFAULT 0 CHECK(approved IN (0, 1)),
+            approved_at            TEXT DEFAULT '',
+            approved_by            TEXT DEFAULT '',
+            revoked_at             TEXT DEFAULT '',
+            revoked_by             TEXT DEFAULT '',
+            manifest_version       TEXT DEFAULT '',
+            updated_at             TEXT NOT NULL,
+            PRIMARY KEY (publisher_id, plugin_id, permission_name, permission_fingerprint)
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO plugin_permission_approvals(
+            publisher_id, plugin_id, permission_name, permission_fingerprint,
+            approved, approved_at, approved_by, revoked_at, revoked_by,
+            manifest_version, updated_at
+        )
+        SELECT
+            publisher_id, plugin_id, permission_name, permission_fingerprint,
+            approved, approved_at, approved_by, revoked_at, revoked_by,
+            manifest_version, updated_at
+        FROM plugin_permission_approvals_legacy
+        """
+    )
+    conn.execute("DROP TABLE plugin_permission_approvals_legacy")
+
+
 async def initialize():
     def _init():
         conn = _connect()
         conn.executescript(_SCHEMA)
+        _migrate_plugin_permission_approval_key(conn)
         _finalize_legacy_epg_map_upgrade(conn)
         # 兼容已有数据库：补充新字段
         for col, typ, default in [
