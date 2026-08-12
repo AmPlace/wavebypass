@@ -13,6 +13,10 @@ cd "$ROOT_DIR"
 echo "== Build backend =="
 cd backend
 
+# Keep PyInstaller's writable cache in the build workspace's temp area rather
+# than relying on a pre-existing user cache with unknown ownership.
+export PYINSTALLER_CONFIG_DIR="${PYINSTALLER_CONFIG_DIR:-${TMPDIR:-/tmp}/waveflow-pyinstaller-config}"
+
 if [ ! -d ".venv" ]; then
   python3 -m venv .venv
 fi
@@ -22,8 +26,10 @@ fi
 
 .venv/bin/pyinstaller \
   --clean \
+  --noconfirm \
   --onedir \
-  --hidden-import adapters.17live --add-data "config:config" --add-data "official_plugins:official_plugins" \
+  --hidden-import adapters.17live --collect-data zhconv \
+  --add-data "config:config" --add-data "official_plugins:official_plugins" \
   --name waveflow-backend \
   desktop_entry.py
 
@@ -35,8 +41,14 @@ mkdir -p backend_dist
 cp -a backend/dist/waveflow-backend/. backend_dist/
 chmod +x backend_dist/waveflow-backend
 
-
-
+echo "== Bundle controlled Python runtime =="
+if [ -z "${WAVEFLOW_DESKTOP_PYTHON_RUNTIME_SOURCE:-}" ]; then
+  echo "ERROR: set WAVEFLOW_DESKTOP_PYTHON_RUNTIME_SOURCE to a versioned macOS arm64 CPython 3.14 runtime root" >&2
+  exit 1
+fi
+bash "$ROOT_DIR/scripts/stage-desktop-python-runtime.sh" \
+  "$WAVEFLOW_DESKTOP_PYTHON_RUNTIME_SOURCE" \
+  "$ROOT_DIR/backend_dist/python-runtime"
 
 echo "== Bundle ffmpeg =="
 FFMPEG_SRC=$(ls "$ROOT_DIR/ffmpeg/macos-arm64/ffmpeg" 2>/dev/null)

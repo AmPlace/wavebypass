@@ -386,6 +386,7 @@ class PluginMarketService:
         os_name: str | None = None,
         arch: str | None = None,
         python_environments: PythonEnvironmentManager | None = None,
+        python_executable: str | Path | None = None,
         dependency_fetcher: Callable[[dict[str, Any], Path], Any] | None = None,
         runtime_command_factory: Callable[[PluginManifest, Path, Any | None], Sequence[str]] | None = None,
     ):
@@ -393,8 +394,13 @@ class PluginMarketService:
         self.store = store
         self.trust_policy = trust_policy
         self.os_name, self.arch = (os_name, arch) if os_name and arch else current_platform()
+        self.python_environments = python_environments or PythonEnvironmentManager(
+            self.store.root / "python", python_executable=python_executable or sys.executable,
+        )
+        self.python_executable = str(Path(
+            python_executable or self.python_environments.python_executable,
+        ).resolve())
         self.command_factory = command_factory or self._default_command
-        self.python_environments = python_environments or PythonEnvironmentManager(self.store.root / "python")
         self.dependency_fetcher = dependency_fetcher
         self.runtime_command_factory = runtime_command_factory
         self._active: dict[str, PluginInstance] = {}
@@ -497,11 +503,18 @@ class PluginMarketService:
                     "--version", manifest.version)
         return self.command_factory(manifest, artifact)
 
-    @staticmethod
-    def _default_command(manifest: PluginManifest, artifact: Path) -> Sequence[str]:
+    def _default_command(self, manifest: PluginManifest, artifact: Path) -> Sequence[str]:
         selected = next(item for item in manifest.artifacts if item["sha256"] == artifact.parent.name)
         if selected["runtime"] == "python":
-            return (sys.executable, str(artifact), "--identity", manifest.identity,
+            return (self.python_executable, str(artifact), "--identity", manifest.identity,
+                    "--version", manifest.version)
+        # SDK artifacts are ordinary zip archives rather than executable
+        # files.  A subprocess-runtime Plugin may still be dependency-free,
+        # but its .pyz must be launched by a real interpreter; this is also
+        # what lets a frozen Desktop backend run the same artifact without
+        # trying to execute it with the PyInstaller binary.
+        if selected["runtime"] == "subprocess" and artifact.suffix == ".pyz":
+            return (self.python_executable, "-I", str(artifact), "--identity", manifest.identity,
                     "--version", manifest.version)
         return (str(artifact),)
 

@@ -24,6 +24,7 @@ from plugin_market import (
     PluginArtifactStore, PluginMarketService, current_platform, manifest_signature_payload,
 )
 from plugin_python_runtime import PythonEnvironmentManager, select_dependency_artifacts
+from plugin_desktop_runtime import resolve_plugin_python_executable
 from plugin_runtime import LifecycleState, PluginError, PluginRuntime, validate_manifest
 from plugin_runtime.permissions import PermissionPolicy
 from provider_resolver import ProviderResolver
@@ -441,6 +442,7 @@ class ProductionPluginSubsystem:
         trust = ProductionTrustPolicy(trust_rows)
         gateway = CapabilityGateway(client=http_client)
         dispatcher = CoreCapabilityDispatcher(gateway)
+        python_executable = resolve_plugin_python_executable()
         runtime = PluginRuntime(
             permission_policy=PermissionPolicy(frozenset({"network", "cache"})),
             capability_dispatcher=dispatcher,
@@ -448,7 +450,8 @@ class ProductionPluginSubsystem:
         store = PluginArtifactStore(root / "artifacts", allowed_local_roots=[downloads])
         service = PluginMarketService(
             runtime=runtime, store=store, trust_policy=trust, command_factory=command_factory,
-            python_environments=PythonEnvironmentManager(root),
+            python_executable=python_executable,
+            python_environments=PythonEnvironmentManager(root, python_executable=python_executable),
             dependency_fetcher=lambda item, directory: download_dependency_artifact(
                 item["url"], directory, expected_size=item["size_bytes"],
                 expected_sha256=item["sha256"], client=http_client),
