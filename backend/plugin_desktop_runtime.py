@@ -7,11 +7,13 @@ import os
 import sys
 from pathlib import Path
 
+from desktop_runtime_manifest import runtime_tree_digest
 from plugin_runtime import PluginError
 
 
 DESKTOP_RUNTIME_DIRECTORY = "python-runtime"
 DESKTOP_RUNTIME_METADATA = "runtime.json"
+DESKTOP_RUNTIME_SCHEMA_VERSION = 1
 
 
 def _runtime_candidate(backend_executable: str | Path) -> Path:
@@ -64,15 +66,48 @@ def resolve_plugin_python_executable() -> Path:
             category="runtime",
         ) from exc
     expected_version = f"{sys.version_info.major}.{sys.version_info.minor}"
-    if metadata != {
-        "schema_version": 1,
-        "python_version": expected_version,
-        "os": "macos",
-        "arch": "arm64",
-    }:
+    python_version = str(metadata.get("python_version") or "")
+    executable = str(metadata.get("executable") or "")
+    expected_abi = f"cp{sys.version_info.major}{sys.version_info.minor}"
+    if (
+        metadata.get("schema_version") != DESKTOP_RUNTIME_SCHEMA_VERSION
+        or metadata.get("runtime_type") != "python"
+        or metadata.get("os") != "macos"
+        or metadata.get("arch") != "arm64"
+        or metadata.get("python_abi") != expected_abi
+        or executable != f"bin/python{expected_version}"
+        or not python_version.startswith(f"{expected_version}.")
+    ):
         raise PluginError(
             "PYTHON_RUNTIME_UNSUPPORTED",
             "The Desktop Python runtime metadata is incompatible",
+            category="runtime",
+        )
+    executable_path = Path(executable)
+    if executable_path.is_absolute() or ".." in executable_path.parts:
+        raise PluginError(
+            "PYTHON_RUNTIME_UNSUPPORTED",
+            "The Desktop Python runtime executable path is invalid",
+            category="runtime",
+        )
+    if (
+        not isinstance(metadata.get("tree_sha256"), str)
+        or len(metadata["tree_sha256"]) != 64
+        or not isinstance(metadata.get("tree_file_count"), int)
+    ):
+        raise PluginError(
+            "PYTHON_RUNTIME_UNSUPPORTED",
+            "The Desktop Python runtime integrity metadata is missing",
+            category="runtime",
+        )
+    actual_digest, actual_count = runtime_tree_digest(runtime_root)
+    if (
+        actual_digest != metadata["tree_sha256"]
+        or actual_count != metadata["tree_file_count"]
+    ):
+        raise PluginError(
+            "PYTHON_RUNTIME_UNSUPPORTED",
+            "The Desktop Python runtime integrity check failed",
             category="runtime",
         )
     return candidate

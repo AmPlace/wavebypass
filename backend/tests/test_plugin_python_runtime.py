@@ -8,6 +8,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 from packaging import tags
 
@@ -163,6 +164,26 @@ class PythonRuntimeContractTest(unittest.IsolatedAsyncioTestCase):
         manifest = _manifest("python-platform-candidates", "1.0.0", [current, foreign])
         env = await self.manager.prepare(manifest, {current["sha256"]: current["path"]})
         self.assertEqual([item["sha256"] for item in env.dependencies], [current["sha256"]])
+
+    async def test_frozen_sidecar_subprocesses_inherit_no_bytecode_policy(self):
+        sidecar = self.root / "app" / "python-runtime" / "bin" / "python3.14"
+        manager = PythonEnvironmentManager(self.root / "sidecar-store", python_executable=sidecar)
+
+        class Process:
+            returncode = 0
+
+            async def communicate(self):
+                return b"", b""
+
+        with mock.patch.object(sys, "frozen", True, create=True), \
+                mock.patch.object(sys, "executable", str(self.root / "app" / "waveflow-backend")), \
+                mock.patch("plugin_python_runtime.asyncio.create_subprocess_exec", new=mock.AsyncMock(
+                    return_value=Process(),
+                )) as create_process:
+            await manager._run((str(sidecar), "-B", "-m", "venv", str(self.root / "staging")))
+
+        environment = create_process.call_args.kwargs["env"]
+        self.assertEqual(environment["PYTHONDONTWRITEBYTECODE"], "1")
 
 
 if __name__ == "__main__":

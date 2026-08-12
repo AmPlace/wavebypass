@@ -499,14 +499,14 @@ class PluginMarketService:
         if self.runtime_command_factory:
             return self.runtime_command_factory(manifest, artifact, environment)
         if environment:
-            return (str(environment.python), "-I", str(artifact), "--identity", manifest.identity,
+            return (str(environment.python), "-I", "-B", str(artifact), "--identity", manifest.identity,
                     "--version", manifest.version)
         return self.command_factory(manifest, artifact)
 
     def _default_command(self, manifest: PluginManifest, artifact: Path) -> Sequence[str]:
         selected = next(item for item in manifest.artifacts if item["sha256"] == artifact.parent.name)
         if selected["runtime"] == "python":
-            return (self.python_executable, str(artifact), "--identity", manifest.identity,
+            return (self.python_executable, "-B", str(artifact), "--identity", manifest.identity,
                     "--version", manifest.version)
         # SDK artifacts are ordinary zip archives rather than executable
         # files.  A subprocess-runtime Plugin may still be dependency-free,
@@ -514,7 +514,7 @@ class PluginMarketService:
         # what lets a frozen Desktop backend run the same artifact without
         # trying to execute it with the PyInstaller binary.
         if selected["runtime"] == "subprocess" and artifact.suffix == ".pyz":
-            return (self.python_executable, "-I", str(artifact), "--identity", manifest.identity,
+            return (self.python_executable, "-I", "-B", str(artifact), "--identity", manifest.identity,
                     "--version", manifest.version)
         return (str(artifact),)
 
