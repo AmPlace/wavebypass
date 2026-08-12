@@ -129,6 +129,30 @@ class MarketPluginLifecycleTest(unittest.IsolatedAsyncioTestCase):
             "market_source": {"source_key": source_key},
         }
 
+    async def _wait_reconciliation(self, subsystem) -> None:
+        """Wait for the lifecycle callback's durable/live projection to settle."""
+        for _ in range(20):
+            tasks = [
+                *subsystem._lifecycle_reconcile_tasks.values(),
+                *subsystem._ownership_reconcile_tasks.values(),
+                *subsystem._critical_tasks,
+            ]
+            pending = [task for task in tasks if not task.done()]
+            if not pending:
+                await asyncio.sleep(0)
+                if not any(
+                    not task.done()
+                    for task in [
+                        *subsystem._lifecycle_reconcile_tasks.values(),
+                        *subsystem._ownership_reconcile_tasks.values(),
+                        *subsystem._critical_tasks,
+                    ]
+                ):
+                    return
+                continue
+            await asyncio.gather(*(asyncio.shield(task) for task in pending))
+        self.fail("Plugin lifecycle reconciliation did not become idle")
+
     @staticmethod
     def requirement(version_range=">=1.0.0 <2.0.0"):
         return {
@@ -354,8 +378,10 @@ class MarketPluginLifecycleTest(unittest.IsolatedAsyncioTestCase):
         owner = next(item for item in await self.db.list_plugin_scheme_ownership()
                      if item["scheme"] == "fixture-a")
         self.assertEqual((owner["mode"], owner["plugin_identity"]), ("plugin", identity))
+        await self._wait_reconciliation(subsystem)
         self.assertTrue(subsystem.provider_resolver.is_available("fixture-a"))
         await subsystem.set_ownership("fixture-a", "legacy")
+        await subsystem.shutdown()
 
     async def test_post_commit_projection_failure_reconciles_without_candidate_cleanup(self):
         identity = "org.waveflow/fixture-multi-provider"
