@@ -198,6 +198,22 @@ class DesktopPluginRuntimeTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(os.environ["WAVEFLOW_DB_PATH"], str(Path(temp) / "waveflow.db"))
             self.assertEqual(os.environ["WAVEFLOW_PLUGIN_ROOT"], str(Path(temp) / "plugins"))
 
-    async def test_frozen_desktop_does_not_take_plugin_ownership(self):
-        with mock.patch.object(sys, "frozen", True, create=True):
+    async def test_frozen_desktop_with_controlled_runtime_is_rollout_eligible(self):
+        with mock.patch.object(sys, "frozen", True, create=True), \
+                mock.patch.dict(
+                    _python_backed_rollout_enabled.__globals__,
+                    {"resolve_plugin_python_executable": mock.Mock(
+                        return_value=Path("/app/python-runtime/bin/python3.14"),
+                    )},
+                ):
+            self.assertTrue(_python_backed_rollout_enabled())
+
+    async def test_frozen_desktop_without_controlled_runtime_stays_ineligible(self):
+        with mock.patch.object(sys, "frozen", True, create=True), \
+                mock.patch.dict(
+                    _python_backed_rollout_enabled.__globals__,
+                    {"resolve_plugin_python_executable": mock.Mock(
+                        side_effect=PluginError("PYTHON_RUNTIME_UNSUPPORTED", "missing", category="runtime"),
+                    )},
+                ):
             self.assertFalse(_python_backed_rollout_enabled())

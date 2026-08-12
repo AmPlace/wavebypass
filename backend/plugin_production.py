@@ -1099,7 +1099,16 @@ def _official_trust_rows() -> list[dict[str, Any]]:
 
 def _python_backed_rollout_enabled() -> bool:
     if getattr(sys, "frozen", False):
-        return False
+        # A frozen Desktop backend is eligible only when the release supplied
+        # controlled sidecar has already passed its runtime/manifest/integrity
+        # validation.  This keeps Desktop on the same generic rollout path as
+        # ordinary Python deployments without treating the PyInstaller
+        # interpreter as a Plugin runtime or adding provider-specific policy.
+        try:
+            resolve_plugin_python_executable()
+        except PluginError:
+            return False
+        return True
     if os.environ.get("WAVEFLOW_MODE", "nas").strip().lower() == "desktop":
         return False
     value = os.environ.get("WAVEFLOW_OFFICIAL_PLUGIN_ROLLOUT")
