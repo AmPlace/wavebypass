@@ -749,12 +749,17 @@ async def lifespan(app: FastAPI):
             plugin_subsystem is not None
             and "org.waveflow/yunting" in getattr(getattr(plugin_subsystem, "service", None), "_active", {})
         )
+        myradio_plugin_active = bool(
+            plugin_subsystem is not None
+            and "org.waveflow/myradio" in getattr(getattr(plugin_subsystem, "service", None), "_active", {})
+        )
         if not yunting_plugin_active:
             # Keep the legacy warmup only for installations that have not yet
             # published the Radio Plugin.  Once the Plugin is active, the
             # shared AutomationService owns catalog/programme refreshes.
             asyncio.create_task(_yunting_refresh_task())
-        asyncio.create_task(_myradio_refresh_task())
+        if not myradio_plugin_active:
+            asyncio.create_task(_myradio_refresh_task())
         asyncio.create_task(_prefetch_rb())
         asyncio.create_task(_rtsp_hls_cleanup_task())
         # logo 模板：本地兜底已在 import 时加载完成，这里启动后异步拉一次远程覆盖；
