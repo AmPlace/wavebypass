@@ -119,7 +119,7 @@ class MarketAutomationApiTest(unittest.IsolatedAsyncioTestCase):
         self.main.app.dependency_overrides.clear()
         await self.service.stop(timeout_seconds=0.2)
         self.main.app.state.automation_service = None
-        for client in (self.main.http_client, self.main.yunting_client):
+        for client in (self.main.http_client,):
             if not client.is_closed:
                 await client.aclose()
         for key, value in self._old_env.items():

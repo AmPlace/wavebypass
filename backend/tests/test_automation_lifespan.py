@@ -119,7 +119,7 @@ class AutomationLifespanTest(unittest.IsolatedAsyncioTestCase):
             task.cancel()
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
-        for client in (self.main.http_client, self.main.yunting_client):
+        for client in (self.main.http_client,):
             if not client.is_closed:
                 await client.aclose()
         for key, value in self._old_env.items():
@@ -157,9 +157,6 @@ class AutomationLifespanTest(unittest.IsolatedAsyncioTestCase):
             return record
 
         for name in (
-            "refresh_tokens_task",
-            "_yunting_refresh_task",
-            "_myradio_refresh_task",
             "_prefetch_rb",
             "_rtsp_hls_cleanup_task",
         ):
@@ -192,11 +189,6 @@ class AutomationLifespanTest(unittest.IsolatedAsyncioTestCase):
             self.main.http_client,
             "aclose",
             new=mock.AsyncMock(side_effect=recorder("close_http")),
-        ))
-        stack.enter_context(mock.patch.object(
-            self.main.yunting_client,
-            "aclose",
-            new=mock.AsyncMock(side_effect=recorder("close_yunting")),
         ))
         return stack, events
 
@@ -244,7 +236,6 @@ class AutomationLifespanTest(unittest.IsolatedAsyncioTestCase):
         service.stop.assert_awaited_once()
         self.assertIsNone(self.main.app.state.automation_service)
         self.assertLess(events.index("service_stop"), events.index("close_http"))
-        self.assertLess(events.index("service_stop"), events.index("close_yunting"))
 
     async def test_real_service_waits_300_seconds_and_owns_one_handle(self):
         waiter = ControlledWaiter()
@@ -412,9 +403,6 @@ class AutomationLifespanTest(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(0)
 
         for name in (
-            "refresh_tokens_task",
-            "_yunting_refresh_task",
-            "_myradio_refresh_task",
             "_prefetch_rb",
             "_rtsp_hls_cleanup_task",
             "logo",

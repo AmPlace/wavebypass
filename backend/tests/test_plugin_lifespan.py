@@ -35,13 +35,12 @@ class PluginLifespanTest(unittest.IsolatedAsyncioTestCase):
     def patches(self, automation):
         stack = contextlib.ExitStack()
         stack.enter_context(mock.patch.object(self.main, "create_production_automation_service", new=mock.AsyncMock(return_value=automation)))
-        for name in ("refresh_tokens_task", "_yunting_refresh_task", "_myradio_refresh_task", "_prefetch_rb", "_rtsp_hls_cleanup_task", "refresh_logo_template_from_remote"):
+        for name in ("_prefetch_rb", "_rtsp_hls_cleanup_task", "refresh_logo_template_from_remote"):
             stack.enter_context(mock.patch.object(self.main, name, new=mock.AsyncMock()))
         stack.enter_context(mock.patch.object(self.main, "_clear_stale_rtsp_hls_dirs"))
         stack.enter_context(mock.patch.object(self.main, "_load_tingfm_streams"))
         stack.enter_context(mock.patch.object(self.main, "_stop_all_rtsp_sessions", new=mock.AsyncMock()))
         stack.enter_context(mock.patch.object(self.main.http_client, "aclose", new=mock.AsyncMock()))
-        stack.enter_context(mock.patch.object(self.main.yunting_client, "aclose", new=mock.AsyncMock()))
         return stack
 
     async def test_recovery_and_shutdown_are_lifespan_owned(self):

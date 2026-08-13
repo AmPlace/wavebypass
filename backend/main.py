@@ -21,7 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt, model_validator
 from contextlib import asynccontextmanager
-from fetchers import STATION_FETCHER_MAP, yunting
+from fetchers import STATION_FETCHER_MAP
 import database
 import epg_binding_management
 import epg_management
@@ -130,12 +130,6 @@ GEO_BLOCKED_REGIONS = set(
 )
 
 STATIC_STATIONS = [
-    {"id": "hitfm", "name": "Hit FM 台北", "logoText": "H", "logoUrl": "/logos/hitfm.png", "subtitle": "FM 107.7", "tags": ["music", "TW"]},
-    {"id": "hitfm_taichung", "name": "Hit FM 台中", "logoText": "台中", "logoUrl": "/logos/hitfm.png", "subtitle": "FM 91.5",  "tags": ["music", "TW"]},
-    {"id": "hitfm_tainan", "name": "Hit FM 台南", "logoText": "台南", "logoUrl": "/logos/hitfm.png", "subtitle": "FM 90.1", "tags": ["music", "TW"]},
-    {"id": "hitfm_yilan", "name": "Hit FM 宜兰", "logoText": "宜兰", "logoUrl": "/logos/hitfm.png", "subtitle": "FM 97.1", "tags": ["music", "TW"]},
-    {"id": "hitfm_huadong", "name": "Hit FM 花东", "logoText": "花东", "logoUrl": "/logos/hitfm.png", "subtitle": "FM 107.7", "tags": ["music", "TW"]},
-    {"id": "pop917", "name": "POP Radio", "logoText": "POP", "logoUrl": "/logos/pop917.jpg", "subtitle": "FM 91.7", "tags": ["music", "TW"]},
     # ── 香港电台 (tingfm.com) ──
     {"id": "tf_909", "name": "香港电台第一台", "logoText": "RTHK1", "logoUrl": "https://cdn.tingfm.com/tingfm/2013/04/file5e8d6ff30254e.png?x-oss-process=image/resize,m_fill,w_200,h_200", "subtitle": "RTHK Radio 1", "tags": ["HK", "news"]},
     {"id": "tf_910", "name": "香港电台第二台", "logoText": "RTHK2", "logoUrl": "", "subtitle": "RTHK Radio 2", "tags": ["HK", "music"]},
@@ -186,7 +180,6 @@ def _is_geo_blocked(station_id: str, request: Request) -> bool:
     is_tw = (
         station_id.startswith("mr_")       
         or station_id in _TW_STATION_IDS    
-        or station_id in MYRADIO_CACHE      
     )
     if is_tw and "TW" in GEO_BLOCKED_REGIONS:
         return True
@@ -264,131 +257,12 @@ async def refresh_station_stream_url(station_id: str) -> str:
     return latest_stream_url
 
 
-async def refresh_tokens_task() -> None:
-
-    while True:
-        for station_id in STATION_FETCHER_MAP:
-            try:
-
-                await refresh_station_stream_url(station_id)
-
-                logger.info("电台 %s 播放地址刷新成功", station_id)
-            except Exception:
-                logger.exception("电台 %s 播放地址刷新失败", station_id)
-
-        await asyncio.sleep(TOKEN_REFRESH_INTERVAL_SECONDS)
-
-
 # 全局复用的异步 HTTP 客户端，维持与上游 CDN 的 Keep-Alive 长连接
 http_client = httpx.AsyncClient(
     timeout=HTTP_TIMEOUT,
     verify=CDN_VERIFY_SSL,
     limits=httpx.Limits(max_keepalive_connections=50, max_connections=100)
 )
-
-yunting_client = httpx.AsyncClient(
-    timeout=15.0,
-    follow_redirects=True,
-    limits=httpx.Limits(max_keepalive_connections=10, max_connections=10),
-)
-
-# 云听 API 鉴权
-_YUNTING_SIGN_KEY = "f0fc4c668392f9f9a447e48584c214ee"
-
-def _yunting_sign_headers(params: dict | None = None) -> dict:
-    """生成云听 API 鉴权 headers"""
-    ts = str(int(time.time() * 1000))
-    sorted_params = "&".join(f"{k}={v}" for k, v in sorted((params or {}).items()))
-    if params:
-        sign_text = sorted_params + "&timestamp=" + ts + "&key=" + _YUNTING_SIGN_KEY
-    else:
-        sign_text = "timestamp=" + ts + "&key=" + _YUNTING_SIGN_KEY
-    sign = hashlib.md5(sign_text.encode()).hexdigest().upper()
-    return {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "Origin": "https://www.radio.cn",
-        "Referer": "https://www.radio.cn/",
-        "equipmentId": "0000",
-        "platformCode": "WEB",
-        "timestamp": ts,
-        "sign": sign,
-    }
-
-
-YUNTING_REFRESH_INTERVAL = 1 * 3600
-
-_yunting_sem = asyncio.Semaphore(5)
-
-
-async def _fetch_one_province(prov: str) -> list[dict] | None:
-    try:
-        params = {"categoryId": 0, "provinceCode": prov}
-        async with _yunting_sem:
-            resp = await yunting_client.get(
-                YUNTING_API_BASE,
-                params=params,
-                headers=_yunting_sign_headers(params),
-            )
-        resp.raise_for_status()
-        stations = resp.json().get("data", [])
-        for s in stations:
-            for key in ("playUrlLow", "mp3PlayUrlLow", "mp3PlayUrlHigh"):
-                if isinstance(s.get(key), str) and s[key].startswith("http://"):
-                    s[key] = "https://" + s[key][7:]
-        return stations
-    except Exception:
-        logger.warning("云听省份 %s 拉取失败，保留旧缓存", prov)
-        return None
-
-
-def _write_yunting_caches(prov: str, stations: list[dict], now: float) -> None:
-
-    for s in stations:
-        s.setdefault("provinceCode", prov)
-    YUNTING_CACHE[prov] = {"data": json.dumps(stations, ensure_ascii=False), "ts": now}
-    for s in stations:
-        cid = str(s.get("contentId", ""))
-        if not cid:
-            continue
-        url = s.get("playUrlLow", "")
-        if url.startswith(("http://", "https://")):
-            YUNTING_URL_CACHE[f"yt_{cid}"] = {"url": url, "ts": now}
-        sub = s.get("subtitle", "")
-        if sub:
-            YUNTING_EPG_CACHE[f"yt_{cid}"] = {"subtitle": sub, "ts": now}
-
-
-async def _yunting_warmup() -> None:
-    now = time.time()
-    tasks = [_fetch_one_province(prov) for prov in YUNTING_PROVINCES]
-    results = await asyncio.gather(*tasks)
-
-    prefetched = 0
-    merged: list[dict] = []
-    for prov, stations in zip(YUNTING_PROVINCES, results):
-        if stations is None:
-            cached = YUNTING_CACHE.get(prov)
-            if cached:
-                merged.extend(json.loads(cached["data"]))
-            continue
-        _write_yunting_caches(prov, stations, now)
-        merged.extend(stations)
-        prefetched += 1
-
-    if merged:
-        YUNTING_ALL_CACHE["data"] = json.dumps(merged, ensure_ascii=False).encode("utf-8")
-        YUNTING_ALL_CACHE["ts"] = now
-
-    logger.info("云听缓存预热完成: %d/%d 个省份成功", prefetched, len(YUNTING_PROVINCES))
-
-
-async def _yunting_refresh_task() -> None:
-    while True:
-        await _yunting_warmup()
-        await asyncio.sleep(YUNTING_REFRESH_INTERVAL)
-
 
 RTSP_HLS_ROOT = Path(os.getenv("RTSP_HLS_ROOT") or (Path(tempfile.gettempdir()) / "waveflow_rtsp_hls"))
 RTSP_HLS_SESSIONS: dict[str, dict] = {}
@@ -734,22 +608,6 @@ async def lifespan(app: FastAPI):
         app.state.automation_service = automation_service
         await automation_service.start()
         _clear_stale_rtsp_hls_dirs()
-        asyncio.create_task(refresh_tokens_task())
-        yunting_plugin_active = bool(
-            plugin_subsystem is not None
-            and "org.waveflow/yunting" in getattr(getattr(plugin_subsystem, "service", None), "_active", {})
-        )
-        myradio_plugin_active = bool(
-            plugin_subsystem is not None
-            and "org.waveflow/myradio" in getattr(getattr(plugin_subsystem, "service", None), "_active", {})
-        )
-        if not yunting_plugin_active:
-            # Keep the legacy warmup only for installations that have not yet
-            # published the Radio Plugin.  Once the Plugin is active, the
-            # shared AutomationService owns catalog/programme refreshes.
-            asyncio.create_task(_yunting_refresh_task())
-        if not myradio_plugin_active:
-            asyncio.create_task(_myradio_refresh_task())
         asyncio.create_task(_prefetch_rb())
         asyncio.create_task(_rtsp_hls_cleanup_task())
         # logo 模板：本地兜底已在 import 时加载完成，这里启动后异步拉一次远程覆盖；
@@ -774,7 +632,6 @@ async def lifespan(app: FastAPI):
                 app.state.radio_resolver = None
                 await _stop_all_rtsp_sessions()
                 await http_client.aclose()
-                await yunting_client.aclose()
 
 app = FastAPI(
     title="WaveFlow",
@@ -939,248 +796,6 @@ async def proxy_direct_audio_stream(station_id: str, request: Request) -> Stream
     return StreamingResponse(stream_audio_bytes(), media_type=media_type)
 
 
-YUNTING_API_BASE = "https://ytmsout.radio.cn/web/appBroadcast/list"
-YUNTING_PROVINCES = [
-    '340000',  # 安徽
-    '110000',  # 北京
-    '500000',  # 重庆
-    '350000',  # 福建
-    '620000',  # 甘肃
-    '440000',  # 广东
-    '450000',  # 广西
-    '520000',  # 贵州
-    '460000',  # 海南
-    '130000',  # 河北
-    '410000',  # 河南
-    '230000',  # 黑龙江
-    '420000',  # 湖北
-    '430000',  # 湖南
-    '220000',  # 吉林
-    '320000',  # 江苏
-    '360000',  # 江西
-    '210000',  # 辽宁
-    '150000',  # 内蒙古
-    '640000',  # 宁夏
-    '630000',  # 青海
-    '370000',  # 山东
-    '140000',  # 山西
-    '610000',  # 陕西
-    '310000',  # 上海
-    '510000',  # 四川
-    '540000',  # 西藏
-    '650000',  # 新疆
-    '660000',  # 新疆兵团
-    '530000',  # 云南
-    '330000',  # 浙江
-]
-YUNTING_CACHE: dict[str, dict] = {}
-YUNTING_CACHE_TTL = 2 * 3600
-
-YUNTING_ALL_CACHE: dict[str, bytes | float] = {}  # {"data": json_bytes, "ts": float}
-
-# 电台列表 2 小时足够，但节目每半小时换一次，EPG 用 10 分钟 TTL
-YUNTING_EPG_CACHE: dict[str, dict] = {}   # {"yt_{contentId}": {"subtitle": "...", "ts": ...}}
-YUNTING_EPG_TTL = 10 * 60
-
-YUNTING_URL_CACHE: dict[str, dict] = {}   # {"yt_{contentId}": {"url": "...", "ts": ...}}
-YUNTING_URL_TTL = 1 * 3600
-
-
-# ==========================================
-# myradio.tw 电台缓存
-# ==========================================
-MYRADIO_CACHE: dict[str, dict] = {}
-MYRADIO_CACHE_TTL = 24 * 3600
-
-
-async def _myradio_refresh_task() -> None:
-    from fetchers import fetch_myradio_all
-
-    while True:
-        try:
-            stations = await fetch_myradio_all()
-            if stations:
-                now = time.time()
-                MYRADIO_CACHE.clear()
-                for s in stations:
-                    MYRADIO_CACHE[f"mr_{s['id']}"] = {
-                        "name": s["name"],
-                        "url": s["url"],
-                        "logo": s["logo"],
-                        "freq": s.get("freq", ""),
-                        "tag": s.get("tag", ""),
-                        "ts": now,
-                    }
-                logger.info("myradio 电台预热完成: %d 个", len(stations))
-            else:
-                logger.warning("myradio 抓取返回空列表")
-        except Exception:
-            logger.exception("myradio 预热/刷新失败")
-        await asyncio.sleep(MYRADIO_CACHE_TTL)
-
-
-@app.get("/api/myradio/all", dependencies=[Depends(require_browse_access)])
-async def get_myradio_all(request: Request) -> Response:
-
-    stations = [
-        {"id": k.replace("mr_", ""), "name": v["name"], "url": v["url"],
-         "logo": v["logo"], "freq": v.get("freq", ""), "tag": v.get("tag", "")}
-        for k, v in MYRADIO_CACHE.items()
-        if not _is_geo_blocked(k, request)
-    ]
-    return Response(
-        content=json.dumps(stations, ensure_ascii=False),
-        media_type="application/json",
-    )
-
-
-@app.get("/api/yunting/stations/{province_code}", dependencies=[Depends(require_browse_access)])
-async def proxy_yunting_stations(province_code: str) -> Response:
-    cached = YUNTING_CACHE.get(province_code)
-    if cached and time.time() - cached["ts"] < YUNTING_CACHE_TTL:
-        return Response(content=cached["data"], media_type="application/json")
-
-    params = {"categoryId": 0, "provinceCode": province_code}
-    try:
-        resp = await yunting_client.get(
-            YUNTING_API_BASE, params=params, headers=_yunting_sign_headers(params),
-        )
-        resp.raise_for_status()
-    except httpx.HTTPError as exc:
-        if cached:
-            logger.warning("云听 API 拉取失败，返回缓存: %s", exc)
-            return Response(content=cached["data"], media_type="application/json")
-        raise HTTPException(status_code=502, detail="云听 API 请求失败") from exc
-
-    
-    stations = resp.json().get("data", [])
-    for s in stations:
-        s.setdefault("provinceCode", province_code)  
-        for key in ("playUrlLow", "mp3PlayUrlLow", "mp3PlayUrlHigh"):
-            if isinstance(s.get(key), str) and s[key].startswith("http://"):
-                s[key] = "https://" + s[key][7:]
-    stations_json = json.dumps(stations, ensure_ascii=False)
-    YUNTING_CACHE[province_code] = {"data": stations_json, "ts": time.time()}
-
-    now = time.time()
-    for s in stations:
-        cid = str(s.get("contentId", ""))
-        if not cid:
-            continue
-        url = s.get("playUrlLow", "")
-        if url.startswith(("http://", "https://")):
-            YUNTING_URL_CACHE[f"yt_{cid}"] = {"url": url, "ts": now}
-        subtitle = s.get("subtitle", "")
-        if subtitle:
-            YUNTING_EPG_CACHE[f"yt_{cid}"] = {"subtitle": subtitle, "ts": now}
-
-    return Response(content=stations_json, media_type="application/json")
-
-
-@app.get("/api/yunting/all", dependencies=[Depends(require_browse_access)])
-async def proxy_yunting_all() -> Response:
-    
-
-    now = time.time()
-
-    # 快速路径：预合并缓存命中，直接返回原始 bytes
-    all_cached = YUNTING_ALL_CACHE.get("data")
-    all_ts = float(YUNTING_ALL_CACHE.get("ts", 0))
-    if all_cached and now - all_ts < YUNTING_CACHE_TTL:
-        return Response(
-            content=all_cached,
-            media_type="application/json",
-            headers={"Cache-Control": "public, s-maxage=3600, max-age=300"},
-        )
-
-    # 慢速路径：从各省缓存拼接
-    merged: list[dict] = []
-    missing: list[str] = []
-
-    for prov in YUNTING_PROVINCES:
-        cached = YUNTING_CACHE.get(prov)
-        if cached and now - cached["ts"] < YUNTING_CACHE_TTL:
-            merged.extend(json.loads(cached["data"]))
-        else:
-            missing.append(prov)
-
-    if missing:
-        tasks = [_fetch_one_province(prov) for prov in missing]
-        results = await asyncio.gather(*tasks)
-        for prov, stations in zip(missing, results):
-            if stations is None:
-                continue
-            _write_yunting_caches(prov, stations, now)
-            merged.extend(stations)
-
-    result_bytes = json.dumps(merged, ensure_ascii=False).encode("utf-8")
-    YUNTING_ALL_CACHE["data"] = result_bytes
-    YUNTING_ALL_CACHE["ts"] = now
-    return Response(
-        content=result_bytes,
-        media_type="application/json",
-        headers={"Cache-Control": "public, s-maxage=3600, max-age=300"},
-    )
-
-
-@app.get("/api/yunting/epg", dependencies=[Depends(require_browse_access)])
-async def yunting_epg() -> Response:
-    
-    now = time.time()
-    merged: dict[str, str] = {}
-
-    stale_epg_keys: list[str] = []
-    for key, entry in YUNTING_EPG_CACHE.items():
-        if now - entry["ts"] < YUNTING_EPG_TTL:
-            merged[key.replace("yt_", "")] = entry["subtitle"]
-        else:
-            stale_epg_keys.append(key)
-
-    need_api_refresh: list[str] = []
-    if stale_epg_keys:
-        fresh_provs: list[str] = []
-        for prov in YUNTING_PROVINCES:
-            cached = YUNTING_CACHE.get(prov)
-            if cached and now - cached["ts"] < YUNTING_CACHE_TTL:
-                fresh_provs.append(prov)
-                for item in json.loads(cached["data"]):
-                    cid = str(item.get("contentId", ""))
-                    sub = item.get("subtitle", "")
-                    if cid and sub and f"yt_{cid}" in stale_epg_keys:
-                        merged[cid] = sub
-                        YUNTING_EPG_CACHE[f"yt_{cid}"] = {"subtitle": sub, "ts": now}
-        if len(fresh_provs) < len(YUNTING_PROVINCES):
-            need_api_refresh = [p for p in YUNTING_PROVINCES if p not in fresh_provs]
-
-    if need_api_refresh:
-        for prov in need_api_refresh:
-            try:
-                params = {"categoryId": 0, "provinceCode": prov}
-                resp = await yunting_client.get(
-                    YUNTING_API_BASE,
-                    params=params,
-                    headers=_yunting_sign_headers(params),
-                )
-                resp.raise_for_status()
-                stations_data = resp.json().get("data", [])
-                for s in stations_data:
-                    s.setdefault("provinceCode", prov)
-                    for key in ("playUrlLow", "mp3PlayUrlLow", "mp3PlayUrlHigh"):
-                        if isinstance(s.get(key), str) and s[key].startswith("http://"):
-                            s[key] = "https://" + s[key][7:]
-                YUNTING_CACHE[prov] = {"data": json.dumps(stations_data, ensure_ascii=False), "ts": now}
-                for item in stations_data:
-                    cid = str(item.get("contentId", ""))
-                    sub = item.get("subtitle", "")
-                    if cid and sub:
-                        merged[cid] = sub
-                        YUNTING_EPG_CACHE[f"yt_{cid}"] = {"subtitle": sub, "ts": now}
-            except Exception:
-                pass
-
-    return Response(content=json.dumps(merged), media_type="application/json")
-
-
 import re as _re
 
 
@@ -1227,74 +842,6 @@ def _names_match(query: str, target: str) -> bool:
     return False
 
 
-def _find_yunting_url(station_id: str, name: str = "") -> str | None:
-
-    if station_id.startswith(("yt_", "rb_")):
-        return None
-
-    def _search(keyword: str | None, freq_digits: str) -> str | None:
-        for prov in YUNTING_PROVINCES:
-            cached = YUNTING_CACHE.get(prov)
-            if not cached:
-                continue
-            try:
-                for item in json.loads(cached["data"]):
-                    title = item.get("title", "")
-                    if keyword and keyword not in title:
-                        continue
-                    if freq_digits:
-                        title_freqs = _re.findall(r"\d{2,3}\.\d", title)
-                        if not any(f.replace(".", "") == freq_digits for f in title_freqs):
-                            continue
-                    url = item.get("playUrlLow", "")
-                    if url.startswith("http://"):
-                        url = "https://" + url[7:]
-                    if url.startswith(("http://", "https://")):
-                        return url
-            except Exception:
-                continue
-        return None
-
-    if name:
-        keyword = _re.sub(r"[\d.\s]", "", name)
-        freq_match = _re.search(r"\d{2,3}\.\d", name)
-        freq_digits = freq_match.group().replace(".", "") if freq_match else ""
-        result = _search(keyword or None, freq_digits)
-        if result:
-            return result
-
-    parts = station_id.split("_", 1)
-    if len(parts) >= 2:
-        city_code = parts[0]
-        freq_digits = _re.sub(r"[^0-9]", "", parts[1])
-        result = _search(city_code, freq_digits)
-        if result:
-            return result
-
-    return None
-
-
-def _find_myradio_url(station_id: str, name: str = "") -> str | None:
-    if station_id.startswith("mr_"):
-        return None
-
-    if not name:
-        return None
-
-    query = _normalize_name(name)
-    if not query:
-        return None
-
-    for _key, entry in MYRADIO_CACHE.items():
-        cached = _normalize_name(entry.get("name", ""))
-        if not cached:
-            continue
-        if _names_match(query, cached):
-            return entry["url"]
-
-    return None
-
-
 def _infer_rb_region(station_id: str) -> str | None:
     if station_id.startswith("mr_"):
         return "TW"
@@ -1335,17 +882,7 @@ def _find_rb_url(station_id: str, name: str = "", region: str | None = None) -> 
 
 
 def _find_fallback_url(station_id: str, name: str = "") -> str | None:
-    if station_id.startswith("yt_"):
-        cached = YUNTING_URL_CACHE.get(station_id)
-        if cached:
-            url = cached.get("url") if isinstance(cached, dict) else cached
-            if url:
-                return url
     region = _infer_rb_region(station_id)
-    for finder in (_find_yunting_url, _find_myradio_url):
-        url = finder(station_id, name)
-        if url:
-            return url
     return _find_rb_url(station_id, name, region=region)
 
 
@@ -1359,27 +896,7 @@ def _collect_all_urls(station_id: str, name: str = "") -> list[str]:
             seen.add(url)
             urls.append(url)
 
-    # yt_* 电台：优先用 yunting m3u8（比 CURRENT_STREAMS 里的直连 mp3 更可靠）
-    # 有些电台（如畅行876）的直连流被浏览器 Range 头打回 400，但 yunting m3u8 正常
-    if station_id.startswith("yt_"):
-        cached = YUNTING_URL_CACHE.get(station_id)
-        if cached:
-            _add(cached.get("url") if isinstance(cached, dict) else cached)
-
     _add(CURRENT_STREAMS.get(station_id))
-
-    # mr_* 电台：MYRADIO_CACHE 里可能还没写入 CURRENT_STREAMS
-    if station_id.startswith("mr_"):
-        mr = MYRADIO_CACHE.get(station_id)
-        if mr:
-            url = mr.get("url")
-            if isinstance(url, dict):
-                url = url.get("hlsurl") or url.get("url")
-            _add(url)
-
-    _add(_find_yunting_url(station_id, name))
-
-    _add(_find_myradio_url(station_id, name))
 
     region = _infer_rb_region(station_id)
     _add(_find_rb_url(station_id, name, region=region))
@@ -1454,31 +971,8 @@ async def get_stream_url(station_id: str, name: str = "", request: Request = Non
     if url is None:
         fetcher = STATION_FETCHER_MAP.get(station_id)
 
-        if fetcher is None and station_id.startswith("yt_"):
-            cached_url = YUNTING_URL_CACHE.get(station_id)
-            if cached_url and time.time() - cached_url["ts"] < YUNTING_URL_TTL:
-                url = cached_url["url"]
-                CURRENT_STREAMS[station_id] = url
-                logger.info("电台 %s 从 URL 缓存命中", station_id)
-
-        if fetcher is None and station_id.startswith("mr_"):
-            mr_cached = MYRADIO_CACHE.get(station_id)
-            if mr_cached and time.time() - mr_cached["ts"] < MYRADIO_CACHE_TTL:
-                url = mr_cached["url"]
-                CURRENT_STREAMS[station_id] = url
-                logger.info("电台 %s 从 myradio 缓存命中", station_id)
-
-        if url is None and fetcher is None and station_id.startswith("yt_"):
-            content_id = station_id[3:]
-            for prov in YUNTING_PROVINCES:
-                STATION_FETCHER_MAP[station_id] = yunting(prov, content_id)
-                fetcher = STATION_FETCHER_MAP[station_id]
-                break
-
-        if url is None and fetcher is None and not station_id.startswith("mr_"):
+        if url is None and fetcher is None:
             raise HTTPException(status_code=404, detail="未知电台。")
-        if url is None and station_id.startswith("mr_"):
-            raise HTTPException(status_code=503, detail="myradio 电台数据正在刷新，请稍后重试。")
         if url is None and fetcher is not None:
             try:
                 url = await fetcher()

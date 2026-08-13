@@ -119,7 +119,6 @@ def _is_radio_station_id(_m, station_id: str) -> bool:
         station_id in _m.CURRENT_STREAMS
         or station_id in _m.STATION_FETCHER_MAP
         or station_id in _m.DIRECT_STREAM_STATIONS
-        or station_id in _m.MYRADIO_CACHE
     )
 
 
@@ -137,15 +136,6 @@ def _playback_source_supported(_m, source: dict) -> bool:
 
 async def _radio_station_url(_m, station_id: str) -> str:
     real_url = _m.CURRENT_STREAMS.get(station_id)
-    if not real_url and station_id in _m.MYRADIO_CACHE:
-        cached = _m.MYRADIO_CACHE.get(station_id) or {}
-        if _m.time.time() - float(cached.get("ts") or 0) < _m.MYRADIO_CACHE_TTL:
-            raw = cached.get("url")
-            if isinstance(raw, dict):
-                raw = raw.get("hlsurl") or raw.get("url")
-            real_url = str(raw or "")
-            if real_url:
-                _m.CURRENT_STREAMS[station_id] = real_url
     if not real_url and station_id in _m.STATION_FETCHER_MAP:
         try:
             real_url = await _m.refresh_station_stream_url(station_id)
@@ -405,8 +395,8 @@ async def media_channel_stream(
 ):
     """连续音频/直连流入口。
 
-    主要用于 MyRadio、DIRECT_STREAM_STATIONS 以及其它非 HLS 电台源。这里只暴露
-    稳定 station id，真实上游 URL 仍放在 signed stream handle 内。
+    主要用于非 HLS 电台源。这里只暴露稳定 station id，真实上游 URL
+    仍放在 signed stream handle 内。
     """
     import main as _m
 

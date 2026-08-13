@@ -59,7 +59,7 @@ class AccessControlTest(unittest.TestCase):
 
         self.assertEqual(client.get("/api/stations").status_code, 401)
         self.assertEqual(client.get("/api/iptv/channels").status_code, 401)
-        self.assertEqual(client.get("/api/yunting/all").status_code, 401)
+        self.assertEqual(client.get("/api/yunting/all").status_code, 404)
         self.assertEqual(
             client.get("/api/media/proxy/playlist/test-handle").status_code,
             401,

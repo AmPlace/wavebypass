@@ -77,7 +77,7 @@ class EpgSourceManagementApiTest(unittest.IsolatedAsyncioTestCase):
         await self.client.aclose()
         self.main.app.dependency_overrides.clear()
         self.main.app.state.automation_service = None
-        for client in (self.main.http_client, self.main.yunting_client):
+        for client in (self.main.http_client,):
             if not client.is_closed:
                 await client.aclose()
         for key, value in self.old_env.items():
