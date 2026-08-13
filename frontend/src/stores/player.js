@@ -120,6 +120,22 @@ export const usePlayerStore = defineStore('player', {
       this.stationMap[station.id] = station
     },
 
+    addRadioStations(stations) {
+      const existingIds = new Set(this.stationList.map((station) => station.id))
+      const next = [...this.stationList]
+      const merged = { ...this.stationMap }
+      for (const station of Array.isArray(stations) ? stations : []) {
+        if (!station?.id || merged[station.id]) continue
+        merged[station.id] = station
+        if (!existingIds.has(station.id)) {
+          existingIds.add(station.id)
+          next.push(station)
+        }
+      }
+      this.stationList = next
+      this.stationMap = merged
+    },
+
     loadStations(stations) {
       this.stationList = stations
       const merged = { ...this.stationMap }
@@ -130,6 +146,38 @@ export const usePlayerStore = defineStore('player', {
     updateStationEpg(stationId, subtitle) {
       const station = this.stationMap[stationId]
       if (station) station.subtitle = subtitle
+    },
+
+    updateRadioProgramme(stationId, programmes) {
+      const station = this.stationMap[stationId]
+      if (!station || !station.radioStationId) return
+      const items = Array.isArray(programmes) ? programmes : []
+      station.radioProgrammes = items
+      const now = Date.now()
+      const current = items.find((item) => {
+        const start = Date.parse(item?.start || '')
+        const end = Date.parse(item?.end || '')
+        return Number.isFinite(start) && Number.isFinite(end) && start <= now && now < end
+      })
+      const fallback = items.find((item) => item?.subtitle || item?.title)
+      if (current || fallback) {
+        station.subtitle = String(current?.subtitle || current?.title || fallback?.subtitle || fallback?.title || '')
+      }
+    },
+
+    selectRadioSource(stationId, sourceId) {
+      const station = this.stationMap[stationId]
+      const wanted = String(sourceId || '').trim()
+      if (!station?.radioStationId || !wanted) return false
+      const source = (station.radioSources || []).find((item) => item?.source_id === wanted)
+      if (!source) return false
+      station.radioSourceId = wanted
+      const listItem = this.stationList.find((item) => item.id === stationId)
+      if (listItem) listItem.radioSourceId = wanted
+      if (this.currentStation === stationId && this.isPlaying) {
+        this.isLoading = true
+      }
+      return true
     },
 
     expandPlayer() {

@@ -185,6 +185,18 @@
                 >
                   <svg viewBox="0 0 24 24" fill="none"><path d="M6 7.5h12M6 12h12M6 16.5h12" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>
                 </button>
+                <button
+                  v-if="!isIptvMode && currentRadioSourceOptions.length > 1"
+                  ref="sourceButtonRef"
+                  type="button"
+                  class="utility-btn relative"
+                  :aria-expanded="sourceMenuOpen"
+                  aria-controls="radio-source-menu"
+                  aria-label="切换电台播放源"
+                  @click.stop="toggleSourceMenu"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M6 7.5h12M6 12h12M6 16.5h12"/></svg>
+                </button>
               </div>
             </section>
 
@@ -393,14 +405,14 @@
     <Transition name="fade">
       <div
         v-show="sourceMenuOpen"
-        id="iptv-source-menu"
+        :id="isIptvMode ? 'iptv-source-menu' : 'radio-source-menu'"
         class="fixed z-[80] overflow-hidden rounded-2xl border border-neutral-200 bg-white/95 p-1.5 text-left shadow-xl shadow-black/10 backdrop-blur dark:border-white/10 dark:bg-neutral-800/95"
         :style="sourceMenuStyle"
         @click.stop
       >
         <div class="flex items-center justify-between px-2.5 py-2">
           <span class="text-xs font-medium text-neutral-400 dark:text-neutral-500">播放源</span>
-          <span class="text-xs text-neutral-400 dark:text-neutral-500">{{ currentIptvSourceLabel }}</span>
+          <span class="text-xs text-neutral-400 dark:text-neutral-500">{{ isIptvMode ? currentIptvSourceLabel : currentRadioSourceLabel }}</span>
         </div>
         <div class="overscroll-contain overflow-y-auto [-webkit-overflow-scrolling:touch]" :style="{ maxHeight: sourceMenuListMaxHeight }">
           <button
@@ -434,6 +446,20 @@
               <p class="mt-0.5 truncate text-xs text-neutral-400 dark:text-neutral-500">
                 {{ source.meta }}
               </p>
+            </div>
+          </button>
+          <button
+            v-for="source in (isIptvMode ? [] : currentRadioSourceOptions)"
+            :key="source.source_id"
+            type="button"
+            class="flex w-full items-center gap-2.5 rounded-xl px-2.5 py-2 text-left transition-colors hover:bg-neutral-100 dark:hover:bg-neutral-700/70"
+            :class="{ 'bg-neutral-100 dark:bg-neutral-700/70': source.active }"
+            @click="switchRadioSource(source.source_id)"
+          >
+            <span class="size-2.5 shrink-0 rounded-full bg-emerald-500"></span>
+            <div class="min-w-0 flex-1">
+              <p class="truncate text-sm font-medium text-neutral-800 dark:text-neutral-100">{{ source.title }}</p>
+              <p class="mt-0.5 truncate text-xs text-neutral-400 dark:text-neutral-500">{{ source.meta }}</p>
             </div>
           </button>
         </div>
@@ -1237,9 +1263,25 @@ const iptvSourceOptions = computed(() => {
   })
 })
 
+const currentRadioSourceOptions = computed(() => {
+  if (isIptvMode.value) return []
+  const station = currentStationData.value
+  return (station?.radioSources || []).map((source) => ({
+    source_id: source.source_id,
+    active: source.source_id === station.radioSourceId,
+    title: `${source.provider_key || 'radio'} · ${source.provider_station_id || source.source_id}`,
+    meta: [source.health_status, source.lifecycle_state].filter(Boolean).join(' · ') || '可用',
+  }))
+})
+
 const currentIptvSourceLabel = computed(() => {
   const current = iptvSourceOptions.value[playerStore.iptvUrlIndex]
   return current ? `${current.index + 1}/${iptvSourceOptions.value.length}` : '未选择'
+})
+
+const currentRadioSourceLabel = computed(() => {
+  const current = currentRadioSourceOptions.value.find((source) => source.active)
+  return current ? current.title : '未选择'
 })
 
 async function loadIptvChannels() {
@@ -2365,6 +2407,13 @@ async function switchIptvSource(index) {
   }
 
   await playCurrentIptvUrl(attemptId, { allowStartupRace: false })
+}
+
+function switchRadioSource(sourceId) {
+  if (isIptvMode.value || !currentStation.value) return
+  if (playerStore.selectRadioSource(currentStation.value, sourceId)) {
+    sourceMenuOpen.value = false
+  }
 }
 
 function clearRuntimeHandlerCleanup(target) {

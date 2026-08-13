@@ -21,7 +21,7 @@
           </span>
           <h1 class="truncate text-lg font-semibold leading-none text-[var(--text-primary)]">电台直播</h1>
           <span class="shrink-0 text-sm text-[var(--text-secondary)]">共 {{ filteredStations.length }} 个电台</span>
-          <span v-if="ytLoading || mrLoading" class="hidden text-sm text-[var(--text-tertiary)] sm:inline">正在加载...</span>
+          <span v-if="radioLoading" class="hidden text-sm text-[var(--text-tertiary)] sm:inline">正在加载...</span>
         </div>
 
         <button
@@ -112,8 +112,7 @@
 <script setup>
 import { storeToRefs } from 'pinia'
 import { usePlayerStore } from '../stores/player'
-import { fetchAllYuntingStations } from '../api/yunting'
-import { fetchMyradioStations } from '../api/myradio'
+import { fetchRadioProgramme, fetchRadioStations } from '../api/radioStations'
 import { computed, inject, onBeforeUnmount, onMounted, ref, watch, watchEffect } from 'vue'
 import { useScroll, useThrottleFn } from '@vueuse/core'
 import { API_BASE } from '../apiBase'
@@ -123,11 +122,7 @@ import TagFilterRow from '../components/TagFilterRow.vue'
 const playerStore = usePlayerStore()
 const { currentStation, isPlaying, isLoading, stationList } = storeToRefs(playerStore)
 
-const ytStations = ref([])
-const ytLoading = ref(false)
-
-const mrStations = ref([])
-const mrLoading = ref(false)
+const radioLoading = ref(false)
 const {
   displayName: stationDisplayName,
   shouldShowLogo: shouldShowStationLogo,
@@ -143,59 +138,11 @@ const {
   fallbackName: '未知电台',
 })
 
-// EPG：初始 subtitle 从云听 API，定期 /api/yunting/epg 刷新，同步到 store 触发 MediaSession
-const epgMap = ref({})
-
-function syncEpg(data) {
-  epgMap.value = data
-  for (const [cid, subtitle] of Object.entries(data)) {
-    playerStore.updateStationEpg(`yt_${cid}`, subtitle)
-  }
-}
-
-watch(ytStations, (list) => {
-  const initial = {}
-  for (const s of list) {
-    if (s.subtitle) initial[s.id.replace('yt_', '')] = s.subtitle
-  }
-  if (Object.keys(initial).length) syncEpg(initial)
-}, { once: true })
-
-const T2S = { '樂':'乐','聲':'声','網':'网','廣':'广','聯':'联','華':'华','國':'国','東':'东','電':'电','視':'视','經':'经','發':'发','動':'动','學':'学','機':'机','區':'区','車':'车','產':'产','業':'业','問':'问','開':'开','長':'长','報':'报','點':'点','號':'号','團':'团','場':'场','處':'处','間':'间','書':'书','術':'术','議':'议','記':'记','設':'设','計':'计','話':'话','題':'题','調':'调','論':'论','辦':'办','營':'营','環':'环','競':'竞','衛':'卫','實':'实','總':'总','統':'统','義':'义','資':'资','運':'运','選':'选','達':'达','進':'进','鄉':'乡','錢':'钱','鐵':'铁','門':'门','陽':'阳','雲':'云','飛':'飞','魚':'鱼','馬':'马','風':'风','齊':'齐','龍':'龙' }
-
-function normalizeForDedup(str) {
-  return (str || '').replace(/\s+/g, '').toLowerCase().replace(/[一-鿿]/g, (c) => T2S[c] || c)
-}
-
-function deduplicateByName(stations) {
-  const groups = new Map()
-  for (const s of stations) {
-    const key = normalizeForDedup(s.name)
-    if (!groups.has(key)) groups.set(key, [])
-    groups.get(key).push(s)
-  }
-  return [...groups.values()].map((group) => {
-    if (group.length === 1) return group[0]
-    const pri = (s) => {
-      if (s.id.startsWith('mr_')) return 1
-      if (s.id.startsWith('yt_')) return 2
-      if (s.id.startsWith('rb_')) return 3
-      return 0
-    }
-    group.sort((a, b) => pri(a) - pri(b))
-    const primary = { ...group[0] }
-    primary.tags = [...new Set(group.flatMap((s) => s.tags || []))]
-    if (!primary.logoUrl) {
-      const found = group.find((s) => s.logoUrl)
-      if (found) primary.logoUrl = found.logoUrl
-    }
-    return primary
-  })
-}
-
 const allStations = computed(() => {
   if (!geoConfigLoaded.value) return []
-  const merged = deduplicateByName([...stationList.value, ...mrStations.value, ...ytStations.value])
+  // RadioStation/RadioStationSource identities are explicit.  Never merge
+  // providers by display name, frequency, or an upstream URL.
+  const merged = stationList.value
   if (!geoConfig.value.geoRestrict) return merged
   const blocked = new Set(geoConfig.value.blockedRegions || [])
   if (!blocked.size) return merged
@@ -292,7 +239,7 @@ function isCurrentStationLoading(stationId) {
 }
 
 function stationSubtitle(station) {
-  return station.subtitle || epgMap.value[station.id.replace('yt_', '')] || ''
+  return station.subtitle || ''
 }
 
 function stationLogoUrl(station) {
@@ -323,7 +270,22 @@ const gridRef = ref(null)
 const containerWidth = ref(1024)
 const viewportWidth = ref(typeof window === 'undefined' ? 1280 : window.innerWidth)
 let resizeObserver = null
-let epgTimer = null
+let programmeRequestSeq = 0
+let programmeTimer = null
+
+async function refreshCurrentRadioProgramme(stationId = currentStation.value) {
+  const station = playerStore.stationMap[stationId]
+  if (!station?.radioStationId || !station?.radioSourceId) return
+  const requestSeq = ++programmeRequestSeq
+  const result = await fetchRadioProgramme(station)
+  if (requestSeq !== programmeRequestSeq || currentStation.value !== stationId || !result) return
+  playerStore.updateRadioProgramme(stationId, result.programmes || [])
+}
+
+watch(currentStation, (stationId) => {
+  programmeRequestSeq += 1
+  if (stationId) refreshCurrentRadioProgramme(stationId)
+})
 
 const { y: scrollY } = useScroll(scrollRef)
 const throttledScrollY = useThrottleFn((val) => { scrollPosition.value = val }, 16)
@@ -400,31 +362,20 @@ onMounted(() => {
   })()
 
   ;(async () => {
-    ytLoading.value = true
-    const list = await fetchAllYuntingStations()
-    ytStations.value = list
-    list.forEach((s) => playerStore.addStation(s))
-    ytLoading.value = false
+    radioLoading.value = true
+    const list = await fetchRadioStations()
+    playerStore.addRadioStations(list)
+    radioLoading.value = false
+    if (currentStation.value) refreshCurrentRadioProgramme(currentStation.value)
   })()
 
-  ;(async () => {
-    mrLoading.value = true
-    const list = await fetchMyradioStations()
-    mrStations.value = list
-    list.forEach((s) => playerStore.addStation(s))
-    mrLoading.value = false
-  })()
-
-  epgTimer = setInterval(async () => {
-    try {
-      const res = await fetch(`${API_BASE}/api/yunting/epg`)
-      if (res.ok) syncEpg(await res.json())
-    } catch {}
+  programmeTimer = setInterval(() => {
+    if (currentStation.value) refreshCurrentRadioProgramme(currentStation.value)
   }, 180_000)
 })
 
 onBeforeUnmount(() => {
   if (resizeObserver) resizeObserver.disconnect()
-  if (epgTimer) clearInterval(epgTimer)
+  if (programmeTimer) clearInterval(programmeTimer)
 })
 </script>

@@ -588,6 +588,31 @@ test('同一 station 重选：重新 load 并正常播放', async () => {
   assert.equal(h.audio.loadCalls >= 4, true)
 })
 
+test('persisted Radio source resolves by source_id and bypasses legacy URL racing', async () => {
+  const calls = []
+  const h = createHarness({
+    fetchImpl: async (url) => {
+      calls.push(String(url))
+      assert.equal(String(url).includes('upstream.invalid'), false)
+      if (String(url).includes('/api/radio/stations/radio_a/resolve')) {
+        return responseJson({ source_type: 'audio_http' })
+      }
+      throw new Error(`unexpected Radio request ${url}`)
+    },
+  })
+  h.store.stationMap.RADIO = {
+    id: 'RADIO', name: 'Persisted Radio', radioStationId: 'radio_a', radioSourceId: 'source_a',
+  }
+  h.state.currentStation.value = 'RADIO'
+  h.engine.loadStation('RADIO')
+  await flush()
+
+  assert.deepEqual(calls, ['/api/radio/stations/radio_a/resolve?source_id=source_a'])
+  assert.equal(h.audio.src, '/api/media/radio/radio_a/stream?source_id=source_a')
+  assert.deepEqual(h.audio.playCalls, ['/api/media/radio/radio_a/stream?source_id=source_a'])
+  assert.equal(h.probeAudios.length, 0)
+})
+
 test('进入 auth 时 Radio 停止 HLS/audio/probe 并清理 MediaSession，旧回调不能复活', async () => {
   const timers = createTimerTracker()
   const playDeferred = deferred()

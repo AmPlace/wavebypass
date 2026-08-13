@@ -60,6 +60,17 @@ watch(currentStation, (stationId) => {
   }
 })
 
+watch(
+  () => {
+    const station = currentStation.value ? playerStore.stationMap[currentStation.value] : null
+    return station?.radioSourceId || ''
+  },
+  (sourceId, previousSourceId) => {
+    if (!sourceId || sourceId === previousSourceId || !playerStore.isPlaying) return
+    radioEngine.loadStation(currentStation.value)
+  },
+)
+
 watch(() => playerStore.currentIptvChannel, (channel) => {
   if (channel) radioEngine.stopRadioAttempt()
 })

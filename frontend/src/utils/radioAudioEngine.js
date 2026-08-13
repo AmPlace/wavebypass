@@ -37,6 +37,22 @@ export function createRadioAudioEngine({
     return Boolean(getDirectUrl(stationId))
   }
 
+  function persistedRadioStation(stationId) {
+    const station = playerStore.stationMap[stationId]
+    if (!station?.radioStationId || !station?.radioSourceId) return null
+    return station
+  }
+
+  function radioResolveUrl(station) {
+    const query = new URLSearchParams({ source_id: String(station.radioSourceId) })
+    return `${API_BASE}/api/radio/stations/${encodeURIComponent(station.radioStationId)}/resolve?${query}`
+  }
+
+  function radioMediaUrl(station, path) {
+    const query = new URLSearchParams({ source_id: String(station.radioSourceId) })
+    return `${API_BASE}/api/media/radio/${encodeURIComponent(station.radioStationId)}/${path}?${query}`
+  }
+
   function isAttemptActive(attempt) {
     return Boolean(
       attempt
@@ -561,11 +577,14 @@ export function createRadioAudioEngine({
     return []
   }
 
-  function loadStation(stationId) {
+  function loadStation(stationId, options = {}) {
     if (!audioRef.value || !stationId) return null
 
     const attempt = beginAttempt(stationId)
-    const playlistUrl = `${API_BASE}/api/media/channel/${encodeURIComponent(stationId)}/playlist.m3u8`
+    const radioStation = persistedRadioStation(stationId)
+    const playlistUrl = radioStation
+      ? radioMediaUrl(radioStation, 'playlist.m3u8')
+      : `${API_BASE}/api/media/channel/${encodeURIComponent(stationId)}/playlist.m3u8`
 
     destroyCurrentHls()
     resetAudioSource()
@@ -582,14 +601,46 @@ export function createRadioAudioEngine({
     fallbackStationId = stationId
     directProbeWinner = null
 
+    if (radioStation && !options.radioTransport) {
+      const controller = new AbortController()
+      const timer = setTimer(() => controller.abort(), 10_000)
+      const removeCleanup = addAttemptCleanup(attempt, () => controller.abort())
+      ;(async () => {
+        try {
+          const response = await fetchImpl(radioResolveUrl(radioStation), { signal: controller.signal })
+          if (!isAttemptActive(attempt)) return
+          if (!response.ok) throw new Error('Radio source resolve failed')
+          const resolved = await response.json()
+          const transport = String(resolved?.source_type || '').trim().toLowerCase()
+          if (!['audio_http', 'hls'].includes(transport)) throw new Error('Unsupported Radio transport')
+          if (isAttemptActive(attempt)) loadStation(stationId, { radioTransport: transport })
+        } catch (error) {
+          if (!isAttemptActive(attempt)) return
+          logger.warn('Radio source resolve failed.', error)
+          playerStore.setPlaybackError('电台播放源解析失败，请稍后重试。')
+          playerStore.togglePlay(false)
+        } finally {
+          clearTimer(timer)
+          removeCleanup()
+        }
+      })()
+      return attempt
+    }
+
+    if (radioStation && options.radioTransport === 'audio_http') {
+      directStreamMode.value = 'proxy'
+      if (setMainAudioSrc(attempt, radioMediaUrl(radioStation, 'stream'))) playAudioSafely(attempt)
+      return attempt
+    }
+
     if (directStreamStationMap[stationId]) {
       directStreamMode.value = 'direct'
       if (setMainAudioSrc(attempt, directStreamStationMap[stationId].directUrl)) playAudioSafely(attempt)
       return attempt
     }
 
-    const directUrl = getDirectUrl(stationId)
-    const hasLivePath = playerStore.stationMap[stationId]?.livePath
+    const directUrl = radioStation ? '' : getDirectUrl(stationId)
+    const hasLivePath = radioStation || playerStore.stationMap[stationId]?.livePath
 
     if (directUrl && !hasLivePath) {
       directStreamMode.value = 'direct'
