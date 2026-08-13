@@ -110,13 +110,7 @@ CDN_REQUEST_HEADERS = {
 }
 
 def get_cdn_headers_for_station(station_id: str) -> dict[str, str]:
-    headers = CDN_REQUEST_HEADERS.copy()
-    
-    if station_id.startswith("qz_"):
-        headers["Referer"] = "https://wxqz2.qztv.cn"
-        headers["User-Agent"] = "AppleCoreMedia/1.0.0.23E261 (iPhone; U; CPU OS 26_4_2 like Mac OS X; zh_cn)"
-        
-    return headers
+    return CDN_REQUEST_HEADERS.copy()
 
 TOKEN_REFRESH_HTTP_STATUS_CODES = {401, 403, 404, 410}
 
@@ -142,10 +136,6 @@ STATIC_STATIONS = [
     {"id": "hitfm_yilan", "name": "Hit FM 宜兰", "logoText": "宜兰", "logoUrl": "/logos/hitfm.png", "subtitle": "FM 97.1", "tags": ["music", "TW"]},
     {"id": "hitfm_huadong", "name": "Hit FM 花东", "logoText": "花东", "logoUrl": "/logos/hitfm.png", "subtitle": "FM 107.7", "tags": ["music", "TW"]},
     {"id": "pop917", "name": "POP Radio", "logoText": "POP", "logoUrl": "/logos/pop917.jpg", "subtitle": "FM 91.7", "tags": ["music", "TW"]},
-    {"id": "qz_fm889", "name": "泉州新闻综合", "logoText": "FM889", "logoUrl": "/logos/qz889.png", "subtitle": "FM 88.9", "tags": ["CN", "福建", "news"]},
-    {"id": "qz_fm904", "name": "泉州交通广播", "logoText": "FM904", "logoUrl": "/logos/qz904.png", "subtitle": "FM 90.4", "tags": ["CN", "福建", "news"]},
-    {"id": "qz_fm1059", "name": "泉州刺桐之声", "logoText": "FM1059", "logoUrl": "/logos/qz1059.png", "subtitle": "FM 105.9", "tags": ["CN", "福建", "talk"]},
-    {"id": "qz_fm923", "name": "泉州经济生活", "logoText": "FM923", "logoUrl": "/logos/qz923.png", "subtitle": "FM 92.3", "tags": ["CN", "福建", "news"]},
     # ── 香港电台 (tingfm.com) ──
     {"id": "tf_909", "name": "香港电台第一台", "logoText": "RTHK1", "logoUrl": "https://cdn.tingfm.com/tingfm/2013/04/file5e8d6ff30254e.png?x-oss-process=image/resize,m_fill,w_200,h_200", "subtitle": "RTHK Radio 1", "tags": ["HK", "news"]},
     {"id": "tf_910", "name": "香港电台第二台", "logoText": "RTHK2", "logoUrl": "", "subtitle": "RTHK Radio 2", "tags": ["HK", "music"]},

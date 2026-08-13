@@ -4,7 +4,6 @@ import os
 import re
 from collections.abc import Awaitable, Callable
 import asyncio
-import random
 import httpx
 
 
@@ -90,97 +89,6 @@ async def fetch_pop917():
         channel_id="1",
         cookie_env="POP917_COOKIE"
     )
-
-# ==========================================
-# 泉州无线 APP 系列电台
-# ==========================================
-
-QZTV_API_URL = "https://wxqz2.qztv.cn/api/media/info"
-
-QZTV_HEADERS = {
-    "Host": "wxqz2.qztv.cn",
-    "Accept": "*/*",
-    "Content-Type": "application/x-www-form-urlencoded",
-    "User-Agent": "QZWireless/20241122 CFNetwork/3860.500.112 Darwin/25.4.0",
-}
-
-QZTV_PAYLOAD_TEMPLATE = {
-    "app_version": "3.3.4",
-    "channel_type": "ios",
-    "imei": "6EF23893-9A3E-4C0C-B124-05EA6AFA6EAC",
-    "os_version": "26.4.2",
-    "device_model": "iPhone17,2",
-    "user_id": "",
-    "session_id": "",
-    "radio_id": "",  # 默认设为空，兼容前面的 88.9 和 90.4
-}
-
-QZTV_TIMEOUT = httpx.Timeout(10.0)
- 
-async def fetch_qztv_base(media_id: str, skin: str, station_name: str, radio_id: str = "") -> str:    
-    await asyncio.sleep(random.uniform(5.0, 15.0))
-    
-    payload = QZTV_PAYLOAD_TEMPLATE.copy()
-    payload["media_id"] = media_id
-    payload["skin"] = skin
-    payload["radio_id"] = radio_id  # 把 radio_id 也塞进去
-    
-    async with httpx.AsyncClient(timeout=QZTV_TIMEOUT, verify=False) as client:
-        response = await client.post(QZTV_API_URL, headers=QZTV_HEADERS, data=payload)
-    
-    if response.status_code != 200:
-        logger.error(f"[{station_name}] 遭遇非 200 响应！状态码: {response.status_code}, 内容: {response.text}")
-        
-    response.raise_for_status()
-    
-    try:
-        data = response.json()
-        if data.get("error_code") != 0:
-             raise ValueError(f"{station_name} API 业务报错: {data}")
-        real_url = data["data"]["media_info"]["video_path"]
-    except (ValueError, KeyError, TypeError) as e:
-        logger.error("解析 %s API 返回 JSON 失败: %s", station_name, response.text)
-        raise ValueError(f"无法提取 {station_name} 播放地址。") from e
-
-    if not real_url.startswith(("http://", "https://")):
-        raise ValueError(f"{station_name} 提取到的地址格式异常。")
-
-    logger.info("%s 抓取成功：%s", station_name, real_url)
-    return real_url
-
-# -----------------------------
-# 泉州台各频道具体实现
-# -----------------------------
-
-async def fetch_qz_fm889() -> str:
-    return await fetch_qztv_base(
-        media_id="3", 
-        skin="88daf469b4bc0ebb8b760e20f62003a5", 
-        station_name="泉州新闻综合 88.9"
-    )
-
-async def fetch_qz_fm904() -> str:
-    return await fetch_qztv_base(
-        media_id="4", 
-        skin="27374ae65783ecd9ea344017f42dda85", 
-        station_name="泉州交通广播 90.4"
-    )
-
-async def fetch_qz_fm1059() -> str:
-    return await fetch_qztv_base(
-        media_id="6", 
-        skin="9027907a948c415a061ff8fec3636b80", 
-        station_name="泉州刺桐之声 105.9"
-    )
-
-async def fetch_qz_fm923() -> str:
-    return await fetch_qztv_base(
-        media_id="5", 
-        skin="ff3409f7acdeeb923acaf3c4bddc91fc", 
-        station_name="泉州经济生活 92.3",
-        radio_id="1"  #特别的参数
-    )
-
 
 # ==========================================
 # tingfm.com 系列电台
@@ -428,10 +336,6 @@ STATION_FETCHER_MAP: dict[str, StationFetcher] = {
     "hitfm_tainan": fetch_hitfm_tainan,
     "hitfm_yilan": fetch_hitfm_yilan,
     "hitfm_huadong": fetch_hitfm_huadong,
-    "qz_fm889": fetch_qz_fm889,
-    "qz_fm904": fetch_qz_fm904,
-    "qz_fm1059": fetch_qz_fm1059,
-    "qz_fm923": fetch_qz_fm923,
     "pop917": fetch_pop917,
     # "fj_traffic": tingfm(94),   # 福建交通广播 FM100.7
 }
