@@ -7,7 +7,7 @@ import unittest
 from plugin_runtime import (
     LifecycleState, MemoryCapabilityStubs, PermissionGate, PermissionPolicy, PluginError,
     PluginInstance, PluginRegistry, encode_frame, read_frame, validate_manifest,
-    validate_stream_descriptor,
+    validate_descriptor_metadata, validate_stream_descriptor,
 )
 
 
@@ -104,12 +104,67 @@ class ValidationPermissionRegistryTest(unittest.TestCase):
         self.assertEqual(validate_stream_descriptor(rtsp)["transport"], "rtsp")
         rich = descriptor("dash")
         rich.update({"quality_variants": [{"name": "best"}], "drm": {"scheme": "widevine"},
-                     "encryption": {"method": "aes-128"}, "provider_diagnostics": {"id": "safe"}})
+                     "encryption": {"method": "aes-128"},
+                     "provider_diagnostics": {"id": "safe", "nested": {"live": True}},
+                     "probe_hints": {"page_live": True, "identity": ["channel", "video"]}})
         validate_stream_descriptor(rich)
         bad = descriptor(); bad["headers"] = {"Cookie": "redacted"}
         with self.assertRaises(PluginError) as raised:
             validate_stream_descriptor(bad)
         self.assertEqual(raised.exception.code, "INVALID_PLUGIN_RESPONSE")
+
+    def test_descriptor_metadata_is_bounded_json_data(self):
+        valid = {"identity": {"channel_id": "channel-1", "revision": 2}, "live": True,
+                 "values": [None, 1, 1.5, "safe"]}
+        self.assertEqual(validate_descriptor_metadata(valid), valid)
+
+        invalid_values = [
+            {"callable": lambda: None},
+            {"bytes": b"not-json"},
+            {"value": float("inf")},
+            {"nested": {"a": {"b": {"c": {"d": {"e": {"f": True}}}}}}},
+            {"items": list(range(65))},
+            {"text": "x" * 2049},
+            {"text": "x" * (16 * 1024)},
+        ]
+        for value in invalid_values:
+            with self.subTest(value=type(next(iter(value.values()))).__name__):
+                with self.assertRaises(PluginError) as raised:
+                    validate_descriptor_metadata(value)
+                self.assertEqual(raised.exception.code, "INVALID_PLUGIN_RESPONSE")
+
+        bad_descriptor = descriptor()
+        bad_descriptor["probe_hints"] = {"unsupported": object()}
+        with self.assertRaises(PluginError):
+            validate_stream_descriptor(bad_descriptor)
+
+    def test_descriptor_bridge_preserves_generic_extensions_without_promoting_authority(self):
+        from provider_resolver import ProviderResolver
+
+        base = descriptor()
+        bridged = ProviderResolver._bridge_descriptor("synthetic", base)
+        self.assertNotIn("provider_diagnostics", bridged)
+        self.assertNotIn("probe_hints", bridged)
+
+        base.update({
+            "provider_diagnostics": {"identity": {"channel_id": "c-1"}},
+            "probe_hints": {"page_live": True, "probe_status": "online"},
+        })
+        bridged = ProviderResolver._bridge_descriptor("synthetic", base)
+        self.assertEqual(bridged["provider_diagnostics"], {"identity": {"channel_id": "c-1"}})
+        self.assertEqual(bridged["probe_hints"], {"page_live": True, "probe_status": "online"})
+        self.assertEqual(bridged["headers"], {})
+        self.assertFalse(bridged["requires_proxy"])
+
+    def test_sdk_descriptor_serializes_generic_metadata_contract(self):
+        from waveflow_plugin_sdk import StreamDescriptor
+
+        value = StreamDescriptor.hls(
+            "https://example.invalid/live",
+            provider_diagnostics={"identity": {"channel_id": "c-1"}},
+            probe_hints={"page_live": True},
+        ).as_contract()
+        self.assertEqual(validate_stream_descriptor(value), value)
 
     def test_permission_allow_deny_and_memory_stubs(self):
         manifest = validate_manifest(manifest_data(permissions={"cache": {}, "subprocess": {}}))

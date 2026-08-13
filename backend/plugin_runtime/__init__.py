@@ -4,11 +4,11 @@ from .permissions import MemoryCapabilityStubs, PermissionGate, PermissionPolicy
 from .protocol import MAX_FRAME_BYTES, PROTOCOL_VERSION, encode_frame, read_frame
 from .registry import LifecycleState, PluginInstance, PluginRegistry
 from .runtime import PluginRuntime
-from .validation import validate_station_ref, validate_stream_descriptor
+from .validation import validate_descriptor_metadata, validate_station_ref, validate_stream_descriptor
 
 __all__ = [
     "LifecycleState", "MAX_FRAME_BYTES", "MemoryCapabilityStubs", "PROTOCOL_VERSION", "PermissionGate",
     "PermissionPolicy", "PluginError", "PluginInstance", "PluginManifest", "PluginRegistry", "PluginRuntime",
     "encode_frame", "load_manifest", "read_frame", "validate_manifest", "validate_station_ref",
-    "validate_stream_descriptor",
+    "validate_descriptor_metadata", "validate_stream_descriptor",
 ]

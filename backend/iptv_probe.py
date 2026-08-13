@@ -122,6 +122,15 @@ def _headers_from_channel(ch: dict[str, Any]) -> dict[str, str]:
     return headers
 
 
+def _descriptor_probe_metadata(resolved: dict[str, Any]) -> dict[str, Any]:
+    """Return descriptor metadata as probe observations, never controls."""
+    return {
+        field: resolved[field]
+        for field in ("provider_diagnostics", "probe_hints")
+        if isinstance(resolved.get(field), dict)
+    }
+
+
 def _ffmpeg_input_timeout_args(url: str, timeout_seconds: float) -> list[str]:
     timeout_us = str(int(timeout_seconds * 1_000_000))
     if (url or "").lower().startswith("rtsp://"):
@@ -685,6 +694,7 @@ async def probe_channel_source(ch: dict[str, Any], client: httpx.AsyncClient, *,
             adapter_title = str(resolved.get("title") or resolved.get("anchor_name") or "")
             resolved_youtube_video_id = str(resolved.get("youtube_video_id") or "").strip()
             resolved_youtube_page_is_live = bool(resolved.get("youtube_page_is_live"))
+            descriptor_metadata = _descriptor_probe_metadata(resolved)
             if source_type == "probe_only":
                 return _empty_result(
                     probe_status="online",
@@ -702,6 +712,7 @@ async def probe_channel_source(ch: dict[str, Any], client: httpx.AsyncClient, *,
                         "probe_quality": "metadata_only",
                         "youtube_page_is_live": True,
                         "source_type": source_type,
+                        **descriptor_metadata,
                     }),
                 )
             meta.update({
@@ -711,6 +722,7 @@ async def probe_channel_source(ch: dict[str, Any], client: httpx.AsyncClient, *,
                 "volatile_url": bool(resolved.get("volatile_url")),
                 "cacheable": resolved.get("cacheable"),
                 "warnings": resolved.get("warnings") or [],
+                **descriptor_metadata,
             })
         except AdapterResolveError as exc:
             status = "not_live" if is_adapter_not_live_error(exc.error_code) else "error"

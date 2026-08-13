@@ -219,3 +219,27 @@ class PluginRuntimeProcessTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(Path(diagnostics["cwd"]).resolve(), Path(directory).resolve())
             self.assertEqual({key: diagnostics[key] for key in ("secret", "path")},
                              {"secret": "", "path": "/usr/bin"})
+
+    async def test_metadata_survives_ipc_bridge_and_restart_without_authority(self):
+        from provider_resolver import ProviderResolver
+
+        runtime, instance = await self.active(mode="metadata_then_crash")
+        descriptor = await runtime.request(instance, "tv.resolve_stream", {})
+        bridged = ProviderResolver._bridge_descriptor("synthetic", descriptor)
+        self.assertEqual(bridged["provider_diagnostics"], {
+            "identity": {"channel": "fixture", "video": "v-1"}, "page_live": True,
+        })
+        self.assertEqual(bridged["probe_hints"], {
+            "preferred_probe": "http_segment", "alternates": ["ffmpeg", {"reason": "fixture"}],
+        })
+        self.assertNotIn("security", bridged)
+        self.assertNotIn("commands", bridged)
+
+        with self.assertRaises(PluginError) as crashed:
+            await runtime.request(instance, "tv.resolve_stream", {})
+        self.assertEqual(crashed.exception.code, "PLUGIN_CRASHED")
+        await asyncio.sleep(0.05)
+        await runtime.restart(instance)
+        restarted = await runtime.request(instance, "tv.resolve_stream", {})
+        self.assertEqual(restarted["provider_diagnostics"], descriptor["provider_diagnostics"])
+        self.assertEqual(restarted["probe_hints"], descriptor["probe_hints"])

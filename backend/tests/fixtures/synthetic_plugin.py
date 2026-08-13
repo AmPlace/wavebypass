@@ -131,6 +131,7 @@ def main():
     args = parser.parse_args()
     schemes = [value for value in args.schemes.split(",") if value] or [args.scheme]
     deferred = {}
+    metadata_requests = 0
     while True:
         request = read_frame()
         if request is None:
@@ -178,6 +179,10 @@ def main():
         elif method == "tv.resolve_stream":
             if args.mode == "crash":
                 os._exit(23)
+            if args.mode == "metadata_then_crash":
+                metadata_requests += 1
+                if metadata_requests == 2:
+                    os._exit(23)
             if args.mode == "hang":
                 deferred[request["request_id"]] = request
                 continue
@@ -197,6 +202,15 @@ def main():
                 write_frame(response(request, result))
                 continue
             result = descriptor(request["payload"].get("transport", "hls"))
+            if args.mode in {"metadata", "metadata_then_crash"}:
+                result["provider_diagnostics"] = {
+                    "identity": {"channel": "fixture", "video": "v-1"},
+                    "page_live": True,
+                }
+                result["probe_hints"] = {
+                    "preferred_probe": "http_segment",
+                    "alternates": ["ffmpeg", {"reason": "fixture"}],
+                }
             if args.mode == "invalid_descriptor":
                 result["headers"] = {"Authorization": "redacted-fixture"}
             if args.mode == "wrong_request_id":

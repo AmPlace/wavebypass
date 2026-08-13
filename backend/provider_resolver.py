@@ -127,7 +127,7 @@ class ProviderResolver:
     @staticmethod
     def _bridge_descriptor(scheme: str, descriptor: dict[str, Any]) -> dict[str, Any]:
         transport = str(descriptor.get("transport") or "hls")
-        return {
+        result = {
             "ok": True,
             "adapter": scheme,
             "url": descriptor.get("url") or "",
@@ -141,3 +141,13 @@ class ProviderResolver:
             "warnings": list(descriptor.get("warnings") or []),
             "stream_descriptor_version": descriptor.get("descriptor_version"),
         }
+        # These are validated, JSON-safe descriptor extensions.  Project them
+        # only when present so descriptors without metadata retain the exact
+        # historical Core result shape.
+        for field in (
+            "credential_refs", "quality_variants", "drm", "encryption", "probe_hints",
+            "refresh", "provider_diagnostics", "proxy_reasons", "referer", "origin", "user_agent",
+        ):
+            if field in descriptor:
+                result[field] = descriptor[field]
+        return result

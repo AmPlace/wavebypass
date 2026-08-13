@@ -60,7 +60,11 @@ class StreamDescriptor:
     volatile_url: bool = True
     requires_proxy: bool = False
     warnings: list[str] = field(default_factory=list)
-    provider_diagnostics: dict[str, str] = field(default_factory=dict)
+    # Generic data-only extension points.  The runtime validates JSON shape
+    # and bounds at the Plugin boundary; the SDK does not assign provider-
+    # specific meaning to either field.
+    provider_diagnostics: dict[str, Any] = field(default_factory=dict)
+    probe_hints: dict[str, Any] | None = None
 
     @property
     def direct_playable(self) -> bool:
@@ -74,6 +78,8 @@ class StreamDescriptor:
                  "warnings": list(self.warnings)}
         if self.provider_diagnostics:
             value["provider_diagnostics"] = dict(self.provider_diagnostics)
+        if self.probe_hints is not None:
+            value["probe_hints"] = dict(self.probe_hints)
         return value
 
     @classmethod

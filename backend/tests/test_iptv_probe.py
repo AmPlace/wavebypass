@@ -1,5 +1,6 @@
 import unittest
 import types
+import json
 from unittest import mock
 
 from adapters import AdapterResolveError, parse_adapter_url
@@ -195,6 +196,47 @@ class IptvProbeRealtimeStreamTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["live_status"], "live")
         self.assertEqual(result["probe_method"], "adapter_probe_only")
         self.assertEqual(result["youtube_video_id"], "abcDEF123_4")
+
+    async def test_generic_descriptor_metadata_reaches_probe_observations_only(self):
+        original_probe_hls = iptv_probe._probe_hls
+        original_enrich = iptv_probe._enrich_with_ffprobe
+
+        async def fake_resolve(_target_url, _client):
+            return {
+                "adapter": "synthetic",
+                "source_type": "hls",
+                "url": "https://example.com/live.m3u8",
+                "headers": {},
+                "provider_diagnostics": {"channel_id": "channel-1", "page_live": True},
+                "probe_hints": {"preferred_probe": "http_segment", "probe_status": "online"},
+                "requires_proxy": True,
+            }
+
+        async def fake_probe(_client, _url, _headers):
+            return _empty_result(probe_status="offline", live_status="error", probe_method="http_segment")
+
+        async def fake_enrich(result, _url, _headers):
+            return result
+
+        resolver = types.SimpleNamespace(resolve=fake_resolve)
+        iptv_probe._probe_hls = fake_probe
+        iptv_probe._enrich_with_ffprobe = fake_enrich
+        try:
+            result = await probe_channel_source(
+                {"url": "synthetic://channel-1", "source_type": "adapter"},
+                None,
+                provider_resolver=resolver,
+            )
+        finally:
+            iptv_probe._probe_hls = original_probe_hls
+            iptv_probe._enrich_with_ffprobe = original_enrich
+
+        self.assertEqual(result["probe_status"], "offline")
+        self.assertIn('"channel_id":"channel-1"', result["probe_meta_json"])
+        self.assertIn('"preferred_probe":"http_segment"', result["probe_meta_json"])
+        self.assertIn('"source_type":"hls"', result["probe_meta_json"])
+        metadata = json.loads(result["probe_meta_json"])
+        self.assertNotEqual(metadata.get("probe_status"), "online")
 
 
 class YoutubeAdapterProbeOnlyTest(unittest.IsolatedAsyncioTestCase):
