@@ -985,7 +985,30 @@ class PluginMarketService:
         if row.get("quarantined"):
             raise PluginError("PLUGIN_QUARANTINED", "Plugin requires explicit recovery", category="lifecycle")
         if identity in self._active:
-            return self._public(row)
+            if self.installed_artifact_valid(row):
+                return self._public(row)
+            instance = self._active.pop(identity)
+
+            async def fail_closed() -> None:
+                await db.set_plugin_enabled(
+                    row["publisher_id"], row["plugin_id"], True,
+                    lifecycle_state="unavailable", error="Installed artifact integrity check failed",
+                )
+                await self.runtime.disable(instance)
+
+            task = self._track_critical(
+                asyncio.create_task(
+                    fail_closed(), name=f"plugin-artifact-invalidation:{identity}",
+                ),
+                operation="artifact_invalidation",
+                identity=identity,
+            )
+            await self._await_critical(task)
+            raise PluginError(
+                "PLUGIN_UNAVAILABLE",
+                "Installed plugin artifact failed integrity verification",
+                category="artifact",
+            )
         manifest = validate_manifest(json.loads(row["manifest_json"]))
         await require_high_risk_approvals(manifest)
         artifact = Path(row["artifact_path"])

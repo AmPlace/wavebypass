@@ -483,6 +483,61 @@ class OfficialDistributionProductionTest(unittest.IsolatedAsyncioTestCase):
                             for scheme in BASE_SCHEMES))
         self.assertEqual(restarted.service.runtime.registry.route("fjtv").health, "healthy")
 
+    async def test_active_runtime_converges_unavailable_when_artifact_disappears(self):
+        from plugin_runtime import PluginError
+
+        subsystem = await self._subsystem()
+        await subsystem.startup()
+        row = await self.db.get_plugin_installation("org.waveflow", "fjtv")
+        artifact = Path(row["artifact_path"])
+        artifact.unlink()
+
+        recovered = await subsystem.service.recover_enabled()
+
+        result = next(item for item in recovered if item["plugin"] == "org.waveflow/fjtv")
+        self.assertEqual(result["status"], "unavailable")
+        row = await self.db.get_plugin_installation("org.waveflow", "fjtv")
+        self.assertEqual(row["lifecycle_state"], "unavailable")
+        self.assertNotIn("org.waveflow/fjtv", subsystem.service._active)
+        with self.assertRaises(PluginError):
+            subsystem.service.runtime.registry.route("fjtv")
+
+    async def test_store_binding_rejects_unrelated_database_before_orphan_cleanup(self):
+        from plugin_production import ProductionPluginSubsystem
+        from plugin_runtime import PluginError
+
+        subsystem = await self._subsystem()
+        await subsystem.startup()
+        row = await self.db.get_plugin_installation("org.waveflow", "fjtv")
+        artifact = Path(row["artifact_path"])
+        original_digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+        await subsystem.shutdown()
+        self.subsystems.remove(subsystem)
+        # Model an installation created before the DB/store binding marker was
+        # introduced.  The upgrade guard must still reject an unrelated empty
+        # database before recovery can treat its live paths as an empty set.
+        (Path(self.tmp.name) / "plugin-store" / ".waveflow-plugin-store.json").unlink()
+
+        original_db = os.environ["WAVEFLOW_DB_PATH"]
+        os.environ["WAVEFLOW_DB_PATH"] = str(Path(self.tmp.name) / "unrelated.db")
+        os.environ["WAVEFLOW_OFFICIAL_PLUGIN_BOOTSTRAP"] = "0"
+        try:
+            await self.db.initialize()
+            with self.assertRaises(PluginError) as mismatch:
+                unrelated = await ProductionPluginSubsystem.create(
+                    root=Path(self.tmp.name) / "plugin-store", http_client=self.client,
+                )
+                await unrelated.startup()
+            self.assertEqual(
+                mismatch.exception.code, "ARTIFACT_INVALID", str(mismatch.exception),
+            )
+        finally:
+            os.environ["WAVEFLOW_DB_PATH"] = original_db
+            os.environ["WAVEFLOW_OFFICIAL_PLUGIN_BOOTSTRAP"] = "1"
+
+        self.assertTrue(artifact.is_file())
+        self.assertEqual(hashlib.sha256(artifact.read_bytes()).hexdigest(), original_digest)
+
     async def test_corrupt_official_artifact_repair_failure_remains_unavailable(self):
         subsystem = await self._subsystem()
         await subsystem.startup()

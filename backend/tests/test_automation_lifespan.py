@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from collections import deque
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
@@ -79,6 +80,7 @@ class AutomationLifespanTest(unittest.IsolatedAsyncioTestCase):
             key: os.environ.get(key)
             for key in (
                 "WAVEFLOW_DB_PATH",
+                "WAVEFLOW_PLUGIN_ROOT",
                 "WAVEFLOW_PROXY_HANDLE_SECRET",
                 "WAVEFLOW_ANONYMOUS_BROWSE",
                 "WAVEFLOW_ANONYMOUS_PLAYBACK",
@@ -86,6 +88,7 @@ class AutomationLifespanTest(unittest.IsolatedAsyncioTestCase):
             )
         }
         os.environ["WAVEFLOW_DB_PATH"] = os.path.join(self._tmpdir.name, "waveflow.db")
+        os.environ["WAVEFLOW_PLUGIN_ROOT"] = os.path.join(self._tmpdir.name, "plugins")
         os.environ["WAVEFLOW_PROXY_HANDLE_SECRET"] = "automation-lifespan-test-secret-32-bytes"
         os.environ["WAVEFLOW_ANONYMOUS_BROWSE"] = "1"
         os.environ["WAVEFLOW_ANONYMOUS_PLAYBACK"] = "1"
@@ -133,6 +136,15 @@ class AutomationLifespanTest(unittest.IsolatedAsyncioTestCase):
                 return
             await asyncio.sleep(0)
         self.fail("条件未在事件循环中满足")
+
+    async def test_default_plugin_root_follows_configured_database(self):
+        plugin_production = importlib.import_module("plugin_production")
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("WAVEFLOW_PLUGIN_ROOT", None)
+            self.assertEqual(
+                plugin_production.default_plugin_root(),
+                Path(self._tmpdir.name).resolve() / "plugins",
+            )
 
     def _patch_legacy_dependencies(self, events=None):
         events = events if events is not None else []

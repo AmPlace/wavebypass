@@ -1080,6 +1080,28 @@ async def get_setting(key: str, default: str = '') -> str:
         return row['value'] if row else default
     return await asyncio.to_thread(_get)
 
+
+async def get_or_create_setting(key: str, value: str) -> str:
+    """Atomically return one stable internal setting value.
+
+    This is deliberately separate from ``set_setting``: callers that bind a
+    durable external resource to this database must never overwrite a value
+    selected by another process during concurrent startup.
+    """
+    def _get_or_create():
+        conn = _connect()
+        try:
+            conn.execute(
+                "INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)",
+                (key, value),
+            )
+            row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+            conn.commit()
+            return str(row['value'])
+        finally:
+            conn.close()
+    return await asyncio.to_thread(_get_or_create)
+
 async def set_setting(key: str, value: str):
     def _set():
         conn = _connect()

@@ -8,6 +8,7 @@ import logging
 import os
 import sys
 import tempfile
+import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -44,6 +45,8 @@ PLUGIN_DOWNLOAD_TIMEOUT_SECONDS = 60.0
 PLUGIN_DOWNLOAD_REDIRECTS = 3
 OFFICIAL_PLUGIN_BOOTSTRAP_SETTING = "official_plugin_bootstrap_v1"
 OFFICIAL_PLUGIN_ROLLOUT_SETTING = "official_plugin_rollout_v1"
+PLUGIN_STORE_BINDING_SETTING = "plugin_store_binding_v1"
+PLUGIN_STORE_MARKER = ".waveflow-plugin-store.json"
 
 
 class ProductionTrustPolicy:
@@ -436,6 +439,8 @@ class ProductionPluginSubsystem:
         command_factory=None,
     ) -> "ProductionPluginSubsystem":
         root = Path(root).resolve()
+        root.mkdir(parents=True, exist_ok=True)
+        await _bind_plugin_store(root)
         downloads = root / "downloads"
         downloads.mkdir(parents=True, exist_ok=True)
         trust_rows = [row for row in await db.list_plugin_publisher_trust()
@@ -1078,7 +1083,146 @@ def default_plugin_root() -> Path:
     configured = os.environ.get("WAVEFLOW_PLUGIN_ROOT")
     if configured:
         return Path(configured)
+    configured_db = os.environ.get("WAVEFLOW_DB_PATH")
+    if configured_db:
+        if configured_db == ":memory:" or configured_db.startswith("file:"):
+            raise PluginError(
+                "ARTIFACT_INVALID",
+                "An in-memory or URI database requires an explicit Plugin store root",
+                category="artifact",
+            )
+        return Path(configured_db).expanduser().resolve().parent / "plugins"
     return Path(__file__).resolve().parent / "data" / "plugins"
+
+
+def _read_plugin_store_marker(root: Path) -> str:
+    marker = root / PLUGIN_STORE_MARKER
+    if not marker.exists():
+        return ""
+    try:
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise PluginError(
+            "ARTIFACT_INVALID", "Plugin store binding marker is invalid", category="artifact",
+        ) from exc
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != {"schema_version", "binding_id"}
+        or payload.get("schema_version") != 1
+        or not isinstance(payload.get("binding_id"), str)
+        or not payload["binding_id"]
+    ):
+        raise PluginError(
+            "ARTIFACT_INVALID", "Plugin store binding marker is invalid", category="artifact",
+        )
+    return payload["binding_id"]
+
+
+def _write_plugin_store_marker(root: Path, binding_id: str) -> None:
+    marker = root / PLUGIN_STORE_MARKER
+    fd, temporary_name = tempfile.mkstemp(prefix=f"{PLUGIN_STORE_MARKER}.", dir=root)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(
+                {"schema_version": 1, "binding_id": binding_id},
+                stream,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            stream.flush()
+            os.fsync(stream.fileno())
+        try:
+            # Hard-link publication is atomic and refuses to overwrite a
+            # marker concurrently published by a different database.
+            os.link(temporary, marker)
+        except FileExistsError:
+            if _read_plugin_store_marker(root) != binding_id:
+                raise PluginError(
+                    "ARTIFACT_INVALID",
+                    "Plugin store and database binding do not match",
+                    category="artifact",
+                )
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _validate_unbound_plugin_store(root: Path, references: Iterable[str]) -> None:
+    artifacts_root = (root / "artifacts").resolve()
+    managed_roots = (
+        (artifacts_root / "installed").resolve(),
+        (artifacts_root / "staged").resolve(),
+    )
+    live = {Path(value).resolve() for value in references}
+    if any(not any(path.is_relative_to(managed) for managed in managed_roots) for path in live):
+        raise PluginError(
+            "ARTIFACT_INVALID",
+            "Database Plugin artifact references belong to a different store",
+            category="artifact",
+        )
+    # An old (pre-binding-marker) store can have empty version directories
+    # after its artifact files were removed.  An empty/unrelated database must
+    # not be allowed to claim and then clean that durable store either.
+    durable_footprints = any(
+        path.is_dir()
+        for managed in managed_roots
+        if managed.exists()
+        for path in managed.glob("*/*/*")
+    ) or any(
+        path.is_dir()
+        for container in (root / "environments", root / "workspaces")
+        if container.exists()
+        for path in container.glob("*/*")
+    )
+    if not live and durable_footprints:
+        raise PluginError(
+            "ARTIFACT_INVALID",
+            "Plugin store contains durable state not referenced by this database",
+            category="artifact",
+        )
+    existing = {
+        artifact.resolve()
+        for managed in managed_roots
+        if managed.exists()
+        for artifact in managed.glob("*/*/*/*/artifact")
+    }
+    if existing - live:
+        raise PluginError(
+            "ARTIFACT_INVALID",
+            "Plugin store contains artifacts not referenced by this database",
+            category="artifact",
+        )
+
+
+async def _bind_plugin_store(root: Path) -> None:
+    """Bind one durable Plugin store to exactly one durable database.
+
+    Orphan cleanup is destructive, so it must not run merely because a caller
+    supplied an empty or unrelated database.  The DB value and filesystem
+    marker form a generic ownership fence around all production cleanup paths.
+    """
+    persisted = await db.get_setting(PLUGIN_STORE_BINDING_SETTING, "")
+    marker = await asyncio.to_thread(_read_plugin_store_marker, root)
+    if marker and not persisted:
+        raise PluginError(
+            "ARTIFACT_INVALID",
+            "Plugin store is already bound to another database",
+            category="artifact",
+        )
+    selected = persisted or uuid.uuid4().hex
+    binding_id = await db.get_or_create_setting(PLUGIN_STORE_BINDING_SETTING, selected)
+    if marker:
+        if marker != binding_id:
+            raise PluginError(
+                "ARTIFACT_INVALID",
+                "Plugin store and database binding do not match",
+                category="artifact",
+            )
+        return
+    references = await db.list_plugin_artifact_references()
+    await asyncio.to_thread(_validate_unbound_plugin_store, root, references)
+    await asyncio.to_thread(_write_plugin_store_marker, root, binding_id)
 
 
 def _official_trust_rows() -> list[dict[str, Any]]:
