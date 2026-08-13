@@ -257,9 +257,8 @@ async def _fetch_tiktok(url: str) -> dict[str, Any]:
     return decoded
 
 
-# This is the complete bundle boundary.  Do not add Node-backed StreamGet
-# providers here: haixiu/liveme/lehai require ExecJS at runtime and are not
-# part of this Plugin.
+# This is the complete bundle boundary.  Only wheel-compatible StreamGet
+# providers with deterministic runtime dependencies belong in this Plugin.
 PROVIDER_SPECS: dict[str, ProviderSpec] = {
     "yy": ProviderSpec(YYLiveStream, _url("https://www.yy.com/{room_id}/{room_id}"),
                        play_fields=("flv_url", "record_url"), transport="http_flv"),

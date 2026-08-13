@@ -5,8 +5,8 @@ export const ADAPTER_SCHEMES = Object.freeze([
   'redbook', 'tiktok', 'kuaishou', 'bilibili', 'yy', 'bigo', 'blued', 'soop',
   'netease', 'pandatv', 'maoer', 'look', 'flextv', 'popkontv', 'twitcasting',
   'baidu', 'weibo', 'kugou', 'twitch', 'huajiao', 'showroom', 'inke', 'acfun',
-  'haixiu', 'liveme', 'zhihu', 'chzzk', 'live17', 'langlive', 'changliao',
-  'jd', 'faceit', 'lianjie', 'sixroom', 'lehai', 'huamao', 'shopee', 'laixiu', 'picarto',
+  'zhihu', 'chzzk', 'live17', 'langlive', 'changliao',
+  'jd', 'faceit', 'lianjie', 'sixroom', 'huamao', 'shopee', 'laixiu', 'picarto',
   'fjtv', 'ptbtv', 'nd0593tv', 'qukan', 'woniu',
   'adapter',
 ])

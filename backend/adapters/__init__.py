@@ -223,12 +223,6 @@ def parse_adapter_url(target_url: str) -> AdapterRequest:
     elif scheme == "acfun":
         adapter = "acfun"
         resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
-    elif scheme == "haixiu":
-        adapter = "haixiu"
-        resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
-    elif scheme == "liveme":
-        adapter = "liveme"
-        resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
     elif scheme == "zhihu":
         adapter = "zhihu"
         resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
@@ -255,9 +249,6 @@ def parse_adapter_url(target_url: str) -> AdapterRequest:
         resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
     elif scheme == "sixroom":
         adapter = "sixroom"
-        resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
-    elif scheme == "lehai":
-        adapter = "lehai"
         resource_id = (parsed.netloc or parsed.path.lstrip("/")).strip()
     elif scheme == "huamao":
         adapter = "huamao"
@@ -385,8 +376,6 @@ from .huajiao import resolve_huajiao
 from .showroom import resolve_showroom
 from .inke import resolve_inke
 from .acfun import resolve_acfun
-from .haixiu import resolve_haixiu
-from .liveme import resolve_liveme
 from .zhihu import resolve_zhihu
 from .chzzk import resolve_chzzk
 from .langlive import resolve_langlive
@@ -395,7 +384,6 @@ from .jd import resolve_jd
 from .faceit import resolve_faceit
 from .lianjie import resolve_lianjie
 from .sixroom import resolve_sixroom
-from .lehai import resolve_lehai
 from .huamao import resolve_huamao
 from .shopee import resolve_shopee
 from .laixiu import resolve_laixiu
@@ -448,8 +436,6 @@ _ADAPTER_REGISTRY = {
     "showroom": resolve_showroom,
     "inke": resolve_inke,
     "acfun": resolve_acfun,
-    "haixiu": resolve_haixiu,
-    "liveme": resolve_liveme,
     "zhihu": resolve_zhihu,
     "chzzk": resolve_chzzk,
     "live17": resolve_17live,
@@ -459,7 +445,6 @@ _ADAPTER_REGISTRY = {
     "faceit": resolve_faceit,
     "lianjie": resolve_lianjie,
     "sixroom": resolve_sixroom,
-    "lehai": resolve_lehai,
     "huamao": resolve_huamao,
     "shopee": resolve_shopee,
     "laixiu": resolve_laixiu,

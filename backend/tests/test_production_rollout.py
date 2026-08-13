@@ -221,7 +221,7 @@ class ProductionRolloutTest(unittest.IsolatedAsyncioTestCase):
             {scheme for scheme in _ADAPTER_REGISTRY if subsystem.provider_resolver.mode(scheme) == "plugin"},
             ROLLOUT_SCHEMES,
         )
-        self.assertEqual(len(_ADAPTER_REGISTRY), 61)
+        self.assertEqual(len(_ADAPTER_REGISTRY), 58)
 
         router = importlib.import_module("routers.plugins")
         projections = [await router._plugin_projection(row) for row in installations]

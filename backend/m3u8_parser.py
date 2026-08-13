@@ -23,9 +23,9 @@ _STREAM_URL_PREFIXES = (
     'netease://', 'pandatv://', 'maoer://', 'look://', 'flextv://',
     'popkontv://', 'twitcasting://', 'baidu://', 'weibo://', 'kugou://',
     'twitch://', 'huajiao://', 'showroom://', 'inke://', 'acfun://',
-    'haixiu://', 'liveme://', 'zhihu://', 'chzzk://', 'live17://',
+    'zhihu://', 'chzzk://', 'live17://',
     'langlive://', 'changliao://', 'jd://', 'faceit://', 'lianjie://',
-    'sixroom://', 'lehai://', 'huamao://', 'shopee://', 'laixiu://',
+    'sixroom://', 'huamao://', 'shopee://', 'laixiu://',
     'picarto://', 'youtube://', 'adapter://',
     # 大陆电视台 adapter（2026-06 新增；与 backend/adapters/__init__.py 对齐）
     'fjtv://', 'ptbtv://', 'nd0593tv://', 'qukan://', 'woniu://',
@@ -557,10 +557,6 @@ def adapter_provider(url: str) -> str:
         return 'inke'
     if scheme == 'acfun':
         return 'acfun'
-    if scheme == 'haixiu':
-        return 'haixiu'
-    if scheme == 'liveme':
-        return 'liveme'
     if scheme == 'zhihu':
         return 'zhihu'
     if scheme == 'chzzk':
@@ -579,8 +575,6 @@ def adapter_provider(url: str) -> str:
         return 'lianjie'
     if scheme == 'sixroom':
         return 'sixroom'
-    if scheme == 'lehai':
-        return 'lehai'
     if scheme == 'huamao':
         return 'huamao'
     if scheme == 'shopee':

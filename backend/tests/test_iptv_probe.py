@@ -40,6 +40,22 @@ Input #0, rtsp, from 'rtsp://example/live':
         self.assertEqual(parsed["speed_mbps"], 0.25)
 
 
+class RemovedLegacyProviderSchemeTest(unittest.TestCase):
+    def test_removed_schemes_are_not_registered_or_parseable(self):
+        from adapters import _ADAPTER_REGISTRY
+
+        for scheme in ("haixiu", "liveme", "lehai"):
+            with self.subTest(scheme=scheme):
+                self.assertNotIn(scheme, _ADAPTER_REGISTRY)
+                with self.assertRaises(AdapterResolveError) as direct_ctx:
+                    parse_adapter_url(f"{scheme}://room-1")
+                self.assertEqual(direct_ctx.exception.error_code, "invalid_adapter_url")
+
+                with self.assertRaises(AdapterResolveError) as compat_ctx:
+                    parse_adapter_url(f"adapter://{scheme}/room-1")
+                self.assertEqual(compat_ctx.exception.error_code, "unsupported_adapter")
+
+
 class IptvProbeRealtimeStreamTest(unittest.IsolatedAsyncioTestCase):
     async def test_production_probe_fails_closed_for_plugin_owner_but_keeps_legacy_owner(self):
         from provider_resolver import ProviderResolver

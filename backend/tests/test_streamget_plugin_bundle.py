@@ -28,7 +28,6 @@ EXPECTED_SCHEMES = {
     "chzzk", "live17", "langlive", "changliao", "jd", "faceit", "lianjie", "sixroom", "huamao", "shopee",
     "laixiu", "picarto", "bilibili", "douyu", "douyin", "redbook", "tiktok",
 }
-EXCLUDED_SCHEMES = {"haixiu", "liveme", "lehai"}
 EXPECTED_SCHEME_COUNT = 37
 
 
@@ -83,7 +82,6 @@ class StreamGetBundleContractTest(unittest.TestCase):
         self.assertEqual(manifest.identity, "org.waveflow/streamget-providers")
         self.assertEqual(len(EXPECTED_SCHEMES), EXPECTED_SCHEME_COUNT)
         self.assertEqual({scheme for scheme, _contract in manifest.owned_schemes}, EXPECTED_SCHEMES)
-        self.assertTrue(EXPECTED_SCHEMES.isdisjoint(EXCLUDED_SCHEMES))
         self.assertEqual(set(manifest.permissions), {"network"})
         self.assertTrue(manifest.permissions["network"]["direct"])
         self.assertNotIn("managed", manifest.permissions["network"])
