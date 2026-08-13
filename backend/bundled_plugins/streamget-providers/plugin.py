@@ -16,6 +16,7 @@ from typing import Any, Callable, Mapping
 from streamget import (
     AcfunLiveStream,
     BaiduLiveStream,
+    BilibiliLiveStream,
     BigoLiveStream,
     BluedLiveStream,
     ChangliaoLiveStream,
@@ -69,6 +70,7 @@ class ProviderSpec:
     quality: str = "OD"
     play_fields: tuple[str, ...] = ("flv_url", "m3u8_url", "record_url")
     transport: str | None = None
+    volatile_url: bool = True
 
 
 def _url(template: str) -> Callable[[str], str]:
@@ -123,6 +125,16 @@ PROVIDER_SPECS: dict[str, ProviderSpec] = {
     "shopee": ProviderSpec(ShopeeLiveStream, _url("https://live.shopee.com/{room_id}")),
     "laixiu": ProviderSpec(LaixiuLiveStream, _url("https://www.laixiu.com/{room_id}")),
     "picarto": ProviderSpec(PicartoLiveStream, _url("https://picarto.tv/{room_id}")),
+    # Keep the legacy Bilibili semantics: the provider always advertises FLV
+    # transport, selects FLV before record_url, and leaves volatile_url at
+    # the bridge's legacy false/default value.
+    "bilibili": ProviderSpec(
+        BilibiliLiveStream,
+        _url("https://live.bilibili.com/{room_id}"),
+        play_fields=("flv_url", "record_url"),
+        transport="http_flv",
+        volatile_url=False,
+    ),
 }
 
 
@@ -173,7 +185,7 @@ class StreamGetProvider(TVProvider):
             headers={},
             ttl_seconds=TTL_SECONDS,
             expires_at=None,
-            volatile_url=True,
+            volatile_url=spec.volatile_url,
             requires_proxy=False,
         )
 

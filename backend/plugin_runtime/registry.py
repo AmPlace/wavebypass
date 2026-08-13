@@ -81,8 +81,12 @@ class PluginRegistry:
             raise PluginError("PLUGIN_INCOMPATIBLE", "Candidate identity differs from the active plugin", category="compatibility")
         candidate_schemes = {scheme for scheme, _ in candidate.manifest.owned_schemes}
         old_schemes = {scheme for scheme, _ in old.manifest.owned_schemes}
-        if candidate_schemes != old_schemes:
-            raise PluginError("PLUGIN_INCOMPATIBLE", "Candidate scheme set differs from the active plugin", category="compatibility")
+        if not old_schemes.issubset(candidate_schemes):
+            raise PluginError(
+                "PLUGIN_INCOMPATIBLE",
+                "Candidate cannot remove schemes from the active plugin boundary",
+                category="compatibility",
+            )
         conflicts = [scheme for scheme in candidate_schemes
                      if self._scheme_owners.get(scheme) not in {None, old.instance_id}]
         if conflicts:
@@ -90,6 +94,12 @@ class PluginRegistry:
                               details={"schemes": sorted(conflicts)})
         candidate.transition(LifecycleState.HEALTHY_ACTIVE)
         candidate.health = "healthy"
+        # A signed Plugin update may extend its provider boundary.  The
+        # replacement is still atomic: new schemes must be unowned (or owned
+        # by the old instance).  Active schemes are never silently removed;
+        # retirement needs an explicit ownership/lifecycle transition. Durable
+        # provider ownership remains a separate Core state and is not changed
+        # by this runtime registry operation.
         for scheme in candidate_schemes:
             self._scheme_owners[scheme] = candidate.instance_id
         old.transition(LifecycleState.DRAINING)
@@ -98,9 +108,15 @@ class PluginRegistry:
         if old.state != LifecycleState.DRAINING or candidate.state != LifecycleState.HEALTHY_ACTIVE:
             raise PluginError("INVALID_PLUGIN_RESPONSE", "Plugin replacement cannot be rolled back", category="lifecycle")
         candidate_schemes = {scheme for scheme, _ in candidate.manifest.owned_schemes}
+        old_schemes = {scheme for scheme, _ in old.manifest.owned_schemes}
         if any(self._scheme_owners.get(scheme) != candidate.instance_id for scheme in candidate_schemes):
             raise PluginError("SCHEME_CONFLICT", "Plugin ownership changed during rollback", category="registry")
         for scheme in candidate_schemes:
+            if scheme in old_schemes:
+                self._scheme_owners[scheme] = old.instance_id
+            else:
+                self._scheme_owners.pop(scheme, None)
+        for scheme in old_schemes - candidate_schemes:
             self._scheme_owners[scheme] = old.instance_id
         old.state = LifecycleState.HEALTHY_ACTIVE
         old.health = "healthy"

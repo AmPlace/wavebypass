@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import importlib.util
 import json
 import shutil
@@ -9,6 +10,7 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest import mock
 
 from plugin_runtime import load_manifest
 from plugin_runtime.process import PluginProcess
@@ -24,10 +26,10 @@ EXPECTED_SCHEMES = {
     "yy", "bigo", "blued", "soop", "netease", "pandatv", "maoer", "look", "flextv", "popkontv",
     "twitcasting", "baidu", "weibo", "kugou", "twitch", "huajiao", "showroom", "inke", "acfun", "zhihu",
     "chzzk", "live17", "langlive", "changliao", "jd", "faceit", "lianjie", "sixroom", "huamao", "shopee",
-    "laixiu", "picarto",
+    "laixiu", "picarto", "bilibili",
 }
 EXCLUDED_SCHEMES = {"haixiu", "liveme", "lehai"}
-EXPECTED_SCHEME_COUNT = 32
+EXPECTED_SCHEME_COUNT = 33
 
 
 def _load_plugin_module():
@@ -85,6 +87,10 @@ class StreamGetBundleContractTest(unittest.TestCase):
         self.assertEqual(set(manifest.permissions), {"network"})
         self.assertTrue(manifest.permissions["network"]["direct"])
         self.assertNotIn("managed", manifest.permissions["network"])
+        self.assertEqual(
+            set(manifest.permissions["network"]["allowed_hosts"][-2:]),
+            {"live.bilibili.com", "api.live.bilibili.com"},
+        )
         self.assertEqual(len(manifest.runtime["dependency_lock"]["artifacts"]), 21)
         self.assertEqual(set(self.module.PROVIDER_SPECS), EXPECTED_SCHEMES)
         source = (PLUGIN_DIR / "plugin.py").read_text(encoding="utf-8")
@@ -112,6 +118,7 @@ class StreamGetBundleContractTest(unittest.TestCase):
             "lianjie": "https://www.lailianjie.com/room-42", "sixroom": "https://v.6.cn/room-42",
             "huamao": "https://www.huamao.com/room-42", "shopee": "https://live.shopee.com/room-42",
             "laixiu": "https://www.laixiu.com/room-42", "picarto": "https://picarto.tv/room-42",
+            "bilibili": "https://live.bilibili.com/room-42",
         }
         for scheme in sorted(EXPECTED_SCHEMES):
             fields = {"is_live": True, "flv_url": f"https://media.test/{scheme}.flv",
@@ -127,7 +134,7 @@ class StreamGetBundleContractTest(unittest.TestCase):
             expected_transport = spec.transport or "http_flv"
             self.assertEqual((descriptor.url, descriptor.transport), (expected_url, expected_transport), scheme)
             self.assertEqual((descriptor.ttl_seconds, descriptor.volatile_url, descriptor.requires_proxy),
-                             (1800, True, False), scheme)
+                             (1800, self.module.PROVIDER_SPECS[scheme].volatile_url, False), scheme)
             self.assertEqual(fake.calls, [(expected_urls[scheme], "fetch_web_stream_data"),
                                            (expected_urls[scheme], spec.quality)], scheme)
 
@@ -165,6 +172,104 @@ class StreamGetBundleContractTest(unittest.TestCase):
         with self.assertRaises(SDKPluginError) as upstream:
             broken.resolve_stream(TVReference("weibo", "room"), context)
         self.assertEqual(upstream.exception.code, "TEMPORARY_UPSTREAM_FAILURE")
+
+    def test_bilibili_preserves_legacy_play_selection_and_error_taxonomy(self):
+        fields = {
+            "is_live": True,
+            "flv_url": "https://media.test/bilibili.flv",
+            "m3u8_url": "https://media.test/bilibili.m3u8",
+            "record_url": "https://media.test/bilibili.record",
+        }
+        fake = _fake_class(fields)
+        spec = replace(self.module.PROVIDER_SPECS["bilibili"], stream_class=fake)
+        provider = self.module.StreamGetProvider({"bilibili": spec})
+        context = ResolveContext("fixture", 9999999999999, {}, None)
+        descriptor = provider.resolve_stream(TVReference("bilibili", "room-42"), context)
+        self.assertEqual(
+            (descriptor.url, descriptor.transport, descriptor.ttl_seconds,
+             descriptor.volatile_url, descriptor.requires_proxy),
+            ("https://media.test/bilibili.flv", "http_flv", 1800, False, False),
+        )
+        self.assertEqual(fake.calls, [
+            ("https://live.bilibili.com/room-42", "fetch_web_stream_data"),
+            ("https://live.bilibili.com/room-42", "OD"),
+        ])
+
+        record_only = _fake_class({"is_live": True, "flv_url": "", "record_url": "https://media.test/record"})
+        record_provider = self.module.StreamGetProvider({"bilibili": replace(spec, stream_class=record_only)})
+        record = record_provider.resolve_stream(TVReference("bilibili", "room-42"), context)
+        self.assertEqual(record.url, "https://media.test/record")
+
+        for reference, expected in ((TVReference("bilibili", ""), "RESOURCE_NOT_FOUND"),
+                                    (TVReference("bilibili", "room-42"), "NOT_LIVE")):
+            test_provider = self.module.StreamGetProvider({
+                "bilibili": replace(spec, stream_class=_fake_class(
+                    {"is_live": False} if expected == "NOT_LIVE" else fields,
+                )),
+            })
+            with self.assertRaises(SDKPluginError) as error:
+                test_provider.resolve_stream(reference, context)
+            self.assertEqual(error.exception.code, expected)
+
+        malformed = self.module.StreamGetProvider({
+            "bilibili": replace(spec, stream_class=_fake_class({"is_live": True, "flv_url": "", "record_url": ""})),
+        })
+        with self.assertRaises(SDKPluginError) as no_url:
+            malformed.resolve_stream(TVReference("bilibili", "room-42"), context)
+        self.assertEqual(no_url.exception.code, "TEMPORARY_UPSTREAM_FAILURE")
+
+    def test_bilibili_descriptor_matches_legacy_golden_fixture(self):
+        """Compare the public descriptor fields, not provider-specific metadata."""
+        legacy = importlib.import_module("adapters.bilibili")
+        from adapters import AdapterRequest
+        from provider_resolver import parse_tv_reference
+
+        direct = parse_tv_reference("bilibili://room-42")
+        compat = parse_tv_reference("adapter://bilibili/room-42")
+        self.assertEqual((direct.scheme, direct.resource_id), ("bilibili", "room-42"))
+        self.assertEqual((compat.scheme, compat.resource_id), ("bilibili", "room-42"))
+
+        fields = {
+            "is_live": True,
+            "flv_url": "https://media.test/bilibili.flv",
+            "record_url": "https://media.test/bilibili.record",
+            "anchor_name": "fixture-anchor",
+        }
+        fake = _fake_class(fields)
+        with mock.patch.object(legacy, "BilibiliLiveStream", fake):
+            legacy_result = asyncio.run(legacy.resolve_bilibili(
+                AdapterRequest("bilibili://room-42", "bilibili", "room-42", {}), None,
+            ))
+
+        provider = self.module.StreamGetProvider({
+            "bilibili": replace(self.module.PROVIDER_SPECS["bilibili"], stream_class=fake),
+        })
+        descriptor = provider.resolve_stream(
+            TVReference("bilibili", "room-42"), ResolveContext("fixture", 9999999999999, {}, None),
+        )
+        plugin_result = {
+            "url": descriptor.url,
+            "source_type": descriptor.transport,
+            "direct_playable": descriptor.direct_playable,
+            "requires_proxy": descriptor.requires_proxy,
+            "headers": descriptor.headers,
+            "ttl": descriptor.ttl_seconds,
+            "expires_at": descriptor.expires_at,
+            # The legacy adapter omits this field and the Core bridge exposes
+            # the omitted/default semantic as false.
+            "volatile_url": descriptor.volatile_url,
+        }
+        legacy_result["volatile_url"] = bool(legacy_result.get("volatile_url"))
+        self.assertEqual(
+            {key: legacy_result[key] for key in plugin_result},
+            plugin_result,
+        )
+        self.assertEqual(fake.calls, [
+            ("https://live.bilibili.com/room-42", "fetch_web_stream_data"),
+            ("https://live.bilibili.com/room-42", "OD"),
+            ("https://live.bilibili.com/room-42", "fetch_web_stream_data"),
+            ("https://live.bilibili.com/room-42", "OD"),
+        ])
 
     def test_cli_lock_treats_py2_py3_wheels_as_python3_compatible(self):
         with tempfile.TemporaryDirectory() as directory:

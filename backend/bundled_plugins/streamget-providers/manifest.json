@@ -149,6 +149,10 @@
     {
       "contract": "tv_provider",
       "scheme": "picarto"
+    },
+    {
+      "contract": "tv_provider",
+      "scheme": "bilibili"
     }
   ],
   "permissions": {
@@ -184,7 +188,9 @@
         "www.huamao.com",
         "live.shopee.com",
         "www.laixiu.com",
-        "picarto.tv"
+        "picarto.tv",
+        "live.bilibili.com",
+        "api.live.bilibili.com"
       ],
       "direct": true
     }
@@ -444,5 +450,5 @@
     "type": "python"
   },
   "state_schema_version": 1,
-  "version": "1.0.0"
+  "version": "1.1.0"
 }

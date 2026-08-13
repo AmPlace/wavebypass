@@ -325,6 +325,36 @@ class MarketPluginLifecycleTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["candidate_version"], "")
         self.assertEqual(self.runtime.registry.route("fixture-a").manifest.version, "1.1.0")
 
+    async def test_update_can_extend_bundle_scheme_set_without_rewriting_ownership(self):
+        identity = "org.waveflow/fixture-multi-provider"
+        v1 = self.package("1.0.0", schemes=("fixture-a", "fixture-b"))
+        v2 = self.package("1.1.0", schemes=("fixture-a", "fixture-b", "fixture-c"))
+
+        await self.service.install_from_packages([v1], identity)
+        self.assertEqual(await self.db.list_plugin_scheme_ownership(), [])
+
+        # A failed replacement must roll back the newly added scheme too;
+        # the old runtime must not become the owner of a scheme it never
+        # declared.
+        with mock.patch.object(self.db, "activate_plugin_candidate", return_value=False):
+            with self.assertRaises(self.pm.PluginError):
+                await self.service.install_from_packages([v2], identity)
+        self.assertEqual(self.runtime.registry.route("fixture-a").manifest.version, "1.0.0")
+        self.assertEqual(self.runtime.registry.route("fixture-b").manifest.version, "1.0.0")
+        with self.assertRaises(self.pm.PluginError) as missing:
+            self.runtime.registry.route("fixture-c")
+        self.assertEqual(missing.exception.code, "SCHEME_UNOWNED")
+
+        installed = await self.service.install_from_packages([v2], identity)
+
+        self.assertEqual(installed["active_version"], "1.1.0")
+        self.assertEqual(
+            {self.runtime.registry.route(scheme).manifest.version
+             for scheme in ("fixture-a", "fixture-b", "fixture-c")},
+            {"1.1.0"},
+        )
+        self.assertEqual(await self.db.list_plugin_scheme_ownership(), [])
+
         with mock.patch.object(self.db, "activate_plugin_candidate", return_value=False):
             with self.assertRaises(self.pm.PluginError):
                 await self.service.install_from_packages([self.package("1.3.0")], "org.waveflow/fixture-multi-provider")

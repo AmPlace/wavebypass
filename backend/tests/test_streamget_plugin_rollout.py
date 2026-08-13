@@ -23,6 +23,8 @@ SCHEMES = (
     "jd", "faceit", "lianjie", "sixroom", "huamao", "shopee", "laixiu", "picarto",
 )
 SCHEME_SET = set(SCHEMES)
+BILIBILI_SCHEME = "bilibili"
+BUNDLE_SCHEME_SET = SCHEME_SET | {BILIBILI_SCHEME}
 BATCHES = (
     ("yy", "bigo", "blued", "soop", "netease", "pandatv", "maoer", "look"),
     ("flextv", "popkontv", "twitcasting", "baidu", "weibo", "kugou", "twitch", "huajiao"),
@@ -145,9 +147,9 @@ class StreamGetPluginRolloutTest(unittest.IsolatedAsyncioTestCase):
         )
         manifest = validate_manifest(package["plugin_manifest"])
         self.assertEqual(manifest.identity, IDENTITY)
-        self.assertEqual({scheme for scheme, _contract in manifest.owned_schemes}, SCHEME_SET)
-        self.assertEqual(len(manifest.owned_schemes), 32)
-        self.assertEqual(package["version"], "1.0.0")
+        self.assertEqual({scheme for scheme, _contract in manifest.owned_schemes}, BUNDLE_SCHEME_SET)
+        self.assertEqual(len(manifest.owned_schemes), 33)
+        self.assertEqual(package["version"], "1.1.0")
         return package
 
     async def _install_official(self, subsystem, package: dict) -> None:
@@ -163,7 +165,7 @@ class StreamGetPluginRolloutTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             (installed["trust_state"], installed["source_key"], installed["active_version"],
              installed["lifecycle_state"], installed["enabled"]),
-            ("official", "official", "1.0.0", "active", 1),
+            ("official", "official", "1.1.0", "active", 1),
         )
         row = await self.db.get_plugin_installation("org.waveflow", "streamget-providers")
         self.assertEqual(row["source_package_id"], "official::streamget-providers-plugin")
@@ -182,13 +184,14 @@ class StreamGetPluginRolloutTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(instance.health, "healthy")
         for scheme in SCHEMES:
             self.assertIs(subsystem.service.runtime.registry.route(scheme), instance)
+        self.assertEqual(subsystem.provider_resolver.mode(BILIBILI_SCHEME), "legacy")
 
     def _install_deterministic_runtime_request(self, subsystem) -> None:
         """Keep ProviderResolver deterministic while the real process is smoke-tested separately.
 
         StreamGet intentionally uses direct network, so Core's MockTransport cannot
         intercept its upstream calls.  The provider implementation itself has a
-        32-scheme fixture contract test; this seam exercises the production
+        33-scheme fixture contract test; this seam exercises the production
         resolver/ownership path without turning the rollout test into a flaky
         public-site test.
         """
@@ -196,18 +199,18 @@ class StreamGetPluginRolloutTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(instance.manifest.identity, IDENTITY)
             self.assertEqual(method, "tv.resolve_stream")
             scheme = str(payload["scheme"])
-            self.assertIn(scheme, SCHEME_SET)
+            self.assertIn(scheme, BUNDLE_SCHEME_SET)
             self.plugin_requests.append((scheme, instance.manifest.identity))
-            transport = "http_flv" if scheme == "yy" else "hls"
+            transport = "http_flv" if scheme in {"yy", BILIBILI_SCHEME} else "hls"
             return {
                 "descriptor_version": "1.0",
                 "transport": transport,
-                "url": f"{STREAM_URL_PREFIX}{scheme}.m3u8",
+                "url": f"{STREAM_URL_PREFIX}{scheme}{'.flv' if scheme == BILIBILI_SCHEME else '.m3u8'}",
                 "headers": {},
                 "credential_refs": [],
                 "ttl_seconds": 1800,
                 "expires_at": None,
-                "volatile_url": True,
+                "volatile_url": scheme != BILIBILI_SCHEME,
                 "requires_proxy": False,
                 "warnings": [],
             }
@@ -218,7 +221,8 @@ class StreamGetPluginRolloutTest(unittest.IsolatedAsyncioTestCase):
         result = await subsystem.provider_resolver.resolve(f"{scheme}://room-42", self.client)
         self.assertEqual(subsystem.provider_resolver.mode(scheme), "plugin")
         self.assertEqual(result["stream_descriptor_version"], "1.0")
-        self.assertEqual(result["url"], f"{STREAM_URL_PREFIX}{scheme}.m3u8")
+        suffix = ".flv" if scheme == BILIBILI_SCHEME else ".m3u8"
+        self.assertEqual(result["url"], f"{STREAM_URL_PREFIX}{scheme}{suffix}")
         self.assertEqual(
             subsystem.service.runtime.registry.route(scheme).manifest.identity,
             IDENTITY,
@@ -235,7 +239,7 @@ class StreamGetPluginRolloutTest(unittest.IsolatedAsyncioTestCase):
 
     async def _assert_plugin_modes(self, subsystem, expected: set[str]) -> None:
         rows = {row["scheme"]: row for row in await self.db.list_plugin_scheme_ownership()}
-        for scheme in SCHEMES:
+        for scheme in sorted(BUNDLE_SCHEME_SET):
             row = rows.get(scheme)
             mode = "legacy" if row is None else row["mode"]
             identity = "" if row is None else row["plugin_identity"]
@@ -245,6 +249,8 @@ class StreamGetPluginRolloutTest(unittest.IsolatedAsyncioTestCase):
             else:
                 self.assertEqual(mode, "legacy", scheme)
                 self.assertEqual(subsystem.provider_resolver.mode(scheme), "legacy")
+        if BILIBILI_SCHEME not in expected:
+            self.assertEqual(subsystem.provider_resolver.mode(BILIBILI_SCHEME), "legacy")
 
     async def test_four_batch_rollout_partial_ownership_crash_recovery_and_guards(self):
         self._require_mac_runtime()
@@ -323,12 +329,12 @@ class StreamGetPluginRolloutTest(unittest.IsolatedAsyncioTestCase):
         # untouched; generic candidate-success coverage lives in the Runtime
         # and Market lifecycle suites.
         bad_candidate = copy.deepcopy(package)
-        bad_candidate["version"] = "1.0.1"
-        bad_candidate["plugin_manifest"]["version"] = "1.0.1"
+        bad_candidate["version"] = "1.1.1"
+        bad_candidate["plugin_manifest"]["version"] = "1.1.1"
         with self.assertRaises(PluginError):
             await subsystem.install(IDENTITY, [bad_candidate])
         row = await self.db.get_plugin_installation("org.waveflow", "streamget-providers")
-        self.assertEqual(row["active_version"], "1.0.0")
+        self.assertEqual(row["active_version"], "1.1.0")
         await self._assert_plugin_modes(subsystem, SCHEME_SET)
 
         # With 31 schemes rolled back and one still Plugin-owned, all
@@ -367,6 +373,43 @@ class StreamGetPluginRolloutTest(unittest.IsolatedAsyncioTestCase):
         for scheme in SCHEME_SET:
             await self._resolve_plugin(subsystem, scheme)
         self.assertEqual({scheme for scheme, identity in self.plugin_requests if identity == IDENTITY}, SCHEME_SET)
+
+    async def test_bilibili_staged_takeover_restart_rollback_and_update_boundary(self):
+        """The newly added scheme is updated with the bundle but rolls out alone."""
+        self._require_mac_runtime()
+        package = await self._official_package()
+        subsystem = await self._subsystem()
+        await subsystem.startup()
+        await self._install_official(subsystem, package)
+
+        self.assertEqual(subsystem.provider_resolver.mode(BILIBILI_SCHEME), "legacy")
+        self._install_deterministic_runtime_request(subsystem)
+        legacy_calls = self.legacy.await_count
+        await subsystem.set_ownership(BILIBILI_SCHEME, "plugin", IDENTITY)
+        result = await self._resolve_plugin(subsystem, BILIBILI_SCHEME)
+        self.assertEqual(
+            (result["source_type"], result["ttl"], result["volatile_url"], result["requires_proxy"]),
+            ("http_flv", 1800, False, False),
+        )
+        self.assertEqual(self.legacy.await_count, legacy_calls)
+        await self._assert_plugin_modes(subsystem, {BILIBILI_SCHEME})
+
+        # Reinstalling the same signed bundle version is idempotent and must
+        # not rewrite any scheme ownership, including the staged new scheme.
+        await subsystem.install(IDENTITY, [package])
+        await self._assert_plugin_modes(subsystem, {BILIBILI_SCHEME})
+
+        subsystem = await self._restart(subsystem)
+        self._install_deterministic_runtime_request(subsystem)
+        await self._assert_plugin_modes(subsystem, {BILIBILI_SCHEME})
+        await self._resolve_plugin(subsystem, BILIBILI_SCHEME)
+
+        await subsystem.set_ownership(BILIBILI_SCHEME, "legacy")
+        await self._resolve_legacy(subsystem, BILIBILI_SCHEME)
+        await subsystem.set_ownership(BILIBILI_SCHEME, "plugin", IDENTITY)
+        await self._resolve_plugin(subsystem, BILIBILI_SCHEME)
+        self.assertEqual(self.legacy.await_count, legacy_calls + 1)
+        await self._assert_plugin_modes(subsystem, {BILIBILI_SCHEME})
 
     @unittest.skipUnless(
         os.environ.get("WAVEFLOW_STREAMGET_LIVE_SMOKE") == "1",

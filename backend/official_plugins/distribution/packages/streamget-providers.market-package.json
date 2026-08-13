@@ -1,8 +1,8 @@
 {
   "artifact_references": [
     {
-      "sha256": "cbf79654fc11f908f7171e54d653d00f36999a010583719b6296c2e6a353f6b7",
-      "url": "payloads/streamget-providers-1.0.0.pyz"
+      "sha256": "124efc93eaa0e1a4fde55e2615b6c8ccb6cd0246acffa80ae88343c155f86ab1",
+      "url": "payloads/streamget-providers-1.1.0.pyz"
     }
   ],
   "dependency_references": [
@@ -97,7 +97,7 @@
   "manifest_signature": {
     "algorithm": "ed25519",
     "key_id": "org.waveflow.release.2026-01",
-    "value": "C7OPbL+xIfaCxt0IcVOeTeMQcitxtZE4TCAFrFWTxii+ByLqwNXv21Ag+B63ALARolpikVRyA6R1fpbN45jSDA=="
+    "value": "UxExkS9fcl3vQSOEyUkAdsvg+1xh1BT/rhnkCMQjjSqGxEkEREtQJwavJc3+c1wWel6RFwwEZFAm+0mULpZbBA=="
   },
   "name": "StreamGet Provider Bundle",
   "package_type": "plugin_package",
@@ -105,16 +105,16 @@
     "artifacts": [
       {
         "arch": "arm64",
-        "entrypoint": "streamget-providers-1.0.0.pyz",
+        "entrypoint": "streamget-providers-1.1.0.pyz",
         "os": "macos",
         "runtime": "python",
-        "sha256": "cbf79654fc11f908f7171e54d653d00f36999a010583719b6296c2e6a353f6b7",
+        "sha256": "124efc93eaa0e1a4fde55e2615b6c8ccb6cd0246acffa80ae88343c155f86ab1",
         "signature": {
           "algorithm": "ed25519",
           "key_id": "org.waveflow.release.2026-01",
-          "value": "SADhR0jCIuHEpmnIfJYn2MSEVvuWIFrSo8oI4FKon97pB8CGyhG/0GmTOgozGs3qgHNGkh/zKBgJ14L5C3MXBA=="
+          "value": "HXYVMNmL1e+qQDpxttpWqL5Eo/kgxgHH0XEpwWq8msVrCTDKVpp0pT8SUQ5AYOwzIe2QJLUtiXjBno4o3Y6JDw=="
         },
-        "size_bytes": 9017
+        "size_bytes": 9171
       }
     ],
     "capabilities": [
@@ -252,6 +252,10 @@
       {
         "contract": "tv_provider",
         "scheme": "picarto"
+      },
+      {
+        "contract": "tv_provider",
+        "scheme": "bilibili"
       }
     ],
     "permissions": {
@@ -287,7 +291,9 @@
           "www.huamao.com",
           "live.shopee.com",
           "www.laixiu.com",
-          "picarto.tv"
+          "picarto.tv",
+          "live.bilibili.com",
+          "api.live.bilibili.com"
         ],
         "direct": true
       }
@@ -541,13 +547,13 @@
         ],
         "lock_version": 1
       },
-      "entrypoint": "streamget-providers-1.0.0.pyz",
+      "entrypoint": "streamget-providers-1.1.0.pyz",
       "ipc": "stdio_framed_json_v1",
       "python_version_range": ">=3.14.0 <3.15.0",
       "type": "python"
     },
     "state_schema_version": 1,
-    "version": "1.0.0"
+    "version": "1.1.0"
   },
   "risk_level": "official_signed_not_sandboxed",
   "schema_version": 1,
@@ -555,5 +561,5 @@
   "source_policy": "signed_release",
   "status": "active",
   "updated_at": "2026-08-12T00:00:00Z",
-  "version": "1.0.0"
+  "version": "1.1.0"
 }
