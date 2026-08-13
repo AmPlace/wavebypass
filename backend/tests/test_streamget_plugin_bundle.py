@@ -26,10 +26,10 @@ EXPECTED_SCHEMES = {
     "yy", "bigo", "blued", "soop", "netease", "pandatv", "maoer", "look", "flextv", "popkontv",
     "twitcasting", "baidu", "weibo", "kugou", "twitch", "huajiao", "showroom", "inke", "acfun", "zhihu",
     "chzzk", "live17", "langlive", "changliao", "jd", "faceit", "lianjie", "sixroom", "huamao", "shopee",
-    "laixiu", "picarto", "bilibili", "douyu", "douyin", "redbook",
+    "laixiu", "picarto", "bilibili", "douyu", "douyin", "redbook", "tiktok",
 }
 EXCLUDED_SCHEMES = {"haixiu", "liveme", "lehai"}
-EXPECTED_SCHEME_COUNT = 36
+EXPECTED_SCHEME_COUNT = 37
 
 
 def _load_plugin_module():
@@ -90,7 +90,7 @@ class StreamGetBundleContractTest(unittest.TestCase):
         self.assertTrue({
             "live.bilibili.com", "api.live.bilibili.com", "www.douyu.com",
             "playweb.douyucdn.cn", "wxapp.douyucdn.cn", "douyucdn2.cn", "live.douyin.com",
-            "www.xiaohongshu.com", "xhslink.com", "live-source-play.xhscdn.com",
+            "www.xiaohongshu.com", "xhslink.com", "live-source-play.xhscdn.com", "www.tiktok.com",
         }.issubset(set(manifest.permissions["network"]["allowed_hosts"])))
         self.assertEqual(len(manifest.runtime["dependency_lock"]["artifacts"]), 21)
         self.assertEqual(set(self.module.PROVIDER_SPECS), EXPECTED_SCHEMES)
@@ -123,6 +123,7 @@ class StreamGetBundleContractTest(unittest.TestCase):
             "bilibili": "https://live.bilibili.com/room-42",
             "douyu": "https://www.douyu.com/room-42", "douyin": "https://live.douyin.com/room-42",
             "redbook": "https://www.xiaohongshu.com/livestream/room-42",
+            "tiktok": "https://www.tiktok.com/@room-42/live",
         }
         for scheme in sorted(EXPECTED_SCHEMES):
             fields = {"is_live": True, "flv_url": f"https://media.test/{scheme}.flv",
@@ -132,6 +133,11 @@ class StreamGetBundleContractTest(unittest.TestCase):
             specs = {key: replace(value, stream_class=fake) for key, value in self.module.PROVIDER_SPECS.items()}
             fetch_calls = []
             if scheme == "redbook":
+                async def fake_fetch(url):
+                    fetch_calls.append(url)
+                    return fields
+                specs[scheme] = replace(specs[scheme], fetcher=fake_fetch)
+            elif scheme == "tiktok":
                 async def fake_fetch(url):
                     fetch_calls.append(url)
                     return fields
@@ -148,7 +154,7 @@ class StreamGetBundleContractTest(unittest.TestCase):
             self.assertEqual((descriptor.url, descriptor.transport), (expected_url, expected_transport), scheme)
             self.assertEqual((descriptor.ttl_seconds, descriptor.volatile_url, descriptor.requires_proxy),
                              (spec.ttl_seconds, spec.volatile_url, False), scheme)
-            if scheme == "redbook":
+            if scheme in {"redbook", "tiktok"}:
                 self.assertEqual(fetch_calls, [expected_urls[scheme]], scheme)
             else:
                 self.assertEqual(fake.calls, [(expected_urls[scheme], "fetch_web_stream_data"),
@@ -296,6 +302,143 @@ class StreamGetBundleContractTest(unittest.TestCase):
             },
         )
         self.assertEqual(descriptor.provider_diagnostics["anchor_name"], legacy_result["anchor_name"])
+
+    def test_tiktok_normalization_app_path_cookie_ttl_and_transport_selection(self):
+        calls = []
+        result = {
+            "is_live": True,
+            "anchor_name": "creator-room",
+            "flv_url": "https://media.test/tiktok.flv?codec=h264",
+            "m3u8_url": "https://media.test/tiktok.m3u8?codec=h264",
+        }
+
+        async def fake_fetch(url):
+            calls.append(url)
+            return result
+
+        provider = self.module.StreamGetProvider({
+            "tiktok": replace(self.module.PROVIDER_SPECS["tiktok"], fetcher=fake_fetch),
+        })
+        descriptor = provider.resolve_stream(
+            TVReference("tiktok", "/@creator/"),
+            ResolveContext("fixture", 9999999999999, {}, None),
+        )
+        self.assertEqual(calls, ["https://www.tiktok.com/@creator/live"])
+        self.assertEqual(
+            (descriptor.url, descriptor.transport, descriptor.ttl_seconds,
+             descriptor.volatile_url, descriptor.requires_proxy, descriptor.direct_playable),
+            (result["flv_url"], "http_flv", 12 * 24 * 60 * 60, False, False, True),
+        )
+
+        hls_only = self.module.StreamGetProvider({
+            "tiktok": replace(self.module.PROVIDER_SPECS["tiktok"], fetcher=mock.AsyncMock(
+                return_value={"is_live": True, "flv_url": "", "m3u8_url": "https://media.test/live.m3u8"}
+            )),
+        })
+        hls_descriptor = hls_only.resolve_stream(
+            TVReference("tiktok", "creator"),
+            ResolveContext("fixture", 9999999999999, {}, None),
+        )
+        self.assertEqual((hls_descriptor.url, hls_descriptor.transport),
+                         ("https://media.test/live.m3u8", "hls"))
+
+        default_headers = self.module.TikTokLiveStream(cookies="").mobile_headers
+        self.assertEqual(default_headers["referer"], "https://www.tiktok.com/")
+        self.assertTrue(default_headers["cookie"].startswith("ttwid="))
+
+    def test_tiktok_not_live_malformed_and_upstream_taxonomy(self):
+        context = ResolveContext("fixture", 9999999999999, {}, None)
+        for result, expected in (
+            ({"is_live": False}, "NOT_LIVE"),
+            ({"is_live": True, "flv_url": "", "m3u8_url": ""}, "TEMPORARY_UPSTREAM_FAILURE"),
+        ):
+            provider = self.module.StreamGetProvider({
+                "tiktok": replace(self.module.PROVIDER_SPECS["tiktok"],
+                                   fetcher=mock.AsyncMock(return_value=result)),
+            })
+            with self.assertRaises(SDKPluginError) as error:
+                provider.resolve_stream(TVReference("tiktok", "creator"), context)
+            self.assertEqual(error.exception.code, expected)
+
+        provider = self.module.StreamGetProvider({
+            "tiktok": replace(self.module.PROVIDER_SPECS["tiktok"],
+                               fetcher=mock.AsyncMock(side_effect=ValueError("malformed response"))),
+        })
+        with self.assertRaises(SDKPluginError) as error:
+            provider.resolve_stream(TVReference("tiktok", "creator"), context)
+        self.assertEqual(error.exception.code, "TEMPORARY_UPSTREAM_FAILURE")
+
+    def test_tiktok_descriptor_matches_legacy_golden_fixture_and_app_api(self):
+        result = {
+            "is_live": True,
+            "anchor_name": "creator-room",
+            "flv_url": "https://media.test/tiktok.flv",
+            "m3u8_url": "https://media.test/tiktok.m3u8",
+        }
+        api_data = {"data": {"room": "fixture"}}
+
+        class FakeStreamData:
+            def to_json(self):
+                return json.dumps(result)
+
+        class FakeTikTok:
+            instances = []
+
+            def __init__(self, *, cookies):
+                self.cookies = cookies
+                self.calls = []
+                type(self).instances.append(self)
+
+            async def fetch_app_stream_data(self, url):
+                self.calls.append((url, "fetch_app_stream_data"))
+                return api_data
+
+            async def fetch_stream_url(self, data, quality):
+                self.calls.append((data, quality))
+                return FakeStreamData()
+
+        legacy = importlib.import_module("adapters.tiktok")
+        from adapters import AdapterRequest
+        with mock.patch.object(legacy, "TikTokLiveStream", FakeTikTok):
+            legacy_result = asyncio.run(legacy.resolve_tiktok(
+                AdapterRequest("tiktok://@creator", "tiktok", "@creator", {}), None,
+            ))
+
+        with mock.patch.object(self.module, "TikTokLiveStream", FakeTikTok):
+            provider = self.module.StreamGetProvider({"tiktok": self.module.PROVIDER_SPECS["tiktok"]})
+            descriptor = provider.resolve_stream(
+                TVReference("tiktok", "/@creator/"),
+                ResolveContext("fixture", 9999999999999, {}, None),
+            )
+
+        self.assertEqual(
+            {
+                "url": descriptor.url,
+                "source_type": descriptor.transport,
+                "direct_playable": descriptor.direct_playable,
+                "requires_proxy": descriptor.requires_proxy,
+                "headers": descriptor.headers,
+                "ttl": descriptor.ttl_seconds,
+                "expires_at": descriptor.expires_at,
+                "volatile_url": descriptor.volatile_url,
+            },
+            {
+                "url": legacy_result["url"],
+                "source_type": legacy_result["source_type"],
+                "direct_playable": legacy_result["direct_playable"],
+                "requires_proxy": legacy_result["requires_proxy"],
+                "headers": legacy_result["headers"],
+                "ttl": legacy_result["ttl"],
+                "expires_at": legacy_result["expires_at"],
+                "volatile_url": False,
+            },
+        )
+        self.assertEqual(descriptor.provider_diagnostics, {})
+        self.assertEqual(
+            [(instance.cookies, instance.calls) for instance in FakeTikTok.instances[-2:]],
+            [("", [("https://www.tiktok.com/@creator/live", "fetch_app_stream_data"),
+                   (api_data, "OD")])] * 2,
+        )
 
     def test_weibo_mapping_and_stable_failure_taxonomy(self):
         fields = {"is_live": True, "flv_url": "https://media.test/live.flv", "m3u8_url": "", "record_url": ""}

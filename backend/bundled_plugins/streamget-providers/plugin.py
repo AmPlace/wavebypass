@@ -49,6 +49,7 @@ from streamget import (
     SoopLiveStream,
     TwitchLiveStream,
     TwitCastingLiveStream,
+    TikTokLiveStream,
     WeiboLiveStream,
     YYLiveStream,
     ZhihuLiveStream,
@@ -81,6 +82,7 @@ class ProviderSpec:
     play_url_selector: Callable[[Mapping[str, Any]], str | None] | None = None
     transport_selector: Callable[[Mapping[str, Any], str], str] | None = None
     fetcher: Callable[[str], Any] | None = None
+    resource_normalizer: Callable[[str], str] | None = None
 
 
 def _url(template: str) -> Callable[[str], str]:
@@ -237,6 +239,24 @@ async def _fetch_redbook(url: str) -> dict[str, Any]:
     return result
 
 
+TIKTOK_TTL_SECONDS = 12 * 24 * 60 * 60
+
+
+def _tiktok_resource(resource_id: str) -> str:
+    return resource_id.strip("/").lstrip("@")
+
+
+async def _fetch_tiktok(url: str) -> dict[str, Any]:
+    """Use StreamGet's public TikTok app-data path without legacy code."""
+    live = TikTokLiveStream(cookies="")
+    data = await live.fetch_app_stream_data(url)
+    stream_obj = await live.fetch_stream_url(data, "OD")
+    decoded = json.loads(stream_obj.to_json())
+    if not isinstance(decoded, dict):
+        raise ValueError("StreamGet returned a non-object result")
+    return decoded
+
+
 # This is the complete bundle boundary.  Do not add Node-backed StreamGet
 # providers here: haixiu/liveme/lehai require ExecJS at runtime and are not
 # part of this Plugin.
@@ -312,6 +332,15 @@ PROVIDER_SPECS: dict[str, ProviderSpec] = {
         ),
         fetcher=_fetch_redbook,
     ),
+    "tiktok": ProviderSpec(
+        TikTokLiveStream,
+        _url("https://www.tiktok.com/@{room_id}/live"),
+        play_fields=("flv_url", "m3u8_url"),
+        volatile_url=False,
+        ttl_seconds=TIKTOK_TTL_SECONDS,
+        fetcher=_fetch_tiktok,
+        resource_normalizer=_tiktok_resource,
+    ),
 }
 
 
@@ -340,7 +369,11 @@ class StreamGetProvider(TVProvider):
     def resolve_stream(self, reference: TVReference, context: ResolveContext) -> StreamDescriptor:
         context.raise_if_cancelled()
         spec = self._specs.get(reference.scheme)
-        room_id = reference.resource_id.strip("/")
+        room_id = (
+            spec.resource_normalizer(reference.resource_id)
+            if spec is not None and spec.resource_normalizer is not None
+            else reference.resource_id.strip("/")
+        )
         if spec is None or not room_id:
             raise InvalidResource("StreamGet resource is not supported")
 
