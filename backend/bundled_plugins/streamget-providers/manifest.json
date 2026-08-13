@@ -153,6 +153,10 @@
     {
       "contract": "tv_provider",
       "scheme": "bilibili"
+    },
+    {
+      "contract": "tv_provider",
+      "scheme": "douyu"
     }
   ],
   "permissions": {
@@ -190,7 +194,11 @@
         "www.laixiu.com",
         "picarto.tv",
         "live.bilibili.com",
-        "api.live.bilibili.com"
+        "api.live.bilibili.com",
+        "www.douyu.com",
+        "playweb.douyucdn.cn",
+        "wxapp.douyucdn.cn",
+        "douyucdn2.cn"
       ],
       "direct": true
     }
@@ -450,5 +458,5 @@
     "type": "python"
   },
   "state_schema_version": 1,
-  "version": "1.1.0"
+  "version": "1.2.0"
 }

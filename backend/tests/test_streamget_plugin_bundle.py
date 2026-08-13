@@ -26,10 +26,10 @@ EXPECTED_SCHEMES = {
     "yy", "bigo", "blued", "soop", "netease", "pandatv", "maoer", "look", "flextv", "popkontv",
     "twitcasting", "baidu", "weibo", "kugou", "twitch", "huajiao", "showroom", "inke", "acfun", "zhihu",
     "chzzk", "live17", "langlive", "changliao", "jd", "faceit", "lianjie", "sixroom", "huamao", "shopee",
-    "laixiu", "picarto", "bilibili",
+    "laixiu", "picarto", "bilibili", "douyu",
 }
 EXCLUDED_SCHEMES = {"haixiu", "liveme", "lehai"}
-EXPECTED_SCHEME_COUNT = 33
+EXPECTED_SCHEME_COUNT = 34
 
 
 def _load_plugin_module():
@@ -87,10 +87,10 @@ class StreamGetBundleContractTest(unittest.TestCase):
         self.assertEqual(set(manifest.permissions), {"network"})
         self.assertTrue(manifest.permissions["network"]["direct"])
         self.assertNotIn("managed", manifest.permissions["network"])
-        self.assertEqual(
-            set(manifest.permissions["network"]["allowed_hosts"][-2:]),
-            {"live.bilibili.com", "api.live.bilibili.com"},
-        )
+        self.assertTrue({
+            "live.bilibili.com", "api.live.bilibili.com", "www.douyu.com",
+            "playweb.douyucdn.cn", "wxapp.douyucdn.cn", "douyucdn2.cn",
+        }.issubset(set(manifest.permissions["network"]["allowed_hosts"])))
         self.assertEqual(len(manifest.runtime["dependency_lock"]["artifacts"]), 21)
         self.assertEqual(set(self.module.PROVIDER_SPECS), EXPECTED_SCHEMES)
         source = (PLUGIN_DIR / "plugin.py").read_text(encoding="utf-8")
@@ -119,6 +119,7 @@ class StreamGetBundleContractTest(unittest.TestCase):
             "huamao": "https://www.huamao.com/room-42", "shopee": "https://live.shopee.com/room-42",
             "laixiu": "https://www.laixiu.com/room-42", "picarto": "https://picarto.tv/room-42",
             "bilibili": "https://live.bilibili.com/room-42",
+            "douyu": "https://www.douyu.com/room-42",
         }
         for scheme in sorted(EXPECTED_SCHEMES):
             fields = {"is_live": True, "flv_url": f"https://media.test/{scheme}.flv",
@@ -134,7 +135,7 @@ class StreamGetBundleContractTest(unittest.TestCase):
             expected_transport = spec.transport or "http_flv"
             self.assertEqual((descriptor.url, descriptor.transport), (expected_url, expected_transport), scheme)
             self.assertEqual((descriptor.ttl_seconds, descriptor.volatile_url, descriptor.requires_proxy),
-                             (1800, self.module.PROVIDER_SPECS[scheme].volatile_url, False), scheme)
+                             (spec.ttl_seconds, spec.volatile_url, False), scheme)
             self.assertEqual(fake.calls, [(expected_urls[scheme], "fetch_web_stream_data"),
                                            (expected_urls[scheme], spec.quality)], scheme)
 
@@ -270,6 +271,162 @@ class StreamGetBundleContractTest(unittest.TestCase):
             ("https://live.bilibili.com/room-42", "fetch_web_stream_data"),
             ("https://live.bilibili.com/room-42", "OD"),
         ])
+
+    def test_douyu_preserves_cdn_selection_and_descriptor_golden_fixture(self):
+        fields = {
+            "is_live": True,
+            "flv_url": "https://ws-h5.douyucdn2.cn/live/primary.flv",
+            "m3u8_url": "https://backup.example/live.m3u8",
+            "extra": {"backup_url_list": [
+                "https://edge.edgesrv.com:8443/live.flv",
+                "https://backup.example/live.flv",
+                "https://cdn.douyucdn2.cn/live/backup.flv",
+            ]},
+            "anchor_name": "fixture-anchor",
+        }
+        fake = _fake_class(fields)
+        provider = self.module.StreamGetProvider({
+            "douyu": replace(self.module.PROVIDER_SPECS["douyu"], stream_class=fake),
+        })
+        descriptor = provider.resolve_stream(
+            TVReference("douyu", "/room-42/"),
+            ResolveContext("fixture", 9999999999999, {}, None),
+        )
+        self.assertEqual(
+            (descriptor.url, descriptor.transport, descriptor.ttl_seconds,
+             descriptor.volatile_url, descriptor.requires_proxy),
+            ("https://ws-h5.douyucdn2.cn/live/primary.flv", "http_flv", 0, True, False),
+        )
+        self.assertEqual(fake.calls, [
+            ("https://www.douyu.com/room-42", "fetch_web_stream_data"),
+            ("https://www.douyu.com/room-42", "OD"),
+        ])
+
+        # A non-primary preferred CDN still wins over ordinary fallbacks and
+        # edgesrv:8443, while the stable fallback order remains deterministic.
+        fallback = _fake_class({
+            "is_live": True,
+            "flv_url": "https://edge.edgesrv.com:8443/live.flv",
+            "extra": {"backup_url_list": [
+                "https://backup.example/live.flv",
+                "https://cdn.douyucdn2.cn/live/backup.flv",
+            ]},
+        })
+        fallback_provider = self.module.StreamGetProvider({
+            "douyu": replace(self.module.PROVIDER_SPECS["douyu"], stream_class=fallback),
+        })
+        fallback_descriptor = fallback_provider.resolve_stream(
+            TVReference("douyu", "room-42"),
+            ResolveContext("fixture", 9999999999999, {}, None),
+        )
+        self.assertEqual(fallback_descriptor.url, "https://cdn.douyucdn2.cn/live/backup.flv")
+
+        hls = _fake_class({
+            "is_live": True,
+            "flv_url": "",
+            "m3u8_url": "https://backup.example/live.m3u8",
+            "extra": {"backup_url_list": ["https://cdn.douyucdn2.cn/live/backup.m3u8"]},
+        })
+        hls_provider = self.module.StreamGetProvider({
+            "douyu": replace(self.module.PROVIDER_SPECS["douyu"], stream_class=hls),
+        })
+        hls_descriptor = hls_provider.resolve_stream(
+            TVReference("douyu", "room-42"),
+            ResolveContext("fixture", 9999999999999, {}, None),
+        )
+        self.assertEqual((hls_descriptor.url, hls_descriptor.transport),
+                         ("https://cdn.douyucdn2.cn/live/backup.m3u8", "hls"))
+
+        all_blocked = _fake_class({
+            "is_live": True,
+            "flv_url": "https://edge.edgesrv.com:8443/live.flv",
+            "extra": {"backup_url_list": ["https://edge2.edgesrv.com:8443/live.flv"]},
+        })
+        all_blocked_provider = self.module.StreamGetProvider({
+            "douyu": replace(self.module.PROVIDER_SPECS["douyu"], stream_class=all_blocked),
+        })
+        self.assertEqual(
+            all_blocked_provider.resolve_stream(
+                TVReference("douyu", "room-42"),
+                ResolveContext("fixture", 9999999999999, {}, None),
+            ).url,
+            "https://edge.edgesrv.com:8443/live.flv",
+        )
+
+        for result, expected in (
+            ({"is_live": False}, "NOT_LIVE"),
+            ({"is_live": True, "flv_url": "", "m3u8_url": "", "extra": {}},
+             "TEMPORARY_UPSTREAM_FAILURE"),
+        ):
+            error_provider = self.module.StreamGetProvider({
+                "douyu": replace(self.module.PROVIDER_SPECS["douyu"], stream_class=_fake_class(result)),
+            })
+            with self.assertRaises(SDKPluginError) as error:
+                error_provider.resolve_stream(
+                    TVReference("douyu", "room-42"),
+                    ResolveContext("fixture", 9999999999999, {}, None),
+                )
+            self.assertEqual(error.exception.code, expected)
+
+        broken = self.module.StreamGetProvider({
+            "douyu": replace(self.module.PROVIDER_SPECS["douyu"],
+                             stream_class=_fake_class({}, failure=RuntimeError("upstream"))),
+        })
+        with self.assertRaises(SDKPluginError) as upstream:
+            broken.resolve_stream(
+                TVReference("douyu", "room-42"),
+                ResolveContext("fixture", 9999999999999, {}, None),
+            )
+        self.assertEqual(upstream.exception.code, "TEMPORARY_UPSTREAM_FAILURE")
+
+    def test_douyu_descriptor_matches_legacy_golden_fixture_without_importing_legacy(self):
+        legacy = importlib.import_module("adapters.douyu")
+        from adapters import AdapterRequest
+
+        fields = {
+            "is_live": True,
+            "flv_url": "https://edge.edgesrv.com:8443/live.flv",
+            "m3u8_url": "https://backup.example/live.m3u8",
+            "extra": {"backup_url_list": [
+                "https://backup.example/live.flv",
+                "https://cdn.douyucdn2.cn/live/backup.flv",
+            ]},
+        }
+
+        class LegacyFake(_FakeStream):
+            calls = []
+            result = fields
+
+            def __init__(self):
+                super().__init__(cookies="")
+
+        with mock.patch.object(legacy, "DouyuLiveStream", LegacyFake):
+            legacy_result = asyncio.run(legacy.resolve_douyu(
+                AdapterRequest("douyu://room-42", "douyu", "room-42", {}), None,
+            ))
+
+        plugin_fake = _fake_class(fields)
+        provider = self.module.StreamGetProvider({
+            "douyu": replace(self.module.PROVIDER_SPECS["douyu"], stream_class=plugin_fake),
+        })
+        descriptor = provider.resolve_stream(
+            TVReference("douyu", "room-42"),
+            ResolveContext("fixture", 9999999999999, {}, None),
+        )
+        plugin_result = {
+            "url": descriptor.url,
+            "source_type": descriptor.transport,
+            "direct_playable": descriptor.direct_playable,
+            "requires_proxy": descriptor.requires_proxy,
+            "headers": descriptor.headers,
+            "ttl": descriptor.ttl_seconds,
+            "expires_at": descriptor.expires_at,
+            "volatile_url": descriptor.volatile_url,
+        }
+        self.assertEqual({key: legacy_result[key] for key in plugin_result}, plugin_result)
+        source = (PLUGIN_DIR / "plugin.py").read_text(encoding="utf-8")
+        self.assertNotIn("adapters.douyu", source)
+        self.assertNotIn("backend.adapters.douyu", source)
 
     def test_cli_lock_treats_py2_py3_wheels_as_python3_compatible(self):
         with tempfile.TemporaryDirectory() as directory:

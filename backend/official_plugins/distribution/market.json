@@ -1,5 +1,5 @@
 {
-  "market_version": "1.5.0",
+  "market_version": "1.6.0",
   "packages": [
     {
       "artifact_references": [
@@ -1359,8 +1359,8 @@
     {
       "artifact_references": [
         {
-          "sha256": "124efc93eaa0e1a4fde55e2615b6c8ccb6cd0246acffa80ae88343c155f86ab1",
-          "url": "payloads/streamget-providers-1.1.0.pyz"
+          "sha256": "e549606d4e391ac51daf5e47c5fb06bf128f73fa0090eb54eeedbc39a524d93f",
+          "url": "payloads/streamget-providers-1.2.0.pyz"
         }
       ],
       "dependency_references": [
@@ -1455,7 +1455,7 @@
       "manifest_signature": {
         "algorithm": "ed25519",
         "key_id": "org.waveflow.release.2026-01",
-        "value": "UxExkS9fcl3vQSOEyUkAdsvg+1xh1BT/rhnkCMQjjSqGxEkEREtQJwavJc3+c1wWel6RFwwEZFAm+0mULpZbBA=="
+        "value": "EY+ouKaJs66rkknMogawfoNEv3sYrGX8THgd26+wtCM680GFfIqn9mInHGO0Pm75Xlpdxf8QBUxP2v+XmB62Cg=="
       },
       "name": "StreamGet Provider Bundle",
       "package_type": "plugin_package",
@@ -1463,16 +1463,16 @@
         "artifacts": [
           {
             "arch": "arm64",
-            "entrypoint": "streamget-providers-1.1.0.pyz",
+            "entrypoint": "streamget-providers-1.2.0.pyz",
             "os": "macos",
             "runtime": "python",
-            "sha256": "124efc93eaa0e1a4fde55e2615b6c8ccb6cd0246acffa80ae88343c155f86ab1",
+            "sha256": "e549606d4e391ac51daf5e47c5fb06bf128f73fa0090eb54eeedbc39a524d93f",
             "signature": {
               "algorithm": "ed25519",
               "key_id": "org.waveflow.release.2026-01",
-              "value": "HXYVMNmL1e+qQDpxttpWqL5Eo/kgxgHH0XEpwWq8msVrCTDKVpp0pT8SUQ5AYOwzIe2QJLUtiXjBno4o3Y6JDw=="
+              "value": "O1V+a/zvuTeqUlXHPz6LlmvnC2W6elpkO4zKUoysjW9ppl1JENjdxof1h+3EEdfuwPDNCZTYc+L0UZChn1zbDQ=="
             },
-            "size_bytes": 9171
+            "size_bytes": 9903
           }
         ],
         "capabilities": [
@@ -1614,6 +1614,10 @@
           {
             "contract": "tv_provider",
             "scheme": "bilibili"
+          },
+          {
+            "contract": "tv_provider",
+            "scheme": "douyu"
           }
         ],
         "permissions": {
@@ -1651,7 +1655,11 @@
               "www.laixiu.com",
               "picarto.tv",
               "live.bilibili.com",
-              "api.live.bilibili.com"
+              "api.live.bilibili.com",
+              "www.douyu.com",
+              "playweb.douyucdn.cn",
+              "wxapp.douyucdn.cn",
+              "douyucdn2.cn"
             ],
             "direct": true
           }
@@ -1905,13 +1913,13 @@
             ],
             "lock_version": 1
           },
-          "entrypoint": "streamget-providers-1.1.0.pyz",
+          "entrypoint": "streamget-providers-1.2.0.pyz",
           "ipc": "stdio_framed_json_v1",
           "python_version_range": ">=3.14.0 <3.15.0",
           "type": "python"
         },
         "state_schema_version": 1,
-        "version": "1.1.0"
+        "version": "1.2.0"
       },
       "risk_level": "official_signed_not_sandboxed",
       "schema_version": 1,
@@ -1919,7 +1927,7 @@
       "source_policy": "signed_release",
       "status": "active",
       "updated_at": "2026-08-12T00:00:00Z",
-      "version": "1.1.0"
+      "version": "1.2.0"
     }
   ],
   "schema_version": 1,

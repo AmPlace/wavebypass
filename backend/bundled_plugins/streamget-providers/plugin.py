@@ -12,6 +12,7 @@ import asyncio
 import json
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
+from urllib.parse import urlparse
 
 from streamget import (
     AcfunLiveStream,
@@ -21,6 +22,7 @@ from streamget import (
     BluedLiveStream,
     ChangliaoLiveStream,
     ChzzkLiveStream,
+    DouyuLiveStream,
     FaceitLiveStream,
     FlexTVLiveStream,
     HuajiaoLiveStream,
@@ -71,6 +73,8 @@ class ProviderSpec:
     play_fields: tuple[str, ...] = ("flv_url", "m3u8_url", "record_url")
     transport: str | None = None
     volatile_url: bool = True
+    ttl_seconds: int = TTL_SECONDS
+    play_url_selector: Callable[[Mapping[str, Any]], str | None] | None = None
 
 
 def _url(template: str) -> Callable[[str], str]:
@@ -83,6 +87,53 @@ def _weibo_url(room_id: str) -> str:
     if room_id.isdigit():
         return f"https://weibo.com/u/{room_id}"
     return f"https://weibo.com/show/{room_id}"
+
+
+# Douyu returns a primary URL plus optional CDN fallbacks.  Keep this policy
+# inside the Plugin rather than importing the legacy adapter: the Plugin must
+# remain independently runnable in its isolated StreamGet environment.
+_DOUYU_PREFERRED_CDN = "douyucdn2.cn"
+_DOUYU_BLOCKED_CDN_HOSTS = {"edgesrv.com"}
+
+
+def _douyu_cdn_score(url: str) -> int:
+    """Lower score means higher priority; -1 is a known-bad endpoint."""
+    try:
+        host = urlparse(url).hostname or ""
+    except Exception:
+        return 100
+    if any(blocked in host for blocked in _DOUYU_BLOCKED_CDN_HOSTS):
+        if ":8443" in url:
+            return -1
+        return 50
+    if _DOUYU_PREFERRED_CDN in host:
+        return 0
+    return 10
+
+
+def _select_douyu_cdn(urls: list[str]) -> str | None:
+    if not urls:
+        return None
+    scored = [(url, _douyu_cdn_score(url)) for url in urls]
+    candidates = [(url, score) for url, score in scored if score >= 0]
+    if not candidates:
+        # Preserve legacy last-resort behavior if every advertised endpoint
+        # is an edgesrv:8443 URL.
+        return urls[0]
+    candidates.sort(key=lambda item: item[1])
+    return candidates[0][0]
+
+
+def _douyu_play_url(result: Mapping[str, Any]) -> str | None:
+    urls: list[str] = []
+    primary_url = result.get("flv_url") or result.get("m3u8_url") or ""
+    if isinstance(primary_url, str) and primary_url:
+        urls.append(primary_url)
+    extra = result.get("extra")
+    backup_urls = extra.get("backup_url_list") if isinstance(extra, Mapping) else []
+    if isinstance(backup_urls, (list, tuple)):
+        urls.extend(url for url in backup_urls if isinstance(url, str) and url)
+    return _select_douyu_cdn(urls)
 
 
 # This is the complete bundle boundary.  Do not add Node-backed StreamGet
@@ -135,6 +186,12 @@ PROVIDER_SPECS: dict[str, ProviderSpec] = {
         transport="http_flv",
         volatile_url=False,
     ),
+    "douyu": ProviderSpec(
+        DouyuLiveStream,
+        _url("https://www.douyu.com/{room_id}"),
+        play_url_selector=_douyu_play_url,
+        ttl_seconds=0,
+    ),
 }
 
 
@@ -171,11 +228,14 @@ class StreamGetProvider(TVProvider):
         if not result.get("is_live"):
             raise PluginError("NOT_LIVE", "StreamGet resource is not live", retryable=False)
 
-        play_url = next(
-            (result.get(field) for field in spec.play_fields
-             if isinstance(result.get(field), str) and result.get(field)),
-            None,
-        )
+        if spec.play_url_selector is not None:
+            play_url = spec.play_url_selector(result)
+        else:
+            play_url = next(
+                (result.get(field) for field in spec.play_fields
+                 if isinstance(result.get(field), str) and result.get(field)),
+                None,
+            )
         if not play_url:
             raise TemporaryFailure("StreamGet returned no playable URL")
         transport = spec.transport or ("http_flv" if result.get("flv_url") else "hls")
@@ -183,7 +243,7 @@ class StreamGetProvider(TVProvider):
             url=play_url,
             transport=transport,
             headers={},
-            ttl_seconds=TTL_SECONDS,
+            ttl_seconds=spec.ttl_seconds,
             expires_at=None,
             volatile_url=spec.volatile_url,
             requires_proxy=False,
