@@ -12,6 +12,7 @@ import base64
 import hashlib
 import hmac
 import json
+from dataclasses import dataclass
 from typing import Any
 
 from security.secrets import SOURCE_ID_PURPOSE, derive_key
@@ -37,6 +38,57 @@ _MARKET_FIELDS = (
     "market_channel_id",
     "market_source_item_id",
 )
+
+
+@dataclass(frozen=True)
+class MediaSourceIdentity:
+    """Stable identity for a source in a media domain.
+
+    ``domain`` is part of the identity material rather than a naming prefix.
+    This keeps IPTV and Radio namespaces separate even when an owner uses the
+    same external identifier in both domains.  A resolved URL is deliberately
+    not represented here; providers may rotate it without changing the
+    durable source identity.
+    """
+
+    domain: str
+    owner: str
+    external_id: str
+
+    def __post_init__(self) -> None:
+        for field in ("domain", "owner", "external_id"):
+            value = getattr(self, field)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{field} must be a non-empty string")
+
+    def material(self) -> dict[str, str]:
+        return {
+            "domain": self.domain.strip().lower(),
+            "owner": self.owner.strip(),
+            "external_id": self.external_id.strip(),
+        }
+
+
+def media_source_id_for(identity: MediaSourceIdentity) -> str:
+    """Return an opaque stable ID for any explicitly named media domain."""
+
+    encoded = json.dumps(identity.material(), ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    digest = hmac.new(derive_key(SOURCE_ID_PURPOSE), encoded, hashlib.sha256).digest()
+    token = base64.urlsafe_b64encode(digest[:18]).rstrip(b"=").decode("ascii")
+    return f"src_{token}"
+
+
+def media_source_revision_for(configuration: Any) -> str:
+    """Fingerprint playback configuration without including volatile URLs."""
+
+    try:
+        encoded = json.dumps(
+            configuration, ensure_ascii=False, sort_keys=True,
+            separators=(",", ":"), allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("media source configuration must be JSON serializable") from exc
+    return hashlib.sha256(encoded).hexdigest()[:24]
 
 
 def _clean(value: Any) -> Any:

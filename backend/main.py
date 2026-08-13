@@ -67,6 +67,8 @@ from routers.plugins import router as plugins_router
 from plugin_production import ProductionPluginSubsystem, default_plugin_root
 from plugin_tasks import register_plugin_update_task
 from provider_resolver import ProviderResolver
+from radio_core import RadioResolver
+from routers.radio import router as radio_router
 from routers.setup import router as setup_router
 from security.dependencies import require_admin, require_browse_access, require_media_access, resolve_media_access
 from security.source_ids import source_id_for
@@ -683,6 +685,7 @@ async def lifespan(app: FastAPI):
     app.state.automation_service = None
     app.state.plugin_subsystem = None
     app.state.provider_resolver = None
+    app.state.radio_resolver = RadioResolver(runtime=None)
     try:
         await database.initialize()
         try:
@@ -702,6 +705,9 @@ async def lifespan(app: FastAPI):
             )
             app.state.plugin_subsystem = plugin_subsystem
             app.state.provider_resolver = plugin_subsystem.provider_resolver
+            app.state.radio_resolver = getattr(
+                plugin_subsystem, "radio_resolver", RadioResolver(runtime=None),
+            )
             recovery = await plugin_subsystem.startup()
             unavailable = [item for item in recovery if item.get("status") != "active"]
             if unavailable:
@@ -715,6 +721,7 @@ async def lifespan(app: FastAPI):
                     logger.exception("Plugin subsystem cleanup after startup failure failed")
             plugin_subsystem = None
             app.state.plugin_subsystem = None
+            app.state.radio_resolver = RadioResolver(runtime=None)
             try:
                 app.state.provider_resolver = ProviderResolver.from_ownership_rows(
                     await database.list_plugin_scheme_ownership(), runtime=None,
@@ -754,6 +761,7 @@ async def lifespan(app: FastAPI):
             finally:
                 app.state.plugin_subsystem = None
                 app.state.provider_resolver = None
+                app.state.radio_resolver = None
                 await _stop_all_rtsp_sessions()
                 await http_client.aclose()
                 await yunting_client.aclose()
@@ -780,6 +788,7 @@ app.include_router(setup_router)
 app.include_router(auth_router)
 app.include_router(media_credentials_router)
 app.include_router(media_proxy_router)
+app.include_router(radio_router)
 app.include_router(settings_router)
 app.include_router(plugins_router)
 

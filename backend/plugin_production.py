@@ -29,6 +29,7 @@ from plugin_desktop_runtime import resolve_plugin_python_executable
 from plugin_runtime import LifecycleState, PluginError, PluginRuntime, validate_manifest
 from plugin_runtime.permissions import PermissionPolicy
 from provider_resolver import ProviderResolver
+from radio_core import RadioCatalogBridge, RadioResolver
 from plugin_capabilities import CapabilityGateway, CoreCapabilityDispatcher
 from plugin_permissions import permission_projection, require_high_risk_approvals
 from plugin_channel_catalog import DynamicChannelCatalog
@@ -192,6 +193,7 @@ class ProductionPluginSubsystem:
     provider_resolver: ProviderResolver
     capability_gateway: CapabilityGateway
     channel_catalog: DynamicChannelCatalog = field(default_factory=DynamicChannelCatalog)
+    radio_catalog: RadioCatalogBridge = field(default_factory=RadioCatalogBridge)
     official_release_root: Path = OFFICIAL_RELEASE_ROOT
     _scheme_locks: dict[str, asyncio.Lock] = field(default_factory=dict, init=False, repr=False)
     _critical_tasks: set[asyncio.Task[Any]] = field(default_factory=set, init=False, repr=False)
@@ -200,6 +202,7 @@ class ProductionPluginSubsystem:
     _lifecycle_reconcile_tasks: dict[str, asyncio.Task[Any]] = field(default_factory=dict, init=False, repr=False)
     _lifecycle_reconcile_generation: dict[str, int] = field(default_factory=dict, init=False, repr=False)
     _shutting_down: bool = field(default=False, init=False, repr=False)
+    radio_resolver: RadioResolver = field(init=False)
 
     def __post_init__(self) -> None:
         # These callbacks are installed on the same service/runtime objects used
@@ -209,6 +212,7 @@ class ProductionPluginSubsystem:
         self.service.destructive_guard = self._assert_identity_not_owned
         self.service.runtime.lifecycle_callback = self._on_runtime_lifecycle_event
         self.service.runtime.activation_context = self._runtime_activation_context
+        self.radio_resolver = RadioResolver(runtime=self.service.runtime)
 
     @asynccontextmanager
     async def _runtime_activation_context(self, operation: str, instance):
@@ -937,6 +941,36 @@ class ProductionPluginSubsystem:
         return await self.channel_catalog.refresh_plugin(
             identity, self.service.runtime, instance, timeout=timeout, now=now,
         )
+
+    async def refresh_radio_catalog(
+        self, identity: str, *, timeout: float = 15.0, now: float | None = None,
+    ) -> dict[str, Any]:
+        """Refresh the optional Radio catalog into durable Radio tables.
+
+        This is intentionally a callable bridge rather than a Plugin-owned
+        scheduler.  Automation can invoke it later using the existing task
+        ownership rules.
+        """
+        instance = self.service._active.get(identity)
+        if instance is None or instance.state != LifecycleState.HEALTHY_ACTIVE:
+            error = PluginError("PLUGIN_UNAVAILABLE", "Radio Plugin is unavailable", category="lifecycle")
+            await self.radio_catalog.record_failure(identity, error)
+            return {"status": "failed", "error": error.as_contract()}
+        owned_schemes = frozenset(
+            scheme for scheme, contract in instance.manifest.owned_schemes
+            if contract == "radio_provider"
+        )
+        try:
+            catalog = await self.service.runtime.request(
+                instance, "radio.catalog", {}, timeout=timeout,
+            )
+            result = await self.radio_catalog.refresh(
+                identity, catalog, owned_schemes=owned_schemes, now=now,
+            )
+            return {"status": "success", **result}
+        except Exception as exc:
+            await self.radio_catalog.record_failure(identity, exc)
+            return {"status": "failed", "error": str(exc)[:2048]}
 
     async def uninstall(self, identity: str) -> bool:
         removed = await self.service.uninstall(identity)

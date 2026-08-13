@@ -35,6 +35,10 @@ CHANNEL_CATALOG_MAX_GROUP_LENGTH = 128
 CHANNEL_CATALOG_MAX_LOGO_LENGTH = 2048
 CHANNEL_CATALOG_MAX_TTL_SECONDS = 24 * 60 * 60
 CHANNEL_CATALOG_KINDS = frozenset({"channel", "event"})
+RADIO_CATALOG_MAX_ITEMS = 512
+RADIO_CATALOG_MAX_BYTES = 256 * 1024
+RADIO_CATALOG_MAX_TTL_SECONDS = 7 * 24 * 60 * 60
+RADIO_CATALOG_MAX_STRING_LENGTH = 2048
 _CATALOG_SCHEME_RE = re.compile(r"^[a-z][a-z0-9+.-]*$")
 
 
@@ -192,6 +196,87 @@ def validate_channel_catalog(value: Any, *, owned_schemes: set[str] | frozenset[
     if len(encoded.encode("utf-8")) > CHANNEL_CATALOG_MAX_BYTES:
         raise invalid_response("Channel catalog exceeds the size limit")
     return {"items": normalized}
+
+
+def validate_radio_catalog(value: Any, *, owned_schemes: set[str] | frozenset[str]) -> dict[str, Any]:
+    """Validate the bounded Radio V1 catalog without making Core storage public.
+
+    The original Radio contract exposed ``stations`` and allowed providers to
+    omit presentation fields.  Keep that wire compatibility while adding
+    bounded fields used by the durable Radio projection.  ``owned_schemes``
+    is the only authority for the provider key; no URL or metadata value can
+    select another provider.
+    """
+    if not isinstance(value, dict) or not isinstance(value.get("stations"), list):
+        raise invalid_response("Invalid Radio catalog")
+    stations = value["stations"]
+    if len(stations) > RADIO_CATALOG_MAX_ITEMS:
+        raise invalid_response("Radio catalog contains too many stations")
+    allowed_schemes = {str(scheme).lower() for scheme in owned_schemes}
+    allowed_fields = {
+        "station_ref", "name", "logo_url", "group_name", "country", "language",
+        "frequency", "metadata", "playback_config", "ttl_seconds", "priority",
+    }
+    seen: set[tuple[str, str]] = set()
+    normalized: list[dict[str, Any]] = []
+    for station in stations:
+        if not isinstance(station, dict) or not set(station).issubset(allowed_fields):
+            raise invalid_response("Invalid Radio catalog station")
+        ref = validate_station_ref(station.get("station_ref"))
+        identity = (ref["provider_key"].strip().lower(), ref["provider_station_id"])
+        if allowed_schemes and identity[0] not in allowed_schemes:
+            raise invalid_response("Radio catalog station is not owned by this Plugin")
+        if identity in seen:
+            raise invalid_response("Duplicate StationRef identity")
+        seen.add(identity)
+        name = station.get("name", ref["provider_station_id"])
+        if not isinstance(name, str) or not name.strip() or len(name) > RADIO_CATALOG_MAX_STRING_LENGTH:
+            raise invalid_response("Invalid Radio catalog station name")
+        ttl = station.get("ttl_seconds", 300)
+        if isinstance(ttl, bool) or not isinstance(ttl, int) or ttl < 1 or ttl > RADIO_CATALOG_MAX_TTL_SECONDS:
+            raise invalid_response("Invalid Radio catalog TTL")
+        priority = station.get("priority", 0)
+        if isinstance(priority, bool) or not isinstance(priority, int) or priority < 0 or priority > 1_000_000:
+            raise invalid_response("Invalid Radio catalog priority")
+        item = dict(station)
+        item["station_ref"] = ref
+        item["name"] = name.strip()
+        item["ttl_seconds"] = ttl
+        item["priority"] = priority
+        for field in ("logo_url", "group_name", "country", "language", "frequency"):
+            raw = item.get(field, "")
+            if raw is None:
+                raw = ""
+            if not isinstance(raw, str) or len(raw) > RADIO_CATALOG_MAX_STRING_LENGTH:
+                raise invalid_response(f"Invalid Radio catalog {field}")
+            item[field] = raw
+        if item["logo_url"]:
+            try:
+                if urlsplit(item["logo_url"]).scheme.lower() not in {"http", "https"}:
+                    raise invalid_response("Invalid Radio catalog logo_url")
+            except ValueError as exc:
+                raise invalid_response("Invalid Radio catalog logo_url") from exc
+        for field in ("metadata", "playback_config"):
+            if field in item and item[field] is not None:
+                validate_descriptor_metadata(item[field], field=f"Radio catalog {field}")
+            elif field == "metadata":
+                item[field] = {}
+            else:
+                item[field] = {}
+        normalized.append(item)
+    normalized_value = {"stations": normalized}
+    if "next_cursor" in value:
+        cursor = value["next_cursor"]
+        if cursor is not None and (not isinstance(cursor, str) or len(cursor) > 512):
+            raise invalid_response("Invalid Radio catalog cursor")
+        normalized_value["next_cursor"] = cursor
+    try:
+        encoded = json.dumps(normalized_value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise invalid_response("Radio catalog is not JSON serializable") from exc
+    if len(encoded.encode("utf-8")) > RADIO_CATALOG_MAX_BYTES:
+        raise invalid_response("Radio catalog exceeds the size limit")
+    return normalized_value
 
 
 def validate_stream_descriptor(value: Any) -> dict[str, Any]:

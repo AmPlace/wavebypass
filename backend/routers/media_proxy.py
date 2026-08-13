@@ -435,6 +435,99 @@ async def media_channel_stream(
     )
 
 
+@router.get("/api/media/radio/{station_id}/playlist.m3u8")
+async def media_radio_playlist(
+    station_id: str,
+    request: Request,
+    source_id: str = Query("", description="Explicit persisted Radio source selector"),
+    access: MediaAccessContext = Depends(resolve_media_access),
+):
+    """Resolve a persisted Radio source through the Plugin media bridge."""
+    if not source_id.strip():
+        raise HTTPException(status_code=400, detail="source_id 参数必填")
+    resolver = getattr(request.app.state, "radio_resolver", None)
+    if resolver is None:
+        raise HTTPException(status_code=503, detail="Radio Plugin runtime 不可用")
+    try:
+        resolved = await resolver.resolve_source(source_id.strip(), station_id=station_id)
+    except PluginError as exc:
+        status = 404 if exc.code in {"RESOURCE_NOT_FOUND", "SCHEME_CONFLICT"} else 503
+        raise HTTPException(status_code=status, detail=exc.as_contract()) from exc
+    resolved_url = str(resolved.get("url") or "").strip()
+    if not resolved_url:
+        raise HTTPException(status_code=502, detail="Radio Plugin 未返回播放地址")
+    resolved_type = str(resolved.get("source_type") or "audio_http").strip().lower()
+    if resolved_type in {"dash", "probe_only"}:
+        raise HTTPException(status_code=501, detail="当前 Radio media path 不支持该 transport")
+    headers = resolved.get("headers") if isinstance(resolved.get("headers"), dict) else {}
+    return await _serve_resolved_source_playlist(
+        resolved_url=resolved_url,
+        resolved_st=resolved_type,
+        custom_ua=str(resolved.get("user_agent") or headers.get("User-Agent") or headers.get("user-agent") or ""),
+        referer=str(resolved.get("referer") or headers.get("Referer") or headers.get("referer") or ""),
+        cookie="",
+        no_ua=False,
+        canonical_key=station_id,
+        source_id=str(resolved.get("source_id") or source_id.strip()),
+        source_revision=str(resolved.get("source_revision") or ""),
+        access=access,
+        domain="radio",
+        handle_ttl=resolved.get("ttl"),
+    )
+
+
+@router.get("/api/media/radio/{station_id}/stream")
+async def media_radio_stream(
+    station_id: str,
+    request: Request,
+    source_id: str = Query("", description="Explicit persisted Radio source selector"),
+    access: MediaAccessContext = Depends(resolve_media_access),
+):
+    if not source_id.strip():
+        raise HTTPException(status_code=400, detail="source_id 参数必填")
+    resolver = getattr(request.app.state, "radio_resolver", None)
+    if resolver is None:
+        raise HTTPException(status_code=503, detail="Radio Plugin runtime 不可用")
+    try:
+        resolved = await resolver.resolve_source(source_id.strip(), station_id=station_id)
+    except PluginError as exc:
+        status = 404 if exc.code in {"RESOURCE_NOT_FOUND", "SCHEME_CONFLICT"} else 503
+        raise HTTPException(status_code=status, detail=exc.as_contract()) from exc
+    resolved_url = str(resolved.get("url") or "").strip()
+    if not resolved_url:
+        raise HTTPException(status_code=502, detail="Radio Plugin 未返回播放地址")
+    resolved_type = str(resolved.get("source_type") or "audio_http").strip().lower()
+    if resolved_type in {"dash", "probe_only"}:
+        raise HTTPException(status_code=501, detail="当前 Radio media path 不支持该 transport")
+    headers = resolved.get("headers") if isinstance(resolved.get("headers"), dict) else {}
+    custom_ua = str(resolved.get("user_agent") or headers.get("User-Agent") or headers.get("user-agent") or "")
+    referer = str(resolved.get("referer") or headers.get("Referer") or headers.get("referer") or "")
+    source_ref = f"radio:{str(resolved.get('source_id') or source_id.strip())}"
+    ctx_id = ""
+    if custom_ua or referer:
+        ctx_id = get_proxy_context_registry().put(ProxyContext(
+            custom_ua=custom_ua,
+            referer=referer,
+            upstream_url=resolved_url,
+            source_type=resolved_type,
+            source_id=source_ref,
+            source_revision=str(resolved.get("source_revision") or ""),
+        ))
+    await _validate_handle_url_or_403(resolved_url, allowed_schemes={"http", "https"})
+    handle = issue_cached_handle(
+        kind="stream",
+        url=resolved_url,
+        src=f"radio:station:{station_id}:source:{source_id.strip()}",
+        src_id=source_ref,
+        ctx=ctx_id,
+        ttl_seconds=resolved.get("ttl"),
+    )
+    return RedirectResponse(
+        f"/api/media/proxy/stream/{handle}{_media_access_suffix(access)}",
+        status_code=307,
+    )
+
+
 async def _serve_radio_station_playlist(
     station_id: str,
     request: Request,
@@ -597,12 +690,20 @@ async def _serve_resolved_source_playlist(
     source_id: str,
     source_revision: str,
     access: MediaAccessContext,
+    domain: str = "iptv",
+    handle_ttl: int | None = None,
 ) -> Response:
     """已经解析到 HTTP/RTSP URL 的 source 的统一入口。"""
     import main as _m
 
     source_ref = source_id or canonical_key
-    src_label = f"channel:{canonical_key}:source:{source_ref}"
+    if not isinstance(handle_ttl, int) or handle_ttl <= 0:
+        handle_ttl = None
+    if domain == "radio":
+        source_ref = f"radio:{source_ref}"
+        src_label = f"radio:station:{canonical_key}:source:{source_id or canonical_key}"
+    else:
+        src_label = f"channel:{canonical_key}:source:{source_ref}"
 
     # 是否需要建 ProxyContext（动态 header）
     ctx_id = ""
@@ -631,6 +732,7 @@ async def _serve_resolved_source_playlist(
             src_id=source_ref,
             ctx=ctx_id,
             compat=0,
+            ttl_seconds=handle_ttl,
         )
         token_qs = (
             f"?access_token={access.propagated_access_token}"
@@ -646,6 +748,7 @@ async def _serve_resolved_source_playlist(
             src=src_label,
             src_id=source_ref,
             ctx=ctx_id,
+            ttl_seconds=handle_ttl,
         )
         suffix = "?stream_type=http_flv" if resolved_st == "http_flv" else ""
         token_qs = (
@@ -654,6 +757,21 @@ async def _serve_resolved_source_playlist(
             else ""
         )
         return RedirectResponse(f"/api/media/proxy/stream/{handle}{suffix}{token_qs}", status_code=307)
+
+    if resolved_st == "audio_http":
+        handle = issue_cached_handle(
+            kind="stream",
+            url=resolved_url,
+            src=src_label,
+            src_id=source_ref,
+            ctx=ctx_id,
+            ttl_seconds=handle_ttl,
+        )
+        token_qs = (
+            f"?access_token={access.propagated_access_token}"
+            if access.propagated_access_token else ""
+        )
+        return RedirectResponse(f"/api/media/proxy/stream/{handle}{token_qs}", status_code=307)
 
     # HLS：复用 main.iptv_wide_playlist 的内部实现（通过 cache key + ctx_id）
     return await _m.serve_iptv_wide_playlist_by_source(

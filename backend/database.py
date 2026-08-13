@@ -2,6 +2,7 @@ import asyncio
 import sqlite3
 import os
 import json
+import time
 import uuid
 from datetime import datetime, timezone
 
@@ -527,6 +528,63 @@ CREATE TABLE IF NOT EXISTS plugin_scheme_ownership (
     plugin_identity TEXT DEFAULT '',
     updated_at   TEXT NOT NULL
 );
+
+-- Radio is a separate domain.  A station is an explicit user-visible
+-- container; its source identity is owner/provider/station based and never
+-- inferred from a name, URL, frequency, or another IPTV row.
+CREATE TABLE IF NOT EXISTS radio_stations (
+    station_id             TEXT PRIMARY KEY,
+    owner_identity         TEXT NOT NULL,
+    provider_key           TEXT NOT NULL,
+    provider_station_id    TEXT NOT NULL,
+    name                   TEXT NOT NULL,
+    logo_url               TEXT NOT NULL DEFAULT '',
+    group_name             TEXT NOT NULL DEFAULT '',
+    country                TEXT NOT NULL DEFAULT '',
+    language               TEXT NOT NULL DEFAULT '',
+    frequency              TEXT NOT NULL DEFAULT '',
+    metadata_json          TEXT NOT NULL DEFAULT '{}',
+    lifecycle_state        TEXT NOT NULL DEFAULT 'active'
+                           CHECK(lifecycle_state IN ('active', 'stale', 'expired')),
+    catalog_ttl_seconds    INTEGER NOT NULL DEFAULT 300 CHECK(catalog_ttl_seconds > 0),
+    catalog_expires_at     REAL NOT NULL DEFAULT 0,
+    last_catalog_success_at TEXT NOT NULL DEFAULT '',
+    last_catalog_error     TEXT NOT NULL DEFAULT '',
+    created_at             TEXT NOT NULL,
+    updated_at             TEXT NOT NULL,
+    UNIQUE(owner_identity, provider_key, provider_station_id)
+);
+CREATE INDEX IF NOT EXISTS idx_radio_stations_lifecycle
+ON radio_stations(lifecycle_state, catalog_expires_at);
+
+CREATE TABLE IF NOT EXISTS radio_station_sources (
+    source_id              TEXT PRIMARY KEY,
+    station_id             TEXT NOT NULL,
+    owner_identity         TEXT NOT NULL,
+    provider_key           TEXT NOT NULL,
+    provider_station_id    TEXT NOT NULL,
+    reference_json         TEXT NOT NULL,
+    source_revision        TEXT NOT NULL,
+    explicit_priority      INTEGER NOT NULL DEFAULT 0,
+    health_status          TEXT NOT NULL DEFAULT 'unknown'
+                           CHECK(health_status IN ('unknown', 'healthy', 'unhealthy')),
+    last_success_at        TEXT NOT NULL DEFAULT '',
+    last_error             TEXT NOT NULL DEFAULT '',
+    lifecycle_state        TEXT NOT NULL DEFAULT 'active'
+                           CHECK(lifecycle_state IN ('active', 'stale', 'expired')),
+    catalog_ttl_seconds    INTEGER NOT NULL DEFAULT 300 CHECK(catalog_ttl_seconds > 0),
+    catalog_expires_at     REAL NOT NULL DEFAULT 0,
+    resolve_expires_at     REAL NOT NULL DEFAULT 0,
+    created_at             TEXT NOT NULL,
+    updated_at             TEXT NOT NULL,
+    UNIQUE(owner_identity, provider_key, provider_station_id),
+    UNIQUE(station_id, source_id),
+    FOREIGN KEY(station_id) REFERENCES radio_stations(station_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_radio_station_sources_station
+ON radio_station_sources(station_id, explicit_priority, source_id);
+CREATE INDEX IF NOT EXISTS idx_radio_station_sources_lifecycle
+ON radio_station_sources(lifecycle_state, catalog_expires_at);
 
 CREATE TABLE IF NOT EXISTS users (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2563,6 +2621,302 @@ async def delete_market_install(package_id: str):
         conn.commit()
         conn.close()
     await asyncio.to_thread(_delete)
+
+
+# ── Radio domain persistence ──
+
+async def apply_radio_catalog(
+    owner_identity: str,
+    rows: list[dict],
+    *,
+    now_unix: float,
+    stale_grace_seconds: int = 300,
+) -> dict:
+    """Atomically publish one Plugin Radio catalog into its own tables.
+
+    The caller supplies already-validated rows.  A successful refresh never
+    deletes a previous source: items omitted by the latest catalog become
+    stale and remain addressable until the bounded grace window expires.
+    """
+    owner = _normalize_identifier(owner_identity, "owner_identity")
+    if not isinstance(rows, list):
+        raise TypeError("rows must be a list")
+    now = _utc_now()
+    stale_until = float(now_unix) + max(1, int(stale_grace_seconds))
+
+    def _apply() -> dict:
+        conn = _connect()
+        try:
+            with conn:
+                existing = {
+                    str(row["source_id"]): row
+                    for row in conn.execute(
+                        "SELECT source_id, station_id FROM radio_station_sources WHERE owner_identity=?",
+                        (owner,),
+                    ).fetchall()
+                }
+                incoming_ids: set[str] = set()
+                incoming_station_ids = {str(row.get("station_id") or "") for row in rows}
+                for row in rows:
+                    source_id = _normalize_identifier(row.get("source_id"), "source_id")
+                    station_id = _normalize_identifier(row.get("station_id"), "station_id")
+                    incoming_ids.add(source_id)
+                    conn.execute(
+                        """
+                        INSERT INTO radio_stations(
+                            station_id, owner_identity, provider_key, provider_station_id,
+                            name, logo_url, group_name, country, language, frequency,
+                            metadata_json, lifecycle_state, catalog_ttl_seconds,
+                            catalog_expires_at, last_catalog_success_at, last_catalog_error,
+                            created_at, updated_at
+                        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, '', ?, ?)
+                        ON CONFLICT(station_id) DO UPDATE SET
+                            owner_identity=excluded.owner_identity,
+                            provider_key=excluded.provider_key,
+                            provider_station_id=excluded.provider_station_id,
+                            name=excluded.name,
+                            logo_url=excluded.logo_url,
+                            group_name=excluded.group_name,
+                            country=excluded.country,
+                            language=excluded.language,
+                            frequency=excluded.frequency,
+                            metadata_json=excluded.metadata_json,
+                            lifecycle_state='active',
+                            catalog_ttl_seconds=excluded.catalog_ttl_seconds,
+                            catalog_expires_at=excluded.catalog_expires_at,
+                            last_catalog_success_at=excluded.last_catalog_success_at,
+                            last_catalog_error='',
+                            updated_at=excluded.updated_at
+                        """,
+                        (
+                            station_id, owner, row["provider_key"], row["provider_station_id"],
+                            row["name"], row.get("logo_url", ""), row.get("group_name", ""),
+                            row.get("country", ""), row.get("language", ""), row.get("frequency", ""),
+                            json.dumps(row.get("metadata") or {}, ensure_ascii=False, separators=(",", ":")),
+                            int(row["ttl_seconds"]), float(row["catalog_expires_at"]), now, now, now,
+                        ),
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO radio_station_sources(
+                            source_id, station_id, owner_identity, provider_key,
+                            provider_station_id, reference_json, source_revision,
+                            explicit_priority, health_status, last_success_at, last_error,
+                            lifecycle_state, catalog_ttl_seconds, catalog_expires_at,
+                            resolve_expires_at, created_at, updated_at
+                        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'unknown', '', '', 'active', ?, ?, 0, ?, ?)
+                        ON CONFLICT(source_id) DO UPDATE SET
+                            station_id=excluded.station_id,
+                            owner_identity=excluded.owner_identity,
+                            provider_key=excluded.provider_key,
+                            provider_station_id=excluded.provider_station_id,
+                            reference_json=excluded.reference_json,
+                            source_revision=excluded.source_revision,
+                            explicit_priority=excluded.explicit_priority,
+                            lifecycle_state='active',
+                            catalog_ttl_seconds=excluded.catalog_ttl_seconds,
+                            catalog_expires_at=excluded.catalog_expires_at,
+                            last_error='',
+                            updated_at=excluded.updated_at
+                        """,
+                        (
+                            source_id, station_id, owner, row["provider_key"], row["provider_station_id"],
+                            json.dumps(row["reference"], ensure_ascii=False, separators=(",", ":")),
+                            row["source_revision"], int(row.get("explicit_priority", 0)),
+                            int(row["ttl_seconds"]), float(row["catalog_expires_at"]), now, now,
+                        ),
+                    )
+
+                for source_id, previous in existing.items():
+                    if source_id in incoming_ids:
+                        continue
+                    conn.execute(
+                        """
+                        UPDATE radio_station_sources
+                        SET lifecycle_state='stale', catalog_expires_at=?, updated_at=?
+                        WHERE source_id=? AND owner_identity=?
+                        """,
+                        (stale_until, now, source_id, owner),
+                    )
+                    if str(previous["station_id"]) not in incoming_station_ids:
+                        conn.execute(
+                            """
+                            UPDATE radio_stations
+                            SET lifecycle_state='stale', catalog_expires_at=?, updated_at=?
+                            WHERE station_id=? AND owner_identity=?
+                            """,
+                            (stale_until, now, previous["station_id"], owner),
+                        )
+                conn.execute(
+                    """
+                    UPDATE radio_stations
+                    SET last_catalog_success_at=?, last_catalog_error=''
+                    WHERE owner_identity=?
+                    """,
+                    (now, owner),
+                )
+            return {"owner_identity": owner, "published": len(rows), "stale": len(set(existing) - incoming_ids)}
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_apply)
+
+
+async def record_radio_catalog_failure(owner_identity: str, error: str) -> None:
+    owner = _normalize_identifier(owner_identity, "owner_identity")
+    message = _normalize_error(error)
+
+    def _record() -> None:
+        conn = _connect()
+        try:
+            with conn:
+                now = _utc_now()
+                conn.execute(
+                    "UPDATE radio_stations SET last_catalog_error=?, updated_at=? WHERE owner_identity=?",
+                    (message, now, owner),
+                )
+                conn.execute(
+                    "UPDATE radio_station_sources SET last_error=?, updated_at=? WHERE owner_identity=?",
+                    (message, now, owner),
+                )
+        finally:
+            conn.close()
+
+    await asyncio.to_thread(_record)
+
+
+def _radio_lifecycle(row: dict, now_unix: float, *, stale_grace_seconds: int = 300) -> str:
+    state = str(row.get("lifecycle_state") or "active")
+    expiry = float(row.get("catalog_expires_at") or 0)
+    if state == "stale" and expiry and now_unix > expiry:
+        return "expired"
+    if state == "active" and expiry and now_unix > expiry + max(1, int(stale_grace_seconds)):
+        return "expired"
+    if state == "active" and expiry and now_unix > expiry:
+        return "stale"
+    return state
+
+
+async def list_radio_stations(*, owner_identity: str = "", include_expired: bool = False, now_unix: float | None = None) -> list[dict]:
+    now_value = float(now_unix if now_unix is not None else time.time())
+
+    def _list() -> list[dict]:
+        conn = _connect()
+        try:
+            clauses = ["1=1"]
+            values: list[str] = []
+            if owner_identity:
+                clauses.append("s.owner_identity=?")
+                values.append(owner_identity)
+            rows = conn.execute(
+                """
+                SELECT s.*, r.source_id, r.provider_key AS source_provider_key,
+                       r.provider_station_id AS source_provider_station_id,
+                       r.reference_json, r.source_revision, r.explicit_priority,
+                       r.health_status, r.last_success_at, r.last_error AS source_last_error,
+                       r.lifecycle_state AS source_lifecycle_state,
+                       r.catalog_ttl_seconds AS source_catalog_ttl_seconds,
+                       r.catalog_expires_at AS source_catalog_expires_at,
+                       r.resolve_expires_at
+                FROM radio_stations s
+                LEFT JOIN radio_station_sources r ON r.station_id=s.station_id
+                WHERE """ + " AND ".join(clauses) + "\n"
+                "ORDER BY s.owner_identity, s.provider_key, s.provider_station_id, r.explicit_priority, r.source_id",
+                values,
+            ).fetchall()
+            result: list[dict] = []
+            by_station: dict[str, dict] = {}
+            for raw in rows:
+                row = dict(raw)
+                station_id = str(row["station_id"])
+                station = by_station.get(station_id)
+                if station is None:
+                    station = {
+                        "station_id": station_id,
+                        "owner_identity": row["owner_identity"],
+                        "provider_key": row["provider_key"],
+                        "provider_station_id": row["provider_station_id"],
+                        "name": row["name"],
+                        "logo_url": row["logo_url"],
+                        "group_name": row["group_name"],
+                        "country": row["country"],
+                        "language": row["language"],
+                        "frequency": row["frequency"],
+                        "metadata": json.loads(row["metadata_json"] or "{}"),
+                        "lifecycle_state": _radio_lifecycle(row, now_value),
+                        "catalog_expires_at": row["catalog_expires_at"],
+                        "sources": [],
+                    }
+                    by_station[station_id] = station
+                    result.append(station)
+                if row.get("source_id"):
+                    source_state = _radio_lifecycle({
+                        "lifecycle_state": row["source_lifecycle_state"],
+                        "catalog_expires_at": row["source_catalog_expires_at"],
+                    }, now_value)
+                    if include_expired or source_state != "expired":
+                        station["sources"].append({
+                            "source_id": row["source_id"],
+                            "owner_identity": row["owner_identity"],
+                            "provider_key": row["source_provider_key"],
+                            "provider_station_id": row["source_provider_station_id"],
+                            "reference": json.loads(row["reference_json"] or "{}"),
+                            "source_revision": row["source_revision"],
+                            "explicit_priority": row["explicit_priority"],
+                            "health_status": row["health_status"],
+                            "last_success_at": row["last_success_at"],
+                            "last_error": row["source_last_error"],
+                            "lifecycle_state": source_state,
+                            "catalog_expires_at": row["source_catalog_expires_at"],
+                            "resolve_expires_at": row["resolve_expires_at"],
+                        })
+            if not include_expired:
+                result = [item for item in result if item["lifecycle_state"] != "expired" and item["sources"]]
+            return result
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_list)
+
+
+async def get_radio_station(station_id: str, *, include_expired: bool = False, now_unix: float | None = None) -> dict | None:
+    rows = await list_radio_stations(include_expired=include_expired, now_unix=now_unix)
+    return next((row for row in rows if row["station_id"] == station_id), None)
+
+
+async def get_radio_station_source(source_id: str, *, station_id: str = "", include_expired: bool = False, now_unix: float | None = None) -> dict | None:
+    stations = await list_radio_stations(include_expired=include_expired, now_unix=now_unix)
+    for station in stations:
+        if station_id and station["station_id"] != station_id:
+            continue
+        for source in station["sources"]:
+            if source["source_id"] == source_id:
+                return {**source, "station_id": station["station_id"], "station_name": station["name"]}
+    return None
+
+
+async def update_radio_source_health(source_id: str, *, success: bool, error: str = "", resolve_expires_at: float = 0) -> None:
+    message = _normalize_error(error)
+
+    def _update() -> None:
+        conn = _connect()
+        try:
+            with conn:
+                now = _utc_now()
+                conn.execute(
+                    """
+                    UPDATE radio_station_sources
+                    SET health_status=?, last_success_at=?, last_error=?,
+                        resolve_expires_at=?, updated_at=?
+                    WHERE source_id=?
+                    """,
+                    ("healthy" if success else "unhealthy", now if success else "",
+                     "" if success else message, float(resolve_expires_at) if success else 0, now, source_id),
+                )
+        finally:
+            conn.close()
+
+    await asyncio.to_thread(_update)
 
 
 # ── Plugin package persistence ──

@@ -13,7 +13,7 @@ from .manifest import PluginManifest
 from .permissions import PermissionGate, PermissionPolicy
 from .process import PluginProcess
 from .registry import LifecycleState, PluginInstance, PluginRegistry
-from .validation import validate_channel_catalog, validate_station_ref, validate_stream_descriptor
+from .validation import validate_channel_catalog, validate_radio_catalog, validate_stream_descriptor
 
 
 logger = logging.getLogger("waveflow.plugin_runtime")
@@ -141,20 +141,23 @@ class PluginRuntime:
         if method in {"tv.resolve_stream", "radio.resolve_stream"}:
             return validate_stream_descriptor(result)
         if method == "radio.catalog":
-            if not isinstance(result, dict) or not isinstance(result.get("stations"), list):
-                raise invalid_response("Invalid Radio catalog")
-            stations = []
-            seen: set[tuple[str, str]] = set()
-            for station in result["stations"]:
-                if not isinstance(station, dict):
-                    raise invalid_response("Invalid Radio catalog station")
-                ref = validate_station_ref(station.get("station_ref"))
-                identity = (ref["provider_key"], ref["provider_station_id"])
-                if identity in seen:
-                    raise invalid_response("Duplicate StationRef identity")
-                seen.add(identity)
-                stations.append(dict(station))
-            return {**result, "stations": stations}
+            contract = next(
+                (item for item in instance.manifest.provider_contracts if item.contract == "radio_provider"),
+                None,
+            )
+            if contract is None or "catalog" not in contract.features:
+                raise PluginError(
+                    "RESOURCE_NOT_FOUND", "Plugin does not implement a Radio catalog", category="request",
+                )
+            owned_schemes = frozenset(
+                scheme for scheme, declared_contract in instance.manifest.owned_schemes
+                if declared_contract == "radio_provider"
+            )
+            if not owned_schemes:
+                # Compatibility for the original mixed TV/Radio fixture. New
+                # Radio packages declare their radio-owned scheme explicitly.
+                owned_schemes = frozenset(scheme for scheme, _ in instance.manifest.owned_schemes)
+            return validate_radio_catalog(result, owned_schemes=owned_schemes)
         if method == "channel_catalog.discover":
             contract = next(
                 (item for item in instance.manifest.provider_contracts if item.contract == "channel_catalog"),
