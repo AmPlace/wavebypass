@@ -26,10 +26,10 @@ EXPECTED_SCHEMES = {
     "yy", "bigo", "blued", "soop", "netease", "pandatv", "maoer", "look", "flextv", "popkontv",
     "twitcasting", "baidu", "weibo", "kugou", "twitch", "huajiao", "showroom", "inke", "acfun", "zhihu",
     "chzzk", "live17", "langlive", "changliao", "jd", "faceit", "lianjie", "sixroom", "huamao", "shopee",
-    "laixiu", "picarto", "bilibili", "douyu",
+    "laixiu", "picarto", "bilibili", "douyu", "douyin",
 }
 EXCLUDED_SCHEMES = {"haixiu", "liveme", "lehai"}
-EXPECTED_SCHEME_COUNT = 34
+EXPECTED_SCHEME_COUNT = 35
 
 
 def _load_plugin_module():
@@ -89,7 +89,7 @@ class StreamGetBundleContractTest(unittest.TestCase):
         self.assertNotIn("managed", manifest.permissions["network"])
         self.assertTrue({
             "live.bilibili.com", "api.live.bilibili.com", "www.douyu.com",
-            "playweb.douyucdn.cn", "wxapp.douyucdn.cn", "douyucdn2.cn",
+            "playweb.douyucdn.cn", "wxapp.douyucdn.cn", "douyucdn2.cn", "live.douyin.com",
         }.issubset(set(manifest.permissions["network"]["allowed_hosts"])))
         self.assertEqual(len(manifest.runtime["dependency_lock"]["artifacts"]), 21)
         self.assertEqual(set(self.module.PROVIDER_SPECS), EXPECTED_SCHEMES)
@@ -119,7 +119,7 @@ class StreamGetBundleContractTest(unittest.TestCase):
             "huamao": "https://www.huamao.com/room-42", "shopee": "https://live.shopee.com/room-42",
             "laixiu": "https://www.laixiu.com/room-42", "picarto": "https://picarto.tv/room-42",
             "bilibili": "https://live.bilibili.com/room-42",
-            "douyu": "https://www.douyu.com/room-42",
+            "douyu": "https://www.douyu.com/room-42", "douyin": "https://live.douyin.com/room-42",
         }
         for scheme in sorted(EXPECTED_SCHEMES):
             fields = {"is_live": True, "flv_url": f"https://media.test/{scheme}.flv",
@@ -132,7 +132,10 @@ class StreamGetBundleContractTest(unittest.TestCase):
             descriptor = provider.resolve_stream(TVReference(scheme, "room-42"), context)
             spec = self.module.PROVIDER_SPECS[scheme]
             expected_url = next(fields[key] for key in spec.play_fields)
-            expected_transport = spec.transport or "http_flv"
+            expected_transport = spec.transport or (
+                spec.transport_selector(fields, expected_url)
+                if spec.transport_selector is not None else "http_flv"
+            )
             self.assertEqual((descriptor.url, descriptor.transport), (expected_url, expected_transport), scheme)
             self.assertEqual((descriptor.ttl_seconds, descriptor.volatile_url, descriptor.requires_proxy),
                              (spec.ttl_seconds, spec.volatile_url, False), scheme)
@@ -427,6 +430,130 @@ class StreamGetBundleContractTest(unittest.TestCase):
         source = (PLUGIN_DIR / "plugin.py").read_text(encoding="utf-8")
         self.assertNotIn("adapters.douyu", source)
         self.assertNotIn("backend.adapters.douyu", source)
+
+    def test_douyin_matches_legacy_hls_flv_cookie_and_error_golden_fixture(self):
+        legacy = importlib.import_module("adapters.douyin")
+        from adapters import AdapterRequest
+        from streamget import DouyinLiveStream
+
+        fields = {
+            "is_live": True,
+            "m3u8_url": "https://media.test/douyin.m3u8",
+            "flv_url": "https://media.test/douyin.flv",
+            "anchor_name": "fixture-anchor",
+        }
+
+        def fake_class(result: dict, *, failure: Exception | None = None):
+            class Fake(_FakeStream):
+                calls = []
+                instances = []
+
+                def __init__(self, proxy_addr=None, cookies=None, stream_orientation=1):
+                    self.proxy_addr = proxy_addr
+                    self.cookies = cookies
+                    self.stream_orientation = stream_orientation
+                    type(self).instances.append(self)
+
+            Fake.result = result
+            Fake.failure = failure
+            return Fake
+
+        legacy_fake = fake_class(fields)
+        with mock.patch.object(legacy, "DouyinLiveStream", legacy_fake):
+            legacy_result = asyncio.run(legacy.resolve_douyin(
+                AdapterRequest("douyin://room-42", "douyin", "room-42", {}), None,
+            ))
+
+        plugin_fake = fake_class(fields)
+        provider = self.module.StreamGetProvider({
+            "douyin": replace(self.module.PROVIDER_SPECS["douyin"], stream_class=plugin_fake),
+        })
+        descriptor = provider.resolve_stream(
+            TVReference("douyin", "/room-42/"),
+            ResolveContext("fixture", 9999999999999, {}, None),
+        )
+        plugin_result = {
+            "url": descriptor.url,
+            "source_type": descriptor.transport,
+            "direct_playable": descriptor.direct_playable,
+            "requires_proxy": descriptor.requires_proxy,
+            "headers": descriptor.headers,
+            "ttl": descriptor.ttl_seconds,
+            "expires_at": descriptor.expires_at,
+            "volatile_url": descriptor.volatile_url,
+        }
+        legacy_result["volatile_url"] = bool(legacy_result.get("volatile_url"))
+        self.assertEqual({key: legacy_result[key] for key in plugin_result}, plugin_result)
+        self.assertEqual(legacy_fake.instances[0].cookies, None)
+        self.assertEqual(plugin_fake.instances[0].cookies, "")
+        self.assertEqual(legacy_fake.calls, [
+            ("https://live.douyin.com/room-42", "fetch_web_stream_data"),
+            ("https://live.douyin.com/room-42", "OD"),
+        ])
+        self.assertEqual(plugin_fake.calls, legacy_fake.calls)
+
+        # Passing an empty cookie string preserves StreamGet's own default
+        # cookie/header behavior; the Plugin does not inject provider headers.
+        self.assertEqual(
+            DouyinLiveStream().pc_headers,
+            DouyinLiveStream(cookies="").pc_headers,
+        )
+        self.assertEqual(
+            DouyinLiveStream().mobile_headers,
+            DouyinLiveStream(cookies="").mobile_headers,
+        )
+        self.assertEqual(DouyinLiveStream().pc_headers["referer"], "https://live.douyin.com/")
+
+        flv_only = self.module.StreamGetProvider({
+            "douyin": replace(self.module.PROVIDER_SPECS["douyin"], stream_class=fake_class({
+                "is_live": True,
+                "m3u8_url": "",
+                "flv_url": "https://media.test/douyin.flv",
+            })),
+        })
+        flv_descriptor = flv_only.resolve_stream(
+            TVReference("douyin", "room-42"),
+            ResolveContext("fixture", 9999999999999, {}, None),
+        )
+        self.assertEqual((flv_descriptor.url, flv_descriptor.transport),
+                         ("https://media.test/douyin.flv", "http_flv"))
+
+        for result, expected in (
+            ({"is_live": False}, "NOT_LIVE"),
+            ({"is_live": True, "m3u8_url": "", "flv_url": ""},
+             "TEMPORARY_UPSTREAM_FAILURE"),
+        ):
+            error_provider = self.module.StreamGetProvider({
+                "douyin": replace(self.module.PROVIDER_SPECS["douyin"], stream_class=fake_class(result)),
+            })
+            with self.assertRaises(SDKPluginError) as error:
+                error_provider.resolve_stream(
+                    TVReference("douyin", "room-42"),
+                    ResolveContext("fixture", 9999999999999, {}, None),
+                )
+            self.assertEqual(error.exception.code, expected)
+
+        broken = self.module.StreamGetProvider({
+            "douyin": replace(self.module.PROVIDER_SPECS["douyin"],
+                              stream_class=fake_class({}, failure=RuntimeError("upstream"))),
+        })
+        with self.assertRaises(SDKPluginError) as upstream:
+            broken.resolve_stream(
+                TVReference("douyin", "room-42"),
+                ResolveContext("fixture", 9999999999999, {}, None),
+            )
+        self.assertEqual(upstream.exception.code, "TEMPORARY_UPSTREAM_FAILURE")
+
+        with self.assertRaises(SDKPluginError) as invalid:
+            provider.resolve_stream(
+                TVReference("douyin", ""),
+                ResolveContext("fixture", 9999999999999, {}, None),
+            )
+        self.assertEqual(invalid.exception.code, "RESOURCE_NOT_FOUND")
+
+        source = (PLUGIN_DIR / "plugin.py").read_text(encoding="utf-8")
+        self.assertNotIn("adapters.douyin", source)
+        self.assertNotIn("backend.adapters.douyin", source)
 
     def test_cli_lock_treats_py2_py3_wheels_as_python3_compatible(self):
         with tempfile.TemporaryDirectory() as directory:

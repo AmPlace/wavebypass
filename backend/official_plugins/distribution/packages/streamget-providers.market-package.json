@@ -1,8 +1,8 @@
 {
   "artifact_references": [
     {
-      "sha256": "e549606d4e391ac51daf5e47c5fb06bf128f73fa0090eb54eeedbc39a524d93f",
-      "url": "payloads/streamget-providers-1.2.0.pyz"
+      "sha256": "2d41142d7676c7e74ee428e8eeba8326dba894e3d415e6e280f5db55777b3bd9",
+      "url": "payloads/streamget-providers-1.3.0.pyz"
     }
   ],
   "dependency_references": [
@@ -97,7 +97,7 @@
   "manifest_signature": {
     "algorithm": "ed25519",
     "key_id": "org.waveflow.release.2026-01",
-    "value": "EY+ouKaJs66rkknMogawfoNEv3sYrGX8THgd26+wtCM680GFfIqn9mInHGO0Pm75Xlpdxf8QBUxP2v+XmB62Cg=="
+    "value": "/vBj0VCmg23sGr4jHw0s2J4rcFCwAmsV5W1dhhIyKCKRXGATQ8iUTd6p2bn9W9zSUDYxJ/rMhQfwhk112f6DBQ=="
   },
   "name": "StreamGet Provider Bundle",
   "package_type": "plugin_package",
@@ -105,16 +105,16 @@
     "artifacts": [
       {
         "arch": "arm64",
-        "entrypoint": "streamget-providers-1.2.0.pyz",
+        "entrypoint": "streamget-providers-1.3.0.pyz",
         "os": "macos",
         "runtime": "python",
-        "sha256": "e549606d4e391ac51daf5e47c5fb06bf128f73fa0090eb54eeedbc39a524d93f",
+        "sha256": "2d41142d7676c7e74ee428e8eeba8326dba894e3d415e6e280f5db55777b3bd9",
         "signature": {
           "algorithm": "ed25519",
           "key_id": "org.waveflow.release.2026-01",
-          "value": "O1V+a/zvuTeqUlXHPz6LlmvnC2W6elpkO4zKUoysjW9ppl1JENjdxof1h+3EEdfuwPDNCZTYc+L0UZChn1zbDQ=="
+          "value": "ERGF/9qa02qe1kx3nuAxKkiiCpRB+Sv6rMkfcQH7iuamLv0DsTYLY4BlZZPMVzs4KqosjlurOOlO4Nsl34ZmBQ=="
         },
-        "size_bytes": 9903
+        "size_bytes": 10003
       }
     ],
     "capabilities": [
@@ -260,6 +260,10 @@
       {
         "contract": "tv_provider",
         "scheme": "douyu"
+      },
+      {
+        "contract": "tv_provider",
+        "scheme": "douyin"
       }
     ],
     "permissions": {
@@ -301,7 +305,8 @@
           "www.douyu.com",
           "playweb.douyucdn.cn",
           "wxapp.douyucdn.cn",
-          "douyucdn2.cn"
+          "douyucdn2.cn",
+          "live.douyin.com"
         ],
         "direct": true
       }
@@ -555,13 +560,13 @@
         ],
         "lock_version": 1
       },
-      "entrypoint": "streamget-providers-1.2.0.pyz",
+      "entrypoint": "streamget-providers-1.3.0.pyz",
       "ipc": "stdio_framed_json_v1",
       "python_version_range": ">=3.14.0 <3.15.0",
       "type": "python"
     },
     "state_schema_version": 1,
-    "version": "1.2.0"
+    "version": "1.3.0"
   },
   "risk_level": "official_signed_not_sandboxed",
   "schema_version": 1,
@@ -569,5 +574,5 @@
   "source_policy": "signed_release",
   "status": "active",
   "updated_at": "2026-08-12T00:00:00Z",
-  "version": "1.2.0"
+  "version": "1.3.0"
 }

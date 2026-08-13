@@ -23,6 +23,7 @@ from streamget import (
     ChangliaoLiveStream,
     ChzzkLiveStream,
     DouyuLiveStream,
+    DouyinLiveStream,
     FaceitLiveStream,
     FlexTVLiveStream,
     HuajiaoLiveStream,
@@ -75,6 +76,7 @@ class ProviderSpec:
     volatile_url: bool = True
     ttl_seconds: int = TTL_SECONDS
     play_url_selector: Callable[[Mapping[str, Any]], str | None] | None = None
+    transport_selector: Callable[[Mapping[str, Any], str], str] | None = None
 
 
 def _url(template: str) -> Callable[[str], str]:
@@ -192,6 +194,15 @@ PROVIDER_SPECS: dict[str, ProviderSpec] = {
         play_url_selector=_douyu_play_url,
         ttl_seconds=0,
     ),
+    "douyin": ProviderSpec(
+        DouyinLiveStream,
+        _url("https://live.douyin.com/{room_id}"),
+        play_fields=("m3u8_url", "flv_url"),
+        volatile_url=False,
+        transport_selector=lambda result, _play_url: (
+            "hls" if result.get("m3u8_url") else "http_flv"
+        ),
+    ),
 }
 
 
@@ -238,7 +249,11 @@ class StreamGetProvider(TVProvider):
             )
         if not play_url:
             raise TemporaryFailure("StreamGet returned no playable URL")
-        transport = spec.transport or ("http_flv" if result.get("flv_url") else "hls")
+        transport = spec.transport or (
+            spec.transport_selector(result, play_url)
+            if spec.transport_selector is not None
+            else ("http_flv" if result.get("flv_url") else "hls")
+        )
         return StreamDescriptor(
             url=play_url,
             transport=transport,

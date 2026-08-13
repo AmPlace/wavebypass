@@ -25,7 +25,8 @@ SCHEMES = (
 SCHEME_SET = set(SCHEMES)
 BILIBILI_SCHEME = "bilibili"
 DOUYU_SCHEME = "douyu"
-BUNDLE_SCHEME_SET = SCHEME_SET | {BILIBILI_SCHEME, DOUYU_SCHEME}
+DOUYIN_SCHEME = "douyin"
+BUNDLE_SCHEME_SET = SCHEME_SET | {BILIBILI_SCHEME, DOUYU_SCHEME, DOUYIN_SCHEME}
 BATCHES = (
     ("yy", "bigo", "blued", "soop", "netease", "pandatv", "maoer", "look"),
     ("flextv", "popkontv", "twitcasting", "baidu", "weibo", "kugou", "twitch", "huajiao"),
@@ -149,8 +150,8 @@ class StreamGetPluginRolloutTest(unittest.IsolatedAsyncioTestCase):
         manifest = validate_manifest(package["plugin_manifest"])
         self.assertEqual(manifest.identity, IDENTITY)
         self.assertEqual({scheme for scheme, _contract in manifest.owned_schemes}, BUNDLE_SCHEME_SET)
-        self.assertEqual(len(manifest.owned_schemes), 34)
-        self.assertEqual(package["version"], "1.2.0")
+        self.assertEqual(len(manifest.owned_schemes), 35)
+        self.assertEqual(package["version"], "1.3.0")
         return package
 
     async def _install_official(self, subsystem, package: dict) -> None:
@@ -166,7 +167,7 @@ class StreamGetPluginRolloutTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             (installed["trust_state"], installed["source_key"], installed["active_version"],
              installed["lifecycle_state"], installed["enabled"]),
-            ("official", "official", "1.2.0", "active", 1),
+            ("official", "official", "1.3.0", "active", 1),
         )
         row = await self.db.get_plugin_installation("org.waveflow", "streamget-providers")
         self.assertEqual(row["source_package_id"], "official::streamget-providers-plugin")
@@ -187,6 +188,7 @@ class StreamGetPluginRolloutTest(unittest.IsolatedAsyncioTestCase):
             self.assertIs(subsystem.service.runtime.registry.route(scheme), instance)
         self.assertEqual(subsystem.provider_resolver.mode(BILIBILI_SCHEME), "legacy")
         self.assertEqual(subsystem.provider_resolver.mode(DOUYU_SCHEME), "legacy")
+        self.assertEqual(subsystem.provider_resolver.mode(DOUYIN_SCHEME), "legacy")
 
     def _install_deterministic_runtime_request(self, subsystem) -> None:
         """Keep ProviderResolver deterministic while the real process is smoke-tested separately.
@@ -212,7 +214,7 @@ class StreamGetPluginRolloutTest(unittest.IsolatedAsyncioTestCase):
                 "credential_refs": [],
                 "ttl_seconds": 0 if scheme == DOUYU_SCHEME else 1800,
                 "expires_at": None,
-                "volatile_url": scheme != BILIBILI_SCHEME,
+                "volatile_url": scheme not in {BILIBILI_SCHEME, DOUYIN_SCHEME},
                 "requires_proxy": False,
                 "warnings": [],
             }
@@ -331,12 +333,12 @@ class StreamGetPluginRolloutTest(unittest.IsolatedAsyncioTestCase):
         # untouched; generic candidate-success coverage lives in the Runtime
         # and Market lifecycle suites.
         bad_candidate = copy.deepcopy(package)
-        bad_candidate["version"] = "1.2.1"
-        bad_candidate["plugin_manifest"]["version"] = "1.2.1"
+        bad_candidate["version"] = "1.3.1"
+        bad_candidate["plugin_manifest"]["version"] = "1.3.1"
         with self.assertRaises(PluginError):
             await subsystem.install(IDENTITY, [bad_candidate])
         row = await self.db.get_plugin_installation("org.waveflow", "streamget-providers")
-        self.assertEqual(row["active_version"], "1.2.0")
+        self.assertEqual(row["active_version"], "1.3.0")
         await self._assert_plugin_modes(subsystem, SCHEME_SET)
 
         # With 31 schemes rolled back and one still Plugin-owned, all
@@ -457,6 +459,51 @@ class StreamGetPluginRolloutTest(unittest.IsolatedAsyncioTestCase):
         await self._resolve_plugin(subsystem, DOUYU_SCHEME)
         self.assertEqual(self.legacy.await_count, legacy_calls + 2)
         await self._assert_plugin_modes(subsystem, {DOUYU_SCHEME, "picarto"})
+
+    async def test_douyin_staged_takeover_restart_rollback_and_update_boundary(self):
+        """Douyin rolls out independently while existing Bundle owners persist."""
+        self._require_mac_runtime()
+        package = await self._official_package()
+        subsystem = await self._subsystem()
+        await subsystem.startup()
+        await self._install_official(subsystem, package)
+
+        self.assertEqual(subsystem.provider_resolver.mode(DOUYIN_SCHEME), "legacy")
+        self.assertEqual(subsystem.provider_resolver.mode(BILIBILI_SCHEME), "legacy")
+        self.assertEqual(subsystem.provider_resolver.mode(DOUYU_SCHEME), "legacy")
+        self._install_deterministic_runtime_request(subsystem)
+        legacy_calls = self.legacy.await_count
+        await subsystem.set_ownership("picarto", "plugin", IDENTITY)
+        await self._resolve_plugin(subsystem, "picarto")
+        await subsystem.set_ownership(DOUYIN_SCHEME, "plugin", IDENTITY)
+        result = await self._resolve_plugin(subsystem, DOUYIN_SCHEME)
+        self.assertEqual(
+            (result["source_type"], result["ttl"], result["volatile_url"], result["requires_proxy"]),
+            ("hls", 1800, False, False),
+        )
+        self.assertEqual(self.legacy.await_count, legacy_calls)
+        await self._resolve_legacy(subsystem, BILIBILI_SCHEME)
+        await self._assert_plugin_modes(subsystem, {DOUYIN_SCHEME, "picarto"})
+
+        # Updating the signed 35-scheme bundle cannot rewrite existing
+        # per-scheme ownership.
+        await subsystem.install(IDENTITY, [package])
+        await self._assert_plugin_modes(subsystem, {DOUYIN_SCHEME, "picarto"})
+
+        subsystem = await self._restart(subsystem)
+        self._install_deterministic_runtime_request(subsystem)
+        await self._assert_plugin_modes(subsystem, {DOUYIN_SCHEME, "picarto"})
+        await self._wait_reconciliation(subsystem)
+        await self._resolve_plugin(subsystem, DOUYIN_SCHEME)
+        await self._resolve_plugin(subsystem, "picarto")
+
+        await subsystem.set_ownership(DOUYIN_SCHEME, "legacy")
+        await self._resolve_legacy(subsystem, DOUYIN_SCHEME)
+        await self._resolve_plugin(subsystem, "picarto")
+        await subsystem.set_ownership(DOUYIN_SCHEME, "plugin", IDENTITY)
+        await self._resolve_plugin(subsystem, DOUYIN_SCHEME)
+        self.assertEqual(self.legacy.await_count, legacy_calls + 2)
+        await self._assert_plugin_modes(subsystem, {DOUYIN_SCHEME, "picarto"})
 
     @unittest.skipUnless(
         os.environ.get("WAVEFLOW_STREAMGET_LIVE_SMOKE") == "1",
