@@ -50,6 +50,42 @@ class ResolveContext:
 
 
 @dataclass(frozen=True)
+class ChannelCatalogItem:
+    external_id: str
+    name: str
+    reference: str
+    kind: str = "channel"
+    group: str | None = None
+    logo: str | None = None
+    starts_at: int | None = None
+    ends_at: int | None = None
+    ttl_seconds: int = 300
+    metadata: dict[str, Any] | None = None
+
+    def as_contract(self) -> dict[str, Any]:
+        value: dict[str, Any] = {
+            "external_id": self.external_id,
+            "name": self.name,
+            "reference": self.reference,
+            "kind": self.kind,
+            "ttl_seconds": self.ttl_seconds,
+        }
+        for field in ("group", "logo", "starts_at", "ends_at", "metadata"):
+            item = getattr(self, field)
+            if item is not None:
+                value[field] = dict(item) if field == "metadata" else item
+        return value
+
+
+@dataclass(frozen=True)
+class ChannelCatalog:
+    items: tuple[ChannelCatalogItem, ...]
+
+    def as_contract(self) -> dict[str, Any]:
+        return {"items": [item.as_contract() for item in self.items]}
+
+
+@dataclass(frozen=True)
 class StreamDescriptor:
     url: str
     transport: str = "hls"

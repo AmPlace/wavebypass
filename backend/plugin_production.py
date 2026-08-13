@@ -30,6 +30,7 @@ from plugin_runtime.permissions import PermissionPolicy
 from provider_resolver import ProviderResolver
 from plugin_capabilities import CapabilityGateway, CoreCapabilityDispatcher
 from plugin_permissions import permission_projection, require_high_risk_approvals
+from plugin_channel_catalog import DynamicChannelCatalog
 from official_plugin_distribution import (
     OFFICIAL_PUBLISHER_ID, OFFICIAL_RELEASE_ROOT, bundled_official_packages, load_official_trust_rows,
     rollout_policy_allows_runtime,
@@ -187,6 +188,7 @@ class ProductionPluginSubsystem:
     http_client: httpx.AsyncClient
     provider_resolver: ProviderResolver
     capability_gateway: CapabilityGateway
+    channel_catalog: DynamicChannelCatalog = field(default_factory=DynamicChannelCatalog)
     official_release_root: Path = OFFICIAL_RELEASE_ROOT
     _scheme_locks: dict[str, asyncio.Lock] = field(default_factory=dict, init=False, repr=False)
     _critical_tasks: set[asyncio.Task[Any]] = field(default_factory=set, init=False, repr=False)
@@ -916,8 +918,25 @@ class ProductionPluginSubsystem:
     async def disable(self, identity: str) -> dict[str, Any]:
         return await self.service.disable(identity)
 
+    async def refresh_channel_catalog(
+        self, identity: str, *, timeout: float = 15.0, now: float | None = None,
+    ) -> dict[str, Any]:
+        """Refresh an optional catalog; Automation owns when this is called."""
+        instance = self.service._active.get(identity)
+        if instance is None or instance.state != LifecycleState.HEALTHY_ACTIVE:
+            return self.channel_catalog.record_failure(
+                identity,
+                PluginError("PLUGIN_UNAVAILABLE", "Plugin catalog provider is unavailable", category="lifecycle"),
+                now=now,
+            )
+        return await self.channel_catalog.refresh_plugin(
+            identity, self.service.runtime, instance, timeout=timeout, now=now,
+        )
+
     async def uninstall(self, identity: str) -> bool:
         removed = await self.service.uninstall(identity)
+        if removed:
+            self.channel_catalog.remove_plugin(identity)
         if removed and identity.startswith(f"{OFFICIAL_PUBLISHER_ID}/"):
             await self._remember_official_bootstrap(identity)
         return removed

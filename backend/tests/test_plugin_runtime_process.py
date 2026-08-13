@@ -7,12 +7,19 @@ import unittest
 from pathlib import Path
 
 from plugin_runtime import LifecycleState, PermissionPolicy, PluginError, PluginRuntime, validate_manifest
+from plugin_channel_catalog import DynamicChannelCatalog
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "synthetic_plugin.py"
 
 
-def manifest_data(*, scheme="synthetic", version="1.0.0", permissions=None):
+def manifest_data(*, scheme="synthetic", version="1.0.0", permissions=None, catalog=False):
+    contracts = [
+        {"contract": "tv_provider", "contract_version": "1.0", "features": ["resolve_stream"]},
+        {"contract": "radio_provider", "contract_version": "1.0", "features": ["catalog", "resolve_stream"]},
+    ]
+    if catalog:
+        contracts.append({"contract": "channel_catalog", "contract_version": "1.0", "features": ["discover"]})
     return {
         "manifest_version": 1,
         "publisher_id": "org.waveflow",
@@ -21,12 +28,10 @@ def manifest_data(*, scheme="synthetic", version="1.0.0", permissions=None):
         "version": version,
         "plugin_api_version": "1.0",
         "core_version_range": ">=0.1.0 <1.0.0",
-        "provider_contracts": [
-            {"contract": "tv_provider", "contract_version": "1.0", "features": ["resolve_stream"]},
-            {"contract": "radio_provider", "contract_version": "1.0", "features": ["catalog", "resolve_stream"]},
-        ],
+        "provider_contracts": contracts,
         "owned_schemes": [{"scheme": scheme, "contract": "tv_provider"}],
-        "capabilities": ["tv.resolve_stream", "radio.catalog", "radio.resolve_stream"],
+        "capabilities": ["tv.resolve_stream", "radio.catalog", "radio.resolve_stream"]
+                      + (["channel_catalog.discover"] if catalog else []),
         "permissions": permissions or {},
         "runtime": {"type": "subprocess", "ipc": "stdio_framed_json_v1"},
         "artifacts": [{
@@ -61,7 +66,9 @@ class PluginRuntimeProcessTest(unittest.IsolatedAsyncioTestCase):
     async def active(self, *, mode="normal", version="1.0.0", scheme="synthetic", permissions=None,
                      policy=None):
         runtime = self.runtime(permission_policy=policy or PermissionPolicy())
-        manifest = validate_manifest(manifest_data(scheme=scheme, version=version, permissions=permissions))
+        manifest = validate_manifest(manifest_data(
+            scheme=scheme, version=version, permissions=permissions, catalog=mode.startswith("catalog"),
+        ))
         instance = runtime.install(manifest, command(mode, version=version, scheme=scheme,
                                                      permissions=",".join((permissions or {}).keys())))
         await runtime.enable(instance)
@@ -80,6 +87,45 @@ class PluginRuntimeProcessTest(unittest.IsolatedAsyncioTestCase):
         await runtime.disable(instance)
         self.assertEqual(instance.state, LifecycleState.INSTALLED_DISABLED)
         self.assertIsNotNone(instance.process.exit_code)
+
+    async def test_optional_channel_catalog_discovery_is_validated_over_ipc(self):
+        runtime, instance = await self.active(mode="catalog")
+        result = await runtime.request(instance, "channel_catalog.discover", {})
+        self.assertEqual([item["external_id"] for item in result["items"]], ["event-1", "channel-2"])
+        self.assertEqual(result["items"][0]["metadata"]["identity"], {"source": "fixture"})
+
+    async def test_channel_catalog_foreign_scheme_and_duplicate_identity_fail_closed(self):
+        runtime, foreign = await self.active(mode="catalog_foreign", scheme="foreign-fixture")
+        with self.assertRaises(PluginError) as foreign_error:
+            await runtime.request(foreign, "channel_catalog.discover", {})
+        self.assertEqual(foreign_error.exception.code, "INVALID_PLUGIN_RESPONSE")
+
+        runtime2, duplicate = await self.active(mode="catalog_duplicate", scheme="duplicate-fixture")
+        with self.assertRaises(PluginError) as duplicate_error:
+            await runtime2.request(duplicate, "channel_catalog.discover", {})
+        self.assertEqual(duplicate_error.exception.code, "INVALID_PLUGIN_RESPONSE")
+
+    async def test_channel_catalog_refresh_survives_plugin_crash_and_restart(self):
+        runtime, instance = await self.active(mode="catalog_then_crash")
+        projection = DynamicChannelCatalog(stale_grace_seconds=30)
+        first = await projection.refresh_plugin("org.waveflow/synthetic", runtime, instance, now=100)
+        self.assertEqual([item["state"] for item in first["items"]], ["active", "active"])
+
+        failed = await projection.refresh_plugin("org.waveflow/synthetic", runtime, instance, now=101)
+        self.assertEqual(failed["failures"]["count"], 1)
+        self.assertEqual([item["state"] for item in failed["visible_items"]], ["active", "active"])
+
+        async def no_sleep(_delay):
+            return None
+
+        runtime.sleep = no_sleep
+        await asyncio.sleep(0.05)
+        await runtime.restart(instance)
+        recovered = await projection.refresh_plugin("org.waveflow/synthetic", runtime, instance, now=102)
+        self.assertEqual(recovered["failures"], {})
+        self.assertEqual([item["identity"] for item in recovered["items"]], [
+            "org.waveflow/synthetic::channel-2", "org.waveflow/synthetic::event-1",
+        ])
 
     async def test_all_transport_descriptors(self):
         runtime, instance = await self.active()

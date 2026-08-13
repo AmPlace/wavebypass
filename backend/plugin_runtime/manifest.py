@@ -17,7 +17,7 @@ IDENTITY_RE = re.compile(r"^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$")
 PLUGIN_ID_RE = re.compile(r"^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$")
 SCHEME_RE = re.compile(r"^[a-z][a-z0-9+.-]*$")
 API_VERSION = "1.0"
-SUPPORTED_CONTRACTS = frozenset({"tv_provider", "radio_provider"})
+SUPPORTED_CONTRACTS = frozenset({"tv_provider", "radio_provider", "channel_catalog"})
 SUPPORTED_PERMISSIONS = frozenset({
     "network", "secrets", "cache", "state", "filesystem", "runtime", "subprocess", "crypto", "media",
 })
@@ -129,6 +129,8 @@ def validate_manifest(data: Any, *, core_version: str = "0.1.0") -> PluginManife
         features = item.get("features")
         if not isinstance(features, list) or any(not isinstance(v, str) or not v for v in features):
             raise _malformed("Invalid provider contract features")
+        if item["contract"] == "channel_catalog" and "discover" not in features:
+            raise _malformed("Channel catalog contract must declare discover")
         if item["contract"] in contract_names:
             raise _malformed("Duplicate provider contract")
         contract_names.add(item["contract"])
@@ -145,10 +147,19 @@ def validate_manifest(data: Any, *, core_version: str = "0.1.0") -> PluginManife
         scheme, contract = item["scheme"], item["contract"]
         if not isinstance(scheme, str) or not SCHEME_RE.fullmatch(scheme) or contract not in contract_names:
             raise _malformed("Invalid scheme declaration")
+        if contract == "channel_catalog":
+            raise _malformed("Channel catalog contract does not declare owned schemes")
         if scheme in seen:
             raise PluginError("SCHEME_CONFLICT", "Plugin declares the same scheme more than once", category="registry")
         seen.add(scheme)
         schemes.append((scheme, contract))
+
+    if "channel_catalog" in contract_names and "tv_provider" not in contract_names:
+        raise PluginError(
+            "PLUGIN_INCOMPATIBLE",
+            "Channel catalog requires a TV provider contract",
+            category="compatibility",
+        )
 
     capabilities = data["capabilities"]
     if not isinstance(capabilities, list) or any(not isinstance(v, str) or not v for v in capabilities) or len(set(capabilities)) != len(capabilities):

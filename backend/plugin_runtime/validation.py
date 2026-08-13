@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
 
 from .errors import invalid_response
 
@@ -25,6 +26,16 @@ DESCRIPTOR_METADATA_MAX_DEPTH = 5
 DESCRIPTOR_METADATA_MAX_ITEMS = 64
 DESCRIPTOR_METADATA_MAX_STRING_LENGTH = 2048
 DESCRIPTOR_METADATA_MAX_KEY_LENGTH = 128
+CHANNEL_CATALOG_MAX_ITEMS = 256
+CHANNEL_CATALOG_MAX_BYTES = 256 * 1024
+CHANNEL_CATALOG_MAX_EXTERNAL_ID_LENGTH = 256
+CHANNEL_CATALOG_MAX_NAME_LENGTH = 200
+CHANNEL_CATALOG_MAX_REFERENCE_LENGTH = 2048
+CHANNEL_CATALOG_MAX_GROUP_LENGTH = 128
+CHANNEL_CATALOG_MAX_LOGO_LENGTH = 2048
+CHANNEL_CATALOG_MAX_TTL_SECONDS = 24 * 60 * 60
+CHANNEL_CATALOG_KINDS = frozenset({"channel", "event"})
+_CATALOG_SCHEME_RE = re.compile(r"^[a-z][a-z0-9+.-]*$")
 
 
 def validate_descriptor_metadata(value: Any, *, field: str = "descriptor metadata") -> dict[str, Any]:
@@ -93,6 +104,94 @@ def validate_descriptor_metadata(value: Any, *, field: str = "descriptor metadat
     if len(encoded.encode("utf-8")) > DESCRIPTOR_METADATA_MAX_BYTES:
         raise invalid_response(f"{field} exceeds maximum size")
     return dict(value)
+
+
+def validate_channel_catalog(value: Any, *, owned_schemes: set[str] | frozenset[str]) -> dict[str, Any]:
+    """Validate a bounded runtime catalog owned by one Plugin instance.
+
+    Catalog references are opaque provider references, not arbitrary network
+    URLs.  Their scheme must be one of the Plugin's declared TV schemes; the
+    existing ProviderResolver remains the authority that resolves them.
+    """
+    if not isinstance(value, dict) or set(value) != {"items"}:
+        raise invalid_response("Channel catalog must contain only items")
+    items = value["items"]
+    if not isinstance(items, list) or len(items) > CHANNEL_CATALOG_MAX_ITEMS:
+        raise invalid_response("Invalid channel catalog items")
+
+    allowed = {str(scheme).lower() for scheme in owned_schemes}
+    seen_external_ids: set[str] = set()
+    normalized: list[dict[str, Any]] = []
+    allowed_fields = {
+        "external_id", "name", "reference", "kind", "group", "logo",
+        "starts_at", "ends_at", "ttl_seconds", "metadata",
+    }
+    for item in items:
+        if not isinstance(item, dict) or not set(item).issubset(allowed_fields):
+            raise invalid_response("Invalid channel catalog item")
+        required = {"external_id", "name", "reference", "kind", "ttl_seconds"}
+        if required - item.keys():
+            raise invalid_response("Channel catalog item is missing required fields")
+        external_id = item["external_id"]
+        name = item["name"]
+        reference = item["reference"]
+        kind = item["kind"]
+        if (not isinstance(external_id, str) or not external_id.strip()
+                or len(external_id) > CHANNEL_CATALOG_MAX_EXTERNAL_ID_LENGTH):
+            raise invalid_response("Invalid channel catalog external_id")
+        if external_id in seen_external_ids:
+            raise invalid_response("Duplicate channel catalog external_id")
+        seen_external_ids.add(external_id)
+        if not isinstance(name, str) or not name.strip() or len(name) > CHANNEL_CATALOG_MAX_NAME_LENGTH:
+            raise invalid_response("Invalid channel catalog name")
+        if not isinstance(reference, str) or not reference or len(reference) > CHANNEL_CATALOG_MAX_REFERENCE_LENGTH:
+            raise invalid_response("Invalid channel catalog reference")
+        try:
+            parsed = urlsplit(reference)
+        except ValueError as exc:
+            raise invalid_response("Invalid channel catalog reference") from exc
+        scheme = parsed.scheme.lower()
+        if (not _CATALOG_SCHEME_RE.fullmatch(scheme) or scheme not in allowed
+                or not (parsed.netloc or parsed.path.strip("/"))
+                or parsed.username is not None or parsed.password is not None
+                or parsed.fragment):
+            raise invalid_response("Channel catalog reference scheme is not owned")
+        if kind not in CHANNEL_CATALOG_KINDS:
+            raise invalid_response("Invalid channel catalog kind")
+        ttl = item["ttl_seconds"]
+        if (not isinstance(ttl, int) or isinstance(ttl, bool)
+                or ttl < 1 or ttl > CHANNEL_CATALOG_MAX_TTL_SECONDS):
+            raise invalid_response("Invalid channel catalog TTL")
+        for field, limit in (("group", CHANNEL_CATALOG_MAX_GROUP_LENGTH), ("logo", CHANNEL_CATALOG_MAX_LOGO_LENGTH)):
+            if field in item and item[field] is not None:
+                if not isinstance(item[field], str) or len(item[field]) > limit:
+                    raise invalid_response(f"Invalid channel catalog {field}")
+        logo = item.get("logo")
+        if logo:
+            try:
+                logo_scheme = urlsplit(logo).scheme.lower()
+            except ValueError as exc:
+                raise invalid_response("Invalid channel catalog logo") from exc
+            if logo_scheme not in {"http", "https"}:
+                raise invalid_response("Invalid channel catalog logo")
+        starts_at = item.get("starts_at")
+        ends_at = item.get("ends_at")
+        for field, timestamp in (("starts_at", starts_at), ("ends_at", ends_at)):
+            if timestamp is not None and (not isinstance(timestamp, int) or isinstance(timestamp, bool) or timestamp < 0):
+                raise invalid_response(f"Invalid channel catalog {field}")
+        if starts_at is not None and ends_at is not None and ends_at < starts_at:
+            raise invalid_response("Channel catalog event window is invalid")
+        if "metadata" in item and item["metadata"] is not None:
+            validate_descriptor_metadata(item["metadata"], field="channel catalog metadata")
+        normalized.append(dict(item))
+
+    try:
+        encoded = json.dumps({"items": normalized}, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise invalid_response("Channel catalog is not JSON serializable") from exc
+    if len(encoded.encode("utf-8")) > CHANNEL_CATALOG_MAX_BYTES:
+        raise invalid_response("Channel catalog exceeds the size limit")
+    return {"items": normalized}
 
 
 def validate_stream_descriptor(value: Any) -> dict[str, Any]:

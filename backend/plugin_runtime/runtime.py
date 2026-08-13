@@ -13,7 +13,7 @@ from .manifest import PluginManifest
 from .permissions import PermissionGate, PermissionPolicy
 from .process import PluginProcess
 from .registry import LifecycleState, PluginInstance, PluginRegistry
-from .validation import validate_station_ref, validate_stream_descriptor
+from .validation import validate_channel_catalog, validate_station_ref, validate_stream_descriptor
 
 
 logger = logging.getLogger("waveflow.plugin_runtime")
@@ -155,6 +155,20 @@ class PluginRuntime:
                 seen.add(identity)
                 stations.append(dict(station))
             return {**result, "stations": stations}
+        if method == "channel_catalog.discover":
+            contract = next(
+                (item for item in instance.manifest.provider_contracts if item.contract == "channel_catalog"),
+                None,
+            )
+            if contract is None or "discover" not in contract.features:
+                raise PluginError(
+                    "RESOURCE_NOT_FOUND", "Plugin does not implement a channel catalog", category="request",
+                )
+            owned_schemes = frozenset(
+                scheme for scheme, declared_contract in instance.manifest.owned_schemes
+                if declared_contract == "tv_provider"
+            )
+            return validate_channel_catalog(result, owned_schemes=owned_schemes)
         return result
 
     async def disable(self, instance: PluginInstance) -> None:

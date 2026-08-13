@@ -132,6 +132,7 @@ def main():
     schemes = [value for value in args.schemes.split(",") if value] or [args.scheme]
     deferred = {}
     metadata_requests = 0
+    catalog_requests = 0
     while True:
         request = read_frame()
         if request is None:
@@ -152,6 +153,11 @@ def main():
                 {"contract": "tv_provider", "contract_version": "1.0", "features": ["resolve_stream"]},
             ]
             capabilities = ["tv.resolve_stream"]
+            if args.mode.startswith("catalog"):
+                provider_contracts.append(
+                    {"contract": "channel_catalog", "contract_version": "1.0", "features": ["discover"]}
+                )
+                capabilities.append("channel_catalog.discover")
             if not args.tv_only:
                 provider_contracts.append(
                     {"contract": "radio_provider", "contract_version": "1.0", "features": ["catalog", "resolve_stream"]}
@@ -219,6 +225,35 @@ def main():
             write_frame(response(request, result))
             if args.mode == "duplicate_response":
                 write_frame(response(request, result))
+        elif method == "channel_catalog.discover":
+            catalog_requests += 1
+            if args.mode == "catalog_failure":
+                write_frame(response(request, error={
+                    "code": "TEMPORARY_UPSTREAM_FAILURE", "message": "catalog fixture failed",
+                    "retryable": True, "category": "provider", "details": {},
+                }))
+                continue
+            if args.mode == "catalog_then_crash" and catalog_requests == 2:
+                os._exit(25)
+            if args.mode == "catalog_foreign":
+                items = [{"external_id": "foreign", "name": "Foreign", "reference": "other://x",
+                          "kind": "channel", "ttl_seconds": 300}]
+            elif args.mode == "catalog_duplicate":
+                items = [
+                    {"external_id": "same", "name": "A", "reference": f"{args.scheme}://a",
+                     "kind": "channel", "ttl_seconds": 300},
+                    {"external_id": "same", "name": "B", "reference": f"{args.scheme}://b",
+                     "kind": "channel", "ttl_seconds": 300},
+                ]
+            else:
+                items = [
+                    {"external_id": "event-1", "name": "Fixture Event", "reference": "synthetic://event-1",
+                     "kind": "event", "group": "fixtures", "starts_at": 100, "ends_at": 200,
+                     "ttl_seconds": 300, "metadata": {"page_live": True, "identity": {"source": "fixture"}}},
+                    {"external_id": "channel-2", "name": "Fixture Channel", "reference": "synthetic://channel-2",
+                     "kind": "channel", "ttl_seconds": 300},
+                ]
+            write_frame(response(request, {"items": items}))
         elif method == "radio.catalog":
             write_frame(response(request, {"stations": [
                 {"station_ref": {"provider_key": "synthetic", "provider_station_id": "one"}, "name": "Same Name"},

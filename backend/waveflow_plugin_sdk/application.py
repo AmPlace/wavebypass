@@ -11,12 +11,20 @@ from typing import Any, BinaryIO
 
 from .capabilities import CapabilityClient, capability_error
 from .errors import PluginError
-from .models import RadioReference, ResolveContext, StreamDescriptor, TVReference
+from .models import ChannelCatalog, RadioReference, ResolveContext, StreamDescriptor, TVReference
 
 
 class TVProvider(ABC):
     @abstractmethod
     def resolve_stream(self, reference: TVReference, context: ResolveContext) -> StreamDescriptor:
+        raise NotImplementedError
+
+
+class ChannelCatalogProvider(ABC):
+    """Optional runtime catalog provider; it does not own Core channel storage."""
+
+    @abstractmethod
+    def discover_channels(self, context: ResolveContext) -> ChannelCatalog | dict[str, Any]:
         raise NotImplementedError
 
 
@@ -36,6 +44,7 @@ class PluginApplication:
         self.permissions = list(permissions or [])
         self._tv: dict[str, TVProvider] = {}
         self._radio: dict[str, RadioProvider] = {}
+        self._channel_catalog: ChannelCatalogProvider | None = None
         self._write_lock = threading.Lock()
         self._callback_lock = threading.Lock()
         self._callbacks: dict[str, tuple[threading.Event, dict[str, Any] | None]] = {}
@@ -50,6 +59,10 @@ class PluginApplication:
 
     def register_radio(self, scheme: str, provider: RadioProvider) -> "PluginApplication":
         self._radio[scheme] = provider
+        return self
+
+    def register_channel_catalog(self, provider: ChannelCatalogProvider) -> "PluginApplication":
+        self._channel_catalog = provider
         return self
 
     def _write(self, value: dict[str, Any]) -> None:
@@ -148,6 +161,11 @@ class PluginApplication:
                 if provider is None:
                     raise PluginError("RESOURCE_NOT_FOUND", "Radio Provider is not registered")
                 self._provider_response(request, provider.resolve_stream(reference, context).as_contract())
+            elif method == "channel_catalog.discover":
+                if self._channel_catalog is None:
+                    raise PluginError("RESOURCE_NOT_FOUND", "Channel catalog is not registered")
+                result = self._channel_catalog.discover_channels(context)
+                self._provider_response(request, result.as_contract() if isinstance(result, ChannelCatalog) else result)
             else:
                 raise PluginError("RESOURCE_NOT_FOUND", "Provider method is not supported")
         except PluginError as exc:
@@ -172,6 +190,9 @@ class PluginApplication:
             contracts.append({"contract": "radio_provider", "contract_version": "1.0", "features": ["catalog", "resolve_stream"]})
             capabilities.extend(["radio.catalog", "radio.resolve_stream"])
             schemes.extend({"scheme": scheme, "contract": "radio_provider"} for scheme in self._radio)
+        if self._channel_catalog is not None:
+            contracts.append({"contract": "channel_catalog", "contract_version": "1.0", "features": ["discover"]})
+            capabilities.append("channel_catalog.discover")
         return {"protocol_version": "1.1", "plugin": self.identity, "version": self.version,
                 "provider_contracts": contracts, "owned_schemes": schemes,
                 "capabilities": capabilities, "permissions": self.permissions}
