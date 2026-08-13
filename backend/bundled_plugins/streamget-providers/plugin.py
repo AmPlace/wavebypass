@@ -10,9 +10,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, unquote, urlparse
+
+import httpx
 
 from streamget import (
     AcfunLiveStream,
@@ -68,7 +71,7 @@ DIRECT_NETWORK_PERMISSION = "network.direct"
 
 @dataclass(frozen=True)
 class ProviderSpec:
-    stream_class: type
+    stream_class: type | None
     url_builder: Callable[[str], str]
     quality: str = "OD"
     play_fields: tuple[str, ...] = ("flv_url", "m3u8_url", "record_url")
@@ -77,6 +80,7 @@ class ProviderSpec:
     ttl_seconds: int = TTL_SECONDS
     play_url_selector: Callable[[Mapping[str, Any]], str | None] | None = None
     transport_selector: Callable[[Mapping[str, Any], str], str] | None = None
+    fetcher: Callable[[str], Any] | None = None
 
 
 def _url(template: str) -> Callable[[str], str]:
@@ -136,6 +140,101 @@ def _douyu_play_url(result: Mapping[str, Any]) -> str | None:
     if isinstance(backup_urls, (list, tuple)):
         urls.extend(url for url in backup_urls if isinstance(url, str) and url)
     return _select_douyu_cdn(urls)
+
+
+REDNOTE_MOBILE_HEADERS = {
+    "user-agent": "ios/7.830 (ios 17.0; ; iPhone 15 (A2846/A3089/A3090/A3092))",
+    "xy-common-params": "platform=iOS&sid=session.1722166379345546829388",
+    "referer": "https://app.xhs.cn/",
+}
+_REDNOTE_INITIAL_STATE = re.compile(r"<script>window\.__INITIAL_STATE__=(.*?)</script>")
+
+
+def _redbook_target(resource_id: str) -> str:
+    """Preserve room-id references and accept the legacy link form."""
+    value = resource_id.strip("/")
+    if value.startswith(("http://", "https://")):
+        return value
+    if "xhslink.com/" in value:
+        return f"https://{value}"
+    return f"https://www.xiaohongshu.com/livestream/{value}"
+
+
+async def _redbook_request(url: str) -> tuple[str, str]:
+    """Fetch one page in the Plugin's direct-network boundary.
+
+    This intentionally does not use Core HTTP/session state or mutate
+    StreamGet classes.  The client and headers remain local to the Plugin.
+    """
+    async with httpx.AsyncClient(timeout=20, follow_redirects=True, verify=False, http2=True) as client:
+        response = await client.get(url, headers=REDNOTE_MOBILE_HEADERS)
+        response.raise_for_status()
+        return response.text, str(response.url)
+
+
+def _redbook_query_value(url: str, name: str) -> str | None:
+    return parse_qs(urlparse(url).query).get(name, [None])[0]
+
+
+def _parse_redbook_initial_state(page: str) -> dict[str, Any] | None:
+    match = _REDNOTE_INITIAL_STATE.search(page)
+    if not match:
+        return None
+    try:
+        parsed = json.loads(match.group(1).replace("undefined", "null"))
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("Redbook INITIAL_STATE is malformed") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("Redbook INITIAL_STATE is not an object")
+    return parsed
+
+
+async def _fetch_redbook(url: str) -> dict[str, Any]:
+    """Own the Redbook parser instead of monkey-patching RedNoteLiveStream."""
+    resolved_url = url
+    if "xhslink.com" in resolved_url:
+        _unused_page, resolved_url = await _redbook_request(resolved_url)
+
+    host_id = _redbook_query_value(resolved_url, "host_id")
+    user_match = re.search(r"/user/profile/(.*?)(?=/|\?|$)", resolved_url)
+    user_id = user_match.group(1) if user_match else host_id
+    result: dict[str, Any] = {"anchor_name": "", "is_live": False, "live_url": resolved_url}
+    page, _final_url = await _redbook_request(resolved_url)
+    initial_state = _parse_redbook_initial_state(page)
+
+    if initial_state and initial_state.get("liveStream"):
+        stream_data = initial_state["liveStream"]
+        if not isinstance(stream_data, dict):
+            raise ValueError("Redbook liveStream is malformed")
+        if stream_data.get("liveStatus") == "success":
+            room_info = stream_data["roomData"]["roomInfo"]
+            title = room_info.get("roomTitle")
+            if title and "回放" not in title:
+                live_link = room_info["deeplink"]
+                anchor_name = _redbook_query_value(live_link, "host_nickname")
+                flv_url = _redbook_query_value(live_link, "flvUrl")
+                flv_url = unquote(flv_url) if flv_url else flv_url
+
+                if flv_url and "live/" in flv_url:
+                    room_id = flv_url.split("live/", 1)[1].split(".", 1)[0]
+                    flv_url = f"http://live-source-play.xhscdn.com/live/{room_id}.flv"
+                    m3u8_url = flv_url.replace(".flv", ".m3u8")
+                    result |= {
+                        "anchor_name": anchor_name or "",
+                        "is_live": True,
+                        "title": title,
+                        "flv_url": flv_url,
+                        "m3u8_url": m3u8_url,
+                        "record_url": flv_url,
+                    }
+                    return result
+
+    profile_url = f"https://www.xiaohongshu.com/user/profile/{user_id}"
+    profile_page, _profile_final_url = await _redbook_request(profile_url)
+    anchor_name = re.search(r"<title>@(.*?) 的个人主页</title>", profile_page)
+    if anchor_name:
+        result["anchor_name"] = anchor_name.group(1)
+    return result
 
 
 # This is the complete bundle boundary.  Do not add Node-backed StreamGet
@@ -203,6 +302,16 @@ PROVIDER_SPECS: dict[str, ProviderSpec] = {
             "hls" if result.get("m3u8_url") else "http_flv"
         ),
     ),
+    "redbook": ProviderSpec(
+        None,
+        _redbook_target,
+        play_fields=("m3u8_url", "flv_url"),
+        volatile_url=False,
+        transport_selector=lambda result, _play_url: (
+            "hls" if result.get("m3u8_url") else "http_flv"
+        ),
+        fetcher=_fetch_redbook,
+    ),
 }
 
 
@@ -213,6 +322,13 @@ class StreamGetProvider(TVProvider):
         self._specs = specs
 
     async def _fetch(self, spec: ProviderSpec, url: str) -> dict[str, Any]:
+        if spec.fetcher is not None:
+            result = await spec.fetcher(url)
+            if not isinstance(result, dict):
+                raise ValueError("StreamGet returned a non-object result")
+            return result
+        if spec.stream_class is None:
+            raise ValueError("StreamGet provider has no fetch implementation")
         live = spec.stream_class(cookies="")
         data = await live.fetch_web_stream_data(url)
         stream_obj = await live.fetch_stream_url(data, spec.quality)
@@ -262,6 +378,14 @@ class StreamGetProvider(TVProvider):
             expires_at=None,
             volatile_url=spec.volatile_url,
             requires_proxy=False,
+            provider_diagnostics=(
+                {
+                    "provider": "redbook",
+                    "anchor_name": str(result.get("anchor_name") or ""),
+                    "live_state": "live" if result.get("is_live") else "not_live",
+                }
+                if reference.scheme == "redbook" else {}
+            ),
         )
 
 

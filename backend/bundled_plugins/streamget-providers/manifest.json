@@ -161,6 +161,10 @@
     {
       "contract": "tv_provider",
       "scheme": "douyin"
+    },
+    {
+      "contract": "tv_provider",
+      "scheme": "redbook"
     }
   ],
   "permissions": {
@@ -203,7 +207,10 @@
         "playweb.douyucdn.cn",
         "wxapp.douyucdn.cn",
         "douyucdn2.cn",
-        "live.douyin.com"
+        "live.douyin.com",
+        "www.xiaohongshu.com",
+        "xhslink.com",
+        "live-source-play.xhscdn.com"
       ],
       "direct": true
     }
@@ -463,5 +470,5 @@
     "type": "python"
   },
   "state_schema_version": 1,
-  "version": "1.3.0"
+  "version": "1.4.0"
 }

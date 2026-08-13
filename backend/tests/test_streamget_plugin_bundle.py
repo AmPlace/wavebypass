@@ -26,10 +26,10 @@ EXPECTED_SCHEMES = {
     "yy", "bigo", "blued", "soop", "netease", "pandatv", "maoer", "look", "flextv", "popkontv",
     "twitcasting", "baidu", "weibo", "kugou", "twitch", "huajiao", "showroom", "inke", "acfun", "zhihu",
     "chzzk", "live17", "langlive", "changliao", "jd", "faceit", "lianjie", "sixroom", "huamao", "shopee",
-    "laixiu", "picarto", "bilibili", "douyu", "douyin",
+    "laixiu", "picarto", "bilibili", "douyu", "douyin", "redbook",
 }
 EXCLUDED_SCHEMES = {"haixiu", "liveme", "lehai"}
-EXPECTED_SCHEME_COUNT = 35
+EXPECTED_SCHEME_COUNT = 36
 
 
 def _load_plugin_module():
@@ -90,11 +90,13 @@ class StreamGetBundleContractTest(unittest.TestCase):
         self.assertTrue({
             "live.bilibili.com", "api.live.bilibili.com", "www.douyu.com",
             "playweb.douyucdn.cn", "wxapp.douyucdn.cn", "douyucdn2.cn", "live.douyin.com",
+            "www.xiaohongshu.com", "xhslink.com", "live-source-play.xhscdn.com",
         }.issubset(set(manifest.permissions["network"]["allowed_hosts"])))
         self.assertEqual(len(manifest.runtime["dependency_lock"]["artifacts"]), 21)
         self.assertEqual(set(self.module.PROVIDER_SPECS), EXPECTED_SCHEMES)
         source = (PLUGIN_DIR / "plugin.py").read_text(encoding="utf-8")
-        for forbidden in ("backend.", "httpx", "requests", "aiohttp", "curl_cffi"):
+        for forbidden in ("backend.", "adapters.", "requests", "aiohttp", "curl_cffi",
+                          "RedNoteLiveStream.fetch_app_stream_data", "__setattr__"):
             self.assertNotIn(forbidden, source)
         self.assertTrue(validate_project(PLUGIN_DIR)["valid"])
 
@@ -120,6 +122,7 @@ class StreamGetBundleContractTest(unittest.TestCase):
             "laixiu": "https://www.laixiu.com/room-42", "picarto": "https://picarto.tv/room-42",
             "bilibili": "https://live.bilibili.com/room-42",
             "douyu": "https://www.douyu.com/room-42", "douyin": "https://live.douyin.com/room-42",
+            "redbook": "https://www.xiaohongshu.com/livestream/room-42",
         }
         for scheme in sorted(EXPECTED_SCHEMES):
             fields = {"is_live": True, "flv_url": f"https://media.test/{scheme}.flv",
@@ -127,6 +130,12 @@ class StreamGetBundleContractTest(unittest.TestCase):
                       "record_url": f"https://media.test/{scheme}.record"}
             fake = _fake_class(fields)
             specs = {key: replace(value, stream_class=fake) for key, value in self.module.PROVIDER_SPECS.items()}
+            fetch_calls = []
+            if scheme == "redbook":
+                async def fake_fetch(url):
+                    fetch_calls.append(url)
+                    return fields
+                specs[scheme] = replace(specs[scheme], fetcher=fake_fetch)
             provider = self.module.StreamGetProvider(specs)
             context = ResolveContext("fixture", 9999999999999, {}, None)
             descriptor = provider.resolve_stream(TVReference(scheme, "room-42"), context)
@@ -139,8 +148,154 @@ class StreamGetBundleContractTest(unittest.TestCase):
             self.assertEqual((descriptor.url, descriptor.transport), (expected_url, expected_transport), scheme)
             self.assertEqual((descriptor.ttl_seconds, descriptor.volatile_url, descriptor.requires_proxy),
                              (spec.ttl_seconds, spec.volatile_url, False), scheme)
-            self.assertEqual(fake.calls, [(expected_urls[scheme], "fetch_web_stream_data"),
-                                           (expected_urls[scheme], spec.quality)], scheme)
+            if scheme == "redbook":
+                self.assertEqual(fetch_calls, [expected_urls[scheme]], scheme)
+            else:
+                self.assertEqual(fake.calls, [(expected_urls[scheme], "fetch_web_stream_data"),
+                                               (expected_urls[scheme], spec.quality)], scheme)
+
+    def test_redbook_parser_decodes_live_flv_and_preserves_redirect_target(self):
+        initial_state = {
+            "liveStream": {
+                "liveStatus": "success",
+                "roomData": {"roomInfo": {
+                    "roomTitle": "fixture live",
+                    "deeplink": "https://app.xhs.cn/live?host_nickname=主播&flvUrl=http%253A%252F%252Fupstream.example%252Flive%252Froom-42.flv",
+                }},
+            },
+        }
+        page = f"<script>window.__INITIAL_STATE__={json.dumps(initial_state, ensure_ascii=False)}</script>"
+        profile = "<title>@fallback 的个人主页</title>"
+        requests = []
+
+        async def fake_request(url):
+            requests.append(url)
+            if "xhslink.com" in url:
+                return "redirected", "https://www.xiaohongshu.com/livestream/room-42?host_id=room-42"
+            if len(requests) == 2:
+                return page, url
+            return profile, url
+
+        with mock.patch.object(self.module, "_redbook_request", side_effect=fake_request):
+            result = asyncio.run(self.module._fetch_redbook("https://xhslink.com/fixture"))
+
+        self.assertEqual(result["is_live"], True)
+        self.assertEqual(result["anchor_name"], "主播")
+        self.assertEqual(result["flv_url"], "http://live-source-play.xhscdn.com/live/room-42.flv")
+        self.assertEqual(result["m3u8_url"], "http://live-source-play.xhscdn.com/live/room-42.m3u8")
+        self.assertEqual(requests, [
+            "https://xhslink.com/fixture",
+            "https://www.xiaohongshu.com/livestream/room-42?host_id=room-42",
+        ])
+
+    def test_redbook_replay_not_live_and_malformed_page_taxonomy(self):
+        replay = {
+            "liveStream": {"liveStatus": "success", "roomData": {"roomInfo": {
+                "roomTitle": "录播回放", "deeplink": "https://app.xhs.cn/live?flvUrl=x"
+            }}}
+        }
+        replay_page = f"<script>window.__INITIAL_STATE__={json.dumps(replay, ensure_ascii=False)}</script>"
+
+        async def replay_request(url):
+            return (replay_page if "/livestream/" in url else "", url)
+
+        with mock.patch.object(self.module, "_redbook_request", side_effect=replay_request):
+            result = asyncio.run(self.module._fetch_redbook("https://www.xiaohongshu.com/livestream/room-42"))
+        self.assertFalse(result["is_live"])
+
+        malformed = "<script>window.__INITIAL_STATE__={not-json}</script>"
+        with mock.patch.object(self.module, "_redbook_request", return_value=(malformed, "fixture")):
+            with self.assertRaises(ValueError):
+                asyncio.run(self.module._fetch_redbook("https://www.xiaohongshu.com/livestream/room-42"))
+
+        provider = self.module.StreamGetProvider({
+            "redbook": replace(self.module.PROVIDER_SPECS["redbook"],
+                                fetcher=mock.AsyncMock(side_effect=ValueError("malformed"))),
+        })
+        with self.assertRaises(SDKPluginError) as error:
+            provider.resolve_stream(
+                TVReference("redbook", "room-42"),
+                ResolveContext("fixture", 9999999999999, {}, None),
+            )
+        self.assertEqual(error.exception.code, "TEMPORARY_UPSTREAM_FAILURE")
+
+    def test_redbook_descriptor_flags_ttl_and_generic_metadata(self):
+        async def fake_fetch(url):
+            return {
+                "is_live": True,
+                "anchor_name": "主播",
+                "m3u8_url": "https://media.test/redbook.m3u8",
+                "flv_url": "https://media.test/redbook.flv",
+            }
+
+        provider = self.module.StreamGetProvider({
+            "redbook": replace(self.module.PROVIDER_SPECS["redbook"], fetcher=fake_fetch),
+        })
+        descriptor = provider.resolve_stream(
+            TVReference("redbook", "room-42"),
+            ResolveContext("fixture", 9999999999999, {}, None),
+        )
+        self.assertEqual(
+            (descriptor.url, descriptor.transport, descriptor.ttl_seconds,
+             descriptor.volatile_url, descriptor.requires_proxy, descriptor.direct_playable),
+            ("https://media.test/redbook.m3u8", "hls", 1800, False, False, True),
+        )
+        self.assertEqual(descriptor.provider_diagnostics, {
+            "provider": "redbook", "anchor_name": "主播", "live_state": "live",
+        })
+
+    def test_redbook_descriptor_matches_legacy_golden_fixture(self):
+        initial_state = {
+            "liveStream": {
+                "liveStatus": "success",
+                "roomData": {"roomInfo": {
+                    "roomTitle": "fixture live",
+                    "deeplink": "https://app.xhs.cn/live?host_nickname=主播&flvUrl=http%253A%252F%252Fupstream.example%252Flive%252Froom-42.flv",
+                }},
+            },
+        }
+        page = f"<script>window.__INITIAL_STATE__={json.dumps(initial_state, ensure_ascii=False)}</script>"
+
+        legacy = importlib.import_module("adapters.redbook")
+        from adapters import AdapterRequest
+
+        async def legacy_request(url, **_kwargs):
+            return page
+
+        with mock.patch.object(legacy, "async_req", side_effect=legacy_request):
+            legacy_result = asyncio.run(legacy.resolve_redbook(
+                AdapterRequest("redbook://room-42", "redbook", "room-42", {}), None,
+            ))
+
+        provider = self.module.StreamGetProvider({"redbook": self.module.PROVIDER_SPECS["redbook"]})
+        with mock.patch.object(self.module, "_redbook_request", return_value=(page, "fixture")):
+            descriptor = provider.resolve_stream(
+                TVReference("redbook", "room-42"),
+                ResolveContext("fixture", 9999999999999, {}, None),
+            )
+        self.assertEqual(
+            {
+                "url": descriptor.url,
+                "source_type": descriptor.transport,
+                "direct_playable": descriptor.direct_playable,
+                "requires_proxy": descriptor.requires_proxy,
+                "headers": descriptor.headers,
+                "ttl": descriptor.ttl_seconds,
+                "expires_at": descriptor.expires_at,
+                "volatile_url": descriptor.volatile_url,
+            },
+            {
+                "url": legacy_result["url"],
+                "source_type": legacy_result["source_type"],
+                "direct_playable": legacy_result["direct_playable"],
+                "requires_proxy": legacy_result["requires_proxy"],
+                "headers": legacy_result["headers"],
+                "ttl": legacy_result["ttl"],
+                "expires_at": legacy_result["expires_at"],
+                "volatile_url": False,
+            },
+        )
+        self.assertEqual(descriptor.provider_diagnostics["anchor_name"], legacy_result["anchor_name"])
 
     def test_weibo_mapping_and_stable_failure_taxonomy(self):
         fields = {"is_live": True, "flv_url": "https://media.test/live.flv", "m3u8_url": "", "record_url": ""}
