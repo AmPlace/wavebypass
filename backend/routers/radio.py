@@ -49,6 +49,23 @@ async def resolve_radio_station(
         raise HTTPException(status_code=status, detail=exc.as_contract()) from exc
 
 
+@router.get("/api/radio/stations/{station_id}/programme")
+async def get_radio_programme(
+    station_id: str,
+    request: Request,
+    source_id: str = Query("", description="Explicit persisted Radio source selector"),
+    _access=Depends(require_browse_access),
+):
+    if not source_id.strip():
+        raise HTTPException(status_code=400, detail="source_id is required")
+    resolver = _radio_resolver(request)
+    try:
+        return await resolver.resolve_programme(source_id.strip(), station_id=station_id)
+    except PluginError as exc:
+        status = 404 if exc.code in {"RESOURCE_NOT_FOUND", "SCHEME_CONFLICT"} else 503
+        raise HTTPException(status_code=status, detail=exc.as_contract()) from exc
+
+
 @router.post("/api/radio/plugins/{plugin_identity:path}/refresh")
 async def refresh_radio_catalog(
     plugin_identity: str,

@@ -23,6 +23,7 @@ from security.source_ids import MediaSourceIdentity, media_source_id_for, media_
 RADIO_DOMAIN = "radio"
 RADIO_CATALOG_STALE_GRACE_SECONDS = 300
 RADIO_DESCRIPTOR_CACHE_DEFAULT_TTL_SECONDS = 300
+RADIO_PROGRAMME_CACHE_DEFAULT_TTL_SECONDS = 600
 
 
 def radio_station_identity(owner_identity: str, provider_key: str, provider_station_id: str) -> MediaSourceIdentity:
@@ -115,13 +116,22 @@ class RadioResolver:
         self.runtime = runtime
         self.clock = clock
         self._descriptor_cache: dict[tuple[str, str, str], tuple[float, dict[str, Any]]] = {}
+        self._programme_cache: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
         self._locks: dict[tuple[str, str, str], asyncio.Lock] = {}
+        self._programme_locks: dict[tuple[str, str], asyncio.Lock] = {}
 
     def _lock_for(self, key: tuple[str, str, str]) -> asyncio.Lock:
         lock = self._locks.get(key)
         if lock is None:
             lock = asyncio.Lock()
             self._locks[key] = lock
+        return lock
+
+    def _programme_lock_for(self, key: tuple[str, str]) -> asyncio.Lock:
+        lock = self._programme_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._programme_locks[key] = lock
         return lock
 
     async def resolve_source(self, source_id: str, *, station_id: str = "") -> dict[str, Any]:
@@ -169,8 +179,14 @@ class RadioResolver:
                 station_ref = reference.get("station_ref") if isinstance(reference, dict) else None
                 if not isinstance(station_ref, dict):
                     raise PluginError("INVALID_PLUGIN_RESPONSE", "Persisted Radio reference is invalid", category="routing")
+                playback_config = reference.get("playback_config") if isinstance(reference, dict) else None
+                if not isinstance(playback_config, dict):
+                    playback_config = {}
                 descriptor = await self.runtime.request(
-                    instance, "radio.resolve_stream", {"station_ref": station_ref},
+                    instance, "radio.resolve_stream", {
+                        "station_ref": station_ref,
+                        "playback_config": playback_config,
+                    },
                 )
                 # Keep the Radio projection aligned with the existing TV
                 # descriptor bridge. Domain/source fields are additive routing
@@ -200,7 +216,130 @@ class RadioResolver:
                 await database.update_radio_source_health(source_id, success=False, error=_error_text(exc))
                 raise
 
+    async def resolve_programme(self, source_id: str, *, station_id: str = "") -> dict[str, Any]:
+        """Resolve a provider-native Radio programme snapshot.
+
+        This is deliberately a Radio projection and never touches TV EPG
+        tables, matchers, or bindings.  The persisted source revision is part
+        of the cache key so a playback-config update cannot reuse an older
+        provider snapshot.
+        """
+        source = await database.get_radio_station_source(
+            source_id, station_id=station_id, now_unix=float(self.clock()),
+        )
+        if source is None or source.get("lifecycle_state") == "expired":
+            raise PluginError("RESOURCE_NOT_FOUND", "Radio source is unavailable", category="routing")
+        owner = str(source.get("owner_identity") or "")
+        provider_key = str(source.get("provider_key") or "").strip().lower()
+        revision = str(source.get("source_revision") or "")
+        key = (str(source_id), revision)
+        now = float(self.clock())
+        cached = self._programme_cache.get(key)
+        if cached and cached[0] > now:
+            return copy.deepcopy(cached[1])
+        durable = await database.get_radio_programme_snapshot(source_id, now_unix=now)
+        if durable and str(durable.get("source_revision") or "") == revision:
+            result = {
+                "domain": RADIO_DOMAIN,
+                "station_id": source.get("station_id"),
+                "source_id": source_id,
+                "source_revision": revision,
+                "station_ref": {
+                    "provider_key": durable.get("provider_key") or provider_key,
+                    "provider_station_id": durable.get("provider_station_id") or source.get("provider_station_id"),
+                },
+                "revision": durable.get("revision") or "",
+                "programmes": durable.get("programmes") or [],
+                "expires_at": durable.get("expires_at_unix"),
+            }
+            self._programme_cache[key] = (float(durable["expires_at_unix"]), copy.deepcopy(result))
+            return result
+        if self.runtime is None:
+            raise PluginError("PLUGIN_UNAVAILABLE", "Radio Plugin runtime is unavailable", category="lifecycle")
+
+        async with self._programme_lock_for(key):
+            now = float(self.clock())
+            cached = self._programme_cache.get(key)
+            if cached and cached[0] > now:
+                return copy.deepcopy(cached[1])
+            try:
+                instance = self.runtime.registry.route(provider_key)
+                if instance.manifest.identity != owner:
+                    raise PluginError(
+                        "SCHEME_CONFLICT", "Radio source owner does not match the active Plugin", category="routing",
+                    )
+                owned = {
+                    scheme for scheme, contract in instance.manifest.owned_schemes
+                    if contract == "radio_provider"
+                }
+                if not owned:
+                    owned = {scheme for scheme, _contract in instance.manifest.owned_schemes}
+                if provider_key not in owned:
+                    raise PluginError(
+                        "SCHEME_CONFLICT", "Active Plugin does not own this Radio scheme", category="routing",
+                    )
+                reference = source.get("reference") or {}
+                station_ref = reference.get("station_ref") if isinstance(reference, dict) else None
+                if not isinstance(station_ref, dict):
+                    raise PluginError("INVALID_PLUGIN_RESPONSE", "Persisted Radio reference is invalid", category="routing")
+                playback_config = reference.get("playback_config") if isinstance(reference, dict) else None
+                if not isinstance(playback_config, dict):
+                    playback_config = {}
+                snapshot = await self.runtime.request(
+                    instance, "radio.programme", {
+                        "station_ref": station_ref,
+                        "playback_config": playback_config,
+                    },
+                )
+                returned_ref = snapshot.get("station_ref") or {}
+                if (
+                    str(returned_ref.get("provider_key") or "").lower() != provider_key
+                    or str(returned_ref.get("provider_station_id") or "") != str(station_ref.get("provider_station_id") or "")
+                ):
+                    raise PluginError(
+                        "INVALID_PLUGIN_RESPONSE", "Radio programme station identity changed", category="routing",
+                    )
+                current = await database.get_radio_station_source(
+                    source_id, station_id=station_id, now_unix=float(self.clock()),
+                )
+                if current is None or str(current.get("source_revision") or "") != revision:
+                    raise PluginError(
+                        "PLUGIN_CANDIDATE_CONFLICT", "Radio source changed during programme resolve", category="routing",
+                    )
+                item_expiries = [
+                    int(item["expires_at"])
+                    for item in snapshot.get("programmes", [])
+                    if isinstance(item.get("expires_at"), int) and item["expires_at"] > int(now)
+                ]
+                expires_at = min(item_expiries) if item_expiries else int(now) + RADIO_PROGRAMME_CACHE_DEFAULT_TTL_SECONDS
+                ttl = max(1, min(7 * 24 * 60 * 60, int(expires_at - now)))
+                persisted = await database.upsert_radio_programme_snapshot(
+                    current, snapshot, updated_at_unix=now, ttl_seconds=ttl,
+                )
+                result = {
+                    "domain": RADIO_DOMAIN,
+                    "station_id": current.get("station_id"),
+                    "source_id": source_id,
+                    "source_revision": revision,
+                    "station_ref": snapshot["station_ref"],
+                    "revision": snapshot["revision"],
+                    "programmes": snapshot["programmes"],
+                    "expires_at": persisted["expires_at_unix"],
+                }
+                self._programme_cache[key] = (float(persisted["expires_at_unix"]), copy.deepcopy(result))
+                return result
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                raise exc
+
     def invalidate(self, source_id: str, source_revision: str | None = None) -> None:
         keys = [key for key in self._descriptor_cache if key[1] == source_id and (source_revision is None or key[2] == source_revision)]
         for key in keys:
             self._descriptor_cache.pop(key, None)
+        programme_keys = [
+            key for key in self._programme_cache
+            if key[0] == source_id and (source_revision is None or key[1] == source_revision)
+        ]
+        for key in programme_keys:
+            self._programme_cache.pop(key, None)

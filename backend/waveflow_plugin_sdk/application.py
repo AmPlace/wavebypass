@@ -36,6 +36,9 @@ class RadioProvider(ABC):
     def resolve_stream(self, reference: RadioReference, context: ResolveContext) -> StreamDescriptor:
         raise NotImplementedError
 
+    def programme(self, reference: RadioReference, context: ResolveContext) -> dict[str, Any]:
+        raise PluginError("RESOURCE_NOT_FOUND", "Radio programme is not implemented")
+
 
 class PluginApplication:
     def __init__(self, *, identity: str, version: str, permissions: list[str] | None = None):
@@ -161,6 +164,12 @@ class PluginApplication:
                 if provider is None:
                     raise PluginError("RESOURCE_NOT_FOUND", "Radio Provider is not registered")
                 self._provider_response(request, provider.resolve_stream(reference, context).as_contract())
+            elif method == "radio.programme":
+                reference = RadioReference.from_payload(payload)
+                provider = self._radio.get(reference.provider_key) or (next(iter(self._radio.values())) if len(self._radio) == 1 else None)
+                if provider is None:
+                    raise PluginError("RESOURCE_NOT_FOUND", "Radio Provider is not registered")
+                self._provider_response(request, provider.programme(reference, context))
             elif method == "channel_catalog.discover":
                 if self._channel_catalog is None:
                     raise PluginError("RESOURCE_NOT_FOUND", "Channel catalog is not registered")
@@ -187,8 +196,13 @@ class PluginApplication:
             capabilities.append("tv.resolve_stream")
             schemes.extend({"scheme": scheme, "contract": "tv_provider"} for scheme in self._tv)
         if self._radio:
-            contracts.append({"contract": "radio_provider", "contract_version": "1.0", "features": ["catalog", "resolve_stream"]})
+            features = ["catalog", "resolve_stream"]
+            if any(type(provider).programme is not RadioProvider.programme for provider in self._radio.values()):
+                features.append("programme")
+            contracts.append({"contract": "radio_provider", "contract_version": "1.0", "features": features})
             capabilities.extend(["radio.catalog", "radio.resolve_stream"])
+            if "programme" in features:
+                capabilities.append("radio.programme")
             schemes.extend({"scheme": scheme, "contract": "radio_provider"} for scheme in self._radio)
         if self._channel_catalog is not None:
             contracts.append({"contract": "channel_catalog", "contract_version": "1.0", "features": ["discover"]})

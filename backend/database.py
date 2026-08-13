@@ -586,6 +586,28 @@ ON radio_station_sources(station_id, explicit_priority, source_id);
 CREATE INDEX IF NOT EXISTS idx_radio_station_sources_lifecycle
 ON radio_station_sources(lifecycle_state, catalog_expires_at);
 
+-- Radio programme snapshots are intentionally separate from TV EPG tables.
+-- They describe the current/provider-native programme view for one explicit
+-- Radio source and never participate in TV binding or matching.
+CREATE TABLE IF NOT EXISTS radio_programme_snapshots (
+    source_id              TEXT PRIMARY KEY,
+    station_id             TEXT NOT NULL,
+    owner_identity         TEXT NOT NULL,
+    provider_key           TEXT NOT NULL,
+    provider_station_id    TEXT NOT NULL,
+    source_revision        TEXT NOT NULL,
+    revision               TEXT NOT NULL,
+    programmes_json        TEXT NOT NULL,
+    updated_at_unix        REAL NOT NULL,
+    expires_at_unix        REAL NOT NULL,
+    created_at              TEXT NOT NULL,
+    updated_at              TEXT NOT NULL,
+    FOREIGN KEY(source_id) REFERENCES radio_station_sources(source_id) ON DELETE CASCADE,
+    FOREIGN KEY(station_id) REFERENCES radio_stations(station_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_radio_programme_snapshots_expiry
+ON radio_programme_snapshots(expires_at_unix);
+
 CREATE TABLE IF NOT EXISTS users (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     username      TEXT NOT NULL UNIQUE,
@@ -908,6 +930,10 @@ async def initialize():
                 conn.execute(f"ALTER TABLE subscriptions ADD COLUMN {col} {typ} DEFAULT {default}")
             except sqlite3.OperationalError:
                 pass  # 字段已存在
+        try:
+            conn.execute("ALTER TABLE radio_programme_snapshots ADD COLUMN source_revision TEXT NOT NULL DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
         for col, typ, default in [
             ('source_type', 'TEXT', "'hls'"),
             ('youtube_video_id', 'TEXT', "''"),
@@ -2917,6 +2943,113 @@ async def update_radio_source_health(source_id: str, *, success: bool, error: st
             conn.close()
 
     await asyncio.to_thread(_update)
+
+
+async def upsert_radio_programme_snapshot(
+    source: dict,
+    snapshot: dict,
+    *,
+    updated_at_unix: float,
+    ttl_seconds: int,
+) -> dict:
+    """Persist one validated Radio programme snapshot atomically.
+
+    This table is deliberately not shared with the TV EPG projection.  The
+    caller has already validated the Plugin payload and supplies the explicit
+    source row that authorized the mutation.
+    """
+    source_id = _normalize_identifier(source.get("source_id"), "source_id")
+    station_id = _normalize_identifier(source.get("station_id"), "station_id")
+    owner_identity = _normalize_identifier(source.get("owner_identity"), "owner_identity")
+    provider_key = _normalize_identifier(source.get("provider_key"), "provider_key")
+    provider_station_id = _normalize_identifier(source.get("provider_station_id"), "provider_station_id")
+    source_revision = _normalize_identifier(source.get("source_revision"), "source_revision")
+    if not isinstance(snapshot, dict) or not isinstance(snapshot.get("programmes"), list):
+        raise TypeError("snapshot must be a validated Radio programme object")
+    if isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int):
+        raise TypeError("ttl_seconds must be an integer")
+    ttl = max(1, min(ttl_seconds, 7 * 24 * 60 * 60))
+    revision = _normalize_identifier(snapshot.get("revision"), "revision")
+    programmes_json = json.dumps(
+        snapshot["programmes"], ensure_ascii=False, separators=(",", ":"), allow_nan=False,
+    )
+    updated = float(updated_at_unix)
+    expires = updated + ttl
+
+    def _upsert() -> dict:
+        conn = _connect()
+        try:
+            now = _utc_now()
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO radio_programme_snapshots(
+                        source_id, station_id, owner_identity, provider_key,
+                        provider_station_id, source_revision, revision, programmes_json,
+                        updated_at_unix, expires_at_unix, created_at, updated_at
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(source_id) DO UPDATE SET
+                        station_id=excluded.station_id,
+                        owner_identity=excluded.owner_identity,
+                        provider_key=excluded.provider_key,
+                        provider_station_id=excluded.provider_station_id,
+                        source_revision=excluded.source_revision,
+                        revision=excluded.revision,
+                        programmes_json=excluded.programmes_json,
+                        updated_at_unix=excluded.updated_at_unix,
+                        expires_at_unix=excluded.expires_at_unix,
+                        updated_at=excluded.updated_at
+                    """,
+                    (
+                        source_id, station_id, owner_identity, provider_key,
+                        provider_station_id, source_revision, revision, programmes_json,
+                        updated, expires, now, now,
+                    ),
+                )
+            return {
+                "source_id": source_id,
+                "station_id": station_id,
+                "owner_identity": owner_identity,
+                "provider_key": provider_key,
+                "provider_station_id": provider_station_id,
+                "source_revision": source_revision,
+                "revision": revision,
+                "programmes": json.loads(programmes_json),
+                "updated_at_unix": updated,
+                "expires_at_unix": expires,
+            }
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_upsert)
+
+
+async def get_radio_programme_snapshot(
+    source_id: str,
+    *,
+    now_unix: float | None = None,
+) -> dict | None:
+    source_key = _normalize_identifier(source_id, "source_id")
+    now = float(now_unix if now_unix is not None else time.time())
+
+    def _get() -> dict | None:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM radio_programme_snapshots WHERE source_id=?",
+                (source_key,),
+            ).fetchone()
+            if row is None:
+                return None
+            value = dict(row)
+            if float(value.get("expires_at_unix") or 0) <= now:
+                return None
+            value["programmes"] = json.loads(value.pop("programmes_json") or "[]")
+            return value
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_get)
 
 
 # ── Plugin package persistence ──

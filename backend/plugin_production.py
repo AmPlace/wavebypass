@@ -972,6 +972,42 @@ class ProductionPluginSubsystem:
             await self.radio_catalog.record_failure(identity, exc)
             return {"status": "failed", "error": str(exc)[:2048]}
 
+    async def refresh_radio_programmes(
+        self, identity: str, *, timeout: float = 15.0, now: float | None = None,
+    ) -> dict[str, Any]:
+        """Refresh provider-native Radio programme snapshots via Automation.
+
+        The durable station/source rows are the work list.  No TV EPG state or
+        Plugin-owned scheduler is involved, and one source failure does not
+        discard another source's last-good snapshot.
+        """
+        instance = self.service._active.get(identity)
+        if instance is None or instance.state != LifecycleState.HEALTHY_ACTIVE:
+            return {"status": "failed", "checked": 0, "updated": 0, "failed": 1,
+                    "error": "Radio Plugin is unavailable"}
+        checked = updated = failed = 0
+        errors: list[str] = []
+        for station in await db.list_radio_stations(owner_identity=identity, now_unix=now):
+            for source in station.get("sources") or []:
+                if source.get("lifecycle_state") == "expired":
+                    continue
+                checked += 1
+                try:
+                    await self.radio_resolver.resolve_programme(
+                        source["source_id"], station_id=station["station_id"],
+                    )
+                    updated += 1
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    failed += 1
+                    errors.append(f"{source.get('source_id')}: {type(exc).__name__}")
+        return {
+            "status": "success" if failed == 0 else ("partial" if updated else "failed"),
+            "checked": checked, "updated": updated, "failed": failed,
+            "errors": errors[:32],
+        }
+
     async def uninstall(self, identity: str) -> bool:
         removed = await self.service.uninstall(identity)
         if removed:

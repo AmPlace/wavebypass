@@ -13,7 +13,7 @@ from .manifest import PluginManifest
 from .permissions import PermissionGate, PermissionPolicy
 from .process import PluginProcess
 from .registry import LifecycleState, PluginInstance, PluginRegistry
-from .validation import validate_channel_catalog, validate_radio_catalog, validate_stream_descriptor
+from .validation import validate_channel_catalog, validate_radio_catalog, validate_radio_programme, validate_stream_descriptor
 
 
 logger = logging.getLogger("waveflow.plugin_runtime")
@@ -158,6 +158,14 @@ class PluginRuntime:
                 # Radio packages declare their radio-owned scheme explicitly.
                 owned_schemes = frozenset(scheme for scheme, _ in instance.manifest.owned_schemes)
             return validate_radio_catalog(result, owned_schemes=owned_schemes)
+        if method == "radio.programme":
+            contract = next((item for item in instance.manifest.provider_contracts if item.contract == "radio_provider"), None)
+            if contract is None or "programme" not in contract.features:
+                raise PluginError("RESOURCE_NOT_FOUND", "Plugin does not implement Radio programme", category="request")
+            owned_schemes = frozenset(scheme for scheme, declared_contract in instance.manifest.owned_schemes if declared_contract == "radio_provider")
+            if not owned_schemes:
+                owned_schemes = frozenset(scheme for scheme, _ in instance.manifest.owned_schemes)
+            return validate_radio_programme(result, owned_schemes=owned_schemes)
         if method == "channel_catalog.discover":
             contract = next(
                 (item for item in instance.manifest.provider_contracts if item.contract == "channel_catalog"),

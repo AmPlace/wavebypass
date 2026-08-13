@@ -126,6 +126,52 @@ class RadioCoreBridgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stale["lifecycle_state"], "stale")
         self.assertEqual(stale["sources"][0]["lifecycle_state"], "stale")
 
+    async def test_programme_bridge_persists_radio_snapshot_and_reuses_revision_cache(self):
+        bridge = RadioCatalogBridge()
+        await bridge.refresh(
+            "org.waveflow/synthetic",
+            {"stations": [{
+                "station_ref": {"provider_key": "synthetic", "provider_station_id": "programme-one"},
+                "name": "Programme Station", "playback_config": {"profile": "primary"},
+                "ttl_seconds": 60,
+            }]},
+            owned_schemes={"synthetic"}, now=400,
+        )
+        station = (await database.list_radio_stations(now_unix=401))[0]
+        source = station["sources"][0]
+
+        class FakeRuntime:
+            def __init__(self):
+                self.calls = []
+                self.instance = types.SimpleNamespace(
+                    manifest=types.SimpleNamespace(
+                        identity="org.waveflow/synthetic",
+                        owned_schemes=(("synthetic", "radio_provider"),),
+                    )
+                )
+                self.registry = types.SimpleNamespace(route=lambda _scheme: self.instance)
+
+            async def request(self, _instance, method, payload):
+                self.calls.append((method, payload))
+                self_id = payload["station_ref"]["provider_station_id"]
+                if method == "radio.programme":
+                    return {
+                        "station_ref": {"provider_key": "synthetic", "provider_station_id": self_id},
+                        "revision": "programme-rev-1",
+                        "programmes": [{"provider_programme_id": "p1", "title": "Now", "updated_at": 401}],
+                    }
+                raise AssertionError(method)
+
+        runtime = FakeRuntime()
+        resolver = RadioResolver(runtime=runtime, clock=lambda: 401)
+        result = await resolver.resolve_programme(source["source_id"], station_id=station["station_id"])
+        self.assertEqual(result["programmes"][0]["title"], "Now")
+        self.assertEqual(runtime.calls[0][1]["playback_config"], {"profile": "primary"})
+        persisted = await database.get_radio_programme_snapshot(source["source_id"], now_unix=402)
+        self.assertEqual(persisted["revision"], "programme-rev-1")
+        await resolver.resolve_programme(source["source_id"], station_id=station["station_id"])
+        self.assertEqual(len(runtime.calls), 1)
+
     async def test_bounds_ownership_and_identity_compatibility(self):
         bridge = RadioCatalogBridge()
         with self.assertRaises(PluginError):

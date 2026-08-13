@@ -24,11 +24,15 @@ class TVReference:
 class RadioReference:
     provider_key: str
     provider_station_id: str
+    playback_config: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> "RadioReference":
         station = payload.get("station_ref") if isinstance(payload.get("station_ref"), dict) else payload
-        return cls(str(station.get("provider_key") or ""), str(station.get("provider_station_id") or ""))
+        config = payload.get("playback_config")
+        if not isinstance(config, dict):
+            config = {}
+        return cls(str(station.get("provider_key") or ""), str(station.get("provider_station_id") or ""), dict(config))
 
 
 @dataclass(frozen=True)

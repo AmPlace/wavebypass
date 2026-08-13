@@ -56,6 +56,7 @@ from epg_tasks import (
     run_epg_refresh_now,
     run_epg_source_refresh_now,
 )
+from radio_tasks import reconcile_radio_automation_tasks
 from ssrf_guard import UnsafeTargetError, assert_safe_target_url, assert_safe_host_ips
 from core.config import get_settings
 from core.settings_service import get_effective_settings
@@ -734,11 +735,25 @@ async def lifespan(app: FastAPI):
         if plugin_subsystem is not None:
             if await database.list_plugin_installations():
                 register_plugin_update_task(automation_service.registry, plugin_subsystem)
+            if (
+                getattr(plugin_subsystem, "service", None) is not None
+                and hasattr(automation_service, "registry")
+                and hasattr(automation_service, "repository")
+            ):
+                await reconcile_radio_automation_tasks(automation_service, plugin_subsystem)
         app.state.automation_service = automation_service
         await automation_service.start()
         _clear_stale_rtsp_hls_dirs()
         asyncio.create_task(refresh_tokens_task())
-        asyncio.create_task(_yunting_refresh_task())
+        yunting_plugin_active = bool(
+            plugin_subsystem is not None
+            and "org.waveflow/yunting" in getattr(getattr(plugin_subsystem, "service", None), "_active", {})
+        )
+        if not yunting_plugin_active:
+            # Keep the legacy warmup only for installations that have not yet
+            # published the Radio Plugin.  Once the Plugin is active, the
+            # shared AutomationService owns catalog/programme refreshes.
+            asyncio.create_task(_yunting_refresh_task())
         asyncio.create_task(_myradio_refresh_task())
         asyncio.create_task(_prefetch_rb())
         asyncio.create_task(_rtsp_hls_cleanup_task())

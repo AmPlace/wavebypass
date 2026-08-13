@@ -39,6 +39,9 @@ RADIO_CATALOG_MAX_ITEMS = 512
 RADIO_CATALOG_MAX_BYTES = 256 * 1024
 RADIO_CATALOG_MAX_TTL_SECONDS = 7 * 24 * 60 * 60
 RADIO_CATALOG_MAX_STRING_LENGTH = 2048
+RADIO_PROGRAMME_MAX_ITEMS = 128
+RADIO_PROGRAMME_MAX_BYTES = 128 * 1024
+RADIO_PROGRAMME_MAX_STRING_LENGTH = 2048
 _CATALOG_SCHEME_RE = re.compile(r"^[a-z][a-z0-9+.-]*$")
 
 
@@ -276,6 +279,57 @@ def validate_radio_catalog(value: Any, *, owned_schemes: set[str] | frozenset[st
         raise invalid_response("Radio catalog is not JSON serializable") from exc
     if len(encoded.encode("utf-8")) > RADIO_CATALOG_MAX_BYTES:
         raise invalid_response("Radio catalog exceeds the size limit")
+    return normalized_value
+
+
+def validate_radio_programme(value: Any, *, owned_schemes: set[str] | frozenset[str]) -> dict[str, Any]:
+    """Validate bounded Radio programme snapshots separately from TV EPG."""
+    if not isinstance(value, dict) or set(value) != {"station_ref", "revision", "programmes"}:
+        raise invalid_response("Invalid Radio programme snapshot")
+    ref = validate_station_ref(value.get("station_ref"))
+    allowed = {str(scheme).lower() for scheme in owned_schemes}
+    if allowed and ref["provider_key"].strip().lower() not in allowed:
+        raise invalid_response("Radio programme station is not owned by this Plugin")
+    revision = value["revision"]
+    if not isinstance(revision, str) or len(revision) > 256:
+        raise invalid_response("Invalid Radio programme revision")
+    programmes = value["programmes"]
+    if not isinstance(programmes, list) or len(programmes) > RADIO_PROGRAMME_MAX_ITEMS:
+        raise invalid_response("Invalid Radio programme list")
+    fields = {"provider_programme_id", "title", "start", "end", "description", "subtitle", "updated_at", "expires_at"}
+    seen: set[str] = set()
+    normalized: list[dict[str, Any]] = []
+    for item in programmes:
+        if not isinstance(item, dict) or not set(item).issubset(fields) or "title" not in item or "updated_at" not in item:
+            raise invalid_response("Invalid Radio programme item")
+        title = item["title"]
+        if not isinstance(title, str) or not title.strip() or len(title) > RADIO_PROGRAMME_MAX_STRING_LENGTH:
+            raise invalid_response("Invalid Radio programme title")
+        provider_id = item.get("provider_programme_id", "")
+        if not isinstance(provider_id, str) or len(provider_id) > RADIO_PROGRAMME_MAX_STRING_LENGTH or provider_id in seen:
+            raise invalid_response("Invalid Radio programme provider identity")
+        if provider_id:
+            seen.add(provider_id)
+        for field in ("description", "subtitle"):
+            if field in item and item[field] is not None and (not isinstance(item[field], str) or len(item[field]) > RADIO_PROGRAMME_MAX_STRING_LENGTH):
+                raise invalid_response(f"Invalid Radio programme {field}")
+        for field in ("start", "end", "updated_at", "expires_at"):
+            timestamp = item.get(field)
+            if timestamp is not None and (isinstance(timestamp, bool) or not isinstance(timestamp, int) or timestamp < 0):
+                raise invalid_response(f"Invalid Radio programme {field}")
+        if item.get("start") is not None and item.get("end") is not None and item["end"] < item["start"]:
+            raise invalid_response("Radio programme time range is invalid")
+        normalized_item = dict(item)
+        normalized_item.update({"title": title.strip(), "description": item.get("description", ""),
+                                "subtitle": item.get("subtitle", ""), "provider_programme_id": provider_id})
+        normalized.append(normalized_item)
+    normalized_value = {"station_ref": ref, "revision": revision, "programmes": normalized}
+    try:
+        encoded = json.dumps(normalized_value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise invalid_response("Radio programme snapshot is not JSON serializable") from exc
+    if len(encoded.encode("utf-8")) > RADIO_PROGRAMME_MAX_BYTES:
+        raise invalid_response("Radio programme snapshot exceeds the size limit")
     return normalized_value
 
 
