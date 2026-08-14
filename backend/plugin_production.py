@@ -201,6 +201,7 @@ class ProductionPluginSubsystem:
     _ownership_reconcile_generation: dict[str, int] = field(default_factory=dict, init=False, repr=False)
     _lifecycle_reconcile_tasks: dict[str, asyncio.Task[Any]] = field(default_factory=dict, init=False, repr=False)
     _lifecycle_reconcile_generation: dict[str, int] = field(default_factory=dict, init=False, repr=False)
+    _radio_catalog_locks: dict[str, asyncio.Lock] = field(default_factory=dict, init=False, repr=False)
     _shutting_down: bool = field(default=False, init=False, repr=False)
     radio_resolver: RadioResolver = field(init=False)
 
@@ -213,6 +214,13 @@ class ProductionPluginSubsystem:
         self.service.runtime.lifecycle_callback = self._on_runtime_lifecycle_event
         self.service.runtime.activation_context = self._runtime_activation_context
         self.radio_resolver = RadioResolver(runtime=self.service.runtime)
+
+    def _radio_catalog_lock(self, identity: str) -> asyncio.Lock:
+        lock = self._radio_catalog_locks.get(identity)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._radio_catalog_locks[identity] = lock
+        return lock
 
     @asynccontextmanager
     async def _runtime_activation_context(self, operation: str, instance):
@@ -951,26 +959,35 @@ class ProductionPluginSubsystem:
         scheduler.  Automation can invoke it later using the existing task
         ownership rules.
         """
-        instance = self.service._active.get(identity)
-        if instance is None or instance.state != LifecycleState.HEALTHY_ACTIVE:
-            error = PluginError("PLUGIN_UNAVAILABLE", "Radio Plugin is unavailable", category="lifecycle")
-            await self.radio_catalog.record_failure(identity, error)
-            return {"status": "failed", "error": error.as_contract()}
-        owned_schemes = frozenset(
-            scheme for scheme, contract in instance.manifest.owned_schemes
-            if contract == "radio_provider"
-        )
-        try:
-            catalog = await self.service.runtime.request(
-                instance, "radio.catalog", {}, timeout=timeout,
+        async with self._radio_catalog_lock(identity):
+            generation = await db.begin_radio_catalog_refresh(identity)
+            instance = self.service._active.get(identity)
+            if instance is None or instance.state != LifecycleState.HEALTHY_ACTIVE:
+                error = PluginError("PLUGIN_UNAVAILABLE", "Radio Plugin is unavailable", category="lifecycle")
+                await self.radio_catalog.record_failure(identity, error, generation=generation)
+                return {"status": "failed", "error": error.as_contract()}
+            owned_schemes = frozenset(
+                scheme for scheme, contract in instance.manifest.owned_schemes
+                if contract == "radio_provider"
             )
-            result = await self.radio_catalog.refresh(
-                identity, catalog, owned_schemes=owned_schemes, now=now,
-            )
-            return {"status": "success", **result}
-        except Exception as exc:
-            await self.radio_catalog.record_failure(identity, exc)
-            return {"status": "failed", "error": str(exc)[:2048]}
+            if not owned_schemes:
+                error = PluginError(
+                    "SCHEME_CONFLICT", "Radio Plugin does not declare a Radio-owned scheme", category="routing",
+                )
+                await self.radio_catalog.record_failure(identity, error, generation=generation)
+                return {"status": "failed", "error": error.as_contract()}
+            try:
+                catalog = await self.service.runtime.request(
+                    instance, "radio.catalog", {}, timeout=timeout,
+                )
+                result = await self.radio_catalog.refresh(
+                    identity, catalog, owned_schemes=owned_schemes, now=now,
+                    generation=generation,
+                )
+                return {"status": result.get("status", "success"), **result}
+            except Exception as exc:
+                await self.radio_catalog.record_failure(identity, exc, generation=generation)
+                return {"status": "failed", "error": str(exc)[:2048]}
 
     async def refresh_radio_programmes(
         self, identity: str, *, timeout: float = 15.0, now: float | None = None,

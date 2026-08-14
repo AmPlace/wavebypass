@@ -22,6 +22,7 @@ function mapRadioStation(station) {
     owner_identity: String(item.owner_identity || ''),
     provider_key: String(item.provider_key || ''),
     provider_station_id: String(item.provider_station_id || ''),
+    source_discriminator: String(item.source_discriminator || ''),
     source_revision: String(item.source_revision || ''),
     explicit_priority: item.explicit_priority,
     health_status: String(item.health_status || ''),
@@ -57,13 +58,13 @@ export async function fetchRadioStations({ fetchImpl = fetch } = {}) {
     const timer = setTimeout(() => controller.abort(), 15_000)
     const response = await fetchImpl(`${API_BASE}/api/radio/stations`, { signal: controller.signal })
     clearTimeout(timer)
-    if (!response.ok) return []
+    if (!response.ok) return null
     const body = await response.json()
     const rows = Array.isArray(body) ? body : body?.stations
     if (!Array.isArray(rows)) return []
     return rows.map(mapRadioStation).filter(Boolean)
   } catch {
-    return []
+    return null
   }
 }
 

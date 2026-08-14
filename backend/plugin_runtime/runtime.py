@@ -154,9 +154,9 @@ class PluginRuntime:
                 if declared_contract == "radio_provider"
             )
             if not owned_schemes:
-                # Compatibility for the original mixed TV/Radio fixture. New
-                # Radio packages declare their radio-owned scheme explicitly.
-                owned_schemes = frozenset(scheme for scheme, _ in instance.manifest.owned_schemes)
+                raise PluginError(
+                    "SCHEME_CONFLICT", "Radio Plugin does not declare a Radio-owned scheme", category="routing",
+                )
             return validate_radio_catalog(result, owned_schemes=owned_schemes)
         if method == "radio.programme":
             contract = next((item for item in instance.manifest.provider_contracts if item.contract == "radio_provider"), None)
@@ -164,7 +164,9 @@ class PluginRuntime:
                 raise PluginError("RESOURCE_NOT_FOUND", "Plugin does not implement Radio programme", category="request")
             owned_schemes = frozenset(scheme for scheme, declared_contract in instance.manifest.owned_schemes if declared_contract == "radio_provider")
             if not owned_schemes:
-                owned_schemes = frozenset(scheme for scheme, _ in instance.manifest.owned_schemes)
+                raise PluginError(
+                    "SCHEME_CONFLICT", "Radio Plugin does not declare a Radio-owned scheme", category="routing",
+                )
             return validate_radio_programme(result, owned_schemes=owned_schemes)
         if method == "channel_catalog.discover":
             contract = next(

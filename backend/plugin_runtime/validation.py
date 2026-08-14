@@ -218,9 +218,10 @@ def validate_radio_catalog(value: Any, *, owned_schemes: set[str] | frozenset[st
     allowed_schemes = {str(scheme).lower() for scheme in owned_schemes}
     allowed_fields = {
         "station_ref", "name", "logo_url", "group_name", "country", "language",
-        "frequency", "metadata", "playback_config", "ttl_seconds", "priority",
+        "frequency", "metadata", "playback_config", "source_discriminator",
+        "ttl_seconds", "priority",
     }
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str, str]] = set()
     normalized: list[dict[str, Any]] = []
     for station in stations:
         if not isinstance(station, dict) or not set(station).issubset(allowed_fields):
@@ -229,9 +230,16 @@ def validate_radio_catalog(value: Any, *, owned_schemes: set[str] | frozenset[st
         identity = (ref["provider_key"].strip().lower(), ref["provider_station_id"])
         if allowed_schemes and identity[0] not in allowed_schemes:
             raise invalid_response("Radio catalog station is not owned by this Plugin")
-        if identity in seen:
-            raise invalid_response("Duplicate StationRef identity")
-        seen.add(identity)
+        discriminator = station.get("source_discriminator", "")
+        if discriminator is None:
+            discriminator = ""
+        if not isinstance(discriminator, str) or len(discriminator) > 128:
+            raise invalid_response("Invalid Radio catalog source discriminator")
+        discriminator = discriminator.strip()
+        source_identity = (*identity, discriminator)
+        if source_identity in seen:
+            raise invalid_response("Duplicate Radio catalog source identity")
+        seen.add(source_identity)
         name = station.get("name", ref["provider_station_id"])
         if not isinstance(name, str) or not name.strip() or len(name) > RADIO_CATALOG_MAX_STRING_LENGTH:
             raise invalid_response("Invalid Radio catalog station name")
@@ -243,6 +251,7 @@ def validate_radio_catalog(value: Any, *, owned_schemes: set[str] | frozenset[st
             raise invalid_response("Invalid Radio catalog priority")
         item = dict(station)
         item["station_ref"] = ref
+        item["source_discriminator"] = discriminator
         item["name"] = name.strip()
         item["ttl_seconds"] = ttl
         item["priority"] = priority

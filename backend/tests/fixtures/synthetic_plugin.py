@@ -128,6 +128,7 @@ def main():
     parser.add_argument("--schemes", default="")
     parser.add_argument("--permissions", default="")
     parser.add_argument("--tv-only", action="store_true")
+    parser.add_argument("--radio-owned", action="store_true")
     args = parser.parse_args()
     schemes = [value for value in args.schemes.split(",") if value] or [args.scheme]
     deferred = {}
@@ -167,7 +168,10 @@ def main():
                 "protocol_version": "1.1" if args.mode.startswith("nested_") else "1.0",
                 "plugin": args.identity, "version": args.version,
                 "provider_contracts": provider_contracts,
-                "owned_schemes": [{"scheme": scheme, "contract": "tv_provider"} for scheme in schemes],
+                "owned_schemes": [{
+                    "scheme": scheme,
+                    "contract": "radio_provider" if args.radio_owned else "tv_provider",
+                } for scheme in schemes],
                 "capabilities": capabilities,
                 "permissions": permissions,
             }

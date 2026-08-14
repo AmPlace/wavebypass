@@ -273,18 +273,35 @@ let resizeObserver = null
 let programmeRequestSeq = 0
 let programmeTimer = null
 
-async function refreshCurrentRadioProgramme(stationId = currentStation.value) {
+async function refreshCurrentRadioProgramme(
+  stationId = currentStation.value,
+  sourceId = playerStore.stationMap[stationId]?.radioSourceId,
+) {
   const station = playerStore.stationMap[stationId]
-  if (!station?.radioStationId || !station?.radioSourceId) return
+  if (!station?.radioStationId || !sourceId) return
   const requestSeq = ++programmeRequestSeq
-  const result = await fetchRadioProgramme(station)
-  if (requestSeq !== programmeRequestSeq || currentStation.value !== stationId || !result) return
+  const requestStation = { ...station, radioSourceId: sourceId }
+  const result = await fetchRadioProgramme(requestStation)
+  if (
+    requestSeq !== programmeRequestSeq
+    || currentStation.value !== stationId
+    || playerStore.stationMap[stationId]?.radioSourceId !== sourceId
+    || !result
+  ) return
   playerStore.updateRadioProgramme(stationId, result.programmes || [])
 }
 
-watch(currentStation, (stationId) => {
+const currentRadioSelection = computed(() => {
+  const stationId = currentStation.value
+  return stationId ? `${stationId}:${playerStore.stationMap[stationId]?.radioSourceId || ''}` : ''
+})
+
+watch(currentRadioSelection, (selection) => {
   programmeRequestSeq += 1
-  if (stationId) refreshCurrentRadioProgramme(stationId)
+  if (selection) {
+    const [stationId, ...sourceParts] = selection.split(':')
+    refreshCurrentRadioProgramme(stationId, sourceParts.join(':'))
+  }
 })
 
 const { y: scrollY } = useScroll(scrollRef)
@@ -364,7 +381,7 @@ onMounted(() => {
   ;(async () => {
     radioLoading.value = true
     const list = await fetchRadioStations()
-    playerStore.addRadioStations(list)
+    if (Array.isArray(list)) playerStore.addRadioStations(list)
     radioLoading.value = false
     if (currentStation.value) refreshCurrentRadioProgramme(currentStation.value)
   })()

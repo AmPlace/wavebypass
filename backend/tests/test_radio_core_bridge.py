@@ -10,7 +10,11 @@ from pathlib import Path
 
 import database
 from plugin_runtime import PermissionPolicy, PluginError, PluginRuntime, validate_manifest
-from radio_core import RadioCatalogBridge, RadioResolver
+from radio_core import (
+    RADIO_DESCRIPTOR_CACHE_MAX_ENTRIES,
+    RadioCatalogBridge,
+    RadioResolver,
+)
 from security.source_ids import MediaSourceIdentity, media_source_id_for, media_source_revision_for, source_id_for, source_revision_for
 
 
@@ -30,7 +34,7 @@ def _manifest():
             {"contract": "tv_provider", "contract_version": "1.0", "features": ["resolve_stream"]},
             {"contract": "radio_provider", "contract_version": "1.0", "features": ["catalog", "resolve_stream"]},
         ],
-        "owned_schemes": [{"scheme": "synthetic", "contract": "tv_provider"}],
+        "owned_schemes": [{"scheme": "synthetic", "contract": "radio_provider"}],
         "capabilities": ["tv.resolve_stream", "radio.catalog", "radio.resolve_stream"],
         "permissions": {},
         "runtime": {"type": "subprocess", "ipc": "stdio_framed_json_v1"},
@@ -52,7 +56,7 @@ class RadioCoreBridgeTest(unittest.IsolatedAsyncioTestCase):
         await database.initialize()
         self.runtime = PluginRuntime(permission_policy=PermissionPolicy())
         self.instance = self.runtime.install(
-            _manifest(), [sys.executable, str(FIXTURE), "--mode", "normal", "--scheme", "synthetic"],
+            _manifest(), [sys.executable, str(FIXTURE), "--mode", "normal", "--scheme", "synthetic", "--radio-owned"],
         )
         await self.runtime.enable(self.instance)
 
@@ -125,6 +129,111 @@ class RadioCoreBridgeTest(unittest.IsolatedAsyncioTestCase):
         stale = next(item for item in rows if item["provider_key"] == "other")
         self.assertEqual(stale["lifecycle_state"], "stale")
         self.assertEqual(stale["sources"][0]["lifecycle_state"], "stale")
+
+    async def test_explicit_source_discriminator_keeps_one_station_with_two_sources(self):
+        bridge = RadioCatalogBridge()
+        await bridge.refresh(
+            "org.waveflow/synthetic",
+            {"stations": [
+                {"station_ref": {"provider_key": "synthetic", "provider_station_id": "one"},
+                 "source_discriminator": "primary", "name": "Station", "playback_config": {"profile": "primary"}},
+                {"station_ref": {"provider_key": "synthetic", "provider_station_id": "one"},
+                 "source_discriminator": "backup", "name": "Station", "playback_config": {"profile": "backup"}},
+            ]},
+            owned_schemes={"synthetic"}, now=250,
+        )
+        stations = await database.list_radio_stations(now_unix=251)
+        self.assertEqual(len(stations), 1)
+        self.assertEqual(len(stations[0]["sources"]), 2)
+        self.assertEqual(
+            {source["source_discriminator"] for source in stations[0]["sources"]},
+            {"primary", "backup"},
+        )
+        self.assertNotEqual(*[source["source_id"] for source in stations[0]["sources"]])
+
+    async def test_catalog_generation_rejects_late_old_publication_and_failure(self):
+        bridge = RadioCatalogBridge()
+        generation_a = await database.begin_radio_catalog_refresh("org.waveflow/synthetic")
+        generation_b = await database.begin_radio_catalog_refresh("org.waveflow/synthetic")
+        newer = await bridge.refresh(
+            "org.waveflow/synthetic",
+            {"stations": [{"station_ref": {"provider_key": "synthetic", "provider_station_id": "new"}, "name": "New"}]},
+            owned_schemes={"synthetic"}, now=300, generation=generation_b,
+        )
+        older = await bridge.refresh(
+            "org.waveflow/synthetic",
+            {"stations": [{"station_ref": {"provider_key": "synthetic", "provider_station_id": "old"}, "name": "Old"}]},
+            owned_schemes={"synthetic"}, now=200, generation=generation_a,
+        )
+        self.assertEqual(newer["status"], "success")
+        self.assertEqual(older["status"], "stale")
+        stations = await database.list_radio_stations(now_unix=301)
+        self.assertEqual([item["provider_station_id"] for item in stations], ["new"])
+        await bridge.record_failure("org.waveflow/synthetic", RuntimeError("late failure"), generation=generation_a)
+        stations = await database.list_radio_stations(now_unix=301)
+        self.assertEqual(stations[0]["sources"][0]["last_error"], "")
+
+    async def test_resolve_old_revision_cannot_update_new_source_health(self):
+        bridge = RadioCatalogBridge()
+        await bridge.refresh(
+            "org.waveflow/synthetic",
+            {"stations": [{
+                "station_ref": {"provider_key": "synthetic", "provider_station_id": "race"},
+                "name": "Race", "playback_config": {"profile": "old"},
+            }]},
+            owned_schemes={"synthetic"}, now=350,
+        )
+        station = (await database.list_radio_stations(now_unix=351))[0]
+        source = station["sources"][0]
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        class FakeRuntime:
+            def __init__(self):
+                self.instance = types.SimpleNamespace(
+                    manifest=types.SimpleNamespace(
+                        identity="org.waveflow/synthetic",
+                        owned_schemes=(("synthetic", "radio_provider"),),
+                    )
+                )
+                self.registry = types.SimpleNamespace(route=lambda _scheme: self.instance)
+
+            async def request(self, _instance, method, _payload):
+                self.assert_method = method
+                started.set()
+                await release.wait()
+                return {
+                    "descriptor_version": "1.0", "transport": "audio_http",
+                    "url": "https://example.invalid/race.mp3", "headers": {},
+                    "credential_refs": [], "ttl_seconds": 60, "expires_at": None,
+                    "volatile_url": False, "requires_proxy": False, "warnings": [],
+                }
+
+        resolver = RadioResolver(runtime=FakeRuntime(), clock=lambda: 351)
+        task = asyncio.create_task(resolver.resolve_source(source["source_id"], station_id=station["station_id"]))
+        await started.wait()
+        await bridge.refresh(
+            "org.waveflow/synthetic",
+            {"stations": [{
+                "station_ref": {"provider_key": "synthetic", "provider_station_id": "race"},
+                "name": "Race", "playback_config": {"profile": "new"},
+            }]},
+            owned_schemes={"synthetic"}, now=352,
+        )
+        release.set()
+        with self.assertRaises(PluginError) as caught:
+            await task
+        self.assertEqual(caught.exception.code, "PLUGIN_CANDIDATE_CONFLICT")
+        current = await database.get_radio_station_source(source["source_id"], station_id=station["station_id"], now_unix=353)
+        self.assertNotEqual(current["source_revision"], source["source_revision"])
+        self.assertEqual(current["health_status"], "unknown")
+
+    async def test_resolver_cache_pruning_is_bounded(self):
+        resolver = RadioResolver(clock=lambda: 100)
+        for index in range(RADIO_DESCRIPTOR_CACHE_MAX_ENTRIES + 5):
+            resolver._descriptor_cache[("radio", f"source-{index}", "revision")] = (1000 + index, {"index": index})
+        resolver._prune_caches()
+        self.assertLessEqual(len(resolver._descriptor_cache), RADIO_DESCRIPTOR_CACHE_MAX_ENTRIES)
 
     async def test_programme_bridge_persists_radio_snapshot_and_reuses_revision_cache(self):
         bridge = RadioCatalogBridge()

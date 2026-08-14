@@ -13,7 +13,8 @@ from plugin_channel_catalog import DynamicChannelCatalog
 FIXTURE = Path(__file__).parent / "fixtures" / "synthetic_plugin.py"
 
 
-def manifest_data(*, scheme="synthetic", version="1.0.0", permissions=None, catalog=False):
+def manifest_data(*, scheme="synthetic", version="1.0.0", permissions=None, catalog=False,
+                  radio_owned=True):
     contracts = [
         {"contract": "tv_provider", "contract_version": "1.0", "features": ["resolve_stream"]},
         {"contract": "radio_provider", "contract_version": "1.0", "features": ["catalog", "resolve_stream"]},
@@ -29,7 +30,10 @@ def manifest_data(*, scheme="synthetic", version="1.0.0", permissions=None, cata
         "plugin_api_version": "1.0",
         "core_version_range": ">=0.1.0 <1.0.0",
         "provider_contracts": contracts,
-        "owned_schemes": [{"scheme": scheme, "contract": "tv_provider"}],
+        # Production Radio requests must have an explicitly Radio-owned
+        # scheme. Catalog-only cases below deliberately use a TV-owned
+        # fixture scheme because that is the Channel Catalog contract.
+        "owned_schemes": [{"scheme": scheme, "contract": "radio_provider" if radio_owned else "tv_provider"}],
         "capabilities": ["tv.resolve_stream", "radio.catalog", "radio.resolve_stream"]
                       + (["channel_catalog.discover"] if catalog else []),
         "permissions": permissions or {},
@@ -48,9 +52,9 @@ def manifest_data(*, scheme="synthetic", version="1.0.0", permissions=None, cata
     }
 
 
-def command(mode="normal", *, version="1.0.0", scheme="synthetic", permissions=""):
+def command(mode="normal", *, version="1.0.0", scheme="synthetic", permissions="", radio_owned=True):
     return [sys.executable, str(FIXTURE), "--mode", mode, "--version", version, "--scheme", scheme,
-            "--permissions", permissions]
+            "--permissions", permissions] + (["--radio-owned"] if radio_owned else [])
 
 
 class PluginRuntimeProcessTest(unittest.IsolatedAsyncioTestCase):
@@ -66,11 +70,14 @@ class PluginRuntimeProcessTest(unittest.IsolatedAsyncioTestCase):
     async def active(self, *, mode="normal", version="1.0.0", scheme="synthetic", permissions=None,
                      policy=None):
         runtime = self.runtime(permission_policy=policy or PermissionPolicy())
+        radio_owned = not mode.startswith("catalog")
         manifest = validate_manifest(manifest_data(
             scheme=scheme, version=version, permissions=permissions, catalog=mode.startswith("catalog"),
+            radio_owned=radio_owned,
         ))
         instance = runtime.install(manifest, command(mode, version=version, scheme=scheme,
-                                                     permissions=",".join((permissions or {}).keys())))
+                                                     permissions=",".join((permissions or {}).keys()),
+                                                     radio_owned=radio_owned))
         await runtime.enable(instance)
         return runtime, instance
 

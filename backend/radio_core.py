@@ -24,6 +24,8 @@ RADIO_DOMAIN = "radio"
 RADIO_CATALOG_STALE_GRACE_SECONDS = 300
 RADIO_DESCRIPTOR_CACHE_DEFAULT_TTL_SECONDS = 300
 RADIO_PROGRAMME_CACHE_DEFAULT_TTL_SECONDS = 600
+RADIO_DESCRIPTOR_CACHE_MAX_ENTRIES = 1024
+RADIO_PROGRAMME_CACHE_MAX_ENTRIES = 1024
 
 
 def radio_station_identity(owner_identity: str, provider_key: str, provider_station_id: str) -> MediaSourceIdentity:
@@ -34,8 +36,28 @@ def radio_station_identity(owner_identity: str, provider_key: str, provider_stat
     )
 
 
-def radio_source_id(owner_identity: str, provider_key: str, provider_station_id: str) -> str:
-    return media_source_id_for(radio_station_identity(owner_identity, provider_key, provider_station_id))
+def radio_source_identity(
+    owner_identity: str,
+    provider_key: str,
+    provider_station_id: str,
+    source_discriminator: str = "",
+) -> MediaSourceIdentity:
+    base = f"{provider_key.strip().lower()}:{provider_station_id.strip()}"
+    discriminator = source_discriminator.strip()
+    if discriminator:
+        base = f"{base}:{discriminator}"
+    return MediaSourceIdentity(RADIO_DOMAIN, owner_identity, base)
+
+
+def radio_source_id(
+    owner_identity: str,
+    provider_key: str,
+    provider_station_id: str,
+    source_discriminator: str = "",
+) -> str:
+    return media_source_id_for(radio_source_identity(
+        owner_identity, provider_key, provider_station_id, source_discriminator,
+    ))
 
 
 def radio_station_id(owner_identity: str, provider_key: str, provider_station_id: str) -> str:
@@ -59,7 +81,10 @@ class RadioCatalogBridge:
         *,
         owned_schemes: set[str] | frozenset[str],
         now: float | None = None,
+        generation: int | None = None,
     ) -> dict:
+        if generation is None:
+            generation = await database.begin_radio_catalog_refresh(owner_identity)
         normalized = validate_radio_catalog(catalog, owned_schemes=owned_schemes)
         now_value = float(now if now is not None else time.time())
         rows: list[dict[str, Any]] = []
@@ -67,7 +92,10 @@ class RadioCatalogBridge:
             ref = dict(item["station_ref"])
             provider_key = ref["provider_key"].strip().lower()
             provider_station_id = ref["provider_station_id"].strip()
-            source_id = radio_source_id(owner_identity, provider_key, provider_station_id)
+            source_discriminator = str(item.get("source_discriminator") or "").strip()
+            source_id = radio_source_id(
+                owner_identity, provider_key, provider_station_id, source_discriminator,
+            )
             station_id = radio_station_id(owner_identity, provider_key, provider_station_id)
             playback_config = dict(item.get("playback_config") or {})
             source_revision = media_source_revision_for({
@@ -75,6 +103,7 @@ class RadioCatalogBridge:
                 "owner": owner_identity,
                 "provider_key": provider_key,
                 "provider_station_id": provider_station_id,
+                "source_discriminator": source_discriminator,
                 "reference": ref,
                 "playback_config": playback_config,
             })
@@ -85,6 +114,7 @@ class RadioCatalogBridge:
                 "owner_identity": owner_identity,
                 "provider_key": provider_key,
                 "provider_station_id": provider_station_id,
+                "source_discriminator": source_discriminator,
                 "name": item["name"],
                 "logo_url": item.get("logo_url", ""),
                 "group_name": item.get("group_name", ""),
@@ -92,21 +122,36 @@ class RadioCatalogBridge:
                 "language": item.get("language", ""),
                 "frequency": item.get("frequency", ""),
                 "metadata": dict(item.get("metadata") or {}),
-                "reference": {"station_ref": ref, "playback_config": playback_config},
+                "reference": {
+                    "station_ref": ref,
+                    "playback_config": playback_config,
+                    "source_discriminator": source_discriminator,
+                },
                 "source_revision": source_revision,
                 "explicit_priority": int(item.get("priority", 0)),
                 "ttl_seconds": ttl,
                 "catalog_expires_at": now_value + ttl,
             })
-        return await database.apply_radio_catalog(
+        result = await database.apply_radio_catalog(
             owner_identity,
             rows,
             now_unix=now_value,
             stale_grace_seconds=RADIO_CATALOG_STALE_GRACE_SECONDS,
+            generation=generation,
         )
+        if result.get("status") == "success":
+            await database.prune_radio_catalog(
+                owner_identity, now_unix=now_value,
+                stale_grace_seconds=RADIO_CATALOG_STALE_GRACE_SECONDS,
+            )
+        return result
 
-    async def record_failure(self, owner_identity: str, error: BaseException) -> None:
-        await database.record_radio_catalog_failure(owner_identity, _error_text(error))
+    async def record_failure(
+        self, owner_identity: str, error: BaseException, *, generation: int | None = None,
+    ) -> None:
+        await database.record_radio_catalog_failure(
+            owner_identity, _error_text(error), generation=generation,
+        )
 
 
 class RadioResolver:
@@ -119,6 +164,25 @@ class RadioResolver:
         self._programme_cache: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
         self._locks: dict[tuple[str, str, str], asyncio.Lock] = {}
         self._programme_locks: dict[tuple[str, str], asyncio.Lock] = {}
+
+    def _prune_caches(self, now: float | None = None) -> None:
+        current = float(self.clock() if now is None else now)
+        for cache, limit in (
+            (self._descriptor_cache, RADIO_DESCRIPTOR_CACHE_MAX_ENTRIES),
+            (self._programme_cache, RADIO_PROGRAMME_CACHE_MAX_ENTRIES),
+        ):
+            for key, value in list(cache.items()):
+                if value[0] <= current:
+                    cache.pop(key, None)
+            if len(cache) > limit:
+                for key, _value in sorted(cache.items(), key=lambda item: item[1][0])[:len(cache) - limit]:
+                    cache.pop(key, None)
+        for key, lock in list(self._locks.items()):
+            if key not in self._descriptor_cache and not lock.locked():
+                self._locks.pop(key, None)
+        for key, lock in list(self._programme_locks.items()):
+            if key not in self._programme_cache and not lock.locked():
+                self._programme_locks.pop(key, None)
 
     def _lock_for(self, key: tuple[str, str, str]) -> asyncio.Lock:
         lock = self._locks.get(key)
@@ -135,6 +199,7 @@ class RadioResolver:
         return lock
 
     async def resolve_source(self, source_id: str, *, station_id: str = "") -> dict[str, Any]:
+        self._prune_caches()
         source = await database.get_radio_station_source(
             source_id, station_id=station_id, now_unix=float(self.clock()),
         )
@@ -166,11 +231,6 @@ class RadioResolver:
                     scheme for scheme, contract in instance.manifest.owned_schemes
                     if contract == "radio_provider"
                 }
-                if not owned:
-                    # Compatibility for the pre-existing mixed TV/Radio V1
-                    # fixture. Production Radio manifests declare the radio
-                    # contract on their owned scheme explicitly.
-                    owned = {scheme for scheme, _contract in instance.manifest.owned_schemes}
                 if provider_key not in owned:
                     raise PluginError(
                         "SCHEME_CONFLICT", "Active Plugin does not own this Radio scheme", category="routing",
@@ -188,6 +248,14 @@ class RadioResolver:
                         "playback_config": playback_config,
                     },
                 )
+                current = await database.get_radio_station_source(
+                    source_id, station_id=source.get("station_id") or station_id,
+                    now_unix=float(self.clock()),
+                )
+                if current is None or str(current.get("source_revision") or "") != revision:
+                    raise PluginError(
+                        "PLUGIN_CANDIDATE_CONFLICT", "Radio source changed during resolve", category="routing",
+                    )
                 # Keep the Radio projection aligned with the existing TV
                 # descriptor bridge. Domain/source fields are additive routing
                 # context; transport and generic metadata use one validator.
@@ -207,13 +275,17 @@ class RadioResolver:
                 if cache_ttl:
                     self._descriptor_cache[key] = (expires_at, copy.deepcopy(bridged))
                 await database.update_radio_source_health(
-                    source_id, success=True, resolve_expires_at=expires_at,
+                    source_id, expected_source_revision=revision,
+                    success=True, resolve_expires_at=expires_at,
                 )
                 return bridged
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                await database.update_radio_source_health(source_id, success=False, error=_error_text(exc))
+                await database.update_radio_source_health(
+                    source_id, expected_source_revision=revision,
+                    success=False, error=_error_text(exc),
+                )
                 raise
 
     async def resolve_programme(self, source_id: str, *, station_id: str = "") -> dict[str, Any]:
@@ -224,6 +296,7 @@ class RadioResolver:
         of the cache key so a playback-config update cannot reuse an older
         provider snapshot.
         """
+        self._prune_caches()
         source = await database.get_radio_station_source(
             source_id, station_id=station_id, now_unix=float(self.clock()),
         )
@@ -272,8 +345,6 @@ class RadioResolver:
                     scheme for scheme, contract in instance.manifest.owned_schemes
                     if contract == "radio_provider"
                 }
-                if not owned:
-                    owned = {scheme for scheme, _contract in instance.manifest.owned_schemes}
                 if provider_key not in owned:
                     raise PluginError(
                         "SCHEME_CONFLICT", "Active Plugin does not own this Radio scheme", category="routing",
@@ -343,3 +414,4 @@ class RadioResolver:
         ]
         for key in programme_keys:
             self._programme_cache.pop(key, None)
+        self._prune_caches()

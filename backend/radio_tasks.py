@@ -78,16 +78,33 @@ def create_radio_task_definition(identity: str, kind: str, subsystem) -> Automat
     )
 
 
-def _active_radio_identities(service: AutomationService) -> set[str]:
+def _active_radio_features(service: AutomationService) -> dict[str, frozenset[str]]:
     active = getattr(getattr(service, "_active", None), "items", None)
     if not callable(active):
-        return set()
-    result: set[str] = set()
+        return {}
+    result: dict[str, frozenset[str]] = {}
     for identity, instance in active():
         manifest = getattr(instance, "manifest", None)
         contracts = getattr(manifest, "provider_contracts", ())
-        if any(getattr(contract, "contract", "") == "radio_provider" for contract in contracts):
-            result.add(str(identity))
+        radio_contract = next(
+            (contract for contract in contracts if getattr(contract, "contract", "") == "radio_provider"),
+            None,
+        )
+        owned_schemes = getattr(manifest, "owned_schemes", ())
+        def owned_contract(item) -> str:
+            if hasattr(item, "contract"):
+                return str(getattr(item, "contract") or "")
+            if isinstance(item, (tuple, list)) and len(item) > 1:
+                return str(item[1] or "")
+            if isinstance(item, dict):
+                return str(item.get("contract") or "")
+            return ""
+
+        if radio_contract is not None and any(
+            owned_contract(item) == "radio_provider"
+            for item in owned_schemes
+        ):
+            result[str(identity)] = frozenset(getattr(radio_contract, "features", ()))
     return result
 
 
@@ -98,8 +115,14 @@ async def reconcile_radio_automation_tasks(service: AutomationService, subsystem
             expected: dict[str, set[str]] = {}
             active_service = getattr(subsystem, "service", None)
             if active_service is not None:
-                for identity in _active_radio_identities(active_service):
-                    expected[identity] = {RADIO_CATALOG_TASK_TYPE, RADIO_PROGRAMME_TASK_TYPE}
+                for identity, features in _active_radio_features(active_service).items():
+                    kinds: set[str] = set()
+                    if RADIO_CATALOG_TASK_TYPE in features:
+                        kinds.add(RADIO_CATALOG_TASK_TYPE)
+                    if RADIO_PROGRAMME_TASK_TYPE in features:
+                        kinds.add(RADIO_PROGRAMME_TASK_TYPE)
+                    if kinds:
+                        expected[identity] = kinds
             expected_task_ids = {
                 _task_id(identity, kind)
                 for identity, kinds in expected.items()

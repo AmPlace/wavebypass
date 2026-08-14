@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { API_BASE } from '../apiBase.js'
 import { adapterNameFromUrl, buildChannelProxyUrl, channelIdentity, isAdapterSchemeUrl, isSourceExplicitlyDisabled } from '../utils/sourceIdentity.js'
 import { normalizeIptvChannelSortMode } from '../utils/iptvChannelList.js'
+import { currentRadioProgramme } from '../utils/radioProgramme.js'
 
 function normalizeChannelContextChannels(channels) {
   const result = []
@@ -121,19 +122,39 @@ export const usePlayerStore = defineStore('player', {
     },
 
     addRadioStations(stations) {
-      const existingIds = new Set(this.stationList.map((station) => station.id))
+      if (!Array.isArray(stations)) return false
       const next = [...this.stationList]
       const merged = { ...this.stationMap }
-      for (const station of Array.isArray(stations) ? stations : []) {
-        if (!station?.id || merged[station.id]) continue
-        merged[station.id] = station
-        if (!existingIds.has(station.id)) {
-          existingIds.add(station.id)
-          next.push(station)
-        }
+      const incomingIds = new Set()
+      for (const station of stations) {
+        if (!station?.id) continue
+        incomingIds.add(station.id)
+        const existing = merged[station.id]
+        const selectedSource = existing?.radioSourceId
+        const sourceStillAvailable = selectedSource && (station.radioSources || []).some(
+          (source) => source.source_id === selectedSource,
+        )
+        const updated = existing
+          ? {
+              ...existing,
+              ...station,
+              radioSourceId: sourceStillAvailable ? selectedSource : station.radioSourceId,
+              radioProgrammes: existing.radioProgrammes,
+            }
+          : station
+        merged[station.id] = updated
+        const index = next.findIndex((item) => item.id === station.id)
+        if (index >= 0) next[index] = updated
+        else next.push(updated)
       }
-      this.stationList = next
+      // Only dynamic Radio rows are removed on a successful catalog refresh;
+      // retained static/legacy rows remain untouched.
+      for (const [stationId, station] of Object.entries(merged)) {
+        if (station?.radioDomain && !incomingIds.has(stationId)) delete merged[stationId]
+      }
+      this.stationList = next.filter((station) => !station.radioDomain || incomingIds.has(station.id))
       this.stationMap = merged
+      return true
     },
 
     loadStations(stations) {
@@ -153,15 +174,9 @@ export const usePlayerStore = defineStore('player', {
       if (!station || !station.radioStationId) return
       const items = Array.isArray(programmes) ? programmes : []
       station.radioProgrammes = items
-      const now = Date.now()
-      const current = items.find((item) => {
-        const start = Date.parse(item?.start || '')
-        const end = Date.parse(item?.end || '')
-        return Number.isFinite(start) && Number.isFinite(end) && start <= now && now < end
-      })
-      const fallback = items.find((item) => item?.subtitle || item?.title)
-      if (current || fallback) {
-        station.subtitle = String(current?.subtitle || current?.title || fallback?.subtitle || fallback?.title || '')
+      const current = currentRadioProgramme(items)
+      if (current) {
+        station.subtitle = String(current.subtitle || current.title || '')
       }
     },
 

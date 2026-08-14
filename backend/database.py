@@ -5,6 +5,7 @@ import json
 import time
 import uuid
 from datetime import datetime, timezone
+from typing import Any
 
 from epg_source_model import (
     BUILTIN_CHINA_EPG_PRESET,
@@ -563,6 +564,7 @@ CREATE TABLE IF NOT EXISTS radio_station_sources (
     owner_identity         TEXT NOT NULL,
     provider_key           TEXT NOT NULL,
     provider_station_id    TEXT NOT NULL,
+    source_discriminator   TEXT NOT NULL DEFAULT '',
     reference_json         TEXT NOT NULL,
     source_revision        TEXT NOT NULL,
     explicit_priority      INTEGER NOT NULL DEFAULT 0,
@@ -577,7 +579,7 @@ CREATE TABLE IF NOT EXISTS radio_station_sources (
     resolve_expires_at     REAL NOT NULL DEFAULT 0,
     created_at             TEXT NOT NULL,
     updated_at             TEXT NOT NULL,
-    UNIQUE(owner_identity, provider_key, provider_station_id),
+    UNIQUE(owner_identity, provider_key, provider_station_id, source_discriminator),
     UNIQUE(station_id, source_id),
     FOREIGN KEY(station_id) REFERENCES radio_stations(station_id) ON DELETE CASCADE
 );
@@ -585,6 +587,17 @@ CREATE INDEX IF NOT EXISTS idx_radio_station_sources_station
 ON radio_station_sources(station_id, explicit_priority, source_id);
 CREATE INDEX IF NOT EXISTS idx_radio_station_sources_lifecycle
 ON radio_station_sources(lifecycle_state, catalog_expires_at);
+
+CREATE TABLE IF NOT EXISTS radio_catalog_states (
+    owner_identity          TEXT PRIMARY KEY,
+    generation              INTEGER NOT NULL DEFAULT 0,
+    published_generation    INTEGER NOT NULL DEFAULT 0,
+    last_success_at         TEXT NOT NULL DEFAULT '',
+    last_error              TEXT NOT NULL DEFAULT '',
+    updated_at              TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_radio_catalog_states_generation
+ON radio_catalog_states(owner_identity, generation);
 
 -- Radio programme snapshots are intentionally separate from TV EPG tables.
 -- They describe the current/provider-native programme view for one explicit
@@ -914,11 +927,101 @@ def _migrate_plugin_permission_approval_key(conn: sqlite3.Connection) -> None:
     conn.execute("DROP TABLE plugin_permission_approvals_legacy")
 
 
+def _migrate_radio_station_sources_schema(conn: sqlite3.Connection) -> None:
+    """Add explicit Radio source identity without collapsing old rows.
+
+    The first Radio schema made provider/station the source identity.  A
+    source discriminator is now optional, so the old three-column UNIQUE
+    constraint must be rebuilt rather than merely adding a nullable column.
+    Existing rows receive the empty discriminator and therefore retain their
+    previous source IDs.
+    """
+    table = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='radio_station_sources'"
+    ).fetchone()
+    if table is None:
+        return
+    columns = {
+        str(row[1]) for row in conn.execute("PRAGMA table_info(radio_station_sources)").fetchall()
+    }
+    unique_sets: set[tuple[str, ...]] = set()
+    for index in conn.execute("PRAGMA index_list(radio_station_sources)").fetchall():
+        if not int(index[2]):
+            continue
+        unique_sets.add(tuple(
+            str(row[2])
+            for row in conn.execute(f"PRAGMA index_info({index[1]!r})").fetchall()
+            if row[2] is not None
+        ))
+    expected = ('owner_identity', 'provider_key', 'provider_station_id', 'source_discriminator')
+    if 'source_discriminator' in columns and expected in unique_sets:
+        return
+
+    conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        conn.execute("""
+            CREATE TABLE radio_station_sources_new (
+                source_id              TEXT PRIMARY KEY,
+                station_id             TEXT NOT NULL,
+                owner_identity         TEXT NOT NULL,
+                provider_key           TEXT NOT NULL,
+                provider_station_id    TEXT NOT NULL,
+                source_discriminator   TEXT NOT NULL DEFAULT '',
+                reference_json         TEXT NOT NULL,
+                source_revision        TEXT NOT NULL,
+                explicit_priority      INTEGER NOT NULL DEFAULT 0,
+                health_status          TEXT NOT NULL DEFAULT 'unknown'
+                                       CHECK(health_status IN ('unknown', 'healthy', 'unhealthy')),
+                last_success_at        TEXT NOT NULL DEFAULT '',
+                last_error             TEXT NOT NULL DEFAULT '',
+                lifecycle_state        TEXT NOT NULL DEFAULT 'active'
+                                       CHECK(lifecycle_state IN ('active', 'stale', 'expired')),
+                catalog_ttl_seconds    INTEGER NOT NULL DEFAULT 300 CHECK(catalog_ttl_seconds > 0),
+                catalog_expires_at     REAL NOT NULL DEFAULT 0,
+                resolve_expires_at     REAL NOT NULL DEFAULT 0,
+                created_at             TEXT NOT NULL,
+                updated_at             TEXT NOT NULL,
+                UNIQUE(owner_identity, provider_key, provider_station_id, source_discriminator),
+                UNIQUE(station_id, source_id),
+                FOREIGN KEY(station_id) REFERENCES radio_stations(station_id) ON DELETE CASCADE
+            )
+        """)
+        discriminator_sql = "source_discriminator" if 'source_discriminator' in columns else "''"
+        conn.execute(f"""
+            INSERT INTO radio_station_sources_new(
+                source_id, station_id, owner_identity, provider_key, provider_station_id,
+                source_discriminator, reference_json, source_revision, explicit_priority,
+                health_status, last_success_at, last_error, lifecycle_state,
+                catalog_ttl_seconds, catalog_expires_at, resolve_expires_at,
+                created_at, updated_at
+            )
+            SELECT source_id, station_id, owner_identity, provider_key, provider_station_id,
+                   {discriminator_sql}, reference_json, source_revision, explicit_priority,
+                   health_status, last_success_at, last_error, lifecycle_state,
+                   catalog_ttl_seconds, catalog_expires_at, resolve_expires_at,
+                   created_at, updated_at
+            FROM radio_station_sources
+        """)
+        conn.execute("DROP TABLE radio_station_sources")
+        conn.execute("ALTER TABLE radio_station_sources_new RENAME TO radio_station_sources")
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_radio_station_sources_station
+            ON radio_station_sources(station_id, explicit_priority, source_id)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_radio_station_sources_lifecycle
+            ON radio_station_sources(lifecycle_state, catalog_expires_at)
+        """)
+    finally:
+        conn.execute("PRAGMA foreign_keys=ON")
+
+
 async def initialize():
     def _init():
         conn = _connect()
         conn.executescript(_SCHEMA)
         _migrate_plugin_permission_approval_key(conn)
+        _migrate_radio_station_sources_schema(conn)
         _finalize_legacy_epg_map_upgrade(conn)
         # 兼容已有数据库：补充新字段
         for col, typ, default in [
@@ -2651,12 +2754,52 @@ async def delete_market_install(package_id: str):
 
 # ── Radio domain persistence ──
 
+async def begin_radio_catalog_refresh(owner_identity: str) -> int:
+    """Reserve a monotonically increasing publication generation for an owner."""
+    owner = _normalize_identifier(owner_identity, "owner_identity")
+
+    def _begin() -> int:
+        conn = _connect()
+        try:
+            with conn:
+                now = _utc_now()
+                conn.execute(
+                    """
+                    INSERT INTO radio_catalog_states(
+                        owner_identity, generation, published_generation,
+                        last_success_at, last_error, updated_at
+                    ) VALUES(?, 0, 0, '', '', ?)
+                    ON CONFLICT(owner_identity) DO NOTHING
+                    """,
+                    (owner, now),
+                )
+                conn.execute(
+                    """
+                    UPDATE radio_catalog_states
+                    SET generation=generation + 1, updated_at=?
+                    WHERE owner_identity=?
+                    """,
+                    (now, owner),
+                )
+                row = conn.execute(
+                    "SELECT generation FROM radio_catalog_states WHERE owner_identity=?",
+                    (owner,),
+                ).fetchone()
+                if row is None:
+                    raise RuntimeError("Radio catalog generation state was not created")
+                return int(row[0])
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_begin)
+
 async def apply_radio_catalog(
     owner_identity: str,
     rows: list[dict],
     *,
     now_unix: float,
     stale_grace_seconds: int = 300,
+    generation: int | None = None,
 ) -> dict:
     """Atomically publish one Plugin Radio catalog into its own tables.
 
@@ -2674,6 +2817,23 @@ async def apply_radio_catalog(
         conn = _connect()
         try:
             with conn:
+                if generation is not None:
+                    # This conditional write obtains the SQLite writer lock
+                    # before any station mutation.  A late generation then
+                    # observes rowcount=0 and cannot partially publish.
+                    current = conn.execute(
+                        """
+                        UPDATE radio_catalog_states
+                        SET published_generation=?, last_success_at=?, last_error='', updated_at=?
+                        WHERE owner_identity=? AND generation=?
+                        """,
+                        (int(generation), now, now, owner, int(generation)),
+                    )
+                    if current.rowcount != 1:
+                        return {
+                            "owner_identity": owner, "status": "stale",
+                            "published": 0, "stale": 0, "generation": int(generation),
+                        }
                 existing = {
                     str(row["source_id"]): row
                     for row in conn.execute(
@@ -2726,16 +2886,17 @@ async def apply_radio_catalog(
                         """
                         INSERT INTO radio_station_sources(
                             source_id, station_id, owner_identity, provider_key,
-                            provider_station_id, reference_json, source_revision,
+                            provider_station_id, source_discriminator, reference_json, source_revision,
                             explicit_priority, health_status, last_success_at, last_error,
                             lifecycle_state, catalog_ttl_seconds, catalog_expires_at,
                             resolve_expires_at, created_at, updated_at
-                        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'unknown', '', '', 'active', ?, ?, 0, ?, ?)
+                        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'unknown', '', '', 'active', ?, ?, 0, ?, ?)
                         ON CONFLICT(source_id) DO UPDATE SET
                             station_id=excluded.station_id,
                             owner_identity=excluded.owner_identity,
                             provider_key=excluded.provider_key,
                             provider_station_id=excluded.provider_station_id,
+                            source_discriminator=excluded.source_discriminator,
                             reference_json=excluded.reference_json,
                             source_revision=excluded.source_revision,
                             explicit_priority=excluded.explicit_priority,
@@ -2747,6 +2908,7 @@ async def apply_radio_catalog(
                         """,
                         (
                             source_id, station_id, owner, row["provider_key"], row["provider_station_id"],
+                            row.get("source_discriminator", ""),
                             json.dumps(row["reference"], ensure_ascii=False, separators=(",", ":")),
                             row["source_revision"], int(row.get("explicit_priority", 0)),
                             int(row["ttl_seconds"]), float(row["catalog_expires_at"]), now, now,
@@ -2781,14 +2943,20 @@ async def apply_radio_catalog(
                     """,
                     (now, owner),
                 )
-            return {"owner_identity": owner, "published": len(rows), "stale": len(set(existing) - incoming_ids)}
+            return {
+                "owner_identity": owner, "status": "success", "published": len(rows),
+                "stale": len(set(existing) - incoming_ids),
+                **({"generation": int(generation)} if generation is not None else {}),
+            }
         finally:
             conn.close()
 
     return await asyncio.to_thread(_apply)
 
 
-async def record_radio_catalog_failure(owner_identity: str, error: str) -> None:
+async def record_radio_catalog_failure(
+    owner_identity: str, error: str, *, generation: int | None = None,
+) -> None:
     owner = _normalize_identifier(owner_identity, "owner_identity")
     message = _normalize_error(error)
 
@@ -2797,6 +2965,17 @@ async def record_radio_catalog_failure(owner_identity: str, error: str) -> None:
         try:
             with conn:
                 now = _utc_now()
+                if generation is not None:
+                    current = conn.execute(
+                        """
+                        UPDATE radio_catalog_states
+                        SET last_error=?, updated_at=?
+                        WHERE owner_identity=? AND generation=?
+                        """,
+                        (message, now, owner, int(generation)),
+                    )
+                    if current.rowcount != 1:
+                        return
                 conn.execute(
                     "UPDATE radio_stations SET last_catalog_error=?, updated_at=? WHERE owner_identity=?",
                     (message, now, owner),
@@ -2809,6 +2988,50 @@ async def record_radio_catalog_failure(owner_identity: str, error: str) -> None:
             conn.close()
 
     await asyncio.to_thread(_record)
+
+
+async def prune_radio_catalog(
+    owner_identity: str = "", *, now_unix: float | None = None,
+    stale_grace_seconds: int = 300,
+) -> dict[str, int]:
+    """Remove only expired Radio projections with no live source reference."""
+    owner = owner_identity.strip() if isinstance(owner_identity, str) else ""
+    now_value = float(now_unix if now_unix is not None else time.time())
+    grace = max(1, int(stale_grace_seconds))
+
+    def _prune() -> dict[str, int]:
+        conn = _connect()
+        try:
+            with conn:
+                owner_clause = "" if not owner else " AND owner_identity=?"
+                owner_args = () if not owner else (owner,)
+                snapshots = conn.execute(
+                    "DELETE FROM radio_programme_snapshots WHERE expires_at_unix<=?" + owner_clause,
+                    (now_value, *owner_args),
+                ).rowcount
+                sources = conn.execute(
+                    """
+                    DELETE FROM radio_station_sources
+                    WHERE (lifecycle_state='expired'
+                       OR (lifecycle_state='stale' AND catalog_expires_at<=?)
+                       OR (lifecycle_state='active' AND catalog_expires_at + ? <= ?))
+                    """ + (" AND owner_identity=?" if owner else ""),
+                    (now_value, grace, now_value, *owner_args),
+                ).rowcount
+                stations = conn.execute(
+                    """
+                    DELETE FROM radio_stations
+                    WHERE NOT EXISTS(
+                        SELECT 1 FROM radio_station_sources r WHERE r.station_id=radio_stations.station_id
+                    )
+                    """ + (" AND owner_identity=?" if owner else ""),
+                    owner_args,
+                ).rowcount
+            return {"snapshots": snapshots, "sources": sources, "stations": stations}
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_prune)
 
 
 def _radio_lifecycle(row: dict, now_unix: float, *, stale_grace_seconds: int = 300) -> str:
@@ -2838,6 +3061,7 @@ async def list_radio_stations(*, owner_identity: str = "", include_expired: bool
                 """
                 SELECT s.*, r.source_id, r.provider_key AS source_provider_key,
                        r.provider_station_id AS source_provider_station_id,
+                       r.source_discriminator,
                        r.reference_json, r.source_revision, r.explicit_priority,
                        r.health_status, r.last_success_at, r.last_error AS source_last_error,
                        r.lifecycle_state AS source_lifecycle_state,
@@ -2886,6 +3110,7 @@ async def list_radio_stations(*, owner_identity: str = "", include_expired: bool
                             "owner_identity": row["owner_identity"],
                             "provider_key": row["source_provider_key"],
                             "provider_station_id": row["source_provider_station_id"],
+                            "source_discriminator": row["source_discriminator"] or "",
                             "reference": json.loads(row["reference_json"] or "{}"),
                             "source_revision": row["source_revision"],
                             "explicit_priority": row["explicit_priority"],
@@ -2921,7 +3146,14 @@ async def get_radio_station_source(source_id: str, *, station_id: str = "", incl
     return None
 
 
-async def update_radio_source_health(source_id: str, *, success: bool, error: str = "", resolve_expires_at: float = 0) -> None:
+async def update_radio_source_health(
+    source_id: str,
+    *,
+    expected_source_revision: str | None = None,
+    success: bool,
+    error: str = "",
+    resolve_expires_at: float = 0,
+) -> None:
     message = _normalize_error(error)
 
     def _update() -> None:
@@ -2929,15 +3161,23 @@ async def update_radio_source_health(source_id: str, *, success: bool, error: st
         try:
             with conn:
                 now = _utc_now()
+                where = "source_id=?"
+                values: list[Any] = [
+                    "healthy" if success else "unhealthy", now if success else "",
+                    "" if success else message, float(resolve_expires_at) if success else 0,
+                    now, source_id,
+                ]
+                if expected_source_revision is not None:
+                    where += " AND source_revision=?"
+                    values.append(str(expected_source_revision))
                 conn.execute(
-                    """
+                    f"""
                     UPDATE radio_station_sources
                     SET health_status=?, last_success_at=?, last_error=?,
                         resolve_expires_at=?, updated_at=?
-                    WHERE source_id=?
+                    WHERE {where}
                     """,
-                    ("healthy" if success else "unhealthy", now if success else "",
-                     "" if success else message, float(resolve_expires_at) if success else 0, now, source_id),
+                    values,
                 )
         finally:
             conn.close()
