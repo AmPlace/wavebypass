@@ -199,6 +199,9 @@ class SXBCDeterministicTest(unittest.TestCase):
         manifest = load_manifest(ROOT / "bundled_plugins" / "sxbc" / "manifest.json")
         sdtv = load_manifest(ROOT / "bundled_plugins" / "sdtv" / "manifest.json")
         self.assertEqual(manifest.runtime["dependency_lock"], sdtv.runtime["dependency_lock"])
+        self.assertEqual(manifest.version, "1.0.1")
+        self.assertTrue(manifest.permissions["network"]["managed"])
+        self.assertTrue(manifest.permissions["network"]["allow_http"])
         source = (ROOT / "bundled_plugins" / "sxbc" / "plugin.py").read_text()
         for forbidden in ("openssl", "subprocess", "create_subprocess_exec", "backend.adapters", "import httpx"):
             self.assertNotIn(forbidden, source)
