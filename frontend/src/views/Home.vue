@@ -139,14 +139,9 @@ const {
 })
 
 const allStations = computed(() => {
-  if (!geoConfigLoaded.value) return []
   // RadioStation/RadioStationSource identities are explicit.  Never merge
   // providers by display name, frequency, or an upstream URL.
-  const merged = stationList.value
-  if (!geoConfig.value.geoRestrict) return merged
-  const blocked = new Set(geoConfig.value.blockedRegions || [])
-  if (!blocked.size) return merged
-  return merged.filter((s) => !(s.tags || []).some((t) => blocked.has(t)))
+  return stationList.value
 })
 
 const regionLabels = {
@@ -178,9 +173,6 @@ function nextSortMode() {
   stationSortMode.value = SORT_MODES[(idx + 1) % SORT_MODES.length].key
 }
 const currentSortLabel = computed(() => SORT_MODES.find(m => m.key === stationSortMode.value)?.label || '默认排序')
-
-const geoConfig = ref({ geoRestrict: false, blockedRegions: [] })
-const geoConfigLoaded = ref(false)
 
 const regions = computed(() => {
   const set = new Set()
@@ -365,17 +357,12 @@ onMounted(() => {
 
   ;(async () => {
     try {
-      const [cfgRes, stRes] = await Promise.all([
-        fetch(`${API_BASE}/api/config`),
-        fetch(`${API_BASE}/api/stations`),
-      ])
-      if (cfgRes.ok) geoConfig.value = await cfgRes.json()
+      const stRes = await fetch(`${API_BASE}/api/stations`)
       if (stRes.ok) {
         const stations = await stRes.json()
         playerStore.loadStations(stations)
       }
     } catch {}
-    geoConfigLoaded.value = true
   })()
 
   ;(async () => {

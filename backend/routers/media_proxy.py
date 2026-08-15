@@ -382,7 +382,7 @@ async def media_channel_playlist(
 
     # 2. 回落到电台 station_id。
     if _is_radio_station_id(_m, channel_key):
-        return await _serve_radio_station_playlist(channel_key, request, access)
+        return await _serve_radio_station_playlist(channel_key, access)
 
     raise HTTPException(status_code=404, detail="频道不存在")
 
@@ -402,8 +402,6 @@ async def media_channel_stream(
 
     if not _is_radio_station_id(_m, channel_key):
         raise HTTPException(status_code=404, detail="电台不存在")
-    if _m._is_geo_blocked(channel_key, request):
-        raise HTTPException(status_code=403, detail="该电台因地域限制不可用。")
 
     real_url = await _radio_station_url(_m, channel_key)
     if not real_url:
@@ -520,13 +518,9 @@ async def media_radio_stream(
 
 async def _serve_radio_station_playlist(
     station_id: str,
-    request: Request,
     access: MediaAccessContext,
 ) -> Response:
     import main as _m
-
-    if _m._is_geo_blocked(station_id, request):
-        raise HTTPException(status_code=403, detail="该电台因地域限制不可用。")
 
     real_url = await _radio_station_url(_m, station_id)
     if not real_url:

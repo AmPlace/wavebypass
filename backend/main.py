@@ -123,12 +123,6 @@ TOKEN_REFRESH_HTTP_STATUS_CODES = {401, 403, 404, 410}
 DIRECT_STREAM_STATIONS: set[str] = set()
 
 
-# ========== 地域限制配置 ==========
-GEO_RESTRICT = os.getenv("GEO_RESTRICT", "").strip() == "1"
-GEO_BLOCKED_REGIONS = set(
-    r.strip() for r in os.getenv("GEO_BLOCKED_REGIONS", "TW").split(",") if r.strip()
-)
-
 STATIC_STATIONS = [
     # ── 香港电台 (tingfm.com) ──
     {"id": "tf_909", "name": "香港电台第一台", "logoText": "RTHK1", "logoUrl": "https://cdn.tingfm.com/tingfm/2013/04/file5e8d6ff30254e.png?x-oss-process=image/resize,m_fill,w_200,h_200", "subtitle": "RTHK Radio 1", "tags": ["HK", "news"]},
@@ -167,26 +161,6 @@ STATIC_STATIONS = [
     {"id": "tfsg_63610", "name": "Class 95 FM", "logoText": "95", "logoUrl": "", "subtitle": "95 FM", "tags": ["SG", "music"]},
     {"id": "tfsg_22537", "name": "Oli 96.8 FM", "logoText": "Oli", "logoUrl": "", "subtitle": "96.8 FM", "tags": ["SG", "music"]},
 ]
-
-_TW_STATION_IDS = {s["id"] for s in STATIC_STATIONS if "TW" in s.get("tags", [])}
-
-
-def _is_geo_blocked(station_id: str, request: Request) -> bool:
-    if not GEO_RESTRICT or not GEO_BLOCKED_REGIONS:
-        return False
-    country = request.headers.get("cf-ipcountry", "").upper()
-    if country and country != "CN":
-        return False  
-    is_tw = (
-        station_id.startswith("mr_")       
-        or station_id in _TW_STATION_IDS    
-    )
-    if is_tw and "TW" in GEO_BLOCKED_REGIONS:
-        return True
-    if not is_tw and "CN" in GEO_BLOCKED_REGIONS:
-        return True
-    return False
-
 
 CURRENT_STREAMS: dict[str, str] = {}
 
@@ -688,43 +662,22 @@ async def fetch_real_m3u8_text(real_m3u8_url: str, station_id: str) -> httpx.Res
 
 
 @app.get("/api/config")
-async def get_config(request: Request) -> dict:
-    """返回前端需要的运行时配置（地域限制信息）"""
+async def get_config() -> dict:
+    """返回前端运行时配置；内容可见性不依赖访问者地区。"""
     settings = await get_effective_settings()
-    base = {
+    return {
         "mode": settings.mode,
         "anonymousBrowse": settings.anonymous_browse,
         "anonymousPlayback": settings.anonymous_playback,
         "production": settings.production,
     }
-    if not GEO_RESTRICT:
-        return {**base, "geoRestrict": False}
-    country = request.headers.get("cf-ipcountry", "").upper()
-    if country and country != "CN":
-        return {**base, "geoRestrict": False}
-    return {
-        **base,
-        "geoRestrict": True,
-        "blockedRegions": sorted(GEO_BLOCKED_REGIONS),
-    }
 
 
 @app.get("/api/stations", dependencies=[Depends(require_browse_access)])
-async def get_stations(request: Request) -> Response:
-    """返回静态电台列表，并根据地域限制过滤。"""
-
-    if not GEO_RESTRICT:
-        stations = STATIC_STATIONS
-    else:
-        country = request.headers.get("cf-ipcountry", "").upper()
-        if country and country != "CN":
-            stations = STATIC_STATIONS
-        else:
-            blocked = GEO_BLOCKED_REGIONS
-            stations = [s for s in STATIC_STATIONS if not any(t in blocked for t in s.get("tags", []))]
-
+async def get_stations() -> Response:
+    """返回用户可见的静态电台列表；地区标签仅是 station metadata。"""
     return Response(
-        content=json.dumps(stations, ensure_ascii=False),
+        content=json.dumps(STATIC_STATIONS, ensure_ascii=False),
         media_type="application/json",
     )
 
@@ -736,10 +689,7 @@ async def get_stations(request: Request) -> Response:
 
 
 @app.get("/api/{station_id}/stream", dependencies=[Depends(require_media_access)])
-async def proxy_direct_audio_stream(station_id: str, request: Request) -> StreamingResponse:
-    if request and _is_geo_blocked(station_id, request):
-        raise HTTPException(status_code=403, detail="该电台因地域限制不可用。")
-
+async def proxy_direct_audio_stream(station_id: str) -> StreamingResponse:
     if station_id not in DIRECT_STREAM_STATIONS:
         raise HTTPException(status_code=400, detail="该电台不是直连音频流。")
 
@@ -905,11 +855,7 @@ def _collect_all_urls(station_id: str, name: str = "") -> list[str]:
 
 
 @app.get("/api/{station_id}/all-urls", dependencies=[Depends(require_media_access)])
-async def get_all_urls(station_id: str, name: str = "", request: Request = None) -> Response:
-
-    if request and _is_geo_blocked(station_id, request):
-        raise HTTPException(status_code=403, detail="该电台因地域限制不可用。")
-
+async def get_all_urls(station_id: str, name: str = "") -> Response:
     urls = _collect_all_urls(station_id, name)
     return Response(
         content=json.dumps(urls, ensure_ascii=False),
@@ -930,12 +876,7 @@ async def _head_check(url: str) -> tuple[str, float]:
 
 
 @app.get("/api/{station_id}/reachable-urls", dependencies=[Depends(require_media_access)])
-async def get_reachable_urls(station_id: str, name: str = "", request: Request = None) -> Response:
-    
-
-    if request and _is_geo_blocked(station_id, request):
-        raise HTTPException(status_code=403, detail="该电台因地域限制不可用。")
-
+async def get_reachable_urls(station_id: str, name: str = "") -> Response:
     urls = _collect_all_urls(station_id, name)
     if not urls:
         return Response(content="[]", media_type="application/json")
@@ -959,13 +900,7 @@ async def get_reachable_urls(station_id: str, name: str = "", request: Request =
 
 
 @app.get("/api/{station_id}/stream-url", dependencies=[Depends(require_media_access)])
-async def get_stream_url(station_id: str, name: str = "", request: Request = None) -> Response:
-
-    
-
-    if request and _is_geo_blocked(station_id, request):
-        raise HTTPException(status_code=403, detail="该电台因地域限制不可用。")
-
+async def get_stream_url(station_id: str, name: str = "") -> Response:
     url = CURRENT_STREAMS.get(station_id)
 
     if url is None:

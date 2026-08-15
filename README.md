@@ -82,8 +82,6 @@ docker run -d \
   --network waveflow-net \
   -p 8000:8000 \
   -e HITFM_COOKIE="" \
-  -e GEO_RESTRICT="0" \
-  -e GEO_BLOCKED_REGIONS="" \
   --restart unless-stopped \
   ghcr.io/amplace/waveflow-backend:latest
 ```
@@ -136,8 +134,6 @@ npm run dev
 | 变量名 | 说明 | 默认值 |
 |---|---|---|
 | `HITFM_COOKIE` | Hit FM 官网 Cookie（可选填写） | 空 |
-| `GEO_RESTRICT` | 地域拦截全局开关，设为 `1` 启用拦截 | `0`（关闭） |
-| `GEO_BLOCKED_REGIONS` | 地域拦截黑名单标签，需配合上方开关使用，多个地区使用英文逗号分隔 | `TW` |
 
 ---
 

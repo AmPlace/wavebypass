@@ -7,8 +7,6 @@ services:
     environment:
       WAVEFLOW_MODE: ${WAVEFLOW_MODE:-nas}
       HITFM_COOKIE: ${HITFM_COOKIE:-}
-      GEO_RESTRICT: ${GEO_RESTRICT:-}
-      GEO_BLOCKED_REGIONS: ${GEO_BLOCKED_REGIONS:-TW}
     volumes:
       - waveflow-data:/app/data
     networks:
