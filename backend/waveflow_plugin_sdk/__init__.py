@@ -12,6 +12,7 @@ from .errors import (
     UpstreamFailure,
 )
 from .models import ChannelCatalog, ChannelCatalogItem, RadioReference, ResolveContext, StreamDescriptor, TVReference
+from .resources import load_resource_text
 
 SDK_VERSION = "0.1.0"
 
@@ -21,4 +22,5 @@ __all__ = [
     "RadioProvider", "RadioReference",
     "RateLimited", "ResolveContext", "SDK_VERSION", "StreamDescriptor",
     "TVProvider", "TVReference", "TemporaryFailure", "UpstreamFailure",
+    "load_resource_text",
 ]

@@ -158,7 +158,30 @@ def _zip_write(archive: zipfile.ZipFile, name: str, data: bytes, *, executable: 
     archive.writestr(info, data)
 
 
-def build_sdk_artifact(entrypoint: str | Path, output: str | Path) -> dict[str, Any]:
+def _project_resources(root: Path, entrypoint: Path) -> list[tuple[str, bytes]]:
+    """Return safe non-build files that a Python Plugin imports at runtime."""
+    excluded_files = {
+        "manifest.json", "dependency-lock.json", "requirements.in", "requirements.txt",
+        "README", "README.md", "README.rst", "README.txt",
+    }
+    excluded_dirs = {".git", "__pycache__", "dist", ".pytest_cache"}
+    resources: list[tuple[str, bytes]] = []
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or path.resolve() == entrypoint.resolve():
+            continue
+        relative = path.relative_to(root)
+        if any(part in excluded_dirs for part in relative.parts) or path.name in excluded_files:
+            continue
+        if path.suffix in {".pyc", ".pyo", ".pyz"} or path.name.startswith("."):
+            continue
+        archive_name = str(relative).replace("\\", "/")
+        if archive_name == "__main__.py" or archive_name.startswith("waveflow_plugin_sdk/"):
+            raise PluginError("INVALID_PLUGIN_RESPONSE", "Plugin resource uses a reserved archive path", category="cli")
+        resources.append((archive_name, path.read_bytes()))
+    return resources
+
+
+def build_sdk_artifact(entrypoint: str | Path, output: str | Path, *, resource_root: str | Path | None = None) -> dict[str, Any]:
     source = Path(entrypoint).resolve()
     target = Path(output).resolve()
     if not source.is_file():
@@ -169,6 +192,12 @@ def build_sdk_artifact(entrypoint: str | Path, output: str | Path) -> dict[str, 
         _zip_write(archive, "__main__.py", source.read_bytes(), executable=True)
         for path in sorted(SDK_ROOT.rglob("*.py")):
             _zip_write(archive, str(Path("waveflow_plugin_sdk") / path.relative_to(SDK_ROOT)), path.read_bytes())
+        if resource_root is not None:
+            root = Path(resource_root).resolve()
+            if not root.is_dir() or not source.is_relative_to(root):
+                raise PluginError("ARTIFACT_NOT_FOUND", "Plugin resource root is invalid", category="cli")
+            for name, data in _project_resources(root, source):
+                _zip_write(archive, name, data)
     os.replace(staging, target)
     return {"artifact": str(target), "sha256": _sha256(target),
             "size_bytes": target.stat().st_size}
@@ -189,7 +218,7 @@ def build_project(project: str | Path, *, output: str | Path | None = None) -> d
     if not source.is_relative_to(root) or not source.is_file():
         raise PluginError("ARTIFACT_NOT_FOUND", "Plugin entrypoint does not exist", category="cli")
     target = Path(output).resolve() if output else root / "dist" / f"{manifest.plugin_id}-{manifest.version}.pyz"
-    built = build_sdk_artifact(source, target)
+    built = build_sdk_artifact(source, target, resource_root=root)
     digest = built["sha256"]
     for artifact in manifest_data["artifacts"]:
         artifact.update({"entrypoint": target.name, "sha256": digest, "size_bytes": target.stat().st_size})

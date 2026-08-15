@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 from cryptography.hazmat.primitives import serialization
@@ -134,6 +135,28 @@ class PluginSDKCLITest(unittest.IsolatedAsyncioTestCase):
         finally:
             await process.call("runtime.shutdown", {})
             await process.stop()
+
+    async def test_build_packages_project_resource_for_pyz_runtime(self):
+        (self.root / "fixture.txt").write_text("packaged-resource", encoding="utf-8")
+        provider = PROVIDER.replace("TVReference", "TVReference, load_resource_text", 1)
+        provider = provider.replace(
+            'if reference.resource_id == "missing":',
+            'if load_resource_text("fixture.txt", anchor=__file__) != "packaged-resource":\n'
+            '            raise RuntimeError("resource fixture was not packaged")\n'
+            '        if reference.resource_id == "missing":',
+        )
+        (self.root / "provider.py").write_text(provider)
+        built = build_project(self.root)
+        with zipfile.ZipFile(built["artifact"]) as archive:
+            self.assertIn("fixture.txt", archive.namelist())
+        result = await run_build_test(
+            Path(built["manifest"]), method="tv.resolve_stream",
+            payload={"scheme": "sdkfixture", "resource_id": "one", "query": {}},
+            capabilities={"core.http.fetch": {"status": 200, "headers": {},
+                "body": {"url": "https://media.example/live.m3u8"}, "response_mode": "json"}},
+        )
+        self.assertTrue(result["health"]["healthy"])
+        self.assertEqual(result["result"]["url"], "https://media.example/live.m3u8")
 
     def test_validate_build_sign_and_market_package(self):
         built = build_project(self.root)

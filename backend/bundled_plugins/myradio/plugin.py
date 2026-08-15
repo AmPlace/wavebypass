@@ -9,18 +9,17 @@ from __future__ import annotations
 import json
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from pathlib import Path
 from typing import Any
 
 from waveflow_plugin_sdk import (
     InvalidResource, PluginApplication, PluginError, RadioProvider,
-    RadioReference, ResolveContext, StreamDescriptor,
+    RadioReference, ResolveContext, StreamDescriptor, load_resource_text,
 )
 
 
 BASE = "https://myradio-dev.zeabur.app"
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
-STATIC_PATH = Path(__file__).with_name("static.json")
+STATIC_RESOURCE = "static.json"
 STATION_ID_RE = re.compile(r"^A[0-9]{4}$")
 SITEMAP_RE = re.compile(r"<loc>https?://myradio\.com\.tw/radios/(A[0-9]{4})</loc>")
 ALLOWED_DYNAMIC_HOSTS = [
@@ -38,7 +37,7 @@ def _failure(code: str, message: str, *, retryable: bool = True) -> PluginError:
 
 def _load_static() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     try:
-        value = json.loads(STATIC_PATH.read_text(encoding="utf-8"))
+        value = json.loads(load_resource_text(STATIC_RESOURCE, anchor=__file__))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise _failure("static_catalog_invalid", "MyRadio static catalog is unavailable", retryable=False) from exc
     static = value.get("static") if isinstance(value, dict) else None
