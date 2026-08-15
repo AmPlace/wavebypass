@@ -82,11 +82,11 @@
 
     <div v-if="showAppShell" class="fixed inset-x-0 top-0 z-50 bg-[var(--bg)] lg:hidden">
       <div class="h-[env(safe-area-inset-top)]"></div>
-      <div class="flex h-12 items-center justify-between px-4 sm:px-6">
-        <div class="flex items-center rounded-full border border-[var(--border)] bg-[var(--bg-soft)]/70 p-0.5 text-xs font-medium shadow-sm shadow-black/[0.04] backdrop-blur-xl">
+      <div class="mobile-header-row flex h-12 items-center justify-between px-4 sm:px-6">
+        <div class="mobile-mode-switch flex h-10 items-center rounded-full border border-[var(--border)] bg-[var(--bg-soft)]/70 p-0.5 text-sm font-medium shadow-sm shadow-black/[0.04] backdrop-blur-xl">
           <button
             type="button"
-            class="rounded-full px-3 py-1.5 transition-all sm:px-4"
+            class="flex h-9 items-center rounded-full px-3 transition-all sm:px-4"
             :class="activeMode === 'radio' ? 'bg-neutral-950 text-white dark:bg-white dark:text-black' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'"
             @click="router.push('/')"
           >
@@ -94,7 +94,7 @@
           </button>
           <button
             type="button"
-            class="rounded-full px-3 py-1.5 transition-all sm:px-4"
+            class="flex h-9 items-center rounded-full px-3 transition-all sm:px-4"
             :class="activeMode === 'iptv' ? 'bg-neutral-950 text-white dark:bg-white dark:text-black' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'"
             @click="router.push('/iptv')"
           >
@@ -102,14 +102,8 @@
           </button>
         </div>
         <div class="flex items-center gap-2">
-          <button v-show="activeMode === 'iptv'" type="button" class="mobile-action-btn" aria-label="订阅源" @click="router.push('/market')">
-            <svg class="size-5" viewBox="0 0 24 24" fill="none"><path d="M4 8.4 12 4l8 4.4-8 4.4L4 8.4Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M4 12.2 12 16.6l8-4.4M4 16l8 4.4L20 16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          </button>
-          <button v-show="activeMode === 'iptv'" type="button" class="mobile-action-btn" aria-label="设置" @click="router.push('/settings/sources')">
-            <svg class="size-5" viewBox="0 0 24 24" fill="none"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="1.8"/></svg>
-          </button>
-          <div class="relative flex items-center rounded-full border border-[var(--border)] bg-[var(--bg-soft)]/70 shadow-sm shadow-black/[0.04] backdrop-blur-xl transition-all duration-300 ease-out" :class="searchExpanded ? 'w-48 sm:w-56' : 'size-10'">
-            <button type="button" class="flex size-10 shrink-0 items-center justify-center text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]" aria-label="搜索" @click="toggleSearch">
+          <div class="mobile-search-shell relative flex items-center rounded-full border border-[var(--border)] bg-[var(--bg-soft)]/70 shadow-sm shadow-black/[0.04] backdrop-blur-xl transition-all duration-300 ease-out" :class="searchExpanded ? 'mobile-search-expanded' : 'mobile-search-collapsed'">
+            <button type="button" class="mobile-search-trigger flex shrink-0 items-center justify-center text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]" aria-label="搜索" @click="toggleSearch">
               <svg class="size-5" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="1.8" /><path d="M16.5 16.5L21 21" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" /></svg>
             </button>
             <input ref="searchInputRef" v-model="searchQuery" type="text" placeholder="搜索频道、节目" class="h-full w-full bg-transparent pr-3 text-sm text-[var(--text-primary)] outline-none placeholder:text-[var(--text-tertiary)]" :class="searchExpanded ? 'opacity-100' : 'pointer-events-none opacity-0'" @blur="onSearchBlur" />
@@ -118,6 +112,29 @@
             <svg v-if="isDark" class="size-5" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 3v2M12 19v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M3 12h2M19 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="12" cy="12" r="4" stroke="currentColor" stroke-width="1.8"/></svg>
             <svg v-else class="size-5" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M20.5 14.4A7.7 7.7 0 0 1 9.6 3.5 8.5 8.5 0 1 0 20.5 14.4Z" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
           </button>
+          <div ref="mobileMenuRef" class="relative">
+            <button type="button" class="mobile-action-btn" aria-label="更多" :aria-expanded="mobileMenuOpen" aria-haspopup="menu" @click.stop="toggleMobileMenu">
+              <svg class="size-5" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="5" cy="12" r="1.35" fill="currentColor"/><circle cx="12" cy="12" r="1.35" fill="currentColor"/><circle cx="19" cy="12" r="1.35" fill="currentColor"/></svg>
+            </button>
+            <div v-if="mobileMenuOpen" class="mobile-nav-popover" role="menu" aria-label="更多导航">
+              <div class="mobile-nav-popover__title">导航</div>
+              <button
+                v-for="item in mobileNavigationItems"
+                :key="item.label"
+                type="button"
+                class="mobile-nav-popover__item"
+                :class="{ 'mobile-nav-popover__item--active': item.active, 'mobile-nav-popover__item--disabled': item.disabled }"
+                :aria-current="item.active ? 'page' : undefined"
+                :aria-disabled="item.disabled ? 'true' : undefined"
+                :disabled="item.disabled"
+                role="menuitem"
+                @click="navigateMobile(item)"
+              >
+                <span>{{ item.label }}</span>
+                <span v-if="item.disabled" class="mobile-nav-popover__hint">暂不可用</span>
+              </button>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -196,6 +213,8 @@ const playerStore = usePlayerStore()
 const { activeMode } = storeToRefs(playerStore)
 const router = useRouter()
 const route = useRoute()
+const mobileMenuOpen = ref(false)
+const mobileMenuRef = ref(null)
 const showAppShell = computed(() => !route.meta.authPage)
 const hasDesktopShell = computed(() => showAppShell.value)
 const SIDEBAR_STORAGE_KEY = 'waveflow-sidebar-collapsed'
@@ -228,6 +247,7 @@ const THEME_STATUS_BAR = {
 }
 
 watch(() => route.path, (path) => {
+  mobileMenuOpen.value = false
   playerStore.setActiveMode(path.startsWith('/iptv') || path.startsWith('/admin') || path.startsWith('/settings') || path.startsWith('/market') ? 'iptv' : 'radio')
 }, { immediate: true })
 
@@ -317,6 +337,14 @@ const searchExpanded = ref(false)
 const searchInputRef = ref(null)
 const desktopSearchInputRef = ref(null)
 
+const mobileNavigationItems = computed(() => [
+  { label: 'Radio', route: '/', active: route.path === '/' },
+  { label: 'TV', route: '/iptv', active: route.path === '/iptv' },
+  { label: 'Market', route: '/market', active: route.path === '/market' },
+  { label: '设置', route: '/settings/sources', active: route.path.startsWith('/settings') },
+  { label: '关于', route: '', active: false, disabled: true },
+])
+
 function navItemClass(item) {
   if (item.active) {
     return 'border-[var(--border-strong)] bg-[var(--surface-active)] text-[var(--text-primary)]'
@@ -335,8 +363,8 @@ function toggleSearch() {
   searchExpanded.value = !searchExpanded.value
   if (searchExpanded.value) {
     nextTick(() => {
-      searchInputRef.value?.focus()
-      desktopSearchInputRef.value?.focus()
+      const isMobileViewport = window.matchMedia('(max-width: 1023px)').matches
+      (isMobileViewport ? searchInputRef : desktopSearchInputRef).value?.focus()
     })
   } else {
     searchQuery.value = ''
@@ -346,6 +374,28 @@ function toggleSearch() {
 function onSearchBlur() {
   if (!searchQuery.value.trim()) {
     searchExpanded.value = false
+  }
+}
+
+function toggleMobileMenu() {
+  mobileMenuOpen.value = !mobileMenuOpen.value
+}
+
+function navigateMobile(item) {
+  if (item.disabled || !item.route) return
+  mobileMenuOpen.value = false
+  router.push(item.route)
+}
+
+function handleMobileMenuPointerDown(event) {
+  if (mobileMenuOpen.value && !mobileMenuRef.value?.contains(event.target)) {
+    mobileMenuOpen.value = false
+  }
+}
+
+function handleMobileMenuKeydown(event) {
+  if (event.key === 'Escape') {
+    mobileMenuOpen.value = false
   }
 }
 
@@ -371,6 +421,8 @@ onMounted(() => {
   mediaQuery = window.matchMedia('(prefers-color-scheme: dark)')
   mediaQuery.addEventListener('change', handleSystemThemeChange)
   document.addEventListener('visibilitychange', handleVisibilityChange)
+  document.addEventListener('pointerdown', handleMobileMenuPointerDown)
+  document.addEventListener('keydown', handleMobileMenuKeydown)
 })
 
 onBeforeUnmount(() => {
@@ -378,5 +430,7 @@ onBeforeUnmount(() => {
     mediaQuery.removeEventListener('change', handleSystemThemeChange)
   }
   document.removeEventListener('visibilitychange', handleVisibilityChange)
+  document.removeEventListener('pointerdown', handleMobileMenuPointerDown)
+  document.removeEventListener('keydown', handleMobileMenuKeydown)
 })
 </script>
