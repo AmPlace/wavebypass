@@ -10,6 +10,30 @@
       </RouterLink>
     </header>
 
+    <section class="mb-6 rounded-2xl border border-amber-500/25 bg-amber-500/5 p-4 sm:p-5">
+      <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <h3 class="text-sm font-semibold text-[var(--text-primary)]">Developer Mode</h3>
+          <p class="mt-1 text-xs leading-5 text-[var(--text-secondary)]">
+            本地 Developer Plugin 不经过 WaveFlow Official 签名验证，但仍必须通过 manifest、digest、权限和隔离运行时校验。
+          </p>
+        </div>
+        <button type="button" class="plugin-btn" :disabled="developerActing" @click="toggleDeveloperMode">
+          {{ developerMode ? '关闭 Developer Mode' : '启用 Developer Mode' }}
+        </button>
+      </div>
+      <div v-if="developerMode" class="mt-4 space-y-2">
+        <label class="block text-xs font-medium text-[var(--text-secondary)]" for="developer-plugin-path">本地 package 目录、manifest.json 或 .pyz 路径</label>
+        <div class="flex flex-col gap-2 sm:flex-row">
+          <input id="developer-plugin-path" v-model="developerPath" type="text" class="min-h-10 min-w-0 flex-1 rounded-xl border border-[var(--border)] bg-[var(--card-bg)] px-3 text-sm text-[var(--text-primary)]" placeholder="/path/to/plugin/dist/manifest.json" />
+          <label class="plugin-btn cursor-pointer" for="developer-plugin-file">选择文件</label>
+          <input id="developer-plugin-file" type="file" class="hidden" accept=".json,.pyz" @change="selectDeveloperFile" />
+          <button type="button" class="plugin-btn" :disabled="developerActing || !developerPath.trim()" @click="installLocalPlugin">安装本地 Plugin</button>
+        </div>
+        <p class="text-xs leading-5 text-[var(--text-tertiary)]">关闭 Developer Mode 不会删除已安装的本地插件；只会阻止新的 unsigned local install/update。</p>
+      </div>
+    </section>
+
     <section v-if="loading" class="grid gap-3 md:grid-cols-2" aria-label="正在加载插件" aria-busy="true">
       <div v-for="index in 4" :key="index" class="h-40 animate-pulse rounded-2xl border border-[var(--border)] bg-[var(--surface)]"></div>
     </section>
@@ -41,6 +65,7 @@
             <div class="mt-4 flex flex-wrap gap-1.5 text-xs text-[var(--text-secondary)]">
               <span class="plugin-chip">v{{ plugin.version || '未知' }}</span>
               <span class="plugin-chip">{{ runtimeLabel(plugin.runtime) }}</span>
+              <span v-if="plugin.trust_class === 'developer_local'" class="plugin-chip plugin-chip-warning">Developer Local</span>
               <span v-if="plugin.permissions?.pending?.length" class="plugin-chip plugin-chip-warning">待批准 {{ plugin.permissions.pending.length }}</span>
               <span v-if="plugin.quarantined" class="plugin-chip plugin-chip-danger">Quarantined</span>
               <span v-if="plugin.market?.update_available" class="plugin-chip plugin-chip-update">有更新</span>
@@ -140,7 +165,7 @@
 <script setup>
 import { computed, defineComponent, h, onMounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
-import { approvePluginPermission, disablePlugin, enablePlugin, fetchPlugin, fetchPlugins, pluginErrorMessage, recoverPlugin, revokePluginPermission, setPluginOwnership } from '../../api/plugins'
+import { approvePluginPermission, disablePlugin, enablePlugin, fetchDeveloperMode, fetchPlugin, fetchPlugins, installDeveloperPlugin, pluginErrorMessage, recoverPlugin, revokePluginPermission, setDeveloperMode, setPluginOwnership } from '../../api/plugins'
 import { useToastStore } from '../../stores/toast'
 
 const DetailSection = defineComponent({
@@ -157,6 +182,9 @@ const selected = ref(null)
 const detailLoading = ref(false)
 const detailError = ref('')
 const acting = ref(false)
+const developerMode = ref(false)
+const developerPath = ref('')
+const developerActing = ref(false)
 const selectedIdentity = computed(() => selected.value?.plugin || '')
 
 async function loadPlugins({ background = false } = {}) { if (!background) loading.value = true; loadError.value = ''; try { plugins.value = (await fetchPlugins()).plugins || [] } catch (error) { loadError.value = pluginErrorMessage(error, '插件列表加载失败') } finally { if (!background) loading.value = false } }
@@ -165,6 +193,10 @@ async function loadDetail(identity) { detailLoading.value = true; detailError.va
 async function reloadDetail() { if (selectedIdentity.value) await loadDetail(selectedIdentity.value) }
 function closeDetail() { drawerOpen.value = false; selected.value = null; detailError.value = '' }
 async function refreshAfterAction(identity = selectedIdentity.value) { await loadPlugins({ background: true }); if (drawerOpen.value && identity) await loadDetail(identity) }
+async function loadDeveloperMode() { try { developerMode.value = Boolean((await fetchDeveloperMode()).enabled) } catch (error) { toastStore.error(pluginErrorMessage(error, 'Developer Mode 状态加载失败')) } }
+async function toggleDeveloperMode() { developerActing.value = true; try { developerMode.value = Boolean((await setDeveloperMode(!developerMode.value)).enabled); toastStore.success(developerMode.value ? 'Developer Mode 已启用' : 'Developer Mode 已关闭') } catch (error) { toastStore.error(pluginErrorMessage(error)) } finally { developerActing.value = false } }
+function selectDeveloperFile(event) { const file = event.target?.files?.[0]; if (file?.path) developerPath.value = file.path; else if (file?.name) developerPath.value = file.name }
+async function installLocalPlugin() { developerActing.value = true; try { await installDeveloperPlugin(developerPath.value.trim()); toastStore.success('本地 Developer Plugin 已安装'); await loadPlugins() } catch (error) { toastStore.error(pluginErrorMessage(error, '本地 Plugin 安装失败')) } finally { developerActing.value = false } }
 
 async function toggleEnabled(plugin) {
   const action = plugin.enabled ? '停用' : '启用'
@@ -183,7 +215,7 @@ function statusLabel(plugin) { if (plugin.quarantined) return 'Quarantined'; if 
 function statusClass(plugin) { if (plugin.quarantined || !plugin.runtime_available && plugin.enabled) return 'is-danger'; if (!plugin.enabled) return 'is-muted'; return 'is-healthy' }
 function runtimeLabel(runtime) { if (runtime?.type === 'python') return runtime.python_version_range ? `Python ${runtime.python_version_range}` : 'Python'; if (runtime?.type === 'subprocess') return 'Binary / subprocess'; return runtime?.type || 'Unknown runtime' }
 function environmentLabel(status) { return ({ ready: 'Healthy', unavailable: 'Unavailable', not_applicable: 'Not applicable' })[status] || status || 'Unknown' }
-function trustLabel(value) { return ({ official: 'Official publisher', third_party: 'Trusted third party' })[value] || value || 'Unknown' }
+function trustLabel(value) { return ({ official: 'Official publisher', third_party: 'Trusted third party', developer_local: 'Developer Local（未经过 Official 签名）' })[value] || value || 'Unknown' }
 function ownershipSummary(plugin) { const values = plugin.ownership || []; if (!values.length) return 'Legacy'; const owned = values.filter((item) => item.mode === 'plugin').length; return owned ? `${owned}/${values.length} Plugin` : 'Legacy' }
 function contractLabels(contracts) { return (contracts || []).map((item) => item.contract === 'tv_provider' ? 'TVProvider' : item.contract === 'radio_provider' ? 'RadioProvider' : item.contract).join(' · ') || '无 Provider Contract' }
 function permissionLabel(name) { return ({ 'network.managed': 'Managed Network', 'network.direct': 'Direct Network' })[name] || name }
@@ -191,7 +223,7 @@ function isPending(name) { return Boolean(selected.value?.permissions?.pending?.
 function isRevocable(name) { return name === 'network.direct' && Boolean(selected.value?.permissions?.approved?.some((item) => item.name === name)) }
 function marketLink(plugin) { const params = new URLSearchParams({ type: 'plugins' }); if (plugin?.market?.package_id) params.set('package', plugin.market.package_id); return `/market?${params}` }
 
-onMounted(loadPlugins)
+onMounted(() => { loadPlugins(); loadDeveloperMode() })
 </script>
 
 <style scoped>

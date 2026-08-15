@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import os
+import shutil
 import sys
 import tempfile
 import uuid
@@ -23,6 +24,9 @@ import database as db
 import market
 from plugin_market import (
     PluginArtifactStore, PluginMarketService, current_platform, manifest_signature_payload,
+)
+from plugin_developer import (
+    DEVELOPER_LOCAL_SOURCE_KEY, load_developer_package,
 )
 from plugin_python_runtime import PythonEnvironmentManager, select_dependency_artifacts
 from plugin_desktop_runtime import resolve_plugin_python_executable
@@ -48,6 +52,7 @@ OFFICIAL_PLUGIN_BOOTSTRAP_SETTING = "official_plugin_bootstrap_v1"
 OFFICIAL_PLUGIN_ROLLOUT_SETTING = "official_plugin_rollout_v1"
 PLUGIN_STORE_BINDING_SETTING = "plugin_store_binding_v1"
 PLUGIN_STORE_MARKER = ".waveflow-plugin-store.json"
+PLUGIN_DEVELOPER_MODE_SETTING = "plugin_developer_mode_v1"
 
 
 class ProductionTrustPolicy:
@@ -1066,6 +1071,48 @@ class ProductionPluginSubsystem:
         finally:
             for path in temp_paths:
                 path.unlink(missing_ok=True)
+
+    async def developer_mode_enabled(self) -> bool:
+        return (await db.get_setting(PLUGIN_DEVELOPER_MODE_SETTING, "0")).strip() == "1"
+
+    async def set_developer_mode(self, enabled: bool) -> dict[str, Any]:
+        await db.set_setting(PLUGIN_DEVELOPER_MODE_SETTING, "1" if enabled else "0")
+        return {"enabled": bool(enabled)}
+
+    async def install_developer_local(self, path: str) -> dict[str, Any]:
+        if not await self.developer_mode_enabled():
+            raise PluginError(
+                "DEVELOPER_MODE_REQUIRED",
+                "Developer Mode must be enabled before installing a local Plugin",
+                category="trust",
+            )
+        package = await asyncio.to_thread(load_developer_package, path)
+        manifest = validate_manifest(package["plugin_manifest"])
+        identity = manifest.identity
+        staging_root = Path(tempfile.mkdtemp(prefix="developer-local-", dir=self.download_root))
+        try:
+            local_artifacts = []
+            for item in package.get("artifact_references") or []:
+                source = Path(str(item["local_path"])).resolve(strict=True)
+                target = staging_root / f"artifact-{item['sha256']}"
+                await asyncio.to_thread(shutil.copyfile, source, target)
+                local_artifacts.append({"sha256": item["sha256"], "local_path": str(target)})
+            local_dependencies = []
+            for item in package.get("dependency_references") or []:
+                source = Path(str(item["local_path"])).resolve(strict=True)
+                target = staging_root / f"dependency-{item['sha256']}.whl"
+                await asyncio.to_thread(shutil.copyfile, source, target)
+                local_dependencies.append({"sha256": item["sha256"], "local_path": str(target)})
+            prepared = dict(package)
+            prepared["artifact_references"] = local_artifacts
+            prepared["dependency_references"] = local_dependencies
+            prepared["market_source"] = {
+                "source_key": DEVELOPER_LOCAL_SOURCE_KEY,
+                "is_builtin": False,
+            }
+            return await self.service.install_developer_local([prepared], identity)
+        finally:
+            await asyncio.to_thread(shutil.rmtree, staging_root, True)
 
     async def repair(self, identity: str, packages: Iterable[dict[str, Any]]) -> dict[str, Any]:
         prepared, temp_paths = await self._prepare_packages(packages)

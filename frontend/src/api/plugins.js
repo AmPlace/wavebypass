@@ -12,6 +12,25 @@ export async function fetchPlugins() {
   return response.json()
 }
 
+export async function fetchDeveloperMode() {
+  const response = await apiRequest('/api/admin/plugins/developer/mode')
+  return response.json()
+}
+
+export async function setDeveloperMode(enabled) {
+  const response = await apiRequest('/api/admin/plugins/developer/mode', {
+    method: 'PUT', headers: JSON_HEADERS, body: JSON.stringify({ enabled: Boolean(enabled) }),
+  })
+  return response.json()
+}
+
+export async function installDeveloperPlugin(path) {
+  const response = await apiRequest('/api/admin/plugins/developer/local/install', {
+    method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ path }),
+  })
+  return response.json()
+}
+
 export async function fetchPlugin(identity) {
   const response = await apiRequest(`/api/admin/plugins/${pluginPath(identity)}`)
   return response.json()
@@ -74,6 +93,8 @@ export function pluginErrorMessage(error, fallback = '插件操作失败，请�
     PERMISSION_APPROVAL_REQUIRED: '安装前需要批准高风险权限',
     SCHEME_CONFLICT: '请先将相关 scheme 切回 Legacy，再执行此操作',
     CAPABILITY_DENIED: '当前权限策略不允许此操作',
+    DEVELOPER_MODE_REQUIRED: '请先在 Developer Mode 中启用本地插件安装',
+    ARTIFACT_INTEGRITY_FAILED: '插件本地包完整性校验失败',
   }
   return messages[pluginErrorCode(error)] || fallback
 }

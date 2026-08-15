@@ -12,7 +12,8 @@ import database as db
 import market
 from official_plugin_distribution import OFFICIAL_PUBLISHER_ID, load_official_trust_rows
 from plugin_tasks import reconcile_plugin_update_task
-from plugin_runtime import LifecycleState, PluginError
+from radio_tasks import reconcile_radio_automation_tasks, run_radio_task_now
+from plugin_runtime import LifecycleState, PluginError, validate_manifest
 from security.dependencies import require_admin
 
 
@@ -43,6 +44,14 @@ class PermissionActionRequest(BaseModel):
     package_id: str = ""
 
 
+class DeveloperModeRequest(BaseModel):
+    enabled: bool
+
+
+class DeveloperInstallRequest(BaseModel):
+    path: str = Field(min_length=1, max_length=4096)
+
+
 def _subsystem(request: Request):
     subsystem = getattr(request.app.state, "plugin_subsystem", None)
     if subsystem is None:
@@ -61,6 +70,7 @@ def _error(exc: PluginError) -> HTTPException:
         "DEPENDENCY_PLATFORM_UNSUPPORTED": 422,
         "DEPENDENCY_ARTIFACT_NOT_FOUND": 404,
         "PERMISSION_APPROVAL_REQUIRED": 409,
+        "DEVELOPER_MODE_REQUIRED": 403,
     }
     return HTTPException(status_code=statuses.get(exc.code, 400), detail=exc.as_contract())
 
@@ -117,6 +127,7 @@ def _manifest_projection(
         "provider_contracts": manifest.get("provider_contracts") or [],
         "source_provenance": {"source_key": row.get("source_key") or "", "package_id": row.get("source_package_id") or ""},
         "trust_state": row.get("trust_state") or "",
+        "trust_class": row.get("trust_class") or "official",
         "last_error": str(row.get("last_error") or "")[:1024],
         "runtime": {
             "type": manifest_runtime.get("type") or row.get("runtime_type") or "unknown",
@@ -201,6 +212,46 @@ async def list_trust() -> dict[str, Any]:
         }
         for row in [*official, *rows]
     ]}
+
+
+@router.get("/developer/mode")
+async def get_developer_mode(request: Request) -> dict[str, Any]:
+    return {"enabled": await _subsystem(request).developer_mode_enabled()}
+
+
+@router.put("/developer/mode")
+async def set_developer_mode(body: DeveloperModeRequest, request: Request) -> dict[str, Any]:
+    return await _subsystem(request).set_developer_mode(body.enabled)
+
+
+@router.post("/developer/local/install")
+async def install_developer_plugin(body: DeveloperInstallRequest, request: Request) -> dict[str, Any]:
+    subsystem = _subsystem(request)
+    try:
+        result = await subsystem.install_developer_local(body.path)
+        automation = getattr(request.app.state, "automation_service", None)
+        if automation is not None:
+            await reconcile_radio_automation_tasks(automation, subsystem)
+            identity = str(result.get("plugin") or "")
+            if identity and "/" in identity:
+                publisher, plugin_id = identity.split("/", 1)
+                row = await db.get_plugin_installation(publisher, plugin_id)
+                manifest = validate_manifest(json.loads(row["manifest_json"])) if row else None
+                radio_features = {
+                    feature
+                    for contract in (manifest.provider_contracts if manifest else ())
+                    if contract.contract == "radio_provider"
+                    for feature in contract.features
+                }
+                refresh = {}
+                if "catalog" in radio_features:
+                    refresh["catalog"] = await run_radio_task_now(
+                        automation, subsystem, identity, "catalog",
+                    )
+                result = {**result, "radio_refresh": refresh}
+        return result
+    except PluginError as exc:
+        raise _error(exc) from exc
 
 
 @router.put("/trust")

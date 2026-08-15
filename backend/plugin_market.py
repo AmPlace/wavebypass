@@ -28,6 +28,10 @@ from plugin_permissions import permission_projection, require_high_risk_approval
 PLUGIN_PACKAGE_TYPE = "plugin_package"
 CONTENT_PACKAGE_TYPE = "content_package"
 DEPENDENCY_STATES = frozenset({"ready", "dependency_missing", "plugin_incompatible", "provider_unavailable"})
+MAX_DEVELOPER_ARTIFACT_BYTES = 64 * 1024 * 1024
+DEVELOPER_LOCAL_TRUST_CLASS = "developer_local"
+DEVELOPER_LOCAL_SOURCE_KEY = "developer_local"
+UNSIGNED_DEVELOPER_SIGNATURE = "UNSIGNED"
 logger = logging.getLogger(__name__)
 
 
@@ -169,6 +173,40 @@ class FixtureTrustPolicy:
             Ed25519PublicKey.from_public_bytes(key).verify(encoded, manifest_signature_payload(manifest))
         except (ValueError, InvalidSignature) as exc:
             raise PluginError("AUTH_FAILED", "Plugin manifest signature verification failed", category="trust") from exc
+
+
+class DeveloperLocalTrustPolicy:
+    """Trust policy for explicitly selected local Developer packages.
+
+    This is intentionally not a mode on the production Ed25519 policy.  A
+    local package must carry the exact unsigned marker and is accepted only by
+    the explicit Developer install path; artifact digest and manifest
+    validation happen before this policy is invoked.
+    """
+
+    def verify(self, manifest: PluginManifest, artifact: dict[str, Any], payload: bytes) -> str:
+        signature = artifact.get("signature") or {}
+        if (
+            set(signature) != {"algorithm", "key_id", "value"}
+            or signature.get("algorithm") != "ed25519"
+            or signature.get("value") != UNSIGNED_DEVELOPER_SIGNATURE
+        ):
+            raise PluginError(
+                "PLUGIN_UNTRUSTED",
+                "Developer package does not contain the required local unsigned marker",
+                category="trust",
+            )
+        return DEVELOPER_LOCAL_TRUST_CLASS
+
+    def verify_manifest(
+        self, manifest: PluginManifest, artifact: dict[str, Any], signature: dict[str, Any] | None,
+    ) -> None:
+        if signature is not None:
+            raise PluginError(
+                "PLUGIN_UNTRUSTED",
+                "Developer local packages cannot use an unverified Market manifest signature",
+                category="trust",
+            )
 
 
 def _read_artifact(path: Path, *, max_bytes: int | None = None) -> bytes:
@@ -568,6 +606,48 @@ class PluginMarketService:
             raise PluginError("PLUGIN_INCOMPATIBLE", "Conflicting trusted plugin manifests were published for the same version", category="market")
         return select_candidate(trusted, identity)
 
+    async def _developer_candidate_from_packages(
+        self, packages: Iterable[dict], identity: str,
+    ) -> PluginCandidate:
+        packages = list(packages)
+        if any(package.get("_developer_local") is not True for package in packages):
+            raise PluginError(
+                "CAPABILITY_DENIED",
+                "Unsigned Plugin installation requires an explicit local Developer package",
+                category="trust",
+            )
+        candidates = candidates_from_packages(packages, os_name=self.os_name, arch=self.arch)
+        matching = [
+            candidate for candidate in candidates
+            if candidate.identity == identity and candidate.source_key == DEVELOPER_LOCAL_SOURCE_KEY
+        ]
+        if not matching:
+            raise PluginError("RESOURCE_NOT_FOUND", "No compatible local Developer package is available", category="market")
+        highest = max((candidate.manifest.version for candidate in matching), key=_version_tuple)
+        version_candidates = [candidate for candidate in matching if candidate.manifest.version == highest]
+        digests = {candidate.artifact["sha256"] for candidate in version_candidates}
+        if len(digests) != 1:
+            raise PluginError(
+                "PLUGIN_INCOMPATIBLE",
+                "Conflicting local Developer artifacts were supplied for the same version",
+                category="market",
+            )
+        policy = DeveloperLocalTrustPolicy()
+        trusted: list[PluginCandidate] = []
+        for candidate in version_candidates:
+            payload = _read_artifact(
+                self.store._source(candidate.local_reference),
+                max_bytes=MAX_DEVELOPER_ARTIFACT_BYTES,
+            )
+            if len(payload) != int(candidate.artifact["size_bytes"]):
+                raise PluginError("ARTIFACT_INTEGRITY_FAILED", "Developer artifact size mismatch", category="artifact")
+            if hashlib.sha256(payload).hexdigest() != candidate.artifact["sha256"]:
+                raise PluginError("ARTIFACT_INTEGRITY_FAILED", "Developer artifact digest mismatch", category="artifact")
+            policy.verify_manifest(candidate.manifest, candidate.artifact, candidate.manifest_signature)
+            policy.verify(candidate.manifest, candidate.artifact, payload)
+            trusted.append(candidate)
+        return select_candidate(trusted, identity)
+
     async def install_from_packages(self, packages: Iterable[dict], identity: str) -> dict:
         candidate = await self._trusted_candidate_from_packages(packages, identity)
         await require_high_risk_approvals(candidate.manifest)
@@ -579,6 +659,31 @@ class PluginMarketService:
                     name=f"plugin-activation:{identity}:{candidate.manifest.version}",
                 ),
                 operation="candidate_activation",
+                identity=identity,
+            )
+            return await self._await_critical(task)
+
+    async def install_developer_local(self, packages: Iterable[dict], identity: str) -> dict:
+        """Install a user-selected local package through the normal lifecycle."""
+        candidate = await self._developer_candidate_from_packages(packages, identity)
+        existing = await db.get_plugin_installation(
+            candidate.manifest.publisher_id, candidate.manifest.plugin_id,
+        )
+        if existing and str(existing.get("trust_class") or "official") != DEVELOPER_LOCAL_TRUST_CLASS:
+            raise PluginError(
+                "PLUGIN_UNTRUSTED",
+                "An Official Plugin cannot be replaced by an unsigned local package; uninstall it explicitly first",
+                category="trust",
+            )
+        await require_high_risk_approvals(candidate.manifest)
+        async with self.preparation_lock(identity):
+            prepared = await self._prepare_candidate(candidate, trust_policy=DeveloperLocalTrustPolicy())
+            task = self._track_critical(
+                asyncio.create_task(
+                    self._activate_prepared(prepared),
+                    name=f"plugin-developer-activation:{identity}:{candidate.manifest.version}",
+                ),
+                operation="developer_local_activation",
                 identity=identity,
             )
             return await self._await_critical(task)
@@ -656,8 +761,13 @@ class PluginMarketService:
                 signature = json.loads(row.get("manifest_signature_json") or "{}")
             except json.JSONDecodeError:
                 return False
-            self.trust_policy.verify_manifest(manifest, selected, signature or None)
-            self.trust_policy.verify(manifest, selected, payload)
+            if str(row.get("trust_class") or "official") == DEVELOPER_LOCAL_TRUST_CLASS:
+                developer_policy = DeveloperLocalTrustPolicy()
+                developer_policy.verify_manifest(manifest, selected, signature or None)
+                developer_policy.verify(manifest, selected, payload)
+            else:
+                self.trust_policy.verify_manifest(manifest, selected, signature or None)
+                self.trust_policy.verify(manifest, selected, payload)
             if not row.get("trust_state") or not row.get("source_key"):
                 return False
             return True
@@ -689,11 +799,15 @@ class PluginMarketService:
             await self._discard_prepared(prepared)
             raise
 
-    async def _prepare_candidate(self, candidate: PluginCandidate) -> PreparedPluginCandidate:
+    async def _prepare_candidate(
+        self, candidate: PluginCandidate, *, trust_policy: Any | None = None,
+    ) -> PreparedPluginCandidate:
         staged: Path | None = None
         environment = None
         try:
-            staged, trust_state = await asyncio.to_thread(self.store.stage, candidate, self.trust_policy)
+            staged, trust_state = await asyncio.to_thread(
+                self.store.stage, candidate, trust_policy or self.trust_policy,
+            )
             if candidate.manifest.runtime.get("type") == "python":
                 safe_references = {
                     digest: self.store._source(path)
@@ -794,6 +908,8 @@ class PluginMarketService:
                 artifact_sha256=candidate.artifact["sha256"], artifact_path=str(promoted),
                 runtime_type=candidate.artifact["runtime"], entrypoint=candidate.artifact["entrypoint"],
                 platform_os=self.os_name, platform_arch=self.arch,
+                trust_class=DEVELOPER_LOCAL_TRUST_CLASS
+                if prepared.trust_state == DEVELOPER_LOCAL_TRUST_CLASS else "official",
             )
             command = self._runtime_command(candidate.manifest, promoted, environment)
             instance = self.runtime.install(candidate.manifest, command,
@@ -813,6 +929,8 @@ class PluginMarketService:
                         environment={"runtime_identity": environment.runtime_identity,
                                      "lock_digest": environment.lock_digest}
                         if environment and not environment_reused else None,
+                        trust_class=DEVELOPER_LOCAL_TRUST_CLASS
+                        if prepared.trust_state == DEVELOPER_LOCAL_TRUST_CLASS else "official",
                     )
                 except BaseException:
                     # A repository call may commit and then fail to return.  The
@@ -1049,8 +1167,13 @@ class PluginMarketService:
                 raise PluginError(
                     "ARTIFACT_SIGNATURE_INVALID", "Installed Plugin manifest signature is invalid", category="trust",
                 ) from exc
-            self.trust_policy.verify_manifest(manifest, selected, manifest_signature or None)
-            self.trust_policy.verify(manifest, selected, payload)
+            if str(row.get("trust_class") or "official") == DEVELOPER_LOCAL_TRUST_CLASS:
+                developer_policy = DeveloperLocalTrustPolicy()
+                developer_policy.verify_manifest(manifest, selected, manifest_signature or None)
+                developer_policy.verify(manifest, selected, payload)
+            else:
+                self.trust_policy.verify_manifest(manifest, selected, manifest_signature or None)
+                self.trust_policy.verify(manifest, selected, payload)
         except PluginError as error:
             await db.set_plugin_enabled(
                 row["publisher_id"], row["plugin_id"], True,
@@ -1263,6 +1386,7 @@ class PluginMarketService:
             "active_version": row["active_version"],
             "enabled": bool(row["enabled"]),
             "trust_state": row["trust_state"],
+            "trust_class": row.get("trust_class") or "official",
             "source_key": row["source_key"],
             "lifecycle_state": row["lifecycle_state"],
             "last_activation_status": row["last_activation_status"],

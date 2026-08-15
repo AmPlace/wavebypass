@@ -417,6 +417,8 @@ CREATE TABLE IF NOT EXISTS plugin_installations (
     candidate_version     TEXT DEFAULT '',
     enabled               INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
     trust_state           TEXT NOT NULL,
+    trust_class           TEXT NOT NULL DEFAULT 'official'
+                          CHECK(trust_class IN ('official', 'developer_local')),
     source_key            TEXT DEFAULT '',
     source_package_id     TEXT DEFAULT '',
     manifest_json         TEXT NOT NULL,
@@ -1120,11 +1122,19 @@ async def initialize():
                 pass
         for col, typ, default in [
             ('manifest_signature_json', 'TEXT', "'{}'"),
+            ('trust_class', 'TEXT', "'official'"),
         ]:
             try:
                 conn.execute(f"ALTER TABLE plugin_installations ADD COLUMN {col} {typ} NOT NULL DEFAULT {default}")
             except sqlite3.OperationalError:
                 pass
+        conn.execute(
+            """
+            UPDATE plugin_installations
+            SET trust_class='developer_local'
+            WHERE trust_state='developer_local'
+            """
+        )
         # One-time development migration for the exact pre-5B default row.
         # Runtime product behavior never infers builtin identity from URL/name;
         # all later reads and writes use the persisted builtin_key.
@@ -3463,12 +3473,18 @@ async def begin_plugin_candidate(
     entrypoint: str,
     platform_os: str,
     platform_arch: str,
+    trust_class: str = '',
 ) -> dict:
     def _begin():
         conn = _connect()
         try:
             with conn:
                 now = _utc_now()
+                effective_trust_class = trust_class or (
+                    'developer_local' if trust_state == 'developer_local' else 'official'
+                )
+                if effective_trust_class not in {'official', 'developer_local'}:
+                    raise RuntimeError('invalid plugin trust class')
                 existing = conn.execute(
                     "SELECT * FROM plugin_installations WHERE publisher_id=? AND plugin_id=?",
                     (publisher_id, plugin_id),
@@ -3502,14 +3518,16 @@ async def begin_plugin_candidate(
                     INSERT INTO plugin_installations(
                         publisher_id, plugin_id, installed_version, active_version,
                         candidate_version, enabled, trust_state, source_key,
+                        trust_class,
                         source_package_id, manifest_json, manifest_sha256,
                         manifest_signature_json, artifact_sha256, artifact_path, runtime_type, entrypoint,
                         platform_os, platform_arch, lifecycle_state, quarantined,
                         last_activation_status, last_error, created_at, updated_at
-                    ) VALUES(?, ?, ?, '', ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ) VALUES(?, ?, ?, '', ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                              'candidate', 0, 'pending', '', ?, ?)
                     ON CONFLICT(publisher_id, plugin_id) DO UPDATE SET
                         candidate_version=excluded.candidate_version,
+                        trust_class=excluded.trust_class,
                         lifecycle_state='candidate',
                         last_activation_status='pending',
                         last_error='',
@@ -3517,7 +3535,7 @@ async def begin_plugin_candidate(
                     """,
                     (
                         publisher_id, plugin_id, version, version, trust_state,
-                        source_key, source_package_id, manifest_json, manifest_sha256,
+                        source_key, effective_trust_class, source_package_id, manifest_json, manifest_sha256,
                         manifest_signature_json, artifact_sha256, artifact_path, runtime_type, entrypoint,
                         platform_os, platform_arch, now, now,
                     ),
@@ -3550,17 +3568,23 @@ async def activate_plugin_candidate(
     platform_os: str,
     platform_arch: str,
     environment: dict | None = None,
+    trust_class: str = '',
 ) -> bool:
     def _activate():
         conn = _connect()
         try:
             with conn:
                 now = _utc_now()
+                effective_trust_class = trust_class or (
+                    'developer_local' if trust_state == 'developer_local' else 'official'
+                )
+                if effective_trust_class not in {'official', 'developer_local'}:
+                    raise RuntimeError('invalid plugin trust class')
                 cursor = conn.execute(
                     """
                     UPDATE plugin_installations SET
                         installed_version=?, active_version=?, candidate_version='',
-                        enabled=1, trust_state=?, source_key=?, source_package_id=?,
+                        enabled=1, trust_state=?, trust_class=?, source_key=?, source_package_id=?,
                         manifest_json=?, manifest_sha256=?, manifest_signature_json=?, artifact_sha256=?,
                         artifact_path=?, runtime_type=?, entrypoint=?, platform_os=?,
                         platform_arch=?, lifecycle_state='active', quarantined=0,
@@ -3568,7 +3592,7 @@ async def activate_plugin_candidate(
                     WHERE publisher_id=? AND plugin_id=? AND candidate_version=?
                     """,
                     (
-                        candidate_version, candidate_version, trust_state, source_key,
+                        candidate_version, candidate_version, trust_state, effective_trust_class, source_key,
                         source_package_id, manifest_json, manifest_sha256,
                         manifest_signature_json, artifact_sha256, artifact_path, runtime_type, entrypoint,
                         platform_os, platform_arch, now, publisher_id, plugin_id,
