@@ -1,5 +1,8 @@
 <template>
-  <main class="iptv-main min-h-screen w-full px-5 pb-32 pt-[calc(env(safe-area-inset-top)+4rem)] sm:px-8 lg:px-10 lg:pb-40 lg:pt-6">
+  <main
+    class="iptv-main min-h-screen w-full px-5 pb-32 pt-[calc(env(safe-area-inset-top)+4rem)] sm:px-8 lg:px-10 lg:pb-40 lg:pt-6"
+    :class="{ 'iptv-density-compact': densityMode === 'compact' }"
+  >
     <header class="mb-7 space-y-7">
       <div class="lg:pr-[300px]">
         <TagFilterRow
@@ -23,16 +26,51 @@
           <span v-if="loading" class="hidden text-sm text-[var(--text-tertiary)] sm:inline">加载中...</span>
         </div>
 
-        <button
-          type="button"
-          class="inline-flex h-10 shrink-0 items-center gap-2 rounded-full border border-[var(--border)] bg-[var(--surface)] px-4 text-sm font-medium text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)]"
-          @click="nextSortMode"
-        >
-          <svg class="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="16" y2="12"/><line x1="4" y1="18" x2="12" y2="18"/>
-          </svg>
-          {{ currentSortLabel }}
-        </button>
+        <div class="flex shrink-0 items-center gap-2">
+          <div class="iptv-density-toggle" role="group" aria-label="频道卡密度">
+            <button
+              type="button"
+              class="iptv-density-toggle__button"
+              :class="{ 'iptv-density-toggle__button--active': densityMode === 'standard' }"
+              :aria-pressed="densityMode === 'standard'"
+              aria-label="标准密度"
+              title="标准密度"
+              data-density-option="standard"
+              @click="setDensityMode('standard')"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+                <rect x="4" y="4" width="7" height="7" rx="1"/><rect x="13" y="4" width="7" height="7" rx="1"/><rect x="4" y="13" width="7" height="7" rx="1"/><rect x="13" y="13" width="7" height="7" rx="1"/>
+              </svg>
+              <span class="sr-only">Standard</span>
+            </button>
+            <button
+              type="button"
+              class="iptv-density-toggle__button"
+              :class="{ 'iptv-density-toggle__button--active': densityMode === 'compact' }"
+              :aria-pressed="densityMode === 'compact'"
+              aria-label="紧凑密度"
+              title="紧凑密度"
+              data-density-option="compact"
+              @click="setDensityMode('compact')"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+                <rect x="4" y="5" width="16" height="5" rx="1"/><rect x="4" y="14" width="16" height="5" rx="1"/>
+              </svg>
+              <span class="sr-only">Compact</span>
+            </button>
+          </div>
+
+          <button
+            type="button"
+            class="inline-flex h-10 shrink-0 items-center gap-2 rounded-full border border-[var(--border)] bg-[var(--surface)] px-4 text-sm font-medium text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)]"
+            @click="nextSortMode"
+          >
+            <svg class="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="16" y2="12"/><line x1="4" y1="18" x2="12" y2="18"/>
+            </svg>
+            {{ currentSortLabel }}
+          </button>
+        </div>
       </div>
     </header>
 
@@ -90,7 +128,7 @@
               </span>
               <span class="channel-card__logo-card-shade"></span>
             </span>
-            <span class="card-info">
+            <span v-if="densityMode === 'standard'" class="card-info">
               <span class="card-channel">
                 <span
                   class="channel-play-state-dot"
@@ -103,6 +141,14 @@
               </span>
               <span class="card-program-name">{{ cardSubtitle(item.channel) }}</span>
             </span>
+            <span
+              v-else-if="isCompactStatusVisible(item.channel)"
+              class="channel-card__compact-status channel-play-state-dot"
+              :class="channelStatusDotClass(item.channel)"
+              :title="channelStatusLabel(item.channel)"
+              :aria-label="channelStatusLabel(item.channel)"
+              role="img"
+            />
           </button>
         </div>
       </div>
@@ -122,6 +168,12 @@ import { loadCover, abortPendingCoverRequests } from '../composables/coverLoader
 import TagFilterRow from '../components/TagFilterRow.vue'
 import { channelIdentity, isChannelAllNotLive, isChannelAllUnsupported, isChannelAllUrlsBlocked } from '../utils/sourceIdentity'
 import { IPTV_CHANNEL_SORT_MODES, sortIptvChannels } from '../utils/iptvChannelList'
+import {
+  IPTV_CARD_DENSITIES,
+  defaultIptvCardDensity,
+  readIptvCardDensityPreference,
+  writeIptvCardDensityPreference,
+} from '../utils/iptvCardDensity'
 import { epgBatchRefreshDelay } from '../utils/epgViewing'
 import { iptvCardProgrammeTitle } from '../utils/iptvViewing'
 
@@ -451,6 +503,11 @@ function channelStatusLabel(ch) {
   return '可播放'
 }
 
+function isCompactStatusVisible(ch) {
+  const kind = channelStatusKind(ch)
+  return kind === 'warn' || kind === 'danger'
+}
+
 function defaultCoverClass() {
   return 'channel-card--logo-card'
 }
@@ -616,7 +673,15 @@ async function playChannel(ch) {
 const gridRef = ref(null)
 const containerWidth = ref(1024)
 const viewportWidth = ref(typeof window === 'undefined' ? 1280 : window.innerWidth)
+const densityPreference = ref(readIptvCardDensityPreference())
+const densityMode = computed(() => densityPreference.value || defaultIptvCardDensity(viewportWidth.value))
 let resizeObserver = null
+
+function setDensityMode(value) {
+  if (value !== IPTV_CARD_DENSITIES.STANDARD && value !== IPTV_CARD_DENSITIES.COMPACT) return
+  densityPreference.value = value
+  writeIptvCardDensityPreference(value)
+}
 
 const { y: scrollY } = useScroll(scrollRef)
 const throttledScrollY = useThrottleFn((val) => { scrollPosition.value = val }, 16)
@@ -626,8 +691,12 @@ watchEffect(() => { throttledScrollY(scrollY.value) })
 // 滚动时虚拟列表渲染新卡片 → 重新 observe（IntersectionObserver）
 watch(scrollPosition, () => { _scheduleObserveCards() })
 
-const gap = computed(() => 20)
-const cardFooterHeight = 44
+const gap = computed(() => {
+  if (densityMode.value !== IPTV_CARD_DENSITIES.COMPACT) return 20
+  return viewportWidth.value < 1024 ? 16 : 18
+})
+const cardFooterHeight = computed(() => densityMode.value === IPTV_CARD_DENSITIES.STANDARD ? 44 : 0)
+const cardVisualRatio = computed(() => densityMode.value === IPTV_CARD_DENSITIES.COMPACT ? 3 / 2 : 16 / 9)
 
 const columns = computed(() => {
   const w = viewportWidth.value
@@ -639,7 +708,7 @@ const columns = computed(() => {
 const rowHeight = computed(() => {
   const cols = columns.value
   const cardWidth = (containerWidth.value - gap.value * (cols - 1)) / cols
-  return cardWidth * 9 / 16 + cardFooterHeight
+  return cardWidth * cardVisualRatio.value + cardFooterHeight.value
 })
 
 const cardHeight = computed(() => rowHeight.value)
@@ -671,6 +740,10 @@ const virtualRows = computed(() => {
 
 const totalHeight = computed(() => rows.value.length * (rowHeight.value + gap.value))
 
+function updateViewportWidth() {
+  viewportWidth.value = window.innerWidth
+}
+
 onMounted(() => {
   resizeObserver = new ResizeObserver((entries) => {
     for (const entry of entries) {
@@ -679,9 +752,11 @@ onMounted(() => {
     }
   })
   if (gridRef.value) resizeObserver.observe(gridRef.value)
+  window.addEventListener('resize', updateViewportWidth)
 })
 
 onBeforeUnmount(() => {
+  window.removeEventListener('resize', updateViewportWidth)
   if (resizeObserver) resizeObserver.disconnect()
 })
 </script>

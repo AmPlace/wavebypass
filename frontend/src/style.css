@@ -820,3 +820,91 @@
   -ms-overflow-style: none;
   scrollbar-width: none;
 }
+
+/* IPTV Home density control. Keep this scoped to IPTV so Radio cards retain
+   their existing card/footer presentation. */
+.iptv-density-toggle {
+  display: inline-flex;
+  height: 2.5rem;
+  align-items: center;
+  gap: 2px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  padding: 3px;
+}
+
+.iptv-density-toggle__button {
+  display: inline-flex;
+  width: 2rem;
+  height: 2rem;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  color: var(--text-secondary);
+  transition: background-color 180ms ease, color 180ms ease, box-shadow 180ms ease;
+}
+
+.iptv-density-toggle__button svg {
+  width: 1rem;
+  height: 1rem;
+}
+
+.iptv-density-toggle__button:hover {
+  color: var(--text-primary);
+}
+
+.iptv-density-toggle__button--active {
+  background: var(--surface-active);
+  box-shadow: 0 1px 3px rgba(15,23,42,0.10);
+  color: var(--text-primary);
+}
+
+.iptv-main.iptv-density-compact .channel-card--logo-card {
+  --iptv-card-footer-height: 0px;
+}
+
+.iptv-main.iptv-density-compact .channel-card--logo-card::after,
+.iptv-main.iptv-density-compact .card-info {
+  display: none;
+}
+
+.iptv-main.iptv-density-compact .channel-card__logo-card-visual {
+  bottom: 0;
+}
+
+.iptv-main.iptv-density-compact .channel-card__logo-stage:not(.channel-card__logo-stage--cover) {
+  left: 9%;
+  right: 9%;
+  top: 9%;
+  bottom: 9%;
+}
+
+.iptv-main.iptv-density-compact .channel-card__center-logo:not(.channel-card__center-logo--cover) {
+  max-width: 82%;
+  max-height: 74%;
+}
+
+.iptv-main.iptv-density-compact .channel-card__text-logo {
+  width: min(88%, 360px);
+}
+
+.iptv-main.iptv-density-compact .channel-card__compact-status {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 3;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+}
+
+.iptv-main.iptv-density-compact .channel-card__compact-status.channel-play-state-dot--warn {
+  background: #F59E0B;
+  box-shadow: 0 0 0 3px rgba(245,158,11,0.14);
+}
+
+.iptv-main.iptv-density-compact .channel-card__compact-status.channel-play-state-dot--danger {
+  background: #DC2626;
+  box-shadow: 0 0 0 3px rgba(220,38,38,0.14);
+}

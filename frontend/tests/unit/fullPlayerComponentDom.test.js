@@ -545,6 +545,44 @@ test('首页和 FullPlayer 共用排序状态，默认基础顺序与双向切�
   assert.equal(store.currentIptvChannel.name, 'Bravo')
 })
 
+test('IptvHome density toggle defaults compact on mobile, persists selection, and keeps card clicks', async () => {
+  const storageKey = 'waveflow.iptv.card-density'
+  const originalWidth = window.innerWidth
+  Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 })
+  window.localStorage.removeItem(storageKey)
+  channels = [
+    channel('Alpha', 'alpha'),
+    channel('Not Live', 'not-live', { urls: [{ url: 'https://media.example/not-live.m3u8', source_id: 'not-live', source_type: 'hls', probe_status: 'not_live' }] }),
+  ]
+  installFetch()
+
+  try {
+    const { wrapper, store } = await mountHome()
+    assert.equal(domElement('.iptv-main').classList.contains('iptv-density-compact'), true)
+    assert.equal(domElements('.channel-card .card-info').length, 0)
+    assert.equal(domElements('.channel-card .card-program-name').length, 0)
+    assert.equal(domElements('.channel-card__compact-status').length, 1, 'Compact 只保留异常状态指示')
+    assert.equal(domElement('.channel-card__compact-status').getAttribute('aria-label'), '未开播')
+
+    await clickDom('.channel-card', 0)
+    assert.equal(store.currentIptvChannel.name, 'Alpha')
+    assert.equal(domElement('.channel-card').getAttribute('data-canonical-key'), 'alpha')
+
+    await clickDom('[data-density-option="standard"]')
+    assert.equal(domElement('.iptv-main').classList.contains('iptv-density-compact'), false)
+    assert.equal(domElements('.channel-card .card-info').length, 2)
+    assert.equal(window.localStorage.getItem(storageKey), 'standard')
+
+    wrapper.unmount()
+    document.body.innerHTML = '<div id="app"></div>'
+    await mountHome()
+    assert.equal(domElement('.iptv-main').classList.contains('iptv-density-compact'), false)
+  } finally {
+    window.localStorage.removeItem(storageKey)
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth })
+  }
+})
+
 test('同名不同 canonical identity 只有当前频道行 active', async () => {
   channels = [
     channel('同名频道', 'same-a', { canonical_key: 'same-a' }),
