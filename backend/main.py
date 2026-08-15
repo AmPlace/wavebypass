@@ -4626,7 +4626,7 @@ def _subscription_urls_for_channel(
 @app.get("/api/iptv/subscription.m3u")
 async def export_iptv_subscription(
     request: Request,
-    mode: str = 'hybrid',
+    mode: str = 'smart',
     healthy_only: bool = True,
     include_rtsp: bool = False,
     include_epg: bool = True,

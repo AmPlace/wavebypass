@@ -27,7 +27,7 @@ class ChannelDataCorrectnessGoal2Test(unittest.IsolatedAsyncioTestCase):
         self.tmpdir.cleanup()
 
     async def test_name_candidate_preserves_structured_qualifiers(self):
-        from m3u8_parser import channel_name_semantics, normalize_channel_name
+        from m3u8_parser import channel_name_semantics, normalize_channel_name, source_display_label
 
         semantics = channel_name_semantics('【福建电信】CCTV-5体育高清测试源1080P')
         self.assertEqual(semantics['canonical_candidate'], 'cctv5')
@@ -38,6 +38,13 @@ class ChannelDataCorrectnessGoal2Test(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(normalize_channel_name('CCTV5+'), 'cctv5+')
         self.assertEqual(normalize_channel_name('CCTV4欧洲'), 'cctv4欧洲')
         self.assertEqual(normalize_channel_name('CCTV4美洲'), 'cctv4美洲')
+        self.assertEqual(
+            source_display_label(
+                raw_name='CCTV5电信1080P', subscription_title='福建联通综合频道包',
+                source_type='hls',
+            ),
+            '福建联通 · 1080P',
+        )
 
     async def test_url_only_refresh_keeps_source_row_but_changes_revision(self):
         from security.source_ids import source_id_for, source_revision_for
