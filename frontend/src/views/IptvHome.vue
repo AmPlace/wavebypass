@@ -53,7 +53,7 @@
         >
           <button
             v-for="item in row.items"
-            :key="item.channel.name"
+            :key="item.channel.logical_channel_id || item.channel.canonical_key || item.channel.name"
             type="button"
             :aria-label="`播放 ${item.channel.name}`"
             :style="{ height: `${cardHeight}px` }"

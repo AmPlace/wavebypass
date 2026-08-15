@@ -4327,7 +4327,7 @@ async def get_epg_programs(canonical_key: str, date: str = '', tz: str = ''):
     if effective_target and effective_target.get('channel_id'):
         sid = effective_target['source_id']
         cid = effective_target['channel_id']
-        effective_match_status = (comparison.get('shadow_binding') or {}).get('status', 'matched')
+        effective_match_status = (comparison.get('binding') or {}).get('status', 'matched')
     else:
         tzinfo = _epg_zoneinfo(tz)
         return {

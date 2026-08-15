@@ -43,6 +43,8 @@ export function sourceIdentity(entry) {
 }
 
 export function channelIdentity(channel) {
+  const logicalId = String(channel?.logical_channel_id || '').trim()
+  if (logicalId) return `logical:${logicalId}`
   const canonicalKey = String(channel?.canonical_key || '').trim()
   if (canonicalKey) return canonicalKey
   const name = String(channel?.name || '').trim()
