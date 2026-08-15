@@ -163,6 +163,27 @@ class DeveloperSideloadLifecycleTest(unittest.IsolatedAsyncioTestCase):
             await subsystem.install_developer_local(local_manifest)
         self.assertEqual(raised.exception.code, "PLUGIN_UNTRUSTED")
 
+    async def test_developer_local_high_risk_permission_uses_local_trust_boundary(self):
+        from waveflow_plugin_cli import build_project
+
+        subsystem = await self._make_subsystem()
+        await subsystem.set_developer_mode(True)
+        project = Path(self.tmp.name) / "direct-yunting"
+        shutil.copytree(Path(__file__).parents[1] / "bundled_plugins" / "yunting", project)
+        manifest = json.loads((project / "manifest.json").read_text(encoding="utf-8"))
+        manifest["permissions"]["network"]["direct"] = True
+        (project / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        local_manifest = str(build_project(project)["manifest"])
+
+        projection = await subsystem.approve_developer_local_permission(
+            local_manifest, "network.direct", "developer-test",
+        )
+        self.assertEqual([item["name"] for item in projection["pending"]], [])
+        installed = await subsystem.install_developer_local(local_manifest)
+        self.assertEqual(installed["trust_class"], "developer_local")
+        row = await self.db.get_plugin_installation("org.waveflow", "yunting")
+        self.assertEqual(row["lifecycle_state"], "active")
+
 
 if __name__ == "__main__":
     unittest.main()

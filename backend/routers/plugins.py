@@ -52,6 +52,11 @@ class DeveloperInstallRequest(BaseModel):
     path: str = Field(min_length=1, max_length=4096)
 
 
+class DeveloperPermissionRequest(BaseModel):
+    path: str = Field(min_length=1, max_length=4096)
+    permission: str = Field(min_length=1, max_length=128)
+
+
 def _subsystem(request: Request):
     subsystem = getattr(request.app.state, "plugin_subsystem", None)
     if subsystem is None:
@@ -250,6 +255,18 @@ async def install_developer_plugin(body: DeveloperInstallRequest, request: Reque
                     )
                 result = {**result, "radio_refresh": refresh}
         return result
+    except PluginError as exc:
+        raise _error(exc) from exc
+
+
+@router.post("/developer/local/permission")
+async def approve_developer_plugin_permission(
+    body: DeveloperPermissionRequest, request: Request,
+) -> dict[str, Any]:
+    try:
+        return await _subsystem(request).approve_developer_local_permission(
+            body.path, body.permission, "developer_local_api",
+        )
     except PluginError as exc:
         raise _error(exc) from exc
 

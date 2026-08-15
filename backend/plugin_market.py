@@ -1303,12 +1303,18 @@ class PluginMarketService:
         return await permission_projection(validate_manifest(json.loads(row["manifest_json"])))
 
     async def approve_permission(self, identity: str, packages: Iterable[dict], permission: str, actor: str) -> dict[str, Any]:
-        candidates = candidates_from_packages(packages, os_name=self.os_name, arch=self.arch)
-        candidate = select_candidate(candidates, identity)
+        packages = list(packages)
+        if any(package.get("_developer_local") is True for package in packages):
+            candidate = await self._developer_candidate_from_packages(packages, identity)
+            trust_policy = DeveloperLocalTrustPolicy()
+        else:
+            candidates = candidates_from_packages(packages, os_name=self.os_name, arch=self.arch)
+            candidate = select_candidate(candidates, identity)
+            trust_policy = self.trust_policy
         payload = _read_artifact(self.store._source(candidate.local_reference), max_bytes=int(candidate.artifact["size_bytes"]))
         if len(payload) != int(candidate.artifact["size_bytes"]) or hashlib.sha256(payload).hexdigest() != candidate.artifact["sha256"]:
             raise PluginError("ARTIFACT_INTEGRITY_FAILED", "Plugin artifact failed integrity verification", category="artifact")
-        self.trust_policy.verify(candidate.manifest, candidate.artifact, payload)
+        trust_policy.verify(candidate.manifest, candidate.artifact, payload)
         request = next((item for item in requested_permissions(candidate.manifest) if item.name == permission), None)
         if request is None or request.name not in {"network.direct"}:
             raise PluginError("INVALID_CAPABILITY_REQUEST", "Permission is not approvable", category="permission")

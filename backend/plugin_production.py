@@ -1086,9 +1086,42 @@ class ProductionPluginSubsystem:
                 "Developer Mode must be enabled before installing a local Plugin",
                 category="trust",
             )
-        package = await asyncio.to_thread(load_developer_package, path)
-        manifest = validate_manifest(package["plugin_manifest"])
+        prepared, staging_root = await self._stage_developer_local_package(path)
+        manifest = validate_manifest(prepared["plugin_manifest"])
         identity = manifest.identity
+        try:
+            return await self.service.install_developer_local([prepared], identity)
+        finally:
+            await asyncio.to_thread(shutil.rmtree, staging_root, True)
+
+    async def approve_developer_local_permission(
+        self, path: str, permission: str, actor: str,
+    ) -> dict[str, Any]:
+        """Approve a high-risk permission for an explicitly selected local package.
+
+        Local packages must use the same normal permission approval boundary as
+        Market packages, but their unsigned marker is verified by the local
+        trust policy rather than the Official publisher trust anchor.
+        """
+        if not await self.developer_mode_enabled():
+            raise PluginError(
+                "DEVELOPER_MODE_REQUIRED",
+                "Developer Mode must be enabled before approving a local Plugin permission",
+                category="trust",
+            )
+        package, staging_root = await self._stage_developer_local_package(path)
+        try:
+            manifest = validate_manifest(package["plugin_manifest"])
+            return await self.service.approve_permission(
+                manifest.identity, [package], permission, actor,
+            )
+        finally:
+            await asyncio.to_thread(shutil.rmtree, staging_root, True)
+
+    async def _stage_developer_local_package(
+        self, path: str,
+    ) -> tuple[dict[str, Any], Path]:
+        package = await asyncio.to_thread(load_developer_package, path)
         staging_root = Path(tempfile.mkdtemp(prefix="developer-local-", dir=self.download_root))
         try:
             local_artifacts = []
@@ -1110,9 +1143,10 @@ class ProductionPluginSubsystem:
                 "source_key": DEVELOPER_LOCAL_SOURCE_KEY,
                 "is_builtin": False,
             }
-            return await self.service.install_developer_local([prepared], identity)
-        finally:
+            return prepared, staging_root
+        except BaseException:
             await asyncio.to_thread(shutil.rmtree, staging_root, True)
+            raise
 
     async def repair(self, identity: str, packages: Iterable[dict[str, Any]]) -> dict[str, Any]:
         prepared, temp_paths = await self._prepare_packages(packages)
