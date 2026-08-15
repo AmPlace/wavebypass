@@ -122,7 +122,8 @@ import { loadCover, abortPendingCoverRequests } from '../composables/coverLoader
 import TagFilterRow from '../components/TagFilterRow.vue'
 import { channelIdentity, isChannelAllNotLive, isChannelAllUnsupported, isChannelAllUrlsBlocked } from '../utils/sourceIdentity'
 import { IPTV_CHANNEL_SORT_MODES, sortIptvChannels } from '../utils/iptvChannelList'
-import { channelProgrammeSubtitle, epgBatchRefreshDelay } from '../utils/epgViewing'
+import { epgBatchRefreshDelay } from '../utils/epgViewing'
+import { iptvCardProgrammeTitle } from '../utils/iptvViewing'
 
 const playerStore = usePlayerStore()
 const toastStore = useToastStore()
@@ -427,7 +428,7 @@ function isAnyPlayable(ch) {
 
 function cardSubtitle(ch) {
   const current = epgMap.value[ch.canonical_key]?.current
-  return channelProgrammeSubtitle(current, ch.group_name || '')
+  return iptvCardProgrammeTitle(current, ch.group_name || '')
 }
 
 function channelStatusKind(ch) {

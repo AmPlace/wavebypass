@@ -825,7 +825,7 @@ test('FullPlayer 区分节目单 loading、无 EPG 和请求失败且不阻塞�
   assert.equal(second.store.playbackError, '')
 })
 
-test('IptvHome batch-current 显示 current 结束时间并在最近节目边界后自动更新', async () => {
+test('IptvHome batch-current 只显示 current 节目名并在最近节目边界后自动更新', async () => {
   channels = [channel('Alpha', 'alpha', { group_name: '测试分组' })]
   let batchCount = 0
   const bodies = []
@@ -843,12 +843,12 @@ test('IptvHome batch-current 显示 current 结束时间并在最近节目边界
   }
 
   const { wrapper } = await mountHome()
-  assert.match(domElement('.card-program-name').textContent, /第一档节目 · \d{2}:\d{2} 结束/)
+  assert.equal(domElement('.card-program-name').textContent.trim(), '第一档节目')
   assert.deepEqual(bodies[0], { canonical_keys: ['alpha'] })
   await new Promise((resolve) => setTimeout(resolve, 1_350))
   await flushPromises()
   assert.equal(batchCount, 2)
-  assert.match(domElement('.card-program-name').textContent, /第二档节目 · \d{2}:\d{2} 结束/)
+  assert.equal(domElement('.card-program-name').textContent.trim(), '第二档节目')
 
   wrapper.unmount()
   await new Promise((resolve) => setTimeout(resolve, 1_350))
