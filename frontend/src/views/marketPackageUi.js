@@ -45,7 +45,7 @@ export function requestedPermissions(pkg) {
 }
 
 export function permissionLabel(name) {
-  return ({ 'network.managed': 'Managed Network', 'network.direct': 'Direct Network' })[name] || name
+  return ({ 'network.managed': 'Managed Network', 'network.direct': 'Direct Network', 'network.managed_http': 'Managed Plain HTTP' })[name] || name
 }
 
 export function pluginRuntimeLabel(pkg) {

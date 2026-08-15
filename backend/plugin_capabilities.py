@@ -73,10 +73,16 @@ class CapabilityGateway:
             if len(encoded) > MAX_HTTP_REQUEST_BYTES:
                 raise _invalid("HTTP request body exceeds the limit")
         allow_private = bool(policy.get("allow_private")) if isinstance(policy, dict) else False
+        # Plain HTTP is a separately declared, separately approved managed
+        # capability.  It only changes the accepted transport scheme; all
+        # target, DNS, redirect, host, size, and timeout checks remain active.
+        allow_http = bool(policy.get("allow_http")) if isinstance(policy, dict) else False
         allowed_hosts = policy.get("allowed_hosts") if isinstance(policy, dict) else None
         current = url
         for redirect_count in range(MAX_HTTP_REDIRECTS + 1):
-            await self._validate_http_target(current, allow_private=allow_private, allowed_hosts=allowed_hosts)
+            await self._validate_http_target(
+                current, allow_private=allow_private, allowed_hosts=allowed_hosts, allow_http=allow_http,
+            )
             try:
                 async with self.client.stream(
                     method, current, headers=headers, params=params, content=content, json=json_body,
@@ -146,10 +152,11 @@ class CapabilityGateway:
         return {"status": result["status"], "body": base64.b64decode(result["body"]),
                 "content_type": result["headers"].get("content-type", "")}
 
-    async def _validate_http_target(self, url: str, *, allow_private: bool, allowed_hosts: Any) -> None:
+    async def _validate_http_target(self, url: str, *, allow_private: bool, allowed_hosts: Any,
+                                    allow_http: bool = False) -> None:
         try:
             await assert_safe_target_url(url, allow_private=allow_private, allow_loopback=False,
-                                         allowed_schemes={"https"})
+                                         allowed_schemes={"http", "https"} if allow_http else {"https"})
         except UnsafeTargetError as exc:
             raise PluginError("CAPABILITY_DENIED", "Plugin network target is not permitted",
                               category="permission") from exc

@@ -184,6 +184,62 @@ class DeveloperSideloadLifecycleTest(unittest.IsolatedAsyncioTestCase):
         row = await self.db.get_plugin_installation("org.waveflow", "yunting")
         self.assertEqual(row["lifecycle_state"], "active")
 
+    async def test_developer_local_plain_http_requires_explicit_approval(self):
+        from plugin_runtime import PluginError
+        from waveflow_plugin_cli import build_project
+
+        subsystem = await self._make_subsystem()
+        await subsystem.set_developer_mode(True)
+        project = Path(self.tmp.name) / "plain-http-yunting"
+        shutil.copytree(Path(__file__).parents[1] / "bundled_plugins" / "yunting", project)
+        manifest = json.loads((project / "manifest.json").read_text(encoding="utf-8"))
+        manifest["permissions"]["network"]["allow_http"] = True
+        (project / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        local_manifest = str(build_project(project)["manifest"])
+
+        with self.assertRaises(PluginError) as pending:
+            await subsystem.install_developer_local(local_manifest)
+        self.assertEqual(pending.exception.code, "PERMISSION_APPROVAL_REQUIRED")
+        projection = await subsystem.approve_developer_local_permission(
+            local_manifest, "network.managed_http", "developer-test",
+        )
+        self.assertEqual([item["name"] for item in projection["pending"]], [])
+        installed = await subsystem.install_developer_local(local_manifest)
+        self.assertEqual(installed["trust_class"], "developer_local")
+
+    async def test_developer_local_plain_http_revoke_is_fail_closed(self):
+        from plugin_runtime import PluginError
+        from waveflow_plugin_cli import build_project
+
+        subsystem = await self._make_subsystem()
+        await subsystem.set_developer_mode(True)
+        project = Path(self.tmp.name) / "revoke-plain-http-yunting"
+        shutil.copytree(Path(__file__).parents[1] / "bundled_plugins" / "yunting", project)
+        manifest = json.loads((project / "manifest.json").read_text(encoding="utf-8"))
+        manifest["permissions"]["network"]["allow_http"] = True
+        (project / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        local_manifest = str(build_project(project)["manifest"])
+
+        await subsystem.approve_developer_local_permission(
+            local_manifest, "network.managed_http", "developer-test",
+        )
+        await subsystem.install_developer_local(local_manifest)
+        await subsystem.revoke_permission(
+            "org.waveflow/yunting", "network.managed_http", "developer-test",
+        )
+        row = await self.db.get_plugin_installation("org.waveflow", "yunting")
+        self.assertEqual((row["enabled"], row["lifecycle_state"]), (1, "unavailable"))
+        with self.assertRaises(PluginError) as denied:
+            await subsystem.service.enable("org.waveflow/yunting")
+        self.assertEqual(denied.exception.code, "PERMISSION_APPROVAL_REQUIRED")
+
+        await subsystem.approve_developer_local_permission(
+            local_manifest, "network.managed_http", "developer-test",
+        )
+        self.assertEqual(
+            (await subsystem.service.enable("org.waveflow/yunting"))["lifecycle_state"], "active",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

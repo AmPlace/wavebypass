@@ -1356,6 +1356,8 @@ def _package_card(package: dict) -> dict:
                     permissions.append("network.managed")
                 if network.get("direct") is True:
                     permissions.append("network.direct")
+                if network.get("allow_http") is True:
+                    permissions.append("network.managed_http")
             if isinstance(raw_permissions, dict):
                 permissions.extend(
                     str(key) for key, value in raw_permissions.items()

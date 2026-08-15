@@ -18,8 +18,12 @@ def _clear_modules():
             sys.modules.pop(name, None)
 
 
-def plugin_package(*, version: str = "1.1.0", direct: bool = False) -> dict:
-    permissions = {"network": {"managed": True, **({"direct": True} if direct else {})}}
+def plugin_package(*, version: str = "1.1.0", direct: bool = False, allow_http: bool = False) -> dict:
+    permissions = {"network": {
+        "managed": True,
+        **({"direct": True} if direct else {}),
+        **({"allow_http": True} if allow_http else {}),
+    }}
     return {
         "id": "official::fixture-plugin",
         "name": "Fixture Plugin",
@@ -141,6 +145,10 @@ class PluginManagementApiTest(unittest.IsolatedAsyncioTestCase):
     def test_plugin_card_flattens_network_permissions(self):
         card = self.market._package_card(self.market._normalize_package(plugin_package(direct=True)))
         self.assertEqual(card["plugin"]["permissions"], ["network.direct", "network.managed"])
+        http_card = self.market._package_card(
+            self.market._normalize_package(plugin_package(allow_http=True)),
+        )
+        self.assertEqual(http_card["plugin"]["permissions"], ["network.managed", "network.managed_http"])
 
     async def test_market_routes_plugin_install_update_and_uninstall(self):
         package = plugin_package()

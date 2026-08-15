@@ -9,7 +9,8 @@ import database as db
 from plugin_runtime import PluginError, PluginManifest
 
 
-HIGH_RISK_PERMISSIONS = frozenset({"network.direct"})
+MANAGED_HTTP_PERMISSION = "network.managed_http"
+HIGH_RISK_PERMISSIONS = frozenset({"network.direct", MANAGED_HTTP_PERMISSION})
 
 
 @dataclass(frozen=True)
@@ -27,6 +28,8 @@ def requested_permissions(manifest: PluginManifest) -> tuple[PermissionRequest, 
         requests.append(_request("network.managed", "standard", True))
     if isinstance(network, dict) and network.get("direct") is True:
         requests.append(_request("network.direct", "high", True))
+    if isinstance(network, dict) and network.get("allow_http") is True:
+        requests.append(_request(MANAGED_HTTP_PERMISSION, "high", True))
     return tuple(requests)
 
 

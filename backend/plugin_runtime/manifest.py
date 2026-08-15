@@ -172,13 +172,15 @@ def validate_manifest(data: Any, *, core_version: str = "0.1.0") -> PluginManife
     network = permissions.get("network")
     if network is not None:
         if (not isinstance(network, dict)
-                or not set(network).issubset({"managed", "direct", "allowed_hosts", "allow_private"})
+                or not set(network).issubset({"managed", "direct", "allow_http", "allowed_hosts", "allow_private"})
                 or any(key in network and not isinstance(network[key], bool)
-                       for key in ("managed", "direct", "allow_private"))
+                       for key in ("managed", "direct", "allow_http", "allow_private"))
                 or ("allowed_hosts" in network and
                     (not isinstance(network["allowed_hosts"], list)
                      or any(not isinstance(value, str) or not value for value in network["allowed_hosts"])) )):
             raise _malformed("Invalid network permission declaration")
+        if network.get("allow_http") is True and network.get("managed") is not True:
+            raise _malformed("Plain HTTP permission requires managed network")
     runtime = data["runtime"]
     if not isinstance(runtime, dict) or runtime.get("ipc") != "stdio_framed_json_v1":
         raise PluginError("PLUGIN_INCOMPATIBLE", "Unsupported plugin runtime", category="compatibility")

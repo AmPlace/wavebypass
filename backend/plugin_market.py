@@ -22,7 +22,7 @@ import database as db
 from plugin_runtime import LifecycleState, PluginError, PluginInstance, PluginManifest, PluginRuntime, validate_manifest
 from plugin_runtime.manifest import _range_allows, _version_tuple
 from plugin_python_runtime import PythonEnvironmentManager, select_dependency_artifacts, validate_python_runtime
-from plugin_permissions import permission_projection, require_high_risk_approvals, requested_permissions
+from plugin_permissions import HIGH_RISK_PERMISSIONS, permission_projection, require_high_risk_approvals, requested_permissions
 
 
 PLUGIN_PACKAGE_TYPE = "plugin_package"
@@ -1316,7 +1316,7 @@ class PluginMarketService:
             raise PluginError("ARTIFACT_INTEGRITY_FAILED", "Plugin artifact failed integrity verification", category="artifact")
         trust_policy.verify(candidate.manifest, candidate.artifact, payload)
         request = next((item for item in requested_permissions(candidate.manifest) if item.name == permission), None)
-        if request is None or request.name not in {"network.direct"}:
+        if request is None or request.name not in HIGH_RISK_PERMISSIONS:
             raise PluginError("INVALID_CAPABILITY_REQUEST", "Permission is not approvable", category="permission")
         await db.set_plugin_permission_approval(
             candidate.manifest.publisher_id, candidate.manifest.plugin_id, request.name, request.fingerprint,
@@ -1334,7 +1334,7 @@ class PluginMarketService:
         row = await self._row(identity)
         manifest = validate_manifest(json.loads(row["manifest_json"]))
         request = next((item for item in requested_permissions(manifest) if item.name == permission), None)
-        if request is None or request.name not in {"network.direct"}:
+        if request is None or request.name not in HIGH_RISK_PERMISSIONS:
             raise PluginError("INVALID_CAPABILITY_REQUEST", "Permission is not revocable", category="permission")
         instance = self._active.pop(identity, None)
         if instance:
@@ -1345,7 +1345,7 @@ class PluginMarketService:
         )
         await db.set_plugin_enabled(
             row["publisher_id"], row["plugin_id"], True,
-            lifecycle_state="unavailable", error="PERMISSION_APPROVAL_REQUIRED: network.direct",
+            lifecycle_state="unavailable", error=f"PERMISSION_APPROVAL_REQUIRED: {permission}",
         )
         return await permission_projection(manifest)
 
