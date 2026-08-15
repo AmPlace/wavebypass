@@ -1217,12 +1217,15 @@ async function resumeIptvFromMediaSession() {
 }
 
 const iptvSourceOptions = computed(() => {
+  const selectedEntry = playerStore.iptvUrls[playerStore.iptvUrlIndex]
+  const selectedKey = selectedEntry ? sourceRaceKey(selectedEntry) : ''
   return playerStore.iptvUrls.map((entry, index) => {
     const targetUrl = sourceTargetUrl(entry)
     const isProxySource = entry.type === 'proxy' || entry.via_proxy
     const st = sourceType(entry)
     const typeLabel = st === 'youtube' ? 'YT' : isProxySource ? '代理' : '直连'
     const host = sourceHost(targetUrl)
+    const recommendedLabel = String(entry.recommended_display_label || '').trim()
     const working = Number(entry.is_working)
     const latency = Number(entry.latency_ms) > 0 ? `${entry.latency_ms}ms` : ''
     const runtimeKey = sourceRaceKey(entry)
@@ -1253,11 +1256,11 @@ const iptvSourceOptions = computed(() => {
       identityKey: sourceRaceKey(entry),
       type: st === 'youtube' ? 'youtube' : isProxySource ? 'proxy' : entry.type,
       typeLabel,
-      title: `${index + 1}. ${host}`,
+      title: recommendedLabel || host || `线路 ${index + 1}`,
       meta,
       status: runtimeStatus,
       statusClass: sourceStatusClass(runtimeStatus),
-      active: index === playerStore.iptvUrlIndex,
+      active: selectedKey ? runtimeKey === selectedKey : index === playerStore.iptvUrlIndex,
       disabled,
     }
   })

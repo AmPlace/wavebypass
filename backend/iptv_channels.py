@@ -8,7 +8,12 @@ diagnostic shadow model for the later EPG identity work.
 from datetime import datetime, timezone
 
 import database as db
-from m3u8_parser import clean_channel_display_name, normalize_channel_name, _channel_alias
+from m3u8_parser import channel_name_semantics, clean_channel_display_name, normalize_channel_name, _channel_alias
+
+
+_GENERIC_CANDIDATES = frozenset({
+    '新闻综合', '综合频道', '综合', '公共频道', '新闻频道', '地方频道',
+})
 
 
 def _utc_now() -> str:
@@ -16,6 +21,9 @@ def _utc_now() -> str:
 
 
 def _display_name(raw_name: str) -> str:
+    # Keep user/source spelling for the logical display name; qualifiers are
+    # removed only from the matcher candidate and remain available on source
+    # rows.  This preserves existing UI behavior for names such as 测试新闻台.
     display_name = clean_channel_display_name(raw_name)
     primary_name = _channel_alias.get_primary(display_name)
     if primary_name and primary_name != display_name:
@@ -27,15 +35,30 @@ def _build_runtime_groups(raw_channels: list[dict]) -> list[dict]:
     groups: dict[str, dict] = {}
     for channel in raw_channels:
         channel_id = int(channel['id'])
-        canonical_key = normalize_channel_name(channel['name'])
-        if not canonical_key:
+        semantics = channel_name_semantics(channel['name'])
+        candidate = str(semantics.get('canonical_candidate') or '').strip()
+        if not candidate:
             continue
+        stable = bool(
+            str(channel.get('market_source_item_id') or '').strip()
+            and not str(channel.get('market_source_item_id') or '').startswith('auto-')
+        ) or bool(str(channel.get('tvg_id') or '').strip()) or (
+            str(channel.get('source_type') or '').lower() == 'adapter'
+            and '://' in str(channel.get('url') or '')
+        )
+        # Generic names carry insufficient cross-subscription evidence.  Keep
+        # them subscription-local unless a stable provider/EPG identity exists.
+        match_key = candidate
+        if candidate in _GENERIC_CANDIDATES and not stable:
+            match_key = f'{candidate}::subscription:{int(channel["subscription_id"])}'
         group = groups.setdefault(
-            canonical_key,
+            match_key,
             {
-                'canonical_key': canonical_key,
+                'canonical_key': match_key,
                 'display_name': _display_name(channel['name']),
                 'channel_ids': [],
+                'membership_reason': 'stable_identity' if stable else 'conservative_name',
+                'membership_confidence': 100 if stable else 70,
             },
         )
         group['channel_ids'].append(channel_id)

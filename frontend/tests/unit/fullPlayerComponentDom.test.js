@@ -701,13 +701,15 @@ test('混合 supported + unsupported 频道仍可点击并使用受支持 source
 })
 
 test('播放源菜单切换 direct→proxy→direct，active source 与 store 一致', async () => {
-  const sourceA = { url: 'https://media.example/direct.m3u8', source_id: 'direct', source_type: 'hls', type: 'direct', probe_status: 'online', is_working: 1 }
-  const sourceB = { url: 'http://localhost:5173/api/media/channel/test/playlist.m3u8', source_id: 'proxy', source_type: 'hls', type: 'proxy', via_proxy: true, probe_status: 'online', is_working: 1 }
+  const sourceA = { url: 'https://media.example/direct.m3u8', source_id: 'direct', source_type: 'hls', type: 'direct', recommended_display_label: '福建联通 · 1080P', probe_status: 'online', is_working: 1 }
+  const sourceB = { url: 'http://localhost:5173/api/media/channel/test/playlist.m3u8', source_id: 'proxy', source_type: 'hls', type: 'proxy', via_proxy: true, recommended_display_label: 'mzky · 4K', probe_status: 'online', is_working: 1 }
   const current = { ...channels[0], urls: [sourceA, sourceB] }
   const { wrapper, store } = await mountPlayer({ current })
   await clickDom('[aria-label="切换播放源"]')
   const options = domElements('#iptv-source-menu button')
   assert.equal(options.length, 2)
+  assert.match(options[0].textContent, /福建联通 · 1080P/)
+  assert.match(options[1].textContent, /mzky · 4K/)
   options[1].click()
   await flushPromises()
   assert.equal(store.iptvUrls[store.iptvUrlIndex].source_id, 'proxy')

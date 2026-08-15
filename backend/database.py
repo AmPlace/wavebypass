@@ -102,7 +102,8 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     created_at    TEXT NOT NULL,
     custom_ua     TEXT DEFAULT '',
     force_proxy   INTEGER DEFAULT 0,
-    last_tested   TEXT DEFAULT ''
+    last_tested   TEXT DEFAULT '',
+    refresh_generation INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS channels (
@@ -1040,6 +1041,7 @@ async def initialize():
         except sqlite3.OperationalError:
             pass
         for col, typ, default in [
+            ('refresh_generation', 'INTEGER', '0'),
             ('source_type', 'TEXT', "'hls'"),
             ('youtube_video_id', 'TEXT', "''"),
             ('referer', 'TEXT', "''"),
@@ -1818,6 +1820,50 @@ async def update_subscription(sub_id: int, **kwargs):
     await asyncio.to_thread(_update)
 
 
+class SubscriptionRefreshSuperseded(Exception):
+    """A refresh completed after a newer refresh claimed the subscription."""
+
+
+async def begin_subscription_refresh(sub_id: int) -> int:
+    """Atomically claim the next refresh generation for one subscription."""
+    def _begin():
+        conn = _connect()
+        try:
+            conn.execute('BEGIN IMMEDIATE')
+            row = conn.execute(
+                "SELECT refresh_generation FROM subscriptions WHERE id=?",
+                (sub_id,),
+            ).fetchone()
+            if row is None:
+                conn.rollback()
+                raise ValueError('订阅不存在')
+            generation = int(row['refresh_generation'] or 0) + 1
+            conn.execute(
+                "UPDATE subscriptions SET refresh_generation=? WHERE id=?",
+                (generation, sub_id),
+            )
+            conn.commit()
+            return generation
+        finally:
+            conn.close()
+    return await asyncio.to_thread(_begin)
+
+
+async def mark_subscription_invalid_if_current(sub_id: int, generation: int) -> bool:
+    def _mark():
+        conn = _connect()
+        try:
+            with conn:
+                cursor = conn.execute(
+                    "UPDATE subscriptions SET valid=0 WHERE id=? AND refresh_generation=?",
+                    (sub_id, int(generation)),
+                )
+                return cursor.rowcount == 1
+        finally:
+            conn.close()
+    return await asyncio.to_thread(_mark)
+
+
 async def delete_subscription(sub_id: int):
     def _delete():
         conn = _connect()
@@ -1910,6 +1956,26 @@ def _channel_identity_key(channel: dict) -> tuple:
     return tuple(values)
 
 
+def _channel_stable_identity_key(channel: dict) -> tuple | None:
+    """Return a source continuity key that deliberately excludes URL.
+
+    Stable market item/tvg ids and provider-owned adapter references are strong
+    evidence.  Plain M3U names are only considered by the subscription-local
+    single-candidate fallback in ``_sync_channels_conn``.
+    """
+    values = {field: _channel_config_value(channel, field) for field in _CHANNEL_CONFIG_FIELDS}
+    market_item = values.get('market_source_item_id', '')
+    if market_item and not market_item.startswith('auto-'):
+        return ('market_item', values.get('market_package_id', ''), market_item)
+    tvg_id = values.get('tvg_id', '')
+    if tvg_id:
+        return ('tvg_id', tvg_id.casefold())
+    url = values.get('url', '')
+    if values.get('source_type') == 'adapter' and '://' in url:
+        return ('adapter_reference', values.get('adapter_provider', ''), url)
+    return None
+
+
 def _prepare_channels(channels: list[dict]) -> list[tuple[dict, dict]]:
     prepared = []
     for channel in channels:
@@ -1928,8 +1994,23 @@ def _sync_channels_conn(conn: sqlite3.Connection, sub_id: int, prepared: list[tu
         (sub_id,),
     ).fetchall()
     existing_by_key: dict[tuple, list[sqlite3.Row]] = {}
+    existing_by_stable_key: dict[tuple, list[sqlite3.Row]] = {}
+    existing_by_fallback_key: dict[tuple, list[sqlite3.Row]] = {}
     for row in existing_rows:
-        existing_by_key.setdefault(_channel_identity_key(dict(row)), []).append(row)
+        row_dict = dict(row)
+        existing_by_key.setdefault(_channel_identity_key(row_dict), []).append(row)
+        stable = _channel_stable_identity_key(row_dict)
+        if stable:
+            existing_by_stable_key.setdefault(stable, []).append(row)
+        else:
+            from m3u8_parser import channel_name_semantics
+            semantics = channel_name_semantics(row_dict.get('name', ''))
+            fallback = (
+                semantics['canonical_candidate'],
+                row_dict.get('group_name', ''),
+                row_dict.get('logo_url', ''),
+            )
+            existing_by_fallback_key.setdefault(fallback, []).append(row)
 
     retained_ids = []
     update_assignments = ', '.join(f"{field}=?" for field in _CHANNEL_UPDATE_FIELDS)
@@ -1939,6 +2020,22 @@ def _sync_channels_conn(conn: sqlite3.Connection, sub_id: int, prepared: list[tu
 
     for original, values in prepared:
         matches = existing_by_key.get(_channel_identity_key(original)) or []
+        if not matches:
+            stable = _channel_stable_identity_key(original)
+            if stable:
+                matches = existing_by_stable_key.get(stable) or []
+            else:
+                from m3u8_parser import channel_name_semantics
+                semantics = channel_name_semantics(values.get('name', ''))
+                fallback = (
+                    semantics['canonical_candidate'],
+                    values.get('group_name', ''),
+                    values.get('logo_url', ''),
+                )
+                candidates = existing_by_fallback_key.get(fallback) or []
+                # Weak name evidence is accepted only for one-to-one
+                # subscription-local continuity; it is never cross-source.
+                matches = candidates if len(candidates) == 1 else []
         existing = matches.pop(0) if matches else None
         if existing is not None:
             row_id = int(existing['id'])
@@ -2027,6 +2124,7 @@ async def replace_subscription_channels_atomic(
     channels: list[dict],
     *,
     valid: int | None = None,
+    expected_generation: int | None = None,
 ) -> None:
     """Replace channels and subscription refresh metadata atomically."""
     prepared = _prepare_channels(channels)
@@ -2035,6 +2133,13 @@ async def replace_subscription_channels_atomic(
         conn = _connect()
         try:
             with conn:
+                if expected_generation is not None:
+                    row = conn.execute(
+                        "SELECT refresh_generation FROM subscriptions WHERE id=?",
+                        (sub_id,),
+                    ).fetchone()
+                    if row is None or int(row['refresh_generation'] or 0) != int(expected_generation):
+                        raise SubscriptionRefreshSuperseded(sub_id)
                 _sync_channels_conn(conn, sub_id, prepared)
                 if valid is not None:
                     conn.execute(
@@ -2231,6 +2336,45 @@ async def get_aggregated_channels(group: str = '', search: str = '') -> list[dic
     return await asyncio.to_thread(_get)
 
 
+async def get_iptv_logical_channel_projection() -> list[dict]:
+    """Return the persisted logical-channel read projection with raw members.
+
+    Production reads must use this membership projection rather than
+    recomputing a name merge from raw rows.  Conflict rows are returned as
+    explicit logical channels; orphan history is intentionally excluded.
+    """
+    def _get():
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                """
+                SELECT
+                    lc.id AS logical_channel_id,
+                    lc.canonical_key AS logical_canonical_key,
+                    lc.display_name AS logical_display_name,
+                    lc.status AS logical_status,
+                    m.membership_reason,
+                    m.membership_confidence,
+                    m.variant_type,
+                    c.*,
+                    s.title AS sub_title,
+                    s.custom_ua AS sub_custom_ua,
+                    s.force_proxy AS sub_force_proxy
+                FROM iptv_logical_channels AS lc
+                JOIN iptv_logical_channel_members AS m
+                    ON m.logical_channel_id=lc.id
+                JOIN channels AS c ON c.id=m.channel_id
+                JOIN subscriptions AS s ON s.id=c.subscription_id
+                WHERE lc.status <> 'orphaned'
+                ORDER BY lc.created_at, lc.id, c.id
+                """
+            ).fetchall()
+            return _apply_sub_fallbacks([dict(row) for row in rows])
+        finally:
+            conn.close()
+    return await asyncio.to_thread(_get)
+
+
 def _new_iptv_logical_channel_id() -> str:
     return f'lc_{uuid.uuid4().hex}'
 
@@ -2357,6 +2501,8 @@ async def sync_iptv_logical_channel_shadow_atomic(groups: list[dict]) -> dict:
                     'canonical_key': canonical_key,
                     'display_name': display_name,
                     'channel_ids': current_channel_ids,
+                    'membership_reason': str(group.get('membership_reason') or 'normalized_name')[:64],
+                    'membership_confidence': max(0, min(100, int(group.get('membership_confidence', 100)))),
                 })
 
             # Foreign keys remove most stale rows automatically, but this
@@ -2491,14 +2637,20 @@ async def sync_iptv_logical_channel_shadow_atomic(groups: list[dict]) -> dict:
             def _add_members(logical_id: str, channel_ids: list[int]) -> None:
                 nonlocal created_member_count
                 for channel_id in channel_ids:
+                    group = next(item for item in normalized_groups if channel_id in item['channel_ids'])
                     conn.execute(
                         """
                         INSERT INTO iptv_logical_channel_members(
                             logical_channel_id, channel_id, membership_reason,
                             membership_confidence, variant_type, created_at, updated_at
-                        ) VALUES(?, ?, 'normalized_name', 100, 'unknown', ?, ?)
+                        ) VALUES(?, ?, ?, ?, 'unknown', ?, ?)
                         """,
-                        (logical_id, channel_id, now, now),
+                        (
+                            logical_id, channel_id,
+                            group['membership_reason'],
+                            group['membership_confidence'],
+                            now, now,
+                        ),
                     )
                     members_by_logical.setdefault(logical_id, set()).add(channel_id)
                     logical_by_channel[channel_id] = logical_id

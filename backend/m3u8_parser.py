@@ -164,7 +164,7 @@ _YOUTUBE_CHANNEL_ID_RE = re.compile(r'^UC[a-zA-Z0-9_-]{20,}$')
 _STRIP_RE = re.compile(
     r'[\s]*[\[\(（【]?\s*'
     r'(?:高清|标清|超清|超高清|'
-    r'[1-9]\d?[Pp](?:\s*[Ii])?|'      # 1080p, 720i
+    r'[1-9]\d{2,3}[Pp](?:\s*[Ii])?|' # 1080p, 720p
     r'HEVC|H\.?265|H\.?264|AVC|1080|720|2K|FHD|HD|SD|UHD|'
     r'(?<![0-9A-Za-z])4K|(?<![0-9A-Za-z])8K|'  # 4K/8K 前不能是字母数字
     r'\d{2,3}\s*fps|'            # fps 尾数：4K25、50fps
@@ -177,6 +177,18 @@ _STRIP_RE = re.compile(
 # 行尾括号源标注：(备用)/(测试)/(纯净) 等。只剥明确的源标注词，
 # 不剥 (国内电影)/(外国电影) 这种内容分类。
 _SOURCE_TAG_RE = re.compile(r'[（(]\s*(?:备用|测试|纯净|原画|备用源|线路\d*|超清|高清)\s*[)）]$')
+
+# Source/display qualifiers are deliberately kept separate from the canonical
+# channel candidate.  They are evidence and presentation data, not identity.
+_NAME_QUALITY_RE = re.compile(
+    r'(?<![0-9A-Za-z])(?P<value>2160\s*[Pp]|1080\s*[Pp]|720\s*[Pp]|576\s*[Pp]|480\s*[Pp]|4[Kk]|8[Kk]|2[Kk]|FHD|UHD|HD|SD)(?![0-9A-Za-z])'
+)
+_NAME_ROLE_RE = re.compile(
+    r'(?P<value>备用源|测试源|备份源|测试|备用|备份|线路\s*\d*)',
+    re.IGNORECASE,
+)
+_NAME_WRAPPER_RE = re.compile(r'^[\[【（(]\s*(?P<value>[^\]】）)]{1,48})\s*[\]】）)]')
+_NAME_OPERATOR_RE = re.compile(r'(?P<value>电信|联通|移动|广电|铁通|网通|长宽|鹏博士)')
 
 # 运营商 / 来源后缀。
 # 注意：已移除 '移动'（误伤"深圳移动电视"/"移动戏曲"）、'源'（误伤地名"沂源"/"济源"）。
@@ -232,6 +244,99 @@ def normalize_channel_name(name: str) -> str:
     s = _PROVIDER_RE.sub('', s)
     s = s.lower().strip()
     return s
+
+
+def channel_name_semantics(name: str) -> dict:
+    """Return a conservative candidate/qualifier projection for a raw name.
+
+    This is intentionally not the source identity function.  The raw spelling
+    remains available in ``raw_name`` and the returned qualifiers preserve the
+    information removed from the candidate.  A caller must still use stable
+    ids (or an explicit subscription-local reconciliation decision) before
+    joining two sources.
+    """
+    raw = str(name or '').strip()
+    working = _to_simplified(raw)
+    operators: list[str] = []
+
+    wrapper = _NAME_WRAPPER_RE.match(working)
+    if wrapper:
+        wrapped = wrapper.group('value').strip()
+        if _NAME_OPERATOR_RE.search(wrapped) or len(wrapped) <= 16:
+            operators.append(wrapped)
+            working = working[wrapper.end():].strip()
+
+    roles: list[str] = []
+    for match in _NAME_ROLE_RE.finditer(working):
+        value = re.sub(r'\s+', '', match.group('value')).lower()
+        roles.append('test' if '测试' in value else 'backup')
+    working = _NAME_ROLE_RE.sub('', working)
+
+    qualities: list[str] = []
+    for match in _NAME_QUALITY_RE.finditer(working):
+        value = re.sub(r'\s+', '', match.group('value')).upper()
+        qualities.append(value)
+    working = _NAME_QUALITY_RE.sub('', working)
+
+    # These are safe as source qualifiers only in the common suffix/interior
+    # noise forms.  Do not strip the identity-bearing phrase "移动电视".
+    operator_values = []
+    for match in _NAME_OPERATOR_RE.finditer(working):
+        value = match.group('value')
+        after = working[match.end():]
+        if value == '移动' and after.startswith('电视'):
+            continue
+        operator_values.append(value)
+    for value in operator_values:
+        if value not in operators:
+            operators.append(value)
+    working = _NAME_OPERATOR_RE.sub(
+        lambda match: match.group(0) if match.group(0) == '移动' and working[match.end():].startswith('电视') else '',
+        working,
+    )
+    # ``源`` is a qualifier only when it follows an explicit source role.
+    if roles and working.endswith('源'):
+        working = working[:-1]
+
+    candidate = normalize_channel_name(working)
+    compact = re.sub(r'[\s\-_]+', '', candidate).lower()
+    # Common CCTV sport spellings are one channel candidate; the plus and
+    # international variants remain protected by normalize_channel_name.
+    if compact in {'cctv5体育', 'cctv5sport', 'cctv5高清体育'}:
+        candidate = 'cctv5'
+
+    quality_hint = qualities[0] if qualities else ''
+    role = roles[0] if roles else 'main'
+    return {
+        'canonical_candidate': candidate,
+        'match_key': candidate,
+        'operator': ' / '.join(dict.fromkeys(operators)),
+        'quality_hint': quality_hint,
+        'role': role,
+        'raw_name': raw,
+    }
+
+
+def source_display_label(*, raw_name: str, subscription_title: str = '', source_type: str = '',
+                        resolution: str = '', speed_mbps: float | int = 0) -> str:
+    """Build a bounded human source label from structured/runtime evidence."""
+    semantics = channel_name_semantics(raw_name)
+    origin = str(subscription_title or '').strip()
+    if origin:
+        origin = re.sub(r'\s*(?:综合频道包|订阅|直播源)$', '', origin).strip()
+    quality = str(resolution or '').strip() or semantics.get('quality_hint', '')
+    if not quality and speed_mbps:
+        try:
+            quality = f'{float(speed_mbps):.1f}M/s'
+        except (TypeError, ValueError):
+            quality = ''
+    transport = str(source_type or '').strip().lower()
+    operator = str(semantics.get('operator') or '').strip()
+    role = semantics.get('role') if semantics.get('role') not in {'', 'main'} else ''
+    parts = [item for item in (origin or operator, quality, role) if item]
+    if not parts:
+        parts = [transport.upper()] if transport else ['线路']
+    return ' · '.join(parts)[:96]
 
 
 def _parse_attrs(attr_str: str) -> dict:

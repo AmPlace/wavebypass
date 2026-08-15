@@ -12,7 +12,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from collections.abc import AsyncIterator
 from pathlib import Path
-from urllib.parse import quote, urljoin, urlparse
+from urllib.parse import parse_qs, quote, urljoin, urlparse
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -72,7 +72,7 @@ from radio_core import RadioResolver
 from routers.radio import router as radio_router
 from routers.setup import router as setup_router
 from security.dependencies import require_admin, require_browse_access, require_media_access, resolve_media_access
-from security.source_ids import source_id_for
+from security.source_ids import source_id_for, source_revision_for
 
 
 TOKEN_REFRESH_INTERVAL_SECONDS = 18_000
@@ -527,6 +527,9 @@ async def lifespan(app: FastAPI):
     app.state.radio_resolver = RadioResolver(runtime=None)
     try:
         await database.initialize()
+        # Ensure production channel reads have a durable logical projection
+        # before any API/media request can observe the database.
+        await _run_channel_binding_maintenance('startup')
         try:
             app.state.provider_resolver = ProviderResolver.from_ownership_rows(
                 await database.list_plugin_scheme_ownership(), runtime=None,
@@ -1087,24 +1090,31 @@ async def delete_subscription(sub_id: int):
 
 
 async def _refresh_regular_subscription(sub: dict) -> dict:
+    refresh_generation = await db.begin_subscription_refresh(sub['id'])
     headers = {'User-Agent': sub['custom_ua']} if sub.get('custom_ua') else {}
     try:
         resp = await http_client.get(sub['url'], follow_redirects=True, timeout=15, headers=headers)
         resp.raise_for_status()
     except httpx.HTTPError as exc:
-        await db.update_subscription(sub['id'], valid=0)
+        await db.mark_subscription_invalid_if_current(sub['id'], refresh_generation)
         raise HTTPException(status_code=502, detail=f"刷新失败: {exc}") from exc
 
     document = parse_m3u_document(resp.text)
     channels = list(document.channels)
     channels = deduplicate_channels(channels)
     if not channels:
-        await db.update_subscription(sub['id'], valid=0)
+        await db.mark_subscription_invalid_if_current(sub['id'], refresh_generation)
         raise HTTPException(
             status_code=502,
             detail="刷新结果未解析到任何频道，已保留旧数据",
         )
-    await db.replace_subscription_channels_atomic(sub['id'], channels, valid=1)
+    try:
+        await db.replace_subscription_channels_atomic(
+            sub['id'], channels, valid=1,
+            expected_generation=refresh_generation,
+        )
+    except db.SubscriptionRefreshSuperseded as exc:
+        raise HTTPException(status_code=409, detail="刷新结果已被更新的请求取代") from exc
     await _run_epg_preference_maintenance(sub['id'], document.epg_url_hints)
     await _run_channel_binding_maintenance('subscription_refresh')
     # 频道数据变更后失效 Cover 缓存
@@ -1811,17 +1821,44 @@ def _content_category(name: str) -> str:
 
 
 async def _get_aggregated_iptv_channels(group: str = '', search: str = '') -> tuple[list[dict], list[str]]:
-    # 搜索在 SQL 层过滤（性能好），分组在聚合后过滤（归一化后才准）
-    raw = await db.get_aggregated_channels(group='', search=search)
+    # Once the durable logical projection exists it is the read authority.
+    # Never rebuild a conflicting/split membership from raw names on a read.
+    projection = await db.get_iptv_logical_channel_projection()
+    using_durable_projection = bool(projection)
+    raw = projection if using_durable_projection else await db.get_aggregated_channels(group='', search='')
 
-    from m3u8_parser import adapter_provider, clean_channel_display_name, detect_source_type, normalize_channel_name, parse_youtube_channel_id, parse_youtube_video_id, _channel_alias
+    from m3u8_parser import adapter_provider, channel_name_semantics, clean_channel_display_name, detect_source_type, normalize_channel_name, parse_youtube_channel_id, parse_youtube_video_id, source_display_label, _channel_alias
     from template import channel_template, normalize_group_name, detect_province
     from logo_template import logo_template
 
+    logical_ids_by_key: dict[str, set[str]] = {}
+    for item in raw:
+        logical_id = str(item.get('logical_channel_id') or '')
+        logical_name = str(item.get('logical_canonical_key') or '')
+        if logical_id and logical_name:
+            logical_ids_by_key.setdefault(logical_name, set()).add(logical_id)
+    logical_public_keys = {
+        logical_id: (
+            logical_name if len(logical_ids_by_key.get(logical_name, set())) == 1
+            else f'logical:{logical_id}'
+        )
+        for logical_id, logical_name in {
+            str(item.get('logical_channel_id') or ''): str(item.get('logical_canonical_key') or '')
+            for item in raw if item.get('logical_channel_id')
+        }.items()
+    }
     merged: dict[str, dict] = {}
     for ch in raw:
-        key = normalize_channel_name(ch['name'])
-        display_name = clean_channel_display_name(ch['name'])
+        semantics = channel_name_semantics(ch['name'])
+        logical_id = str(ch.get('logical_channel_id') or '')
+        if using_durable_projection and logical_id:
+            key = logical_public_keys[logical_id]
+            logical_candidate = str(ch.get('logical_canonical_key') or semantics['canonical_candidate'])
+            display_name = str(ch.get('logical_display_name') or clean_channel_display_name(ch['name']))
+        else:
+            key = semantics['canonical_candidate']
+            logical_candidate = key
+            display_name = clean_channel_display_name(ch['name'])
         primary_name = _channel_alias.get_primary(display_name)
         if primary_name and primary_name != display_name:
             display_name = primary_name
@@ -1850,6 +1887,8 @@ async def _get_aggregated_iptv_channels(group: str = '', search: str = '') -> tu
         if key not in merged:
             merged[key] = {
                 'canonical_key': key,
+                'logical_channel_id': logical_id,
+                'logical_candidate': logical_candidate,
                 'name': display_name,
                 'group_name': grp,
                 'logo_url': ch['logo_url'],
@@ -1899,6 +1938,23 @@ async def _get_aggregated_iptv_channels(group: str = '', search: str = '') -> tu
             'market_source_id': ch.get('market_source_id', ''),
             'market_channel_id': ch.get('market_channel_id', ''),
             'market_source_item_id': ch.get('market_source_item_id', ''),
+            'source_revision': source_revision_for(ch),
+            'logical_channel_id': logical_id,
+            'origin_display_name': ch.get('sub_title', ''),
+            'provider_display_name': ch.get('adapter_provider', '') or ch.get('adapter_title', ''),
+            'structured_qualifiers': {
+                'operator': semantics.get('operator', ''),
+                'quality_hint': semantics.get('quality_hint', ''),
+                'role': semantics.get('role', 'main'),
+                'transport': source_type,
+            },
+            'recommended_display_label': source_display_label(
+                raw_name=ch.get('name', ''),
+                subscription_title=ch.get('sub_title', ''),
+                source_type=source_type,
+                resolution=ch.get('resolution', ''),
+                speed_mbps=ch.get('speed_mbps', 0),
+            ),
         }
         source_entry['source_id'] = source_id_for(ch)
         merged[key]['urls'].append(source_entry)
@@ -1927,14 +1983,16 @@ async def _get_aggregated_iptv_channels(group: str = '', search: str = '') -> tu
     # The runtime channel projection is sourced from logical bindings.
     epg_projection = {}
     try:
-        epg_projection = await epg_read_resolver.resolve_epg_read_many(merged.keys())
+        epg_projection = await epg_read_resolver.resolve_epg_read_many(
+            {str(ch.get('logical_candidate') or ch.get('canonical_key') or '') for ch in merged.values()}
+        )
     except Exception:
         pass
 
     for ch in merged.values():
-        resolution = epg_projection.get(ch['canonical_key']) or {}
+        resolution = epg_projection.get(str(ch.get('logical_candidate') or ch['canonical_key'])) or {}
         target = resolution.get('effective_target')
-        binding = resolution.get('shadow_binding') or {}
+        binding = resolution.get('binding') or {}
         if target and resolution.get('effective_source') == 'logical':
             ch['epg_source_id'] = target.get('source_id')
             ch['epg_channel_id'] = target.get('channel_id') or ''
@@ -1956,6 +2014,13 @@ async def _get_aggregated_iptv_channels(group: str = '', search: str = '') -> tu
         min((u['latency_ms'] for u in c['urls'] if u['is_working'] == 1), default=9999),
     ))
 
+    if search:
+        needle = str(search).casefold()
+        result = [
+            ch for ch in result
+            if needle in str(ch.get('name') or '').casefold()
+            or any(needle in str(source.get('raw_name') or '').casefold() for source in ch.get('urls', []))
+        ]
     if group:
         result = [c for c in result if c['group_name'] == group]
 
@@ -4392,6 +4457,27 @@ def _is_supported_export_source(source: dict, healthy_only: bool = True) -> bool
         return False
     return _source_type(source) not in {'youtube', 'unsupported_youtube_url'}
 
+
+_EXPORT_CREDENTIAL_QUERY_KEYS = frozenset({
+    'token', 'access_token', 'auth', 'authorization', 'credential', 'password',
+    'passwd', 'sig', 'signature', 'sign', 'hdnts', 'session', 'sessionid',
+    'key', 'apikey', 'api_key', 'expires', 'exp',
+})
+
+
+def _source_has_export_credentials(source: dict) -> bool:
+    """Detect obvious volatile/credential-bearing direct-export material."""
+    for value in (source.get('url'), source.get('referer')):
+        raw = str(value or '').strip()
+        if not raw:
+            continue
+        parsed = urlparse(raw)
+        if parsed.username or parsed.password:
+            return True
+        if any(key.casefold() in _EXPORT_CREDENTIAL_QUERY_KEYS for key in parse_qs(parsed.query, keep_blank_values=True)):
+            return True
+    return False
+
 def _request_public_base_url(request: Request) -> str:
     proto = request.headers.get("x-forwarded-proto") or request.url.scheme
     host = request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc
@@ -4507,9 +4593,10 @@ def _subscription_urls_for_channel(
             if not include_rtsp and _source_type(source) == 'rtsp':
                 continue
             # direct 模式下保留 referer/custom_ua 的源——它们靠 EXTVLCOPT 直连
-            if source.get('force_proxy') or source.get('proxy_required_hint'):
-                continue
-            out.append((source['url'], source))
+            if source.get('force_proxy') or source.get('proxy_required_hint') or _source_has_export_credentials(source):
+                out.append((_iptv_proxy_url_for_source(source, request, access=access), None))
+            else:
+                out.append((source['url'], source))
         return out
 
     if mode == 'proxy':
@@ -4519,7 +4606,12 @@ def _subscription_urls_for_channel(
     proxy_only_sources = []
     for source in sources:
         source_type = _source_type(source)
-        if source_type in {'adapter', 'rtsp'} or source.get('force_proxy') or source.get('proxy_required_hint'):
+        if (
+            source_type in {'adapter', 'rtsp'}
+            or source.get('force_proxy')
+            or source.get('proxy_required_hint')
+            or _source_has_export_credentials(source)
+        ):
             proxy_only_sources.append(source)
         else:
             direct_sources.append(source)
