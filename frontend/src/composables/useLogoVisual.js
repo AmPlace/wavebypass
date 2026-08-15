@@ -1,5 +1,27 @@
 import { ref } from 'vue'
 
+export function classifyLogoMode(width, height, { enableWide = false } = {}) {
+  const naturalWidth = Number(width)
+  const naturalHeight = Number(height)
+  if (!naturalWidth || !naturalHeight) return 'badge'
+
+  const ratio = naturalWidth / naturalHeight
+  const isLargeCover = naturalWidth >= 480
+    && naturalHeight >= 240
+    && ratio >= 1.55
+    && ratio <= 1.9
+  if (isLargeCover) return 'cover'
+
+  // Wide marks must remain contain-rendered. A ratio-only check is deliberately
+  // conservative so ordinary 2:1 badge assets (for example CCTV marks) stay
+  // in the badge path.
+  const isWide = enableWide
+    && naturalWidth >= 96
+    && naturalHeight >= 24
+    && ratio >= 2.2
+  return isWide ? 'wide' : 'badge'
+}
+
 export function useLogoVisual(options = {}) {
   const failedLogoKeys = ref({})
   const logoVisualModes = ref({})
@@ -58,9 +80,9 @@ export function useLogoVisual(options = {}) {
 
     if (options.onBeforeClassify?.(item, { width, height, event })) return
 
-    const ratio = width / height
-    const isLargeWideImage = width >= 480 && height >= 240 && ratio >= 1.55 && ratio <= 1.9
-    const mode = isLargeWideImage ? 'cover' : 'badge'
+    const mode = classifyLogoMode(width, height, {
+      enableWide: options.enableWide === true,
+    })
     const key = logoVisualKey(item)
     if (logoVisualModes.value[key] === mode) return
     logoVisualModes.value = {

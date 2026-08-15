@@ -823,45 +823,124 @@
 
 /* IPTV Home density control. Keep this scoped to IPTV so Radio cards retain
    their existing card/footer presentation. */
-.iptv-density-toggle {
-  display: inline-flex;
+.iptv-density-menu {
+  position: relative;
   height: 2.5rem;
+}
+
+.iptv-density-menu__trigger {
+  display: inline-flex;
+  width: 2.5rem;
+  height: 2.5rem;
+  cursor: pointer;
   align-items: center;
-  gap: 2px;
+  justify-content: center;
+  list-style: none;
   border: 1px solid var(--border);
   border-radius: 999px;
   background: var(--surface);
-  padding: 3px;
-}
-
-.iptv-density-toggle__button {
-  display: inline-flex;
-  width: 2rem;
-  height: 2rem;
-  align-items: center;
-  justify-content: center;
-  border-radius: 999px;
   color: var(--text-secondary);
   transition: background-color 180ms ease, color 180ms ease, box-shadow 180ms ease;
 }
 
-.iptv-density-toggle__button svg {
+.iptv-density-menu__trigger::-webkit-details-marker {
+  display: none;
+}
+
+.iptv-density-menu__trigger:hover,
+.iptv-density-menu[open] .iptv-density-menu__trigger {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.iptv-density-menu__trigger svg {
   width: 1rem;
   height: 1rem;
 }
 
-.iptv-density-toggle__button:hover {
-  color: var(--text-primary);
+.iptv-density-menu__popover {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 30;
+  width: 13rem;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+  box-shadow: 0 14px 36px rgba(15,23,42,0.14);
 }
 
-.iptv-density-toggle__button--active {
-  background: var(--surface-active);
-  box-shadow: 0 1px 3px rgba(15,23,42,0.10);
+.dark .iptv-density-menu__popover {
+  box-shadow: 0 18px 40px rgba(0,0,0,0.32);
+}
+
+.iptv-density-menu__title {
+  padding: 0 0.25rem 0.5rem;
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.iptv-density-menu__switch {
+  display: flex;
+  width: 100%;
+  min-height: 2.25rem;
+  cursor: pointer;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  border-radius: 9px;
   color: var(--text-primary);
+  font-size: 0.875rem;
+  font-weight: 600;
+  text-align: left;
+}
+
+.iptv-density-menu__switch:hover {
+  background: var(--surface-hover);
+}
+
+.iptv-density-menu__track {
+  display: inline-flex;
+  width: 2.25rem;
+  height: 1.25rem;
+  flex: 0 0 auto;
+  align-items: center;
+  padding: 2px;
+  border-radius: 999px;
+  background: var(--border-strong);
+  transition: background-color 180ms ease;
+}
+
+.iptv-density-menu__thumb {
+  width: 1rem;
+  height: 1rem;
+  border-radius: 999px;
+  background: var(--surface);
+  box-shadow: 0 1px 2px rgba(15,23,42,0.22);
+  transform: translateX(0);
+  transition: transform 180ms ease;
+}
+
+.iptv-density-menu__thumb.is-on {
+  transform: translateX(1rem);
+}
+
+.iptv-density-menu__switch:has(.iptv-density-menu__thumb.is-on) .iptv-density-menu__track {
+  background: #22C55E;
+}
+
+.iptv-density-menu__hint {
+  padding: 0.5rem 0.25rem 0;
+  color: var(--text-tertiary);
+  font-size: 0.6875rem;
+  line-height: 1.35;
 }
 
 .iptv-main.iptv-density-compact .channel-card--logo-card {
   --iptv-card-footer-height: 0px;
+  border-radius: 14px;
 }
 
 .iptv-main.iptv-density-compact .channel-card--logo-card::after,
@@ -880,9 +959,9 @@
   bottom: 9%;
 }
 
-.iptv-main.iptv-density-compact .channel-card__center-logo:not(.channel-card__center-logo--cover) {
-  max-width: 82%;
-  max-height: 74%;
+.iptv-main.iptv-density-compact .channel-card__center-logo--badge {
+  max-width: 100%;
+  max-height: 100%;
 }
 
 .iptv-main.iptv-density-compact .channel-card__text-logo {
@@ -907,4 +986,71 @@
 .iptv-main.iptv-density-compact .channel-card__compact-status.channel-play-state-dot--danger {
   background: #DC2626;
   box-shadow: 0 0 0 3px rgba(220,38,38,0.14);
+}
+
+/* IPTV-only optical sizing. Radio continues using the shared legacy sizing. */
+.iptv-main .channel-card__center-logo--badge {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+.iptv-main .channel-card__logo-stage--wide {
+  left: 5%;
+  right: 5%;
+  top: 29%;
+  bottom: 29%;
+  padding: 0;
+  background: none;
+}
+
+.iptv-main .channel-card__center-logo--wide {
+  display: block;
+  width: 100%;
+  height: 100%;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 0;
+}
+
+.iptv-main.iptv-density-compact .channel-card__logo-stage--wide {
+  top: 31%;
+  bottom: 31%;
+}
+
+.iptv-main .channel-card__text-logo {
+  font-weight: 650;
+}
+
+.iptv-main .channel-card__text-logo--xl {
+  font-size: clamp(18px, 9cqw, 21px);
+}
+
+.iptv-main .channel-card__text-logo--lg {
+  font-size: clamp(17px, 8.5cqw, 19px);
+}
+
+.iptv-main .channel-card__text-logo--md {
+  font-size: clamp(16px, 8cqw, 18px);
+}
+
+.iptv-main .channel-card__text-logo--sm {
+  font-size: clamp(15px, 7.5cqw, 17px);
+}
+
+.iptv-main.iptv-density-compact .channel-card__text-logo--xl {
+  font-size: clamp(17px, 9cqw, 18px);
+}
+
+.iptv-main.iptv-density-compact .channel-card__text-logo--lg {
+  font-size: clamp(16px, 8.5cqw, 17px);
+}
+
+.iptv-main.iptv-density-compact .channel-card__text-logo--md {
+  font-size: clamp(16px, 8cqw, 16.5px);
+}
+
+.iptv-main.iptv-density-compact .channel-card__text-logo--sm {
+  font-size: clamp(15px, 7.5cqw, 16px);
 }

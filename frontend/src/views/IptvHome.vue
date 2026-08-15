@@ -27,38 +27,33 @@
         </div>
 
         <div class="flex shrink-0 items-center gap-2">
-          <div class="iptv-density-toggle" role="group" aria-label="频道卡密度">
-            <button
-              type="button"
-              class="iptv-density-toggle__button"
-              :class="{ 'iptv-density-toggle__button--active': densityMode === 'standard' }"
-              :aria-pressed="densityMode === 'standard'"
-              aria-label="标准密度"
-              title="标准密度"
-              data-density-option="standard"
-              @click="setDensityMode('standard')"
-            >
+          <details class="iptv-density-menu">
+            <summary class="iptv-density-menu__trigger" aria-label="显示频道信息" title="显示频道信息">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
-                <rect x="4" y="4" width="7" height="7" rx="1"/><rect x="13" y="4" width="7" height="7" rx="1"/><rect x="4" y="13" width="7" height="7" rx="1"/><rect x="13" y="13" width="7" height="7" rx="1"/>
+                <path d="M4 7h10M4 17h16M14 7l2-2m-2 2 2 2M10 17l2-2m-2 2 2 2" />
               </svg>
-              <span class="sr-only">Standard</span>
-            </button>
-            <button
-              type="button"
-              class="iptv-density-toggle__button"
-              :class="{ 'iptv-density-toggle__button--active': densityMode === 'compact' }"
-              :aria-pressed="densityMode === 'compact'"
-              aria-label="紧凑密度"
-              title="紧凑密度"
-              data-density-option="compact"
-              @click="setDensityMode('compact')"
-            >
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
-                <rect x="4" y="5" width="16" height="5" rx="1"/><rect x="4" y="14" width="16" height="5" rx="1"/>
-              </svg>
-              <span class="sr-only">Compact</span>
-            </button>
-          </div>
+              <span class="sr-only">显示频道信息</span>
+            </summary>
+            <div class="iptv-density-menu__popover" role="menu">
+              <div class="iptv-density-menu__title">显示频道信息</div>
+              <button
+                type="button"
+                class="iptv-density-menu__switch"
+                role="switch"
+                :aria-checked="densityMode === 'standard'"
+                data-density-option="standard"
+                @click="setDensityMode(densityMode === 'standard' ? 'compact' : 'standard')"
+              >
+                <span>显示频道信息</span>
+                <span class="iptv-density-menu__track" aria-hidden="true">
+                  <span class="iptv-density-menu__thumb" :class="{ 'is-on': densityMode === 'standard' }"></span>
+                </span>
+              </button>
+              <div class="iptv-density-menu__hint">
+                {{ densityMode === 'standard' ? '标准：Logo、频道名和节目' : '紧凑：仅显示 Logo' }}
+              </div>
+            </div>
+          </details>
 
           <button
             type="button"
@@ -174,6 +169,7 @@ import {
   readIptvCardDensityPreference,
   writeIptvCardDensityPreference,
 } from '../utils/iptvCardDensity'
+import { heightForWidth, IPTV_CARD_RATIOS } from '../utils/iptvCardGeometry'
 import { epgBatchRefreshDelay } from '../utils/epgViewing'
 import { iptvCardProgrammeTitle } from '../utils/iptvViewing'
 
@@ -299,6 +295,7 @@ const {
   getIdentityKey: channelLogoIdentityKey,
   getFailureKey: channelLogoCandidateKey,
   getVisualKey: (ch) => `${channelLogoIdentityKey(ch)}|${channelLogoUrl(ch)}`,
+  enableWide: true,
   // onBeforeShow: cover 加载已迁移到 IntersectionObserver（coverLoader）
   onBeforeClassify: (ch, { width, height }) => (
     isCurrentYoutubeThumbnailCandidate(ch)
@@ -693,10 +690,14 @@ watch(scrollPosition, () => { _scheduleObserveCards() })
 
 const gap = computed(() => {
   if (densityMode.value !== IPTV_CARD_DENSITIES.COMPACT) return 20
-  return viewportWidth.value < 1024 ? 16 : 18
+  return viewportWidth.value < 1024 ? 14 : 18
 })
 const cardFooterHeight = computed(() => densityMode.value === IPTV_CARD_DENSITIES.STANDARD ? 44 : 0)
-const cardVisualRatio = computed(() => densityMode.value === IPTV_CARD_DENSITIES.COMPACT ? 3 / 2 : 16 / 9)
+const cardWidthHeightRatio = computed(() => (
+  densityMode.value === IPTV_CARD_DENSITIES.COMPACT
+    ? IPTV_CARD_RATIOS.COMPACT
+    : IPTV_CARD_RATIOS.STANDARD_VISUAL
+))
 
 const columns = computed(() => {
   const w = viewportWidth.value
@@ -708,7 +709,7 @@ const columns = computed(() => {
 const rowHeight = computed(() => {
   const cols = columns.value
   const cardWidth = (containerWidth.value - gap.value * (cols - 1)) / cols
-  return cardWidth * cardVisualRatio.value + cardFooterHeight.value
+  return heightForWidth(cardWidth, cardWidthHeightRatio.value, cardFooterHeight.value)
 })
 
 const cardHeight = computed(() => rowHeight.value)
