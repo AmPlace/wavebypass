@@ -25,6 +25,8 @@ class RegularSubscriptionEmptyRefreshTest(unittest.IsolatedAsyncioTestCase):
             "custom_ua": "",
         }
         with mock.patch.object(main.http_client, "get", return_value=_Response()), \
+                mock.patch.object(main.db, "begin_subscription_refresh", return_value=1), \
+                mock.patch.object(main.db, "mark_subscription_invalid_if_current", return_value=True), \
                 mock.patch.object(main.db, "add_channels_bulk") as add_channels, \
                 mock.patch.object(main.db, "update_subscription") as update_subscription:
             with self.assertRaises(main.HTTPException) as raised:
@@ -32,7 +34,7 @@ class RegularSubscriptionEmptyRefreshTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(raised.exception.status_code, 502)
         add_channels.assert_not_awaited()
-        update_subscription.assert_awaited_once_with(42, valid=0)
+        update_subscription.assert_not_awaited()
 
 
 if __name__ == "__main__":
