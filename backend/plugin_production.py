@@ -680,14 +680,22 @@ class ProductionPluginSubsystem:
         return results
 
     async def shutdown(self) -> None:
-        await self.service.wait_for_critical_tasks()
+        # Signal stopping before waiting.  A post-commit projection retry may
+        # never converge in this process, but its durable intent must remain
+        # for the next startup recovery pass.
+        self._shutting_down = True
+        self.service.begin_shutdown()
+        try:
+            await asyncio.wait_for(self.service.wait_for_critical_tasks(), timeout=5.0)
+        except asyncio.TimeoutError:
+            self.service.cancel_critical_tasks()
+            await self.service.wait_for_critical_tasks()
         if self._critical_tasks:
             await asyncio.gather(
                 *(asyncio.shield(task) for task in tuple(self._critical_tasks)),
                 return_exceptions=True,
             )
         await self.service.runtime.shutdown()
-        self._shutting_down = True
         workers = [
             *self._ownership_reconcile_tasks.values(),
             *self._lifecycle_reconcile_tasks.values(),

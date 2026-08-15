@@ -248,6 +248,31 @@ RTSP_HLS_START_SEGMENTS = _env_int("RTSP_HLS_START_SEGMENTS", 2, minimum=1)
 RTSP_HLS_DELETE_THRESHOLD = _env_int("RTSP_HLS_DELETE_THRESHOLD", 4, minimum=1)
 RTSP_SEGMENT_RE = re.compile(r"^seg_\d+\.ts$")
 RTSP_SESSION_ID_RE = re.compile(r"^[0-9a-f]{24}$")
+_RTSP_HLS_CLEANUP_TASK: asyncio.Task | None = None
+_RTSP_HLS_CLEANUP_STOP: asyncio.Event | None = None
+_APP_BACKGROUND_TASKS: set[asyncio.Task] = set()
+
+
+def _observe_background_task(task: asyncio.Task, owner: str) -> None:
+    if task.cancelled():
+        return
+    try:
+        error = task.exception()
+    except asyncio.CancelledError:
+        return
+    if error is not None:
+        logger.error("后台任务异常退出: owner=%s error_type=%s", owner, type(error).__name__)
+
+
+def _track_app_background_task(task: asyncio.Task, *, owner: str) -> asyncio.Task:
+    _APP_BACKGROUND_TASKS.add(task)
+
+    def done(completed: asyncio.Task) -> None:
+        _APP_BACKGROUND_TASKS.discard(completed)
+        _observe_background_task(completed, owner)
+
+    task.add_done_callback(done)
+    return task
 
 
 def _ffmpeg_bin() -> str | None:
@@ -323,15 +348,52 @@ async def _stop_rtsp_session(session_id: str) -> None:
         _delete_rtsp_session_dir(session_id, session)
 
 
-async def _rtsp_hls_cleanup_task():
-    while True:
-        await asyncio.sleep(30)
+async def _rtsp_hls_cleanup_task(stop_event: asyncio.Event):
+    while not stop_event.is_set():
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=30)
+        except asyncio.TimeoutError:
+            pass
+        if stop_event.is_set():
+            return
         now = time.time()
         for session_id, session in list(RTSP_HLS_SESSIONS.items()):
             proc = session.get("process")
             idle = now - float(session.get("last_access", 0))
             if idle > RTSP_HLS_IDLE_TTL or (proc and _rtsp_proc_returncode(proc) is not None):
-                await _stop_rtsp_session(session_id)
+                try:
+                    await _stop_rtsp_session(session_id)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception("RTSP session cleanup failed: session=%s", session_id)
+
+
+def _start_rtsp_hls_cleanup() -> asyncio.Task:
+    global _RTSP_HLS_CLEANUP_TASK, _RTSP_HLS_CLEANUP_STOP
+    if _RTSP_HLS_CLEANUP_TASK is not None and not _RTSP_HLS_CLEANUP_TASK.done():
+        return _RTSP_HLS_CLEANUP_TASK
+    stop_event = asyncio.Event()
+    task = asyncio.create_task(
+        _rtsp_hls_cleanup_task(stop_event),
+        name="rtsp-hls-cleanup",
+    )
+    _RTSP_HLS_CLEANUP_STOP = stop_event
+    _RTSP_HLS_CLEANUP_TASK = task
+    task.add_done_callback(lambda done: _observe_background_task(done, "rtsp_hls_cleanup"))
+    return task
+
+
+async def _stop_rtsp_hls_cleanup() -> None:
+    global _RTSP_HLS_CLEANUP_TASK, _RTSP_HLS_CLEANUP_STOP
+    task = _RTSP_HLS_CLEANUP_TASK
+    stop_event = _RTSP_HLS_CLEANUP_STOP
+    if stop_event is not None:
+        stop_event.set()
+    _RTSP_HLS_CLEANUP_TASK = None
+    _RTSP_HLS_CLEANUP_STOP = None
+    if task is not None and task is not asyncio.current_task():
+        await asyncio.gather(task, return_exceptions=True)
 
 
 async def _stop_all_rtsp_sessions():
@@ -585,15 +647,18 @@ async def lifespan(app: FastAPI):
         app.state.automation_service = automation_service
         await automation_service.start()
         _clear_stale_rtsp_hls_dirs()
-        asyncio.create_task(_prefetch_rb())
-        asyncio.create_task(_rtsp_hls_cleanup_task())
+        _start_rtsp_hls_cleanup()
         # logo 模板：本地兜底已在 import 时加载完成，这里启动后异步拉一次远程覆盖；
         # 拉失败就维持本地，按用户要求不重试。后续接入设置页后再做定时刷新 / 手动刷新。
-        asyncio.create_task(refresh_logo_template_from_remote(http_client))
+        _track_app_background_task(
+            asyncio.create_task(refresh_logo_template_from_remote(http_client), name="logo-template-refresh"),
+            owner="logo_template_refresh",
+        )
         # 加载 tingfm HK 电台流地址
         _load_tingfm_streams()
         yield
     finally:
+        await _shutdown_app_background_tasks()
         await _shutdown_wide_playlist_state()
         try:
             if automation_service is not None:
@@ -607,6 +672,7 @@ async def lifespan(app: FastAPI):
                 app.state.plugin_subsystem = None
                 app.state.provider_resolver = None
                 app.state.radio_resolver = None
+                await _stop_rtsp_hls_cleanup()
                 await _stop_all_rtsp_sessions()
                 await http_client.aclose()
 
@@ -955,23 +1021,6 @@ async def proxy_radio_browser(country_code: str) -> Response:
 
     RB_CACHE[country_code] = {"data": resp.text, "ts": time.time()}
     return Response(content=resp.text, media_type="application/json")
-
-
-_RB_PREFETCH_REGIONS = ["TW", "CN"]
-
-
-async def _prefetch_rb() -> None:
-    while True:
-        for code in _RB_PREFETCH_REGIONS:
-            try:
-                url = f"https://all.api.radio-browser.info/json/stations/bycountrycodeexact/{code}?order=votes&reverse=true"
-                resp = await http_client.get(url, follow_redirects=True)
-                resp.raise_for_status()
-                RB_CACHE[code] = {"data": resp.text, "ts": time.time()}
-                logger.info("RB %s 预热完成: %d bytes", code, len(resp.text))
-            except Exception as exc:
-                logger.warning("RB %s 预热失败: %s", code, exc)
-        await asyncio.sleep(RB_CACHE_TTL)
 
 
 # =====================================================================
@@ -2053,6 +2102,21 @@ _speed_test_cancel_event: asyncio.Event | None = None
 _speed_test_task: asyncio.Task | None = None
 
 
+async def _shutdown_app_background_tasks() -> None:
+    """Cancel and drain bounded admin/startup tasks owned by the app."""
+    async with _speed_test_lock:
+        if _speed_test_cancel_event is not None:
+            _speed_test_cancel_event.set()
+        tasks = tuple(
+            task for task in _APP_BACKGROUND_TASKS
+            if task is not asyncio.current_task() and not task.done()
+        )
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 def _empty_test_progress(total: int = 0) -> dict:
     return {
         "total": total,
@@ -2088,6 +2152,7 @@ async def _finish_speed_test() -> None:
 def _set_speed_test_task(task: asyncio.Task) -> None:
     global _speed_test_task
     _speed_test_task = task
+    _track_app_background_task(task, owner="speed_test")
 
 
 def _current_speed_test_cancel_event() -> asyncio.Event:
@@ -4245,8 +4310,12 @@ async def _run_manual_epg_refresh(automation_service) -> None:
 
 @app.post("/api/admin/epg/refresh", dependencies=[Depends(require_admin)])
 async def refresh_epg(request: Request):
-    asyncio.create_task(
-        _run_manual_epg_refresh(getattr(request.app.state, "automation_service", None))
+    _track_app_background_task(
+        asyncio.create_task(
+            _run_manual_epg_refresh(getattr(request.app.state, "automation_service", None)),
+            name="manual-epg-refresh",
+        ),
+        owner="manual_epg_refresh",
     )
     return {"ok": True}
 

@@ -545,7 +545,6 @@ class OfficialDistributionProductionTest(unittest.IsolatedAsyncioTestCase):
         artifact = Path(row["artifact_path"])
         artifact.write_bytes(b"corrupt")
         await self.db.set_plugin_enabled("org.waveflow", "fjtv", True, lifecycle_state="unavailable")
-        await subsystem.shutdown()
         with mock.patch.object(subsystem.service.store, "promote", side_effect=OSError("disk full")):
             with self.assertRaises(OSError):
                 await subsystem.repair("org.waveflow/fjtv", importlib.import_module("official_plugin_distribution").bundled_official_packages())

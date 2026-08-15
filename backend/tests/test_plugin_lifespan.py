@@ -35,7 +35,7 @@ class PluginLifespanTest(unittest.IsolatedAsyncioTestCase):
     def patches(self, automation):
         stack = contextlib.ExitStack()
         stack.enter_context(mock.patch.object(self.main, "create_production_automation_service", new=mock.AsyncMock(return_value=automation)))
-        for name in ("_prefetch_rb", "_rtsp_hls_cleanup_task", "refresh_logo_template_from_remote"):
+        for name in ("_rtsp_hls_cleanup_task", "refresh_logo_template_from_remote"):
             stack.enter_context(mock.patch.object(self.main, name, new=mock.AsyncMock()))
         stack.enter_context(mock.patch.object(self.main, "_clear_stale_rtsp_hls_dirs"))
         stack.enter_context(mock.patch.object(self.main, "_load_tingfm_streams"))

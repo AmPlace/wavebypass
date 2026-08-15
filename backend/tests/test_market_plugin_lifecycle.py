@@ -435,6 +435,56 @@ class MarketPluginLifecycleTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.service._active[identity].manifest.version, "2.0.0")
         self.assertTrue(Path(row["artifact_path"]).is_file())
 
+    async def test_permanent_post_commit_failure_shutdown_is_bounded_and_recovers(self):
+        from plugin_production import ProductionPluginSubsystem
+        from provider_resolver import ProviderResolver
+
+        identity = "org.waveflow/fixture-multi-provider"
+        await self.service.install_from_packages([self.package("1.0.0")], identity)
+        subsystem = ProductionPluginSubsystem(
+            service=self.service,
+            trust_policy=self.service.trust_policy,
+            download_root=Path(self.tmp.name) / "downloads",
+            http_client=None,
+            provider_resolver=ProviderResolver(runtime=self.runtime),
+            capability_gateway=object(),
+        )
+        await subsystem.set_ownership("fixture-a", "plugin", identity)
+        projection_failed = asyncio.Event()
+
+        async def fail_projection(_plugin_identity, _instance):
+            projection_failed.set()
+            raise RuntimeError("permanent projection fault")
+
+        with mock.patch.object(self.service, "_project_committed_activation", new=fail_projection):
+            update = asyncio.create_task(
+                self.service.install_from_packages([self.package("2.0.0")], identity),
+            )
+            await projection_failed.wait()
+            await asyncio.wait_for(subsystem.shutdown(), timeout=1.0)
+            with self.assertRaises(asyncio.CancelledError):
+                await update
+
+        row = await self.db.get_plugin_installation("org.waveflow", "fixture-multi-provider")
+        self.assertEqual((row["active_version"], row["candidate_version"]), ("2.0.0", ""))
+        self.assertTrue(Path(row["artifact_path"]).is_file())
+
+        from plugin_runtime import PluginRuntime
+
+        recovered_runtime = PluginRuntime()
+        self.runtime = recovered_runtime
+        recovered = self.pm.PluginMarketService(
+            runtime=recovered_runtime,
+            store=self.store,
+            trust_policy=self.service.trust_policy,
+            command_factory=self.service.command_factory,
+            os_name="linux",
+            arch="x86_64",
+        )
+        results = await recovered.recover_enabled()
+        self.assertEqual(results, [{"plugin": identity, "status": "active"}])
+        self.assertEqual(recovered_runtime.registry.route("fixture-a").manifest.version, "2.0.0")
+
     async def test_commit_then_repository_error_uses_durable_activation_boundary(self):
         identity = "org.waveflow/fixture-multi-provider"
         await self.service.install_from_packages([self.package("1.0.0")], identity)

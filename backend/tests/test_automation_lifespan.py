@@ -156,10 +156,7 @@ class AutomationLifespanTest(unittest.IsolatedAsyncioTestCase):
 
             return record
 
-        for name in (
-            "_prefetch_rb",
-            "_rtsp_hls_cleanup_task",
-        ):
+        for name in ("_rtsp_hls_cleanup_task",):
             stack.enter_context(mock.patch.object(
                 self.main,
                 name,
@@ -402,11 +399,7 @@ class AutomationLifespanTest(unittest.IsolatedAsyncioTestCase):
             async with self.main.lifespan(self.main.app):
                 await asyncio.sleep(0)
 
-        for name in (
-            "_prefetch_rb",
-            "_rtsp_hls_cleanup_task",
-            "logo",
-        ):
+        for name in ("_rtsp_hls_cleanup_task", "logo"):
             self.assertEqual(events.count(name), 1)
         self.assertFalse(hasattr(self.main, "_epg_refresh_loop"))
         paths = {route.path for route in self.main.app.routes}
@@ -415,6 +408,58 @@ class AutomationLifespanTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/api/admin/market/run-auto-update", paths)
         self.assertIn("/api/admin/market/update-all", paths)
         self.assertNotIn("/api/admin/market/automation/status", paths)
+
+    async def test_rtsp_cleanup_has_one_owned_task_and_bounded_shutdown(self):
+        entered = asyncio.Event()
+
+        async def owned_cleanup(stop_event):
+            entered.set()
+            await stop_event.wait()
+
+        with mock.patch.object(self.main, "_rtsp_hls_cleanup_task", new=owned_cleanup):
+            first = self.main._start_rtsp_hls_cleanup()
+            second = self.main._start_rtsp_hls_cleanup()
+            self.assertIs(first, second)
+            await entered.wait()
+            await asyncio.wait_for(self.main._stop_rtsp_hls_cleanup(), timeout=1.0)
+
+        self.assertTrue(first.done())
+        self.assertIsNone(self.main._RTSP_HLS_CLEANUP_TASK)
+
+    async def test_app_background_jobs_are_cancelled_and_drained(self):
+        entered = asyncio.Event()
+        finished = asyncio.Event()
+
+        async def job():
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                finished.set()
+
+        task = self.main._track_app_background_task(
+            asyncio.create_task(job()), owner="test_background_job",
+        )
+        await entered.wait()
+        await asyncio.wait_for(self.main._shutdown_app_background_tasks(), timeout=1.0)
+        self.assertTrue(task.cancelled())
+        self.assertTrue(finished.is_set())
+
+    async def test_radio_browser_cache_is_on_demand_without_prefetch(self):
+        self.main.RB_CACHE.clear()
+        response = SimpleNamespace(text='[{"stationuuid":"fixture"}]')
+        response.raise_for_status = mock.Mock()
+        with mock.patch.object(
+            self.main.http_client,
+            "get",
+            new=mock.AsyncMock(return_value=response),
+        ) as get:
+            first = await self.main.proxy_radio_browser("TW")
+            second = await self.main.proxy_radio_browser("TW")
+
+        self.assertEqual(first.body, second.body)
+        get.assert_awaited_once()
+        self.main.RB_CACHE.clear()
 
     async def test_epg_source_crud_reconciles_committed_source_state(self):
         service = SimpleNamespace(is_started=True, stop=mock.AsyncMock())

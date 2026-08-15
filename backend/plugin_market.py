@@ -446,6 +446,7 @@ class PluginMarketService:
         self._preparation_locks: dict[str, asyncio.Lock] = {}
         self._critical_tasks: set[asyncio.Task[Any]] = set()
         self._activation_expectations: dict[str, str] = {}
+        self._shutdown_event = asyncio.Event()
         self.destructive_guard: Callable[[str], Awaitable[None]] | None = None
         self.workspaces_root = self.store.root / "workspaces"
         self.workspaces_root.mkdir(parents=True, exist_ok=True)
@@ -504,6 +505,26 @@ class PluginMarketService:
         if cancelled:
             raise asyncio.CancelledError
         return task.result()
+
+    def begin_shutdown(self) -> None:
+        """Stop lifecycle work while preserving committed durable intent."""
+        if self._shutdown_event.is_set():
+            return
+        self._shutdown_event.set()
+        self.cancel_critical_tasks()
+
+    def cancel_critical_tasks(self) -> None:
+        for task in tuple(self._critical_tasks):
+            if not task.done():
+                task.cancel()
+
+    def _ensure_not_shutting_down(self) -> None:
+        if self._shutdown_event.is_set():
+            raise PluginError(
+                "PLUGIN_UNAVAILABLE",
+                "Plugin lifecycle service is shutting down",
+                category="lifecycle",
+            )
 
     async def wait_for_critical_tasks(self) -> None:
         while self._critical_tasks:
@@ -649,6 +670,7 @@ class PluginMarketService:
         return select_candidate(trusted, identity)
 
     async def install_from_packages(self, packages: Iterable[dict], identity: str) -> dict:
+        self._ensure_not_shutting_down()
         candidate = await self._trusted_candidate_from_packages(packages, identity)
         await require_high_risk_approvals(candidate.manifest)
         async with self.preparation_lock(identity):
@@ -665,6 +687,7 @@ class PluginMarketService:
 
     async def install_developer_local(self, packages: Iterable[dict], identity: str) -> dict:
         """Install a user-selected local package through the normal lifecycle."""
+        self._ensure_not_shutting_down()
         candidate = await self._developer_candidate_from_packages(packages, identity)
         existing = await db.get_plugin_installation(
             candidate.manifest.publisher_id, candidate.manifest.plugin_id,
@@ -696,6 +719,7 @@ class PluginMarketService:
         can therefore restore a missing/corrupt file without changing
         ownership or silently moving the installation to a newer release.
         """
+        self._ensure_not_shutting_down()
         candidate = await self._trusted_candidate_from_packages(packages, identity)
         await require_high_risk_approvals(candidate.manifest)
         async with self.preparation_lock(identity):
@@ -1027,7 +1051,7 @@ class PluginMarketService:
     ) -> None:
         """Converge Runtime/service projection to an already committed version."""
         delay = 0.0
-        while True:
+        while not self._shutdown_event.is_set():
             try:
                 if instance is None:
                     raise PluginError(
@@ -1071,6 +1095,8 @@ class PluginMarketService:
             except asyncio.CancelledError:
                 raise
             except Exception as error:
+                if self._shutdown_event.is_set():
+                    raise asyncio.CancelledError
                 logger.warning(
                     "Committed Plugin activation reconciliation will retry: plugin=%s error_type=%s error_code=%s",
                     identity,
@@ -1078,7 +1104,11 @@ class PluginMarketService:
                     getattr(error, "code", "PLUGIN_RECONCILIATION_FAILED"),
                 )
                 delay = min(0.5, max(0.01, delay * 2 or 0.01))
-                await asyncio.sleep(delay)
+                try:
+                    await asyncio.wait_for(self._shutdown_event.wait(), timeout=delay)
+                except asyncio.TimeoutError:
+                    pass
+        raise asyncio.CancelledError
 
     async def disable(self, identity: str) -> dict:
         async with self.lifecycle_lock(identity):
