@@ -83,7 +83,7 @@
     <div v-if="showAppShell" class="fixed inset-x-0 top-0 z-50 bg-[var(--bg)] lg:hidden">
       <div class="h-[env(safe-area-inset-top)]"></div>
       <div class="mobile-header-row flex h-12 items-center justify-between px-4 sm:px-6">
-        <div class="mobile-mode-switch flex h-10 items-center rounded-full border border-[var(--border)] bg-[var(--bg-soft)]/70 p-0.5 text-sm font-medium shadow-sm shadow-black/[0.04] backdrop-blur-xl">
+        <div class="mobile-mode-switch flex h-10 items-center rounded-full border border-[var(--border)] p-0.5 text-sm font-medium backdrop-blur-xl">
           <button
             type="button"
             class="flex h-9 items-center rounded-full px-3 transition-all sm:px-4"
@@ -102,7 +102,7 @@
           </button>
         </div>
         <div class="flex items-center gap-2">
-          <div class="mobile-search-shell relative flex items-center rounded-full border border-[var(--border)] bg-[var(--bg-soft)]/70 shadow-sm shadow-black/[0.04] backdrop-blur-xl transition-all duration-300 ease-out" :class="searchExpanded ? 'mobile-search-expanded' : 'mobile-search-collapsed'">
+          <div class="mobile-search-shell relative flex items-center rounded-full backdrop-blur-xl transition-all duration-300 ease-out" :class="searchExpanded ? 'mobile-search-expanded' : 'mobile-search-collapsed'">
             <button type="button" class="mobile-search-trigger flex shrink-0 items-center justify-center text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]" aria-label="搜索" @click="toggleSearch">
               <svg class="size-5" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="1.8" /><path d="M16.5 16.5L21 21" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" /></svg>
             </button>

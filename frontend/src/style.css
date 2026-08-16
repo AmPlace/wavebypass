@@ -271,6 +271,12 @@
 
     .mobile-mode-switch {
       flex: 0 0 auto;
+      background: var(--bg-soft);
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+    }
+
+    .dark .mobile-mode-switch {
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22);
     }
 
     .mobile-action-btn {
@@ -283,12 +289,17 @@
 
     .mobile-action-btn::before {
       position: absolute;
-      inset: 4px;
+      inset: 2px;
       content: '';
       border: 1px solid var(--border);
       border-radius: 999px;
-      background: var(--surface);
+      background: var(--bg-soft);
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
       transition: background-color 180ms ease, border-color 180ms ease, transform 180ms ease;
+    }
+
+    .dark .mobile-action-btn::before {
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22);
     }
 
     .mobile-action-btn:hover {
@@ -312,13 +323,16 @@
     .mobile-action-btn > svg {
       position: relative;
       z-index: 1;
-      width: 1.0625rem;
-      height: 1.0625rem;
+      width: 1.125rem;
+      height: 1.125rem;
     }
 
     .mobile-search-shell {
       height: 2.75rem;
       border-width: 0;
+      border-color: transparent;
+      background: transparent;
+      box-shadow: none;
     }
 
     .mobile-search-collapsed {
@@ -329,12 +343,17 @@
 
     .mobile-search-collapsed::before {
       position: absolute;
-      inset: 4px;
+      inset: 2px;
       content: '';
       border: 1px solid var(--border);
       border-radius: 999px;
       background: var(--bg-soft);
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
       transition: background-color 180ms ease, border-color 180ms ease;
+    }
+
+    .dark .mobile-search-collapsed::before {
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22);
     }
 
     .mobile-search-collapsed:hover::before {
@@ -347,6 +366,11 @@
       border-width: 1px;
       border-color: var(--border);
       background: var(--bg-soft);
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+    }
+
+    .dark .mobile-search-expanded {
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22);
     }
 
     .mobile-search-trigger {
@@ -357,8 +381,8 @@
     }
 
     .mobile-search-trigger > svg {
-      width: 1.0625rem;
-      height: 1.0625rem;
+      width: 1.125rem;
+      height: 1.125rem;
     }
 
     .mobile-nav-popover {
@@ -948,8 +972,8 @@
     }
 
     .mobile-player-logo {
-      width: 2.5rem;
-      height: 2.5rem;
+      width: 2.75rem;
+      height: 2.75rem;
       border-radius: 0.625rem;
       padding: 0.1875rem;
     }
@@ -1009,7 +1033,7 @@
 
     .mobile-player-list-btn::before {
       position: absolute;
-      inset: 4px;
+      inset: 2px;
       content: '';
       border: 1px solid var(--border);
       border-radius: 999px;
@@ -1325,7 +1349,7 @@
     padding-bottom: calc(env(safe-area-inset-bottom) + 6rem);
   }
 
-  /* A 44px hit target carries a 36px visual chip. This keeps the existing
+  /* A 44px hit target carries a 40px visual chip. This keeps the existing
      row measurement and expand/collapse semantics unchanged. */
   .iptv-main .tag-filter-row__item,
   .iptv-main .tag-filter-row__more {
@@ -1339,7 +1363,7 @@
   .iptv-main .tag-filter-row__item::before,
   .iptv-main .tag-filter-row__more::before {
     position: absolute;
-    inset: 4px;
+    inset: 2px;
     z-index: -1;
     content: '';
     border: 1px solid var(--border);
@@ -1382,7 +1406,7 @@
 
   .iptv-main .iptv-density-menu__trigger::before {
     position: absolute;
-    inset: 5px;
+    inset: 2px;
     content: '';
     border: 1px solid var(--border);
     border-radius: 999px;
@@ -1399,8 +1423,8 @@
   .iptv-main .iptv-density-menu__trigger svg {
     position: relative;
     z-index: 1;
-    width: 1.0625rem;
-    height: 1.0625rem;
+    width: 1.125rem;
+    height: 1.125rem;
   }
 
   .iptv-main .iptv-sort-trigger {
@@ -1413,7 +1437,7 @@
 
   .iptv-main .iptv-sort-trigger::before {
     position: absolute;
-    inset: 3px;
+    inset: 2px;
     z-index: -1;
     content: '';
     border: 1px solid var(--border);
@@ -1430,7 +1454,7 @@
   .iptv-main .iptv-sort-trigger > svg {
     position: relative;
     z-index: 1;
-    width: 1.0625rem;
-    height: 1.0625rem;
+    width: 1.125rem;
+    height: 1.125rem;
   }
 }
