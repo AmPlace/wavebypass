@@ -4,9 +4,15 @@
       <div
         v-show="isPlayerExpanded"
         class="full-player fixed inset-0 z-50 overflow-y-auto"
-        :class="{ 'theme-dark': isFullPlayerDark, 'safari-chrome-refresh': isSafariChromeRefreshing }"
-        @pointermove="showMobileOverlayControls"
-        @pointerdown="showMobileOverlayControls"
+        :class="{ 'theme-dark': isFullPlayerDark, 'safari-chrome-refresh': isSafariChromeRefreshing, 'full-player--mobile-layout': isMobileLayout, 'full-player--theater': isTheaterLayout }"
+        @pointerenter="handleOverlayActivity"
+        @pointermove="handleOverlayActivity"
+        @mousemove="handleOverlayActivity"
+        @pointerdown="handleOverlayActivity"
+        @touchstart="handleOverlayActivity"
+        @keydown.capture="handleOverlayActivity"
+        @focusin.capture="handleOverlayFocusIn"
+        @focusout.capture="handleOverlayFocusOut"
       >
         <div ref="playerLayoutRef" class="player-layout" :style="playerLayoutStyle">
           <button
@@ -18,7 +24,13 @@
             <svg viewBox="0 0 24 24" fill="none"><path d="M19 12H5M12 5l-7 7 7 7" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
           </button>
           <main ref="playerMainRef" class="player-main">
-            <section class="media-card">
+            <section
+              ref="mediaSurfaceRef"
+              class="media-card"
+              :class="{ 'media-surface--overlay-hidden': isDesktopOverlayHidden }"
+              @pointerenter="handleOverlayActivity"
+              @pointerleave="scheduleOverlayHide"
+            >
               <div class="mobile-live-pill" aria-hidden="true">
                 <div class="pill-logo">
                   <img
@@ -85,7 +97,24 @@
                 </div>
               </div>
 
-              <div class="video-overlay desktop-video-overlay" aria-label="播放控制">
+              <Transition name="video-loading">
+                <div
+                  v-if="showOverlayLoadingSpinner"
+                  class="video-loading-indicator"
+                  role="status"
+                  aria-label="正在加载"
+                >
+                  <span class="video-loading-spinner" aria-hidden="true"></span>
+                </div>
+              </Transition>
+
+              <div
+                class="video-overlay desktop-video-overlay"
+                :class="{ 'is-hidden': isDesktopOverlayHidden }"
+                aria-label="播放控制"
+                @pointerenter="handleOverlayActivity"
+                @pointerleave="scheduleOverlayHide"
+              >
                 <div
                   v-if="isIptvMode"
                   class="program-progress video-overlay-progress"
@@ -122,41 +151,55 @@
                     <button type="button" class="video-overlay-button video-overlay-button--side" aria-label="下一个" @click="playNext">
                       <svg viewBox="0 0 24 24" fill="currentColor"><path d="M15.9 5.5h2.6v13h-2.6zM5.5 18.1l8.2-6.1-8.2-6.1z"/></svg>
                     </button>
+                    <span
+                      class="video-overlay-status"
+                      :class="overlayPlaybackStateClass"
+                      role="status"
+                      aria-live="polite"
+                    >
+                      {{ overlayPlaybackStatusText }}
+                    </span>
                   </div>
 
                   <div class="video-overlay-utility">
-                    <button
-                      type="button"
-                      class="video-overlay-button video-overlay-button--utility"
-                      :aria-label="iptvMuted ? '取消静音' : '静音'"
-                      @click="toggleMute()"
-                    >
-                      <svg v-if="iptvMuted" viewBox="0 0 24 24" fill="none">
-                        <path d="M4 10v4a1 1 0 0 0 1 1h3l4.2 3.15A.5.5 0 0 0 13 17.75V6.25a.5.5 0 0 0-.8-.4L8 9H5a1 1 0 0 0-1 1Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
-                        <path d="m21 3-18 18" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/>
-                      </svg>
-                      <svg v-else viewBox="0 0 24 24" fill="none">
-                        <path d="M4 10v4a1 1 0 0 0 1 1h3l4.2 3.15A.5.5 0 0 0 13 17.75V6.25a.5.5 0 0 0-.8-.4L8 9H5a1 1 0 0 0-1 1Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
-                        <path d="M16 9a4 4 0 0 1 0 6M18.5 6.5a7.5 7.5 0 0 1 0 11" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
-                      </svg>
-                    </button>
+                    <div class="video-overlay-volume-panel">
+                      <button
+                        type="button"
+                        class="video-overlay-button video-overlay-button--utility"
+                        :aria-label="overlayVolumeButtonLabel"
+                        @click="toggleOverlayMute"
+                      >
+                        <svg v-if="volumeIconState === 'muted'" viewBox="0 0 24 24" fill="none">
+                          <path d="M4 10v4a1 1 0 0 0 1 1h3l4.2 3.15A.5.5 0 0 0 13 17.75V6.25a.5.5 0 0 0-.8-.4L8 9H5a1 1 0 0 0-1 1Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+                          <path d="m21 3-18 18" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/>
+                        </svg>
+                        <svg v-else-if="volumeIconState === 'low'" viewBox="0 0 24 24" fill="none">
+                          <path d="M4 10v4a1 1 0 0 0 1 1h3l4.2 3.15A.5.5 0 0 0 13 17.75V6.25a.5.5 0 0 0-.8-.4L8 9H5a1 1 0 0 0-1 1Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+                          <path d="M16 10a3 3 0 0 1 0 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+                        </svg>
+                        <svg v-else viewBox="0 0 24 24" fill="none">
+                          <path d="M4 10v4a1 1 0 0 0 1 1h3l4.2 3.15A.5.5 0 0 0 13 17.75V6.25a.5.5 0 0 0-.8-.4L8 9H5a1 1 0 0 0-1 1Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+                          <path d="M16 9a4 4 0 0 1 0 6M18.5 6.5a7.5 7.5 0 0 1 0 11" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+                        </svg>
+                      </button>
 
-                    <div v-if="!isIOS || !isIptvMode" class="video-overlay-volume">
-                      <svg viewBox="0 0 24 24" fill="none"><path d="M4 10v4a1 1 0 0 0 1 1h3l4.2 3.15A.5.5 0 0 0 13 17.75V6.25a.5.5 0 0 0-.8-.4L8 9H5a1 1 0 0 0-1 1Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
-                      <input
-                        type="range"
-                        min="0"
-                        max="1"
-                        step="0.01"
-                        :value="volume"
-                        aria-label="音量"
-                        @input="playerStore.setVolume($event.target.value)"
-                      />
+                      <div v-if="!isIOS" class="video-overlay-volume">
+                        <input
+                          type="range"
+                          min="0"
+                          max="1"
+                          step="0.01"
+                          :value="effectiveVolume"
+                          aria-label="音量"
+                          @pointerdown="beginOverlayPinnedInteraction"
+                          @pointerup="endOverlayPinnedInteraction"
+                          @pointercancel="endOverlayPinnedInteraction"
+                          @focus="beginOverlayPinnedInteraction"
+                          @blur="endOverlayPinnedInteraction"
+                          @input="setOverlayVolume($event.target.value)"
+                        />
+                      </div>
                     </div>
-
-                    <button type="button" class="video-overlay-button video-overlay-button--utility" aria-label="全屏" @click="toggleFullscreen">
-                      <svg viewBox="0 0 24 24" fill="none"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z" fill="currentColor"/></svg>
-                    </button>
 
                     <button
                       v-if="isIptvMode && iptvSourceOptions.length"
@@ -168,7 +211,7 @@
                       aria-label="切换播放源"
                       @click.stop="toggleSourceMenu"
                     >
-                      <svg viewBox="0 0 24 24" fill="none"><path d="M6 7.5h12M6 12h12M6 16.5h12" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4.5 7 7.5-3 7.5 3-7.5 3-7.5-3Z"/><path d="m4.5 12 7.5 3 7.5-3"/><path d="m4.5 17 7.5 3 7.5-3"/></svg>
                     </button>
                     <button
                       v-if="!isIptvMode && currentRadioSourceOptions.length > 1"
@@ -180,7 +223,26 @@
                       aria-label="切换电台播放源"
                       @click.stop="toggleSourceMenu"
                     >
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M6 7.5h12M6 12h12M6 16.5h12"/></svg>
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4.5 7 7.5-3 7.5 3-7.5 3-7.5-3Z"/><path d="m4.5 12 7.5 3 7.5-3"/><path d="m4.5 17 7.5 3 7.5-3"/></svg>
+                    </button>
+
+                    <button
+                      v-if="isDesktopLayout"
+                      type="button"
+                      class="video-overlay-button video-overlay-button--utility"
+                      :class="{ active: isRailLayout, disabled: isFullscreen }"
+                      :aria-expanded="isRailLayout"
+                      :aria-disabled="isFullscreen"
+                      :disabled="isFullscreen"
+                      :title="isFullscreen ? '全屏中不可显示频道列表' : (isRailLayout ? '隐藏频道列表' : '显示频道列表')"
+                      :aria-label="isFullscreen ? '全屏中不可显示频道列表' : (isRailLayout ? '隐藏频道列表' : '显示频道列表')"
+                      @click="toggleDesktopRail"
+                    >
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 6h2M5 12h2M5 18h2M11 6h8M11 12h8M11 18h8"/></svg>
+                    </button>
+
+                    <button type="button" class="video-overlay-button video-overlay-button--utility" aria-label="全屏" :aria-pressed="isFullscreen" @click="toggleFullscreen">
+                      <svg viewBox="0 0 24 24" fill="none"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z" fill="currentColor"/></svg>
                     </button>
                   </div>
                 </div>
@@ -188,26 +250,34 @@
             </section>
 
             <section ref="nowPanelRef" class="now-panel">
-              <h1>{{ currentStationName }}</h1>
-              <p class="channel-subtitle">{{ currentChannelSubtitle }}</p>
-              <template v-if="isIptvMode">
-                <p
-                  class="now-program-title"
-                  :class="`now-program-title--${epgViewingState}`"
-                  aria-live="polite"
-                >
-                  {{ epgViewingText }}
-                </p>
-                <p v-if="nextProgramSummary" class="now-program-next">
-                  下一节目 · {{ nextProgramSummary }}
-                </p>
-                <p v-if="showProgramRemaining" class="now-program-remaining desktop-now-program-meta">
-                  剩余 {{ currentProgram.remaining }} 分钟
-                </p>
-              </template>
+              <div class="now-metadata" :class="{ 'now-metadata--without-programme': !hasProgrammeMetadata }">
+                <div class="now-identity">
+                  <h1>{{ currentStationName }}</h1>
+                  <p class="channel-subtitle">{{ currentChannelSubtitle }}</p>
+                </div>
+                <div v-if="hasProgrammeMetadata" class="now-programme">
+                  <p
+                    class="now-program-title"
+                    :class="`now-program-title--${epgViewingState}`"
+                    aria-live="polite"
+                  >
+                    {{ epgViewingText }}
+                  </p>
+                  <p v-if="nextProgramSummary" class="now-program-next mobile-now-program-next">
+                    下一节目 · {{ nextProgramSummary }}
+                  </p>
+                  <div v-if="nextProgramSummary" class="desktop-now-program-next" aria-label="下一节目">
+                    <span class="desktop-now-program-next__label">下一节目</span>
+                    <span class="desktop-now-program-next__title">{{ nextProgramSummary }}</span>
+                  </div>
+                  <p v-if="showProgramRemaining" class="now-program-remaining desktop-now-program-meta">
+                    剩余 {{ currentProgram.remaining }} 分钟
+                  </p>
+                </div>
+              </div>
 
               <div class="mobile-now-controls">
-                <div
+                <div v-if="hasCurrentEpgProgram"
                   class="program-progress"
                   :class="{ empty: !hasCurrentEpgProgram }"
                   role="progressbar"
@@ -276,11 +346,16 @@
                     step="0.01"
                     :value="volume"
                     aria-label="音量"
+                    @pointerdown="beginOverlayPinnedInteraction"
+                    @pointerup="endOverlayPinnedInteraction"
+                    @pointercancel="endOverlayPinnedInteraction"
+                    @focus="beginOverlayPinnedInteraction"
+                    @blur="endOverlayPinnedInteraction"
                     @input="playerStore.setVolume($event.target.value)"
                   />
                 </div>
 
-                <button type="button" class="utility-btn" aria-label="全屏" @click="toggleFullscreen">
+                <button type="button" class="utility-btn" aria-label="全屏" :aria-pressed="isFullscreen" @click="toggleFullscreen">
                   <svg viewBox="0 0 24 24" fill="none"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z" fill="currentColor"/></svg>
                 </button>
 
@@ -294,7 +369,7 @@
                   aria-label="切换播放源"
                   @click.stop="toggleSourceMenu"
                 >
-                  <svg viewBox="0 0 24 24" fill="none"><path d="M6 7.5h12M6 12h12M6 16.5h12" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4.5 7 7.5-3 7.5 3-7.5 3-7.5-3Z"/><path d="m4.5 12 7.5 3 7.5-3"/><path d="m4.5 17 7.5 3 7.5-3"/></svg>
                 </button>
                 <button
                   v-if="!isIptvMode && currentRadioSourceOptions.length > 1"
@@ -306,7 +381,7 @@
                   aria-label="切换电台播放源"
                   @click.stop="toggleSourceMenu"
                 >
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M6 7.5h12M6 12h12M6 16.5h12"/></svg>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4.5 7 7.5-3 7.5 3-7.5 3-7.5-3Z"/><path d="m4.5 12 7.5 3 7.5-3"/><path d="m4.5 17 7.5 3 7.5-3"/></svg>
                 </button>
                 </div>
               </div>
@@ -381,29 +456,31 @@
                 </div>
 
                 <div v-else key="schedule" class="schedule-panel">
-                  <div v-if="epgDateOptions.length" class="schedule-date-list">
-                    <button
-                      v-for="item in epgDateOptions"
-                      :key="item.value"
-                      type="button"
-                      class="schedule-date-chip"
-                      :class="{ active: item.active }"
-                      @click="selectEpgDate(item.value)"
-                    >
-                      <span>{{ item.label }}</span>
-                      <small>{{ item.weekday }}</small>
-                    </button>
-                  </div>
-                  <div v-else class="schedule-date">
-                    <span>今天</span>
-                  </div>
-                  <div class="timeline">
-                    <div v-for="program in displaySchedule" :key="`${program.time}-${program.title}`" class="timeline-row" :class="{ current: program.current, past: program.past }">
-                      <span class="timeline-time">{{ program.time }}</span>
-                      <span class="timeline-dot"></span>
-                      <span class="timeline-title">
-                        {{ program.title }}
-                      </span>
+                  <div v-if="hasScheduleData" class="schedule-content">
+                    <div v-if="epgDateOptions.length" class="schedule-date-list">
+                      <button
+                        v-for="item in epgDateOptions"
+                        :key="item.value"
+                        type="button"
+                        class="schedule-date-chip"
+                        :class="{ active: item.active }"
+                        @click="selectEpgDate(item.value)"
+                      >
+                        <span>{{ item.label }}</span>
+                        <small>{{ item.weekday }}</small>
+                      </button>
+                    </div>
+                    <div v-else class="schedule-date">
+                      <span>今天</span>
+                    </div>
+                    <div class="timeline">
+                      <div v-for="program in displaySchedule" :key="`${program.time}-${program.title}`" class="timeline-row" :class="{ current: program.current, past: program.past }">
+                        <span class="timeline-time">{{ program.time }}</span>
+                        <span class="timeline-dot"></span>
+                        <span class="timeline-title">
+                          {{ program.title }}
+                        </span>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -480,29 +557,31 @@
               </div>
 
               <div v-else key="schedule" class="schedule-panel desktop-panel-scroll">
-                <div v-if="epgDateOptions.length" class="schedule-date-list">
-                  <button
-                    v-for="item in epgDateOptions"
-                    :key="item.value"
-                    type="button"
-                    class="schedule-date-chip"
-                    :class="{ active: item.active }"
-                    @click="selectEpgDate(item.value)"
-                  >
-                    <span>{{ item.label }}</span>
-                    <small>{{ item.weekday }}</small>
-                  </button>
-                </div>
-                <div v-else class="schedule-date">
-                  <span>今天</span>
-                </div>
-                <div class="timeline">
-                  <div v-for="program in displaySchedule" :key="`${program.time}-${program.title}`" class="timeline-row" :class="{ current: program.current, past: program.past }">
-                    <span class="timeline-time">{{ program.time }}</span>
-                    <span class="timeline-dot"></span>
-                    <span class="timeline-title">
-                      {{ program.title }}
-                    </span>
+                <div v-if="hasScheduleData" class="schedule-content">
+                  <div v-if="epgDateOptions.length" class="schedule-date-list">
+                    <button
+                      v-for="item in epgDateOptions"
+                      :key="item.value"
+                      type="button"
+                      class="schedule-date-chip"
+                      :class="{ active: item.active }"
+                      @click="selectEpgDate(item.value)"
+                    >
+                      <span>{{ item.label }}</span>
+                      <small>{{ item.weekday }}</small>
+                    </button>
+                  </div>
+                  <div v-else class="schedule-date">
+                    <span>今天</span>
+                  </div>
+                  <div class="timeline">
+                    <div v-for="program in displaySchedule" :key="`${program.time}-${program.title}`" class="timeline-row" :class="{ current: program.current, past: program.past }">
+                      <span class="timeline-time">{{ program.time }}</span>
+                      <span class="timeline-dot"></span>
+                      <span class="timeline-title">
+                        {{ program.title }}
+                      </span>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -513,12 +592,13 @@
     </Transition>
   </Teleport>
 
-  <Teleport to="body">
+  <Teleport :to="sourceMenuTeleportTarget">
     <Transition name="fade">
       <div
         v-show="sourceMenuOpen"
         :id="isIptvMode ? 'iptv-source-menu' : 'radio-source-menu'"
         class="fixed z-[80] overflow-hidden rounded-2xl border border-neutral-200 bg-white/95 p-1.5 text-left shadow-xl shadow-black/10 backdrop-blur dark:border-white/10 dark:bg-neutral-800/95"
+        :class="{ 'source-menu-in-fullscreen': isFullscreen }"
         :style="sourceMenuStyle"
         @click.stop
       >
@@ -591,6 +671,7 @@ import { useEpg } from '../composables/useEpg'
 import { formatEpgClock } from '../utils/epgViewing'
 import { API_BASE } from '../apiBase'
 import { publicAsset } from '../publicAsset'
+import { calculateFullPlayerSizing } from '../utils/fullPlayerSizing'
 import {
   extractSourceIdFromUrl,
   channelIdentity,
@@ -615,11 +696,13 @@ const iptvMpegtsRef = ref(null)
 const youtubeHostRef = ref(null)
 const playerLayoutRef = ref(null)
 const playerMainRef = ref(null)
+const mediaSurfaceRef = ref(null)
 const nowPanelRef = ref(null)
 const activeIptvEngine = ref('video')
 const sourceButtonRef = ref(null)
 const desktopSourceButtonRef = ref(null)
 const sourceMenuOpen = ref(false)
+const isSourceSwitching = ref(false)
 const sourceMenuStyle = ref({
   left: '12px',
   top: '64px',
@@ -675,33 +758,72 @@ const epgNow = ref(Date.now())
 const mobileOverlayVisible = ref(true)
 const mediaAspectRatio = ref(DEFAULT_MEDIA_ASPECT_RATIO)
 const mediaAspectValue = ref(DEFAULT_MEDIA_ASPECT_VALUE)
+const mediaStageAspectRatio = ref(null)
 const mediaFrameWidth = ref(null)
+const mediaFrameHeight = ref(null)
 const sidePanelWidth = ref(null)
 const playerLayoutWidth = ref(null)
+const layoutMode = ref('desktop')
+const desktopRailPreference = ref('auto')
+const desktopRailLayout = ref('theater')
 const DEFAULT_LOGO_URL = publicAsset('/logos/default.png')
 const isFullPlayerDark = ref(document.documentElement.classList.contains('dark'))
 const isSafariChromeRefreshing = ref(false)
+const isFullscreen = ref(false)
+const desktopOverlayVisible = ref(true)
+const overlayControlsFocused = ref(false)
+const overlayVolumeInteracting = ref(false)
 let themeObserver = null
 let epgTickTimer = null
 let epgRefreshAfterEndTimer = null
 let mobileOverlayTimer = null
+let overlayLoadingTimer = null
 let mediaLayoutObserver = null
 let mediaLayoutRaf = 0
+let hoverCapabilityQuery = null
+let finePointerCapabilityQuery = null
+let overlayHideTimer = null
 
 const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
   (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
 playerStore.initializeMuted(isIOS)  // iOS 静音绕过自动播放限制
 const iptvMuted = isMuted
+const lastNonZeroVolume = ref(Number(volume.value) > 0 ? Number(volume.value) : 1)
+
+const effectiveVolume = computed(() => (
+  iptvMuted.value ? 0 : Math.min(1, Math.max(0, Number(volume.value) || 0))
+))
+
+const volumeIconState = computed(() => {
+  const current = effectiveVolume.value
+  if (current <= 0) return 'muted'
+  if (current < 0.5) return 'low'
+  return 'high'
+})
+
+const overlayVolumeButtonLabel = computed(() => (
+  effectiveVolume.value > 0 ? '静音' : '取消静音'
+))
 
 const playerLayoutStyle = computed(() => {
   const style = {
     '--media-aspect-ratio': mediaAspectRatio.value,
   }
+  if (mediaStageAspectRatio.value) style['--stage-aspect-ratio'] = mediaStageAspectRatio.value
   if (mediaFrameWidth.value) style['--media-frame-width'] = `${mediaFrameWidth.value.toFixed(3)}px`
+  if (mediaFrameHeight.value) style['--media-height'] = `${mediaFrameHeight.value.toFixed(3)}px`
   if (sidePanelWidth.value) style['--side-panel-width'] = `${sidePanelWidth.value.toFixed(3)}px`
   if (playerLayoutWidth.value) style['--layout-width'] = `${playerLayoutWidth.value.toFixed(3)}px`
   return style
 })
+
+const isMobileLayout = computed(() => layoutMode.value === 'mobile')
+const isDesktopLayout = computed(() => layoutMode.value === 'desktop')
+const isRailLayout = computed(() => isDesktopLayout.value && desktopRailLayout.value === 'rail')
+const isTheaterLayout = computed(() => isDesktopLayout.value && desktopRailLayout.value === 'theater')
+const sourceMenuTeleportTarget = computed(() => (
+  isFullscreen.value && mediaSurfaceRef.value ? mediaSurfaceRef.value : 'body'
+))
 
 function useDefaultLogo(event) {
   const img = event?.target
@@ -712,6 +834,10 @@ function useDefaultLogo(event) {
 
 function toggleMute() {
   playerStore.setMuted(!iptvMuted.value)
+  syncCurrentAudioMute()
+}
+
+function syncCurrentAudioMute() {
   if (activeIptvEngine.value === 'youtube') {
     syncYoutubeAudioState()
     return
@@ -719,18 +845,67 @@ function toggleMute() {
   if (iptvVideoRef.value) iptvVideoRef.value.muted = iptvMuted.value
 }
 
-function toggleFullscreen() {
-  if (activeIptvEngine.value === 'youtube') return
-  const el = iptvVideoRef.value
-  if (!el) return
-  if (document.fullscreenElement) {
-    document.exitFullscreen()
-  } else if (el.webkitEnterFullscreen) {
-    el.webkitEnterFullscreen()  // iOS 私有 API
+function setOverlayVolume(value) {
+  const next = Math.min(1, Math.max(0, Number(value) || 0))
+  if (next > 0) {
+    lastNonZeroVolume.value = next
+    playerStore.setVolume(next)
+    if (iptvMuted.value) playerStore.setMuted(false)
   } else {
-    el.requestFullscreen().catch(() => {})
+    playerStore.setVolume(0)
+    playerStore.setMuted(true)
   }
-}  // 跟踪当前播放的 URL，防止重复设置
+  syncCurrentAudioMute()
+}
+
+function toggleOverlayMute() {
+  if (effectiveVolume.value > 0) {
+    lastNonZeroVolume.value = effectiveVolume.value
+    playerStore.setMuted(true)
+  } else {
+    const restore = Math.min(1, Math.max(0.01, Number(lastNonZeroVolume.value) || 1))
+    playerStore.setVolume(restore)
+    playerStore.setMuted(false)
+  }
+  syncCurrentAudioMute()
+}
+
+async function toggleFullscreen() {
+  if (document.fullscreenElement) {
+    await document.exitFullscreen?.().catch?.(() => {})
+    return
+  }
+
+  const target = mediaSurfaceRef.value
+  if (target?.requestFullscreen) {
+    try {
+      await target.requestFullscreen()
+      return
+    } catch {}
+  }
+
+  // iOS versions without Element.requestFullscreen only expose the native
+  // video fullscreen API. Keep this as a feature-detected fallback.
+  const video = iptvVideoRef.value
+  if (video?.webkitEnterFullscreen) {
+    video.webkitEnterFullscreen()
+  }
+} // 跟踪当前播放的 URL，防止重复设置
+
+function handleFullscreenChange() {
+  const fullscreenElement = document.fullscreenElement
+  isFullscreen.value = Boolean(
+    fullscreenElement
+    && mediaSurfaceRef.value
+    && (fullscreenElement === mediaSurfaceRef.value || mediaSurfaceRef.value.contains(fullscreenElement)),
+  )
+  if (isFullscreen.value) {
+    handleOverlayActivity()
+  } else {
+    scheduleOverlayHide()
+  }
+  if (sourceMenuOpen.value) nextTick(() => updateSourceMenuPosition())
+}
 
 function resetMediaAspect() {
   mediaAspectRatio.value = DEFAULT_MEDIA_ASPECT_RATIO
@@ -765,11 +940,6 @@ function updateMediaAspectFromVideo() {
   setMediaAspect(video.videoWidth, video.videoHeight)
 }
 
-function cssNumber(style, prop, fallback = 0) {
-  const value = Number.parseFloat(style.getPropertyValue(prop))
-  return Number.isFinite(value) ? value : fallback
-}
-
 function scheduleMediaFrameSizeUpdate() {
   if (mediaLayoutRaf) return
   mediaLayoutRaf = window.requestAnimationFrame(() => {
@@ -779,54 +949,76 @@ function scheduleMediaFrameSizeUpdate() {
 }
 
 function updateMediaFrameSize() {
-  if (window.matchMedia('(max-width: 980px)').matches) {
-    mediaFrameWidth.value = null
-    sidePanelWidth.value = null
-    playerLayoutWidth.value = null
-    scheduleTabIndicatorUpdate()
-    return
-  }
-
   const viewportWidth = window.innerWidth
   const viewportHeight = window.innerHeight
-  const layoutEl = playerLayoutRef.value
-  const layoutStyle = layoutEl ? window.getComputedStyle(layoutEl) : null
-  const mainStyle = playerMainRef.value ? window.getComputedStyle(playerMainRef.value) : null
-  // This value represents the total horizontal deduction from the viewport;
-  // centering the layout therefore leaves a 24–32px inset on each side.
-  const horizontalInset = Math.min(64, Math.max(48, viewportWidth * 0.05))
-  const layoutGap = layoutStyle
-    ? cssNumber(layoutStyle, 'column-gap', Math.min(24, Math.max(20, viewportWidth * 0.017)))
-    : Math.min(24, Math.max(20, viewportWidth * 0.017))
-  const layoutPaddingTop = layoutStyle ? cssNumber(layoutStyle, 'padding-top') : Math.min(42, Math.max(22, viewportHeight * 0.035))
-  const layoutPaddingBottom = layoutStyle ? cssNumber(layoutStyle, 'padding-bottom') : Math.min(22, Math.max(12, viewportHeight * 0.018))
-  const playerMainOffset = mainStyle ? cssNumber(mainStyle, 'padding-top') : 6
+  const hasHover = typeof window.matchMedia === 'function'
+    ? window.matchMedia('(hover: hover)').matches
+    : false
+  const hasFinePointer = typeof window.matchMedia === 'function'
+    ? window.matchMedia('(pointer: fine)').matches
+    : false
   const nowPanelHeight = nowPanelRef.value
     ? Math.ceil(nowPanelRef.value.getBoundingClientRect().height)
     : 150
-  const preferredPanelWidth = Math.min(340, Math.max(320, viewportWidth * 0.24))
-  const minPanelWidth = viewportWidth >= 1180 ? 320 : 300
-  const maxHeight = Math.max(
-    240,
-    viewportHeight - layoutPaddingTop - layoutPaddingBottom - playerMainOffset - nowPanelHeight,
-  )
-  const maxLayoutWidth = Math.max(720, viewportWidth - horizontalInset)
-  const widthByHeight = maxHeight * mediaAspectValue.value
-  const videoFirstWidth = Math.min(widthByHeight, maxLayoutWidth - layoutGap - minPanelWidth)
-  const panelWidth = Math.max(
-    minPanelWidth,
-    Math.min(preferredPanelWidth, maxLayoutWidth - layoutGap - videoFirstWidth),
-  )
-  const maxWidth = Math.max(360, maxLayoutWidth - layoutGap - panelWidth)
-  const width = Math.min(maxWidth, widthByHeight)
-  mediaFrameWidth.value = width
-  sidePanelWidth.value = panelWidth
-  playerLayoutWidth.value = width + layoutGap + panelWidth
+  const sizing = calculateFullPlayerSizing({
+    viewportWidth,
+    viewportHeight,
+    hasHover,
+    hasFinePointer,
+    railPreference: desktopRailPreference.value,
+    mediaAspect: mediaAspectValue.value,
+    nowPanelHeight,
+  })
+  layoutMode.value = sizing.mode
+  desktopRailLayout.value = sizing.desktopLayout || 'theater'
+  if (sizing.mode === 'mobile') {
+    mediaFrameWidth.value = null
+    mediaFrameHeight.value = null
+    mediaStageAspectRatio.value = null
+    sidePanelWidth.value = null
+    playerLayoutWidth.value = null
+  } else {
+    mediaFrameWidth.value = sizing.videoWidth
+    mediaFrameHeight.value = sizing.stageHeight
+    mediaStageAspectRatio.value = sizing.stageAspectRatio
+    sidePanelWidth.value = sizing.railWidth
+    playerLayoutWidth.value = sizing.layoutWidth
+  }
   scheduleTabIndicatorUpdate()
 }
 
+function toggleDesktopRail() {
+  if (!isDesktopLayout.value || isFullscreen.value) return
+  desktopRailPreference.value = isRailLayout.value ? 'hidden' : 'shown'
+  handleOverlayActivity()
+  scheduleMediaFrameSizeUpdate()
+}
+
+function handlePointerCapabilityChange() {
+  scheduleMediaFrameSizeUpdate()
+}
+
+function observePointerCapabilities() {
+  if (typeof window.matchMedia !== 'function') return
+  hoverCapabilityQuery = window.matchMedia('(hover: hover)')
+  finePointerCapabilityQuery = window.matchMedia('(pointer: fine)')
+  hoverCapabilityQuery.addEventListener?.('change', handlePointerCapabilityChange)
+  finePointerCapabilityQuery.addEventListener?.('change', handlePointerCapabilityChange)
+  hoverCapabilityQuery.addListener?.(handlePointerCapabilityChange)
+  finePointerCapabilityQuery.addListener?.(handlePointerCapabilityChange)
+}
+
+function stopObservingPointerCapabilities() {
+  hoverCapabilityQuery?.removeEventListener?.('change', handlePointerCapabilityChange)
+  finePointerCapabilityQuery?.removeEventListener?.('change', handlePointerCapabilityChange)
+  hoverCapabilityQuery?.removeListener?.(handlePointerCapabilityChange)
+  finePointerCapabilityQuery?.removeListener?.(handlePointerCapabilityChange)
+  hoverCapabilityQuery = null
+  finePointerCapabilityQuery = null
+}
+
 function updateSourceMenuPosition() {
-  const desktop = window.matchMedia('(min-width: 981px)').matches
+  const desktop = isDesktopLayout.value
   const button = (desktop ? desktopSourceButtonRef.value : sourceButtonRef.value) ||
     (desktop ? sourceButtonRef.value : desktopSourceButtonRef.value)
   if (!button) return
@@ -872,13 +1064,91 @@ function clearMobileOverlayTimer() {
 }
 
 function showMobileOverlayControls() {
-  if (window.matchMedia('(min-width: 981px)').matches) return
+  if (isDesktopLayout.value) return
   mobileOverlayVisible.value = true
   clearMobileOverlayTimer()
   mobileOverlayTimer = setTimeout(() => {
     mobileOverlayVisible.value = false
     mobileOverlayTimer = null
   }, 5000)
+}
+
+const overlayMustStayVisible = computed(() => (
+  !isPlaying.value
+  || isLoading.value
+  || isSourceSwitching.value
+  || Boolean(playerStore.playbackError)
+  || sourceMenuOpen.value
+  || overlayControlsFocused.value
+  || overlayVolumeInteracting.value
+))
+
+const isDesktopOverlayHidden = computed(() => (
+  isDesktopLayout.value
+  && !desktopOverlayVisible.value
+  && !overlayMustStayVisible.value
+))
+
+function clearOverlayHideTimer() {
+  if (!overlayHideTimer) return
+  clearTimeout(overlayHideTimer)
+  overlayHideTimer = null
+}
+
+function applyOverlayVisibility() {
+  clearOverlayHideTimer()
+  desktopOverlayVisible.value = true
+  if (overlayMustStayVisible.value || !isDesktopLayout.value) return
+  overlayHideTimer = setTimeout(() => {
+    overlayHideTimer = null
+    if (!overlayMustStayVisible.value && isDesktopLayout.value) {
+      desktopOverlayVisible.value = false
+    }
+  }, 2800)
+}
+
+function scheduleOverlayHide() {
+  clearOverlayHideTimer()
+  if (overlayMustStayVisible.value || !isDesktopLayout.value) {
+    desktopOverlayVisible.value = true
+    return
+  }
+  overlayHideTimer = setTimeout(() => {
+    overlayHideTimer = null
+    if (!overlayMustStayVisible.value && isDesktopLayout.value) {
+      desktopOverlayVisible.value = false
+    }
+  }, 900)
+}
+
+function handleOverlayActivity() {
+  desktopOverlayVisible.value = true
+  applyOverlayVisibility()
+  showMobileOverlayControls()
+}
+
+function beginOverlayPinnedInteraction() {
+  overlayVolumeInteracting.value = true
+  handleOverlayActivity()
+}
+
+function endOverlayPinnedInteraction() {
+  overlayVolumeInteracting.value = false
+  applyOverlayVisibility()
+}
+
+function handleOverlayFocusIn() {
+  overlayControlsFocused.value = true
+  handleOverlayActivity()
+}
+
+function handleOverlayFocusOut() {
+  nextTick(() => {
+    overlayControlsFocused.value = Boolean(
+      mediaSurfaceRef.value?.contains(document.activeElement),
+    )
+    applyOverlayVisibility()
+  })
 }
 
 function syncFullPlayerTheme() {
@@ -992,10 +1262,8 @@ const epgViewingState = computed(() => {
 })
 
 const epgViewingText = computed(() => {
-  if (epgViewingState.value === 'loading') return '正在加载节目单'
-  if (epgViewingState.value === 'error') return '节目单加载失败'
   if (epgViewingState.value === 'current') return currentProgram.value.title
-  return '暂无节目单'
+  return ''
 })
 
 const nextProgramSummary = computed(() => {
@@ -1005,6 +1273,13 @@ const nextProgramSummary = computed(() => {
   const start = formatEpgClock(_epgNext.value?.start)
   return start ? `${title} ${start}` : title
 })
+
+const hasProgrammeMetadata = computed(() => (
+  isIptvMode.value && (
+    hasCurrentEpgProgram.value
+    || Boolean(nextProgramSummary.value)
+  )
+))
 
 function localDateString(date = new Date()) {
   const year = date.getFullYear()
@@ -1059,6 +1334,60 @@ const playbackStateClass = computed(() => {
   return 'idle'
 })
 
+const isTransientPlaybackMessage = computed(() => (
+  /切换备用|源不可用.*切换|正在恢复|正在重连|卡顿|缓冲|重试/.test(String(playerStore.playbackError || ''))
+))
+
+const overlayPlaybackStatusText = computed(() => {
+  const error = String(playerStore.playbackError || '')
+  if (isSourceSwitching.value) return '正在切换源'
+  if (error) {
+    if (/切换备用|源不可用.*切换/.test(error)) return '正在切换源'
+    if (/正在恢复|正在重连|卡顿|缓冲|重试/.test(error)) return '正在重连'
+    return error
+  }
+  if (isLoading.value) return '正在加载'
+  if (isPlaying.value) return '直播中'
+  return '已暂停'
+})
+
+const overlayPlaybackStateClass = computed(() => (
+  isSourceSwitching.value || (isLoading.value && isTransientPlaybackMessage.value)
+    ? 'loading'
+    : playbackStateClass.value
+))
+
+const isOverlayLoadingCandidate = computed(() => {
+  if (!isLoading.value) return false
+  if (playerStore.playbackError && !isTransientPlaybackMessage.value) return false
+  return Boolean(
+    isPlaying.value
+    || playerStore.pendingIptvChannel
+    || playerStore.currentIptvChannel
+    || currentStation.value,
+  )
+})
+
+const showOverlayLoadingSpinner = ref(false)
+
+function clearOverlayLoadingTimer() {
+  if (!overlayLoadingTimer) return
+  clearTimeout(overlayLoadingTimer)
+  overlayLoadingTimer = null
+}
+
+watch(isOverlayLoadingCandidate, (shouldShow) => {
+  clearOverlayLoadingTimer()
+  if (!shouldShow) {
+    showOverlayLoadingSpinner.value = false
+    return
+  }
+  overlayLoadingTimer = setTimeout(() => {
+    overlayLoadingTimer = null
+    showOverlayLoadingSpinner.value = isOverlayLoadingCandidate.value
+  }, 240)
+}, { immediate: true })
+
 const isPlaybackConfirmed = computed(() => (
   !playerStore.playbackError && !isLoading.value && isPlaying.value
 ))
@@ -1077,15 +1406,17 @@ const displaySchedule = computed(() => {
       }
     })
   }
-  // 非 IPTV 继续保留原有电台名 fallback；IPTV 才显示 EPG 观看状态。
-  return [
-    {
-      time: '',
-      title: isIptvMode.value ? epgViewingText.value : currentProgram.value.title,
-      current: false,
-    },
-  ]
+  // Radio 的节目面板仍保留电台名 fallback；IPTV 没有节目数据时保持空面板，
+  // 不用占位文案伪造节目单。
+  if (isIptvMode.value) return []
+  return currentProgram.value.title
+    ? [{ time: '', title: currentProgram.value.title, current: false }]
+    : []
 })
+
+const hasScheduleData = computed(() => (
+  displaySchedule.value.length > 0 || epgDateOptions.value.length > 0
+))
 
 function normalizeGroupName(value) {
   return String(value || '').trim().toLowerCase()
@@ -2492,6 +2823,7 @@ async function switchIptvSource(index) {
   sourceMenuOpen.value = false
 
   const previousIndex = playerStore.iptvUrlIndex
+  if (previousIndex !== index) isSourceSwitching.value = true
   if (previousIndex !== index && ['trying', 'playing'].includes(getSourceRuntimeStatus(previousIndex))) {
     setSourceRuntimeStatus(previousIndex, 'stopped')
   }
@@ -2504,7 +2836,10 @@ async function switchIptvSource(index) {
   clearStallRecoveryTimer()
   cancelCurrentStartup()
   cancelActiveProxyRace()
-  if (!(await setIptvUrlIndexForAttempt(index, attemptId))) return
+  if (!(await setIptvUrlIndexForAttempt(index, attemptId))) {
+    isSourceSwitching.value = false
+    return
+  }
   setSourceRuntimeStatus(index, 'trying')
 
   if (isProxyLikeEntry(entry)) {
@@ -4153,6 +4488,15 @@ watch(sourceMenuOpen, async (open) => {
   updateSourceMenuPosition()
 })
 
+watch([overlayMustStayVisible, isDesktopLayout], () => {
+  if (overlayMustStayVisible.value) {
+    clearOverlayHideTimer()
+    desktopOverlayVisible.value = true
+    return
+  }
+  applyOverlayVisibility()
+}, { immediate: true })
+
 watch(activePlayerPanel, () => {
   nextTick(scheduleTabIndicatorUpdate)
 })
@@ -4205,7 +4549,12 @@ watch(isPlaying, (playing) => {
   }
 })
 
+watch(isLoading, (loading) => {
+  if (!loading) isSourceSwitching.value = false
+})
+
 watch(volume, (v) => {
+  if (Number(v) > 0) lastNonZeroVolume.value = Number(v)
   if (activeIptvEngine.value === 'youtube') {
     syncYoutubeAudioState()
     return
@@ -4316,6 +4665,8 @@ onMounted(() => {
     if (playerMainRef.value) mediaLayoutObserver.observe(playerMainRef.value)
     if (nowPanelRef.value) mediaLayoutObserver.observe(nowPanelRef.value)
   }
+  observePointerCapabilities()
+  document.addEventListener('fullscreenchange', handleFullscreenChange)
   updateMediaFrameSize()
   syncFullPlayerTheme()
   setFullPlayerChromeOpen(isPlayerExpanded.value)
@@ -4342,6 +4693,9 @@ onBeforeUnmount(() => {
   }
   mediaLayoutObserver?.disconnect()
   mediaLayoutObserver = null
+  document.removeEventListener('fullscreenchange', handleFullscreenChange)
+  clearOverlayHideTimer()
+  stopObservingPointerCapabilities()
   themeObserver?.disconnect()
   themeObserver = null
   window.removeEventListener('waveflow-theme-chrome-sync', handleThemeChromeSync)
@@ -4363,6 +4717,7 @@ onBeforeUnmount(() => {
   _epgInvalidate()
   clearEpgRefreshAfterEndTimer()
   clearMobileOverlayTimer()
+  clearOverlayLoadingTimer()
 })
 </script>
 
@@ -4563,7 +4918,7 @@ onBeforeUnmount(() => {
   position: relative;
   z-index: 1;
   display: grid;
-  grid-template-columns: var(--media-frame-width, minmax(0, 1fr)) var(--side-panel-width, minmax(300px, 340px));
+  grid-template-columns: var(--media-frame-width, minmax(0, 1fr)) var(--side-panel-width, minmax(300px, 400px));
   gap: var(--layout-gap);
   width: var(--layout-width);
   max-width: calc(100% - clamp(48px, 5vw, 64px));
@@ -4571,6 +4926,14 @@ onBeforeUnmount(() => {
   margin: 0 auto;
   padding: var(--layout-padding);
   background: var(--page-bg);
+}
+
+.full-player.full-player--theater .player-layout {
+  grid-template-columns: minmax(0, var(--media-frame-width, 1fr));
+}
+
+.full-player.full-player--theater .side-panel {
+  display: none;
 }
 
 .desktop-collapse-btn {
@@ -4617,10 +4980,45 @@ onBeforeUnmount(() => {
   overflow: hidden;
   width: var(--media-frame-width, var(--media-width));
   height: var(--media-height);
-  aspect-ratio: var(--media-aspect-ratio);
+  aspect-ratio: var(--stage-aspect-ratio, var(--media-aspect-ratio));
   border-radius: var(--media-radius);
   background: var(--media-placeholder-bg);
   box-shadow: var(--media-shadow);
+}
+
+.video-loading-enter-active,
+.video-loading-leave-active {
+  transition: opacity 180ms ease;
+}
+
+.video-loading-enter-from,
+.video-loading-leave-to {
+  opacity: 0;
+}
+
+.video-loading-indicator {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.video-loading-spinner {
+  width: 42px;
+  height: 42px;
+  border: 3px solid rgba(255, 255, 255, 0.26);
+  border-top-color: currentColor;
+  border-radius: 999px;
+  animation: video-loading-spin 0.9s linear infinite;
+}
+
+@keyframes video-loading-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .video-overlay {
@@ -4635,6 +5033,35 @@ onBeforeUnmount(() => {
   color: #fff;
   pointer-events: none;
   background: linear-gradient(to top, rgba(0, 0, 0, 0.78), rgba(0, 0, 0, 0.42) 48%, transparent);
+  opacity: 1;
+  transition: opacity 180ms ease;
+}
+
+.video-overlay.is-hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.media-surface--overlay-hidden {
+  cursor: none;
+}
+
+.media-card:fullscreen,
+.media-card:-webkit-full-screen {
+  width: 100vw !important;
+  height: 100vh !important;
+  max-width: none;
+  border-radius: 0;
+}
+
+.media-card:fullscreen .media-video,
+.media-card:-webkit-full-screen .media-video,
+.media-card:fullscreen .youtube-player-host,
+.media-card:-webkit-full-screen .youtube-player-host,
+.media-card:fullscreen .radio-art-stage,
+.media-card:-webkit-full-screen .radio-art-stage {
+  width: 100%;
+  height: 100%;
 }
 
 .video-overlay-controls {
@@ -4650,6 +5077,36 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 10px;
+}
+
+.video-overlay-transport {
+  min-width: 0;
+}
+
+.video-overlay-status {
+  display: block;
+  min-width: 0;
+  max-width: min(28vw, 220px);
+  margin-left: 4px;
+  overflow: hidden;
+  color: rgba(255, 255, 255, 0.68);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.video-overlay-status.playing {
+  color: rgba(142, 245, 185, 0.94);
+}
+
+.video-overlay-status.loading {
+  color: rgba(255, 255, 255, 0.76);
+}
+
+.video-overlay-status.error {
+  color: rgba(255, 184, 184, 0.94);
 }
 
 .video-overlay-button {
@@ -4713,25 +5170,50 @@ onBeforeUnmount(() => {
   background: rgba(255, 255, 255, 0.14);
 }
 
+.video-overlay-button--utility.active {
+  background: rgba(255, 255, 255, 0.18);
+}
+
+.video-overlay-button--utility:disabled,
+.video-overlay-button--utility.disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+.video-overlay-button--utility:disabled:hover,
+.video-overlay-button--utility.disabled:hover {
+  background: transparent;
+  transform: none;
+}
+
 .video-overlay-button--utility svg {
   width: 19px;
   height: 19px;
 }
 
+.video-overlay-volume-panel {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  min-height: 36px;
+  padding: 0 7px 0 2px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.16);
+}
+
+.video-overlay-volume-panel .video-overlay-button--utility:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
 .video-overlay-volume {
   display: flex;
   align-items: center;
-  gap: 8px;
   color: rgba(255, 255, 255, 0.82);
 }
 
-.video-overlay-volume > svg {
-  width: 19px;
-  height: 19px;
-}
-
 .video-overlay-volume input {
-  width: 72px;
+  width: 78px;
   accent-color: #fff;
 }
 
@@ -4920,6 +5402,24 @@ onBeforeUnmount(() => {
   text-align: center;
 }
 
+.now-metadata,
+.now-identity,
+.now-programme {
+  min-width: 0;
+}
+
+.now-panel .channel-subtitle {
+  margin: 5px 0 0;
+  color: var(--text-tertiary);
+  font-size: var(--subtitle-size);
+  font-weight: 500;
+  line-height: 1.2;
+}
+
+.desktop-now-program-next {
+  display: none;
+}
+
 .mobile-now-controls {
   display: block;
 }
@@ -4930,20 +5430,66 @@ onBeforeUnmount(() => {
     text-align: left;
   }
 
+  .now-metadata {
+    display: grid;
+    grid-template-columns: minmax(180px, 0.85fr) minmax(240px, 1.55fr);
+    gap: 18px 24px;
+    align-items: baseline;
+  }
+
+  .now-metadata--without-programme {
+    display: block;
+  }
+
   .now-panel h1 {
     font-size: clamp(20px, 1.8vw, 27px);
   }
 
+  .now-programme {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    column-gap: 18px;
+    row-gap: 2px;
+  }
+
   .now-panel .now-program-title {
+    flex: 1 1 100%;
     max-width: 760px;
+    margin-top: 0;
     font-size: clamp(14px, 1.05vw, 16px);
   }
 
-  .now-panel .now-program-next {
+  .now-panel .mobile-now-program-next {
+    display: none;
+  }
+
+  .now-panel .desktop-now-program-next {
+    display: flex;
+    min-width: 0;
     max-width: 760px;
+    gap: 10px;
+    color: var(--text-tertiary);
+    font-size: var(--meta-size);
+    font-weight: 400;
+    line-height: 1.3;
+  }
+
+  .desktop-now-program-next__label {
+    flex: 0 0 auto;
+    color: var(--text-secondary);
+  }
+
+  .desktop-now-program-next__title {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .now-panel .desktop-now-program-meta {
+    flex: 0 0 auto;
+    margin-top: 0;
     display: block;
   }
 
@@ -4953,6 +5499,10 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 980px) {
+  .now-panel .desktop-now-program-next {
+    display: none;
+  }
+
   .now-panel .desktop-now-program-meta {
     display: none;
   }
@@ -4965,14 +5515,6 @@ onBeforeUnmount(() => {
   line-height: 1.12;
   font-weight: 700;
   letter-spacing: 0;
-}
-
-.now-panel > p {
-  margin: 5px 0 0;
-  color: var(--text-tertiary);
-  font-size: var(--subtitle-size);
-  font-weight: 500;
-  line-height: 1.2;
 }
 
 .now-panel .now-program-title {
@@ -5187,7 +5729,7 @@ onBeforeUnmount(() => {
 .side-panel {
   min-width: 0;
   min-height: 0;
-  padding-top: 0;
+  padding-top: var(--player-main-offset);
 }
 
 .mobile-panel {
@@ -5515,6 +6057,10 @@ onBeforeUnmount(() => {
   color: #20a760;
 }
 
+:global(.source-menu-in-fullscreen) {
+  position: absolute !important;
+}
+
 @media (max-width: 980px) {
   .full-player {
     --layout-width: 100%;
@@ -5582,7 +6128,7 @@ onBeforeUnmount(() => {
     width: var(--media-width);
     height: var(--media-height);
     margin-left: calc(50% - 50vw);
-    aspect-ratio: var(--media-aspect-ratio);
+    aspect-ratio: var(--stage-aspect-ratio, var(--media-aspect-ratio));
     border-radius: var(--media-radius);
     box-shadow: var(--media-shadow);
   }
@@ -5928,4 +6474,387 @@ onBeforeUnmount(() => {
     --timeline-line-left: 70px;
   }
 }
+
+/* Reuse the existing mobile presentation when video-first sizing selects mobile mode. */
+
+  .full-player.full-player--mobile-layout {
+    --layout-width: 100%;
+    --layout-height: auto;
+    --layout-padding: 0 0 calc(env(safe-area-inset-bottom) + 96px);
+    --player-main-offset: 0;
+    --media-width: 100vw;
+    --media-height: auto;
+    --media-radius: 0;
+    --media-shadow: none;
+    --panel-inline: 32px;
+    --title-size: 21px;
+    --title-weight: 500;
+    --subtitle-size: 13px;
+    --meta-size: 12px;
+    --control-gap: 28px;
+    --control-main-size: 56px;
+    --control-main-icon: 22px;
+    --control-side-size: 42px;
+    --control-side-icon: 22px;
+    --utility-gap: 32px;
+    --utility-size: 38px;
+    --utility-icon: 18px;
+    --tab-gap: 0;
+    --tab-min-height: 32px;
+    --tab-size: 14px;
+    --tab-weight: 550;
+    --tab-active-weight: 600;
+    --tab-line-width: 32px;
+    --channel-grid: 44px minmax(0, 1fr) 22px;
+    --channel-gap: 14px;
+    --channel-logo-size: 44px;
+    --channel-min-height: 68px;
+    --channel-margin: 0;
+    --channel-padding: 6px 30px;
+    --channel-title-size: 14px;
+    --channel-title-weight: 500;
+    --channel-subtitle-size: 11px;
+    --channel-subtitle-color: rgba(10, 10, 10, 0.34);
+    --eq-width: 20px;
+    --eq-height: 22px;
+    --eq-opacity: 0.16;
+    --timeline-grid: 56px 30px minmax(0, 1fr);
+    --timeline-line-left: 70px;
+    --timeline-row-height: 58px;
+    --timeline-time-size: 13px;
+    --timeline-title-size: 15px;
+    overflow-y: auto;
+    background: var(--page-bg);
+  }
+
+  .full-player--mobile-layout .player-layout {
+    display: block;
+    width: var(--layout-width);
+    min-height: 100dvh;
+    padding: var(--layout-padding);
+    background: var(--page-bg);
+  }
+
+  .full-player--mobile-layout .desktop-collapse-btn {
+    display: none;
+  }
+
+  .full-player--mobile-layout .media-card {
+    width: var(--media-width);
+    height: var(--media-height);
+    margin-left: calc(50% - 50vw);
+    aspect-ratio: var(--stage-aspect-ratio, var(--media-aspect-ratio));
+    border-radius: var(--media-radius);
+    box-shadow: var(--media-shadow);
+  }
+
+  .full-player--mobile-layout .desktop-video-overlay {
+    display: none;
+  }
+
+  .full-player--mobile-layout .media-video {
+    object-position: center center;
+  }
+
+  .full-player--mobile-layout .radio-art-stage {
+    position: absolute;
+    inset: 0;
+  }
+
+  .full-player--mobile-layout .mobile-live-pill {
+    display: none;
+  }
+
+  .full-player--mobile-layout .overlay-btn {
+    top: 16px;
+    display: grid;
+    width: 44px;
+    height: 44px;
+    background: rgba(0, 0, 0, 0.36);
+    color: #fff;
+    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: blur(18px);
+  }
+
+  .full-player--mobile-layout .overlay-btn:hover {
+    background: rgba(0, 0, 0, 0.44);
+    transform: none;
+  }
+
+  .full-player--mobile-layout .overlay-btn svg {
+    width: 23px;
+    height: 23px;
+  }
+
+  .full-player--mobile-layout .overlay-back {
+    left: 24px;
+    display: grid;
+  }
+
+  .full-player--mobile-layout .overlay-info {
+    right: 24px;
+  }
+
+  .full-player--mobile-layout .now-panel {
+    width: 100%;
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 16px clamp(16px, 4vw, 28px) 0;
+    text-align: center;
+  }
+
+  .full-player--mobile-layout .now-panel h1 {
+    font-size: var(--title-size);
+    line-height: 1.16;
+    font-weight: 700;
+    letter-spacing: -0.03em;
+    font-synthesis: none;
+  }
+
+  .full-player--mobile-layout .now-panel > p {
+    margin: 6px 0 0;
+    font-size: var(--subtitle-size);
+    font-weight: 400;
+    line-height: 1.2;
+    color: var(--text-tertiary);
+  }
+
+  .full-player--mobile-layout .program-progress {
+    margin-top: 12px;
+    padding-top: 0;
+  }
+
+  .full-player--mobile-layout .progress-knob {
+    width: 11px;
+    height: 11px;
+  }
+
+  .full-player--mobile-layout .progress-track {
+    width: 100%;
+    max-width: 480px;
+    margin: 0 auto;
+  }
+
+  .full-player--mobile-layout .progress-times {
+    margin-top: 8px;
+    font-size: var(--meta-size);
+    font-weight: 400;
+  }
+
+  .full-player--mobile-layout .program-state {
+    justify-content: center;
+    margin-top: 10px;
+    color: var(--text-secondary);
+    font-size: var(--meta-size);
+    font-weight: 400;
+  }
+
+  .full-player--mobile-layout .transport-row {
+    gap: var(--control-gap);
+    margin-top: 16px;
+  }
+
+  .full-player--mobile-layout .transport-side {
+    width: var(--control-side-size);
+    height: var(--control-side-size);
+  }
+
+  .full-player--mobile-layout .transport-side svg {
+    width: var(--control-side-icon);
+    height: var(--control-side-icon);
+  }
+
+  .full-player--mobile-layout .transport-main {
+    width: var(--control-main-size);
+    height: var(--control-main-size);
+  }
+
+  .full-player--mobile-layout .transport-main svg {
+    width: var(--control-main-icon);
+    height: var(--control-main-icon);
+  }
+
+  .full-player--mobile-layout .utility-row {
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: var(--utility-size);
+    align-items: center;
+    justify-content: center;
+    gap: var(--utility-gap);
+    margin-top: 10px;
+    min-height: var(--utility-size);
+  }
+
+  .full-player--mobile-layout .utility-btn {
+    display: grid;
+    place-items: center;
+    width: var(--utility-size);
+    height: var(--utility-size);
+    padding: 0;
+    line-height: 0;
+  }
+
+  .full-player--mobile-layout .utility-btn svg {
+    width: var(--utility-icon);
+    height: var(--utility-icon);
+  }
+
+  .full-player--mobile-layout .volume-control {
+    display: grid;
+    place-items: center;
+    width: var(--utility-size);
+    height: var(--utility-size);
+    line-height: 0;
+  }
+
+  .full-player--mobile-layout .volume-control svg {
+    width: var(--utility-icon);
+    height: var(--utility-icon);
+  }
+
+  .full-player--mobile-layout .volume-control input {
+    display: none;
+  }
+
+  .full-player--mobile-layout .side-panel {
+    display: none;
+  }
+
+  .full-player--mobile-layout .mobile-panel {
+    display: block;
+    padding: 22px 0 0;
+  }
+
+  .full-player--mobile-layout .panel-tabs {
+    gap: var(--tab-gap);
+    padding: 0 52px;
+    border-bottom: 0;
+  }
+
+  .full-player--mobile-layout .panel-tabs button {
+    min-height: var(--tab-min-height);
+    font-size: var(--tab-size);
+    font-weight: var(--tab-weight);
+    text-align: center;
+  }
+
+  .full-player--mobile-layout .panel-tabs button.active {
+    font-weight: var(--tab-active-weight);
+  }
+
+  .full-player--mobile-layout .tab-indicator {
+    bottom: -10px;
+  }
+
+  .full-player--mobile-layout .channel-panel {
+    padding-top: 14px;
+  }
+
+  .full-player--mobile-layout .channel-sort-bar {
+    padding: 4px 16px 6px;
+  }
+
+  .full-player--mobile-layout .channel-row {
+    grid-template-columns: var(--channel-grid);
+    min-height: var(--channel-min-height);
+    margin-bottom: var(--channel-margin);
+    padding: var(--channel-padding);
+    border-bottom: 1px solid var(--row-separator);
+    border-radius: 0;
+  }
+
+  .full-player--mobile-layout .channel-row:last-child {
+    border-bottom: 0;
+  }
+
+  .full-player--mobile-layout .channel-row.active {
+    background: transparent;
+  }
+
+  .full-player--mobile-layout .channel-logo {
+    width: var(--channel-logo-size);
+    height: var(--channel-logo-size);
+    border-radius: 13px;
+    font-weight: 500;
+    box-shadow: var(--logo-shadow);
+  }
+
+  .full-player--mobile-layout .channel-title {
+    gap: 6px;
+    font-size: var(--channel-title-size);
+    font-weight: var(--channel-title-weight);
+    line-height: 1.22;
+    letter-spacing: -0.01em;
+    font-synthesis: none;
+  }
+
+  .full-player--mobile-layout .channel-subtitle {
+    font-size: var(--channel-subtitle-size);
+    font-weight: 400;
+    color: var(--channel-subtitle-color);
+  }
+
+  .full-player--mobile-layout .channel-row .eq-icon {
+    align-self: center;
+    justify-self: end;
+  }
+
+  .full-player--mobile-layout .channel-row .eq-icon.active {
+    opacity: 0.9;
+  }
+
+  .full-player--mobile-layout .tag {
+    min-height: 18px;
+    padding: 1px 7px;
+    font-size: 11px;
+  }
+
+  .full-player--mobile-layout .schedule-panel {
+    padding: 24px 30px 0;
+  }
+
+  .full-player--mobile-layout .schedule-date {
+    font-size: 20px;
+    font-weight: 720;
+  }
+
+  .full-player--mobile-layout .timeline {
+    margin-top: 24px;
+  }
+
+  .full-player--mobile-layout .timeline-row {
+    grid-template-columns: var(--timeline-grid);
+    min-height: var(--timeline-row-height);
+  }
+
+  .full-player--mobile-layout .timeline::before {
+    left: var(--timeline-line-left);
+  }
+
+  .full-player--mobile-layout .timeline-title {
+    font-size: var(--timeline-title-size);
+    font-weight: 700;
+  }
+
+  .full-player--mobile-layout .timeline-time {
+    font-size: var(--timeline-time-size);
+    font-weight: 500;
+  }
+
+  .full-player--mobile-layout .timeline-dot {
+    width: 11px;
+    height: 11px;
+  }
+
+  .full-player--mobile-layout .timeline-row.current .timeline-dot {
+    width: 14px;
+    height: 14px;
+    box-shadow: 0 0 0 6px rgba(53, 200, 122, 0.14);
+  }
+
+  .full-player--mobile-layout .live-tag {
+    min-height: 26px;
+    font-size: 13px;
+  }
+
 </style>

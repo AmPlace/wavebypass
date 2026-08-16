@@ -23,10 +23,67 @@ test('FullPlayer channel rows use logical identity instead of sorted index keys'
   assert.doesNotMatch(fullPlayer, /key: `iptv-\$\{ch\.name\}-\$\{index\}`/)
 })
 
-test('FullPlayer Desktop geometry keeps a flexible 16:9 main area and compact side rail', () => {
+test('FullPlayer video-first geometry has one sizing authority and no fixed rail jump', () => {
   assert.match(fullPlayer, /--layout-gap: clamp\(20px, 1\.7vw, 24px\)/)
   assert.match(fullPlayer, /--channel-logo-size: 48px/)
   assert.match(fullPlayer, /--channel-min-height: 64px/)
-  assert.match(fullPlayer, /minmax\(300px, 340px\)/)
-  assert.match(fullPlayer, /const preferredPanelWidth = Math\.min\(340, Math\.max\(320, viewportWidth \* 0\.24\)\)/)
+  assert.match(fullPlayer, /minmax\(300px, 400px\)/)
+  assert.match(fullPlayer, /calculateFullPlayerSizing\(/)
+  assert.match(fullPlayer, /full-player--mobile-layout/)
+  assert.doesNotMatch(fullPlayer, /const isWideViewport = viewportWidth >= 1440/)
+})
+
+test('FullPlayer 1.5 overlay provides delayed loading, status, and unified volume semantics', () => {
+  assert.match(template, /class="video-loading-indicator"/)
+  assert.match(template, /class="video-loading-spinner"/)
+  assert.match(template, /class="video-overlay-status"/)
+  assert.match(template, /class="video-overlay-volume-panel"/)
+  assert.match(template, /:value="effectiveVolume"/)
+  assert.match(template, /@input="setOverlayVolume\(\$event\.target\.value\)"/)
+  assert.match(fullPlayer, /setTimeout\(\(\) => \{[\s\S]*?isOverlayLoadingCandidate\.value/s)
+  assert.match(fullPlayer, /const overlayPlaybackStatusText = computed/)
+  assert.match(fullPlayer, /const volumeIconState = computed/)
+})
+
+test('FullPlayer 1.5 desktop metadata uses structured next-programme fields', () => {
+  assert.match(template, /:class="\{ 'now-metadata--without-programme': !hasProgrammeMetadata \}"/)
+  assert.match(template, /v-if="hasProgrammeMetadata" class="now-programme"/)
+  assert.match(template, /class="desktop-now-program-next"[\s\S]*?下一节目[\s\S]*?desktop-now-program-next__title/)
+  assert.match(fullPlayer, /\.now-panel \.mobile-now-program-next/)
+  assert.match(fullPlayer, /\.now-panel \.desktop-now-program-next/)
+  assert.doesNotMatch(fullPlayer, /暂无节目单/)
+})
+
+test('FullPlayer overlay activity hides only stable playback and restores on interaction', () => {
+  assert.match(template, /@pointerenter="handleOverlayActivity"/)
+  assert.match(template, /@pointermove="handleOverlayActivity"/)
+  assert.match(template, /@keydown\.capture="handleOverlayActivity"/)
+  assert.match(template, /@focusin\.capture="handleOverlayFocusIn"/)
+  assert.match(template, /:class="\{ 'is-hidden': isDesktopOverlayHidden \}"/)
+  assert.match(fullPlayer, /}, 2800\)/)
+  assert.match(fullPlayer, /}, 900\)/)
+  assert.match(fullPlayer, /overlayControlsFocused\.value/)
+  assert.match(fullPlayer, /overlayVolumeInteracting\.value/)
+  assert.match(fullPlayer, /sourceMenuOpen\.value/)
+})
+
+test('FullPlayer custom fullscreen targets the media wrapper and tracks fullscreenchange', () => {
+  assert.match(template, /ref="mediaSurfaceRef"[\s\S]*?class="media-card"/)
+  assert.match(fullPlayer, /target\.requestFullscreen/)
+  assert.match(fullPlayer, /document\.addEventListener\('fullscreenchange', handleFullscreenChange\)/)
+  assert.match(fullPlayer, /document\.removeEventListener\('fullscreenchange', handleFullscreenChange\)/)
+  assert.match(fullPlayer, /mediaSurfaceRef\.value\.contains\(fullscreenElement\)/)
+  const videoTag = template.match(/<video[\s\S]*?<\/video>/)?.[0] || ''
+  assert.doesNotMatch(videoTag, /\bcontrols(?:=|\s)/)
+})
+
+test('FullPlayer separates source selector and Desktop channel rail controls', () => {
+  assert.match(template, /aria-label="切换播放源"[\s\S]*?m4\.5 7 7\.5-3 7\.5 3/s)
+  assert.match(template, /:aria-label="isFullscreen \? '全屏中不可显示频道列表' : \(isRailLayout \? '隐藏频道列表' : '显示频道列表'\)"/)
+  assert.match(template, /:aria-expanded="isRailLayout"/)
+  assert.match(fullPlayer, /function toggleDesktopRail\(\)/)
+  assert.match(fullPlayer, /desktopRailPreference\.value = isRailLayout\.value \? 'hidden' : 'shown'/)
+  assert.match(fullPlayer, /full-player--theater/)
+  assert.match(fullPlayer, /sourceMenuTeleportTarget/)
+  assert.match(fullPlayer, /source-menu-in-fullscreen/)
 })

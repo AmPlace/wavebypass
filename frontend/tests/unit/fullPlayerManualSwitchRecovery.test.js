@@ -25,7 +25,7 @@ function createSwitchHarness() {
     let _recoverySeq = deps.recoverySeq
     let _recoveryInFlight = deps.recoveryInFlight
     const {
-      isIptvMode, playerStore, iptvSourceOptions, sourceMenuOpen,
+      isIptvMode, playerStore, iptvSourceOptions, sourceMenuOpen, isSourceSwitching,
       getSourceRuntimeStatus, setSourceRuntimeStatus, clearRaceLoser,
       setIptvUrlIndexForAttempt, isProxyLikeEntry, tryPlayIptv,
       isAttemptActive, sourceType, markRaceLoser, fallbackToNextIptvUrl,
@@ -59,6 +59,7 @@ function createSwitchHarness() {
     playerStore,
     iptvSourceOptions: { value: [{ index: 1, disabled: false }] },
     sourceMenuOpen: { value: true },
+    isSourceSwitching: { value: false },
     getSourceRuntimeStatus: (index) => statuses.get(index) || 'idle',
     setSourceRuntimeStatus: (index, status) => statuses.set(index, status),
     clearRaceLoser() {},

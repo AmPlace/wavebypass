@@ -600,6 +600,57 @@ test('FullPlayer and shared player store keep mute state synchronized', async ()
   assert.equal(domElement('[aria-label="静音"]').getAttribute('aria-label'), '静音')
 })
 
+test('FullPlayer desktop volume panel mutes at zero and restores the last non-zero volume', async () => {
+  channels = [channel('Alpha', 'alpha')]
+  installFetch()
+  const { store } = await mountPlayer()
+  const slider = domElement('.desktop-video-overlay .video-overlay-volume-panel input[type="range"]')
+
+  slider.value = '0'
+  slider.dispatchEvent(new window.Event('input', { bubbles: true }))
+  await flushPromises()
+  assert.equal(store.volume, 0)
+  assert.equal(store.isMuted, true)
+  assert.equal(domElement('.desktop-video-overlay .video-overlay-volume-panel button').getAttribute('aria-label'), '取消静音')
+
+  slider.value = '0.42'
+  slider.dispatchEvent(new window.Event('input', { bubbles: true }))
+  await flushPromises()
+  assert.equal(store.volume, 0.42)
+  assert.equal(store.isMuted, false)
+
+  await clickDom('.desktop-video-overlay .video-overlay-volume-panel button')
+  assert.equal(store.isMuted, true)
+  await clickDom('.desktop-video-overlay .video-overlay-volume-panel button')
+  assert.equal(store.isMuted, false)
+  assert.equal(store.volume, 0.42)
+})
+
+test('FullPlayer loading indicator is delayed, follows loading state, and is hidden when paused', async () => {
+  channels = [channel('Alpha', 'alpha')]
+  installFetch()
+  const { wrapper, store } = await mountPlayer()
+
+  assert.equal(domElements('.video-loading-indicator').length, 0)
+  store.isLoading = true
+  await new Promise((resolve) => setTimeout(resolve, 120))
+  await wrapper.vm.$nextTick()
+  assert.equal(domElements('.video-loading-indicator').length, 0)
+  await new Promise((resolve) => setTimeout(resolve, 160))
+  await wrapper.vm.$nextTick()
+  assert.equal(domElements('.video-loading-indicator').length, 1)
+
+  store.isLoading = false
+  await flushPromises()
+  assert.equal(domElements('.video-loading-indicator').length, 0)
+
+  store.isPlaying = false
+  store.isLoading = false
+  await new Promise((resolve) => setTimeout(resolve, 280))
+  await wrapper.vm.$nextTick()
+  assert.equal(domElements('.video-loading-indicator').length, 0)
+})
+
 test('同名不同 canonical identity 只有当前频道行 active', async () => {
   channels = [
     channel('同名频道', 'same-a', { canonical_key: 'same-a' }),
@@ -854,7 +905,7 @@ test('FullPlayer 非 IPTV 节目单继续保留电台名 fallback', async () => 
   assert.ok(domElements('.timeline-title').some((item) => item.textContent.trim() === '测试电台'))
 })
 
-test('FullPlayer 区分节目单 loading、无 EPG 和请求失败且不阻塞直播', async () => {
+test('FullPlayer 无 EPG 时隐藏节目元数据且不阻塞直播', async () => {
   let pendingResolve
   fetchOverride = async (url) => {
     if (!url.includes('/api/iptv/epg/programs/')) return null
@@ -863,12 +914,12 @@ test('FullPlayer 区分节目单 loading、无 EPG 和请求失败且不阻塞�
   const first = await mountPlayer()
   first.store.currentIptvChannel = channels[1]
   await flushPromises()
-  assert.equal(domElement('.now-program-title').textContent.trim(), '正在加载节目单')
+  assert.equal(domElements('.now-programme').length, 0)
   assert.equal(first.store.isPlaying, true)
   pendingResolve(response({ current: null, next: null, programs: [], date: '2026-08-09', available_dates: [] }))
   await flushPromises()
-  assert.equal(domElement('.now-program-title').textContent.trim(), '暂无节目单')
-  assert.match(document.body.textContent, /暂无节目单/)
+  assert.equal(domElements('.now-programme').length, 0)
+  assert.doesNotMatch(document.body.textContent, /暂无节目单/)
 
   first.wrapper.unmount()
   fetchOverride = async (url) => {
@@ -878,7 +929,7 @@ test('FullPlayer 区分节目单 loading、无 EPG 和请求失败且不阻塞�
   const second = await mountPlayer()
   second.store.currentIptvChannel = channels[1]
   await flushPromises()
-  assert.equal(domElement('.now-program-title').textContent.trim(), '节目单加载失败')
+  assert.equal(domElements('.now-programme').length, 0)
   assert.equal(second.store.isPlaying, true)
   assert.equal(second.store.playbackError, '')
 })
