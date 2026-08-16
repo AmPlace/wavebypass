@@ -21,7 +21,7 @@
 | YouTube | iframe 与 adapter 解析代码存在 | 解析/身份单测 | 当前数据无真实样本 |
 | MyRadio | 连续音频走 `/channel/{id}/stream` | 北部 FM 修复后 30 秒连续播放 | 多源回退与长播 |
 | Hedged race | 直连立即、代理 2.5 秒后加入、45 秒 loser TTL | 德化/福建/建宁浏览器实测，策略单测 | 完整状态机自动化与取消泄漏测试 |
-| Wide playlist | `WIDE_ENABLED = False`，thin 生效 | 代表 HLS 已实播 | 稳定后单独删除 wide 旧代码 |
+| HLS playlist | Thin playlist fetch + signed-handle rewrite | 代表 HLS 已实播 | 更多上游与长时间 soak |
 
 ## 本次恢复发现并修复
 
@@ -30,7 +30,6 @@
 - Adapter 的代理副本重新参加 2.5 秒 hedged race，不再等待直连彻底失败或被整轮跳过。
 - 多源菜单手动切换保持精确 `source_id`；旧源状态会切为 stopped，不再同时显示多个“当前可播”。
 - 音频并发探测不再被第一个快速失败源提前结束。
-- wide 已关闭时不再发送无意义的 `/api/media/proxy/release/default`，消除匿名播放时的 401。
 
 ## 已知未闭环
 
@@ -48,5 +47,5 @@
 2. 为 FullPlayer hedged race 抽出可测试状态机或组件 harness。
 3. 补齐 MPEG-TS、RTSP、YouTube 的真实成功样本回归。
 4. 对德化、泉州新闻、福建综合做 30–60 分钟 soak，并补 iOS 真机验证。
-5. 代表源稳定后，单独提交删除 wide 与旧 release/race 残留。
+5. 代表源稳定后，补充 Thin HLS 的长时间 soak 与失败恢复验证。
 6. 最后更新 README、安全审计和 CI 回归说明。

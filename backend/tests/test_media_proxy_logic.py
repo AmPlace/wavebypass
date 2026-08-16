@@ -21,6 +21,23 @@ class _FakeMain:
         return source.get("source_type") or "hls"
 
 
+class ThinPlaylistCacheKeyTest(unittest.TestCase):
+    def test_cache_key_uses_source_revision_scope_without_dynamic_query(self):
+        import main
+
+        url_a = "https://cdn.example/live/index.m3u8?token=a"
+        url_b = "https://cdn.example/live/index.m3u8?token=b"
+
+        self.assertEqual(
+            main._thin_cache_key(url_a, "src_a:rev1"),
+            main._thin_cache_key(url_b, "src_a:rev1"),
+        )
+        self.assertNotEqual(
+            main._thin_cache_key(url_a, "src_a:rev1"),
+            main._thin_cache_key(url_a, "src_a:rev2"),
+        )
+
+
 class MediaProxyLogicTest(unittest.TestCase):
     def test_playback_keeps_untested_sources(self):
         source = {

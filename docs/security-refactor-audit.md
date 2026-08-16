@@ -24,10 +24,10 @@
 
 ## High-Risk Entry Points
 
-- Public `target_url` proxy routes remain the main SSRF/resource risk: `/api/iptv/proxy/wide.m3u8`, `/api/iptv/proxy/chunk.ts`, `/api/iptv/proxy/stream`, `/api/iptv/proxy/playlist.m3u8`, `/api/iptv/proxy/rtsp.m3u8`, and radio `/api/{station_id}/playlist.m3u8?target_url=...`.
+- Public `target_url` proxy routes remain the main SSRF/resource risk: `/api/iptv/proxy/chunk.ts`, `/api/iptv/proxy/stream`, `/api/iptv/proxy/playlist.m3u8`, `/api/iptv/proxy/rtsp.m3u8`, and radio `/api/{station_id}/playlist.m3u8?target_url=...`.
 - Admin mutations now require an admin session and the `X-WaveFlow-Request` CSRF header. Remaining risk is older non-admin media/proxy URLs that still carry raw `target_url` query strings.
 - CORS is currently wide open with `allow_origins=["*"]`.
-- In-memory caches such as `M3U8_CACHE`, `M3U8_CACHE_LOCKS`, `_wide_cache`, and RTSP session dictionaries are unbounded or only partly bounded.
+- In-memory caches such as `M3U8_CACHE`, `M3U8_CACHE_LOCKS`, and RTSP session dictionaries are unbounded or only partly bounded.
 - Docker currently allows bypassing frontend nginx and reaching the backend directly.
 
 ## Implementation Order

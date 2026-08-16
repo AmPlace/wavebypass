@@ -123,8 +123,8 @@ class IntegrationTestBase(unittest.IsolatedAsyncioTestCase):
         if self.upstream:
             await self.upstream.stop()
 
-    async def _get_wide(self) -> httpx.Response:
-        """请求 wide playlist，跟踪 redirect。"""
+    async def _get_playlist(self) -> httpx.Response:
+        """请求 Thin playlist，跟踪 redirect。"""
         resp = await self.client.get(
             f"{self.base}/api/media/channel/testchannel/playlist.m3u8",
             follow_redirects=True,
@@ -152,18 +152,18 @@ class TestNormalLive(IntegrationTestBase):
     """正常直播：sequence 推进、缓存命中、handle 不同、wf_seq 注入。"""
 
     async def test_playlist_is_valid_m3u8(self):
-        resp = await self._get_wide()
+        resp = await self._get_playlist()
         self.assertEqual(resp.status_code, 200)
         self.assertIn("#EXTM3U", resp.text)
         self.assertIn("#EXT-X-TARGETDURATION", resp.text)
 
     async def test_handle_urls_are_relative(self):
-        resp = await self._get_wide()
+        resp = await self._get_playlist()
         for path in self._extract_chunk_paths(resp.text):
             self.assertTrue(path.startswith("/api/media/proxy/chunk/"))
 
     async def test_handle_points_to_upstream(self):
-        resp = await self._get_wide()
+        resp = await self._get_playlist()
         paths = self._extract_chunk_paths(resp.text)
         self.assertGreater(len(paths), 0)
         payload = await self._decode_handle(paths[0])
@@ -171,18 +171,18 @@ class TestNormalLive(IntegrationTestBase):
         self.assertIn(str(self.upstream.port), payload["url"])
 
     async def test_wf_seq_in_handle_url(self):
-        resp = await self._get_wide()
+        resp = await self._get_playlist()
         paths = self._extract_chunk_paths(resp.text)
         payload = await self._decode_handle(paths[0])
         self.assertIn("wf_seq=", payload["url"])
 
     async def test_distinct_handles_per_segment(self):
-        resp = await self._get_wide()
+        resp = await self._get_playlist()
         paths = self._extract_chunk_paths(resp.text)
         self.assertEqual(len(set(paths)), len(paths), "all handles should be distinct")
 
     async def test_chunk_fetch_returns_200(self):
-        resp = await self._get_wide()
+        resp = await self._get_playlist()
         paths = self._extract_chunk_paths(resp.text)
         chunk = await self.client.get(f"{self.base}{paths[0]}")
         self.assertEqual(chunk.status_code, 200)
@@ -191,24 +191,24 @@ class TestNormalLive(IntegrationTestBase):
     async def test_cache_hit_after_cold_start(self):
         # cold
         t0 = time.time()
-        r1 = await self._get_wide()
+        r1 = await self._get_playlist()
         t1 = time.time() - t0
         self.assertGreater(t1, 0.001)
         # warm: 第二次应该 < 50ms（缓存命中）
-        # 注意：wide cache TTL 很短，连打两次
+        # Thin cache TTL 为 1.5s，连打两次应命中。
         t0 = time.time()
-        r2 = await self._get_wide()
+        r2 = await self._get_playlist()
         t2 = time.time() - t0
         self.assertLess(t2, 0.5, f"cache should hit in <500ms, got {t2:.3f}s")
 
     async def test_sequence_advances_over_time(self):
-        r1 = await self._get_wide()
+        r1 = await self._get_playlist()
         seq1 = int(re.search(r"#EXT-X-MEDIA-SEQUENCE:(\d+)", r1.text).group(1))
         # Advance the mock upstream twice
         self.upstream.scenario.advance()
         self.upstream.scenario.advance()
-        await asyncio.sleep(5.5)  # thin cache TTL=5s, must expire before re-fetch
-        r2 = await self._get_wide()
+        await asyncio.sleep(2.0)  # Thin cache TTL=1.5s, must expire before re-fetch
+        r2 = await self._get_playlist()
         seq2 = int(re.search(r"#EXT-X-MEDIA-SEQUENCE:(\d+)", r2.text).group(1))
         self.assertGreater(seq2, seq1, f"sequence should advance: {seq1} -> {seq2}")
 
@@ -224,7 +224,7 @@ class TestCyclicFilenames(IntegrationTestBase):
         self.base = f"http://127.0.0.1:{WAVEFLOW_PORT}"
 
     async def test_cyclic_names_get_distinct_handles(self):
-        resp = await self._get_wide()
+        resp = await self._get_playlist()
         paths = self._extract_chunk_paths(resp.text)
         self.assertEqual(len(set(paths)), len(paths))
 
@@ -240,7 +240,7 @@ class TestDiscontinuity(IntegrationTestBase):
         self.base = f"http://127.0.0.1:{WAVEFLOW_PORT}"
 
     async def test_discontinuity_preserved(self):
-        resp = await self._get_wide()
+        resp = await self._get_playlist()
         self.assertIn("#EXT-X-DISCONTINUITY", resp.text)
 
 
@@ -258,11 +258,11 @@ class TestKeyMap(IntegrationTestBase):
         self.base = f"http://127.0.0.1:{WAVEFLOW_PORT}"
 
     async def test_key_rewritten_to_proxy_handle(self):
-        resp = await self._get_wide()
+        resp = await self._get_playlist()
         self.assertIn('URI="/api/media/proxy/chunk/', resp.text)
 
     async def test_map_rewritten_to_proxy_handle(self):
-        resp = await self._get_wide()
+        resp = await self._get_playlist()
         self.assertIn("/api/media/proxy/chunk/", resp.text)
 
 
@@ -280,9 +280,9 @@ class TestServerErrors(IntegrationTestBase):
         self.base = f"http://127.0.0.1:{WAVEFLOW_PORT}"
 
     async def test_503_playlist_returns_error(self):
-        """第二次上游请求 503 → wide playlist 应降级处理。"""
+        """第二次上游请求 503 → Thin playlist 应降级处理。"""
         # First request: cold start (200)
-        r1 = await self._get_wide()
+        r1 = await self._get_playlist()
         self.assertEqual(r1.status_code, 200)
         # Advance scenario so the second request hits the 503
         self.upstream.scenario.advance()
@@ -307,7 +307,7 @@ class TestSegment404(IntegrationTestBase):
         self.base = f"http://127.0.0.1:{WAVEFLOW_PORT}"
 
     async def test_failed_segment_propagates_404(self):
-        resp = await self._get_wide()
+        resp = await self._get_playlist()
         # The first segment should be a "bad" one
         # (The mock upstream puts bad_N.ts for segment 0 when fail_segments_at={0})
         paths = self._extract_chunk_paths(resp.text)
@@ -320,7 +320,7 @@ class TestRange(IntegrationTestBase):
     """Range 请求透传。"""
 
     async def test_range_206(self):
-        resp = await self._get_wide()
+        resp = await self._get_playlist()
         paths = self._extract_chunk_paths(resp.text)
         chunk = await self.client.get(f"{self.base}{paths[0]}", headers={"Range": "bytes=0-99"})
         self.assertEqual(chunk.status_code, 206)
@@ -338,7 +338,7 @@ class TestSlowUpstream(IntegrationTestBase):
         self.base = f"http://127.0.0.1:{WAVEFLOW_PORT}"
 
     async def test_slow_upstream_still_returns_playlist(self):
-        resp = await self._get_wide()
+        resp = await self._get_playlist()
         self.assertEqual(resp.status_code, 200)
         self.assertIn("#EXTM3U", resp.text)
 
@@ -354,7 +354,7 @@ class TestWrongContentLength(IntegrationTestBase):
         self.base = f"http://127.0.0.1:{WAVEFLOW_PORT}"
 
     async def test_wrong_cl_is_handled(self):
-        resp = await self._get_wide()
+        resp = await self._get_playlist()
         paths = self._extract_chunk_paths(resp.text)
         try:
             chunk = await self.client.get(f"{self.base}{paths[0]}")
@@ -398,10 +398,10 @@ class TestPlaylistFreeze(IntegrationTestBase):
         self.base = f"http://127.0.0.1:{WAVEFLOW_PORT}"
 
     async def test_frozen_playlist_detected(self):
-        r1 = await self._get_wide()
+        r1 = await self._get_playlist()
         self.assertEqual(r1.status_code, 200)
         await asyncio.sleep(1)
-        r2 = await self._get_wide()
+        r2 = await self._get_playlist()
         self.assertEqual(r2.status_code, 200)
 
 
@@ -418,7 +418,7 @@ class TestRedirect(IntegrationTestBase):
         self.base = f"http://127.0.0.1:{WAVEFLOW_PORT}"
 
     async def test_redirect_handled(self):
-        resp = await self._get_wide()
+        resp = await self._get_playlist()
         self.assertIn(resp.status_code, (200, 302))
 
 
