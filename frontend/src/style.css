@@ -268,6 +268,12 @@
     border-color: var(--border-strong);
   }
 
+  /* The magnifier handle extends to the lower-right; offset the artwork
+     slightly so its optical center aligns with the action button center. */
+  .toolbar-search-icon {
+    transform: translate(-0.5px, -0.5px);
+  }
+
   .mobile-action-btn:active,
   .desktop-action-btn:active {
     transform: scale(0.96);

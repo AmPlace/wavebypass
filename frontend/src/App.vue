@@ -75,6 +75,7 @@
         >
           <svg v-if="item.icon === 'layers'" class="size-6 shrink-0" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 8.4 12 4l8 4.4-8 4.4L4 8.4Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M4 12.2 12 16.6l8-4.4M4 16l8 4.4L20 16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
           <svg v-else-if="item.icon === 'settings'" class="size-6 shrink-0" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12.22 3h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V5a2 2 0 0 0-2-2Z" stroke="currentColor" stroke-width="1.65"/><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="1.65"/></svg>
+          <svg v-else-if="item.icon === 'github'" class="size-6 shrink-0" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2.5a9.5 9.5 0 0 0-3 18.51c.47.09.65-.2.65-.45v-1.62c-2.65.58-3.21-1.12-3.21-1.12-.43-1.1-1.06-1.39-1.06-1.39-.87-.59.07-.58.07-.58.96.07 1.47.99 1.47.99.85 1.47 2.23 1.05 2.77.8.09-.62.33-1.05.6-1.29-2.12-.24-4.35-1.06-4.35-4.72 0-1.04.37-1.89.99-2.56-.1-.24-.43-1.21.09-2.52 0 0 .81-.26 2.64.98A9.2 9.2 0 0 1 12 7.2c.82 0 1.64.14 2.4.35 1.83-1.24 2.64-.98 2.64-.98.52 1.31.19 2.28.09 2.52.62.67.99 1.52.99 2.56 0 3.67-2.23 4.48-4.36 4.72.34.29.64.85.64 1.72v2.55c0 .25.18.54.66.45A9.5 9.5 0 0 0 12 2.5Z"/></svg>
           <svg v-else class="size-6 shrink-0" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="8" stroke="currentColor" stroke-width="1.8"/><path d="M12 11.5v5M12 8h.01" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
           <span class="nav-label truncate">{{ item.label }}</span>
         </button>
@@ -105,13 +106,13 @@
         <div class="flex items-center gap-2">
           <div class="mobile-search-shell relative flex items-center rounded-full backdrop-blur-xl transition-all duration-300 ease-out" :class="searchExpanded ? 'mobile-search-expanded' : 'mobile-search-collapsed'">
             <button type="button" class="mobile-search-trigger flex shrink-0 items-center justify-center text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]" aria-label="搜索" @click="toggleSearch">
-              <svg class="size-5" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="1.8" /><path d="M16.5 16.5L21 21" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" /></svg>
+              <svg class="size-[19px] toolbar-search-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="1.7" /><path d="M16.5 16.5L21 21" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" /></svg>
             </button>
             <input ref="searchInputRef" v-model="searchQuery" type="text" placeholder="搜索频道、节目" class="h-full w-full bg-transparent pr-3 text-sm text-[var(--text-primary)] outline-none placeholder:text-[var(--text-tertiary)]" :class="searchExpanded ? 'opacity-100' : 'pointer-events-none opacity-0'" @blur="onSearchBlur" />
           </div>
           <button type="button" class="mobile-action-btn" :aria-label="isDark ? '切换到浅色模式' : '切换到深色模式'" @click="toggleTheme">
-            <svg v-if="isDark" class="size-5" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 3v2M12 19v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M3 12h2M19 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="12" cy="12" r="4" stroke="currentColor" stroke-width="1.8"/></svg>
-            <svg v-else class="size-5" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M20.5 14.4A7.7 7.7 0 0 1 9.6 3.5 8.5 8.5 0 1 0 20.5 14.4Z" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <svg v-if="isDark" class="size-[19px]" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 3v2M12 19v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M3 12h2M19 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><circle cx="12" cy="12" r="4" stroke="currentColor" stroke-width="1.7"/></svg>
+            <svg v-else class="size-[19px]" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M20.5 14.4A7.7 7.7 0 0 1 9.6 3.5 8.5 8.5 0 1 0 20.5 14.4Z" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
           </button>
           <div ref="mobileMenuRef" class="relative">
             <button type="button" class="mobile-action-btn" aria-label="更多" :aria-expanded="mobileMenuOpen" aria-haspopup="menu" @click.stop="toggleMobileMenu">
@@ -151,7 +152,7 @@
           aria-label="搜索"
           @click="toggleSearch"
         >
-          <svg class="size-5" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="1.8" /><path d="M16.5 16.5L21 21" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" /></svg>
+          <svg class="size-[19px] toolbar-search-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="1.7" /><path d="M16.5 16.5L21 21" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" /></svg>
         </button>
         <input
           ref="desktopSearchInputRef"
@@ -165,8 +166,8 @@
       </div>
 
       <button type="button" class="desktop-action-btn" :aria-label="isDark ? '切换到浅色模式' : '切换到深色模式'" @click="toggleTheme">
-        <svg v-if="isDark" class="size-5" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 3v2M12 19v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M3 12h2M19 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="12" cy="12" r="4" stroke="currentColor" stroke-width="1.8"/></svg>
-        <svg v-else class="size-5" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M20.5 14.4A7.7 7.7 0 0 1 9.6 3.5 8.5 8.5 0 1 0 20.5 14.4Z" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <svg v-if="isDark" class="size-[19px]" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 3v2M12 19v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M3 12h2M19 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><circle cx="12" cy="12" r="4" stroke="currentColor" stroke-width="1.7"/></svg>
+        <svg v-else class="size-[19px]" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M20.5 14.4A7.7 7.7 0 0 1 9.6 3.5 8.5 8.5 0 1 0 20.5 14.4Z" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
       </button>
     </div>
 
@@ -227,7 +228,7 @@ const primaryNavItems = computed(() => [
 const secondaryNavItems = computed(() => [
   { label: 'Market', icon: 'layers', route: '/market', active: route.path === '/market' },
   { label: '设置', icon: 'settings', route: '/settings/sources', active: route.path.startsWith('/settings') },
-  { label: '关于', icon: 'info', route: '', active: false },
+  { label: 'GitHub', icon: 'github', external: 'https://github.com/amplace/waveflow', active: false },
 ])
 const THEME_CHROME_COLORS = {
   light: '#F6F7F8',
@@ -345,6 +346,10 @@ function navItemClass(item) {
 }
 
 function activateNavItem(item) {
+  if (item.external) {
+    window.open(item.external, '_blank', 'noopener,noreferrer')
+    return
+  }
   if (!item.route) return
   justActivatedLabel.value = item.label
   setTimeout(() => { justActivatedLabel.value = '' }, 350)
