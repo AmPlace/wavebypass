@@ -19,8 +19,8 @@
               <path d="M5 12a7 7 0 0 1 14 0M2.5 12a9.5 9.5 0 0 1 19 0M9 12a3 3 0 0 1 6 0" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
             </svg>
           </span>
-          <h1 class="truncate text-lg font-semibold leading-none text-[var(--text-primary)]">正在直播</h1>
-          <span class="shrink-0 text-sm text-[var(--text-secondary)]">
+          <h1 class="hidden truncate text-lg font-semibold leading-none text-[var(--text-primary)] lg:block">正在直播</h1>
+          <span class="shrink-0 text-sm font-medium text-[var(--text-secondary)]">
             共 {{ filteredChannels.length }} 个频道
           </span>
           <span v-if="loading" class="hidden text-sm text-[var(--text-tertiary)] sm:inline">加载中...</span>
@@ -540,9 +540,8 @@ async function playChannel(ch) {
   if (isAllNotLive(ch)) {
     toastStore.info('该频道上次检测未开播，正在尝试播放')
   }
-  const videoEl = playerStore.iptvVideoEl
-  if (videoEl) videoEl.play().catch(() => {})
   await playerStore.playIptvChannel(ch, {
+    progressive: true,
     channelContext: {
       origin: 'iptv-home',
       group: selectedGroup.value,

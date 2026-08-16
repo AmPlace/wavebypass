@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { API_BASE } from '../apiBase.js'
-import { adapterNameFromUrl, buildChannelProxyUrl, channelIdentity, isAdapterSchemeUrl, isSourceExplicitlyDisabled } from '../utils/sourceIdentity.js'
+import { adapterNameFromUrl, buildChannelProxyUrl, channelIdentity, isAdapterSchemeUrl, isSourceExplicitlyDisabled, sourceRaceKey } from '../utils/sourceIdentity.js'
 import { normalizeIptvChannelSortMode } from '../utils/iptvChannelList.js'
 import { currentRadioProgramme } from '../utils/radioProgramme.js'
 
@@ -14,6 +14,19 @@ function normalizeChannelContextChannels(channels) {
     result.push(channel)
   }
   return result
+}
+
+// A channel switch must invalidate and cancel adapter resolves belonging to the
+// previous selection.  The selection token remains the authoritative stale
+// result guard; aborting here also avoids keeping provider requests alive after
+// the user has already moved to another channel.
+const activeIptvResolveControllers = new Set()
+
+function abortActiveIptvResolves() {
+  for (const controller of activeIptvResolveControllers) {
+    try { controller.abort() } catch {}
+  }
+  activeIptvResolveControllers.clear()
 }
 
 export const usePlayerStore = defineStore('player', {
@@ -44,6 +57,7 @@ export const usePlayerStore = defineStore('player', {
 
   actions: {
     stopAndClearPlayback() {
+      abortActiveIptvResolves()
       ++this.iptvSelectionToken
       this.currentStation = ''
       this.currentIptvChannel = null
@@ -67,6 +81,7 @@ export const usePlayerStore = defineStore('player', {
       }
 
       // 使旧的 playIptvChannel 异步 resolve 失效
+      abortActiveIptvResolves()
       ++this.iptvSelectionToken
 
       // 停止 IPTV 播放
@@ -249,6 +264,7 @@ export const usePlayerStore = defineStore('player', {
     },
 
     async playIptvChannel(channel, options = {}) {
+      abortActiveIptvResolves()
       const selectionToken = ++this.iptvSelectionToken
       if (Object.prototype.hasOwnProperty.call(options, 'channelContext')) {
         const context = options.channelContext
@@ -276,7 +292,6 @@ export const usePlayerStore = defineStore('player', {
         return (a.latency_ms || 9999) - (b.latency_ms || 9999)
       })
       // 构建回退队列：直连优先，代理在后
-      const list = []
       const sourceUrl = (u) => String(u?.url || '').trim()
       const youtubeParts = (url) => {
         const parsed = new URL(url)
@@ -384,6 +399,7 @@ export const usePlayerStore = defineStore('player', {
         const resolveUrl = resolveUrlFor(u)
         if (!resolveUrl) return null
         const ctrl = new AbortController()
+        activeIptvResolveControllers.add(ctrl)
         const timer = setTimeout(() => ctrl.abort(), 10_000)
         try {
           const res = await fetch(resolveUrl, { signal: ctrl.signal })
@@ -394,6 +410,7 @@ export const usePlayerStore = defineStore('player', {
           return { ...data, _resolve_url: resolveUrl }
         } finally {
           clearTimeout(timer)
+          activeIptvResolveControllers.delete(ctrl)
         }
       }
       const sourceForcesProxy = (u) => Boolean(
@@ -449,29 +466,269 @@ export const usePlayerStore = defineStore('player', {
           directUrls.push({ ...u, _canonical_key: canonicalKey, url, source_type: st })
         }
       }
+      const buildQueue = () => {
+        const queue = []
+        // 先所有直连，再所有直连的代理回退，最后是必须代理的。
+        for (const u of directUrls) {
+          queue.push({ ...u, url: u.url, original_url: u.original_url || u.url, type: u.type || 'direct' })
+        }
+        for (const u of directUrls) {
+          const url = sourceUrl(u)
+          const st = sourceType(u)
+          if (st === 'youtube' || st === 'adapter') continue
+          const proxyUrl = u.adapter_proxy_url || proxyUrlFor(u)
+          if (!proxyUrl) continue
+          queue.push({
+            ...u,
+            url: proxyUrl,
+            original_url: u.original_url || url,
+            type: st === 'mpegts' || st === 'http_flv' ? 'direct' : 'proxy',
+            via_proxy: true,
+            source_type: st,
+          })
+        }
+        queue.push(...proxyOnlyUrls)
+        return queue
+      }
+
+      const setProgressiveQueue = (queue, { initial = false, final = false } = {}) => {
+        if (selectionToken !== this.iptvSelectionToken) return false
+        const previous = this.iptvUrls[this.iptvUrlIndex]
+        const previousKey = sourceRaceKey(previous)
+        this.iptvUrls = queue
+        const preservedIndex = previousKey
+          ? queue.findIndex((entry) => sourceRaceKey(entry) === previousKey)
+          : -1
+        this.iptvUrlIndex = preservedIndex >= 0 ? preservedIndex : 0
+        const channelKey = channelIdentity(channel)
+        const currentKey = channelIdentity(this.currentIptvChannel)
+        const currentMatches = Boolean(channelKey && currentKey && channelKey === currentKey)
+          || this.currentIptvChannel === channel
+        const shouldPublishCurrent = !currentMatches || this.pendingIptvChannel === channel
+        if (queue.length && shouldPublishCurrent) {
+          // Keep pending set until FullPlayer's pending watcher has performed
+          // the hard teardown.  Clearing it in the same tick would make Vue
+          // coalesce the watcher and leave the old media engine alive.
+          this.currentIptvChannel = this.currentIptvChannel
+            ? { ...channel }
+            : channel
+        } else if (!queue.length && final && shouldPublishCurrent) {
+          this.currentIptvChannel = this.currentIptvChannel
+            ? { ...channel }
+            : channel
+        }
+        if (this.pendingIptvChannel && selectionToken === this.iptvSelectionToken) {
+          // Give FullPlayer's pending watcher one scheduler turn to perform
+          // teardown, then release the UI-only pending marker even when the
+          // store is used without the component mounted (tests/background).
+          Promise.resolve().then(() => {
+            if (
+              selectionToken === this.iptvSelectionToken
+              && this.pendingIptvChannel
+              && channelIdentity(this.pendingIptvChannel) === channelIdentity(channel)
+            ) {
+              this.pendingIptvChannel = null
+            }
+          })
+        }
+        if (initial) {
+          this.playbackError = queue.length ? '' : '正在获取可播放源'
+          this.isLoading = true
+          this.isPlaying = false
+        } else if (queue.length && !this.playbackError) {
+          this.isLoading = true
+        }
+        return true
+      }
+
+      const addPendingAdapterProxy = (u) => {
+        const fallbackProxyUrl = proxyUrlFor(u)
+        if (!fallbackProxyUrl) return
+        if (proxyOnlyUrls.some((entry) => entry.source_id && entry.source_id === u.source_id && entry.adapter_transport_pending)) return
+        proxyOnlyUrls.push({
+          ...u,
+          url: fallbackProxyUrl,
+          original_url: u.original_url || sourceUrl(u),
+          adapter: u.adapter || adapterNameFromUrl(sourceUrl(u)),
+          type: 'proxy',
+          via_proxy: true,
+          source_type: 'adapter',
+          adapter_transport_pending: true,
+        })
+      }
+
+      const applyResolvedAdapter = (u, resolved) => {
+        const url = sourceUrl(u)
+        const adapter = u.adapter || adapterNameFromUrl(url)
+        const originalUrl = u.original_url || url
+        const fallbackProxyUrl = proxyUrlFor(u)
+        const resolvedUrl = String(resolved?.url || '').trim()
+        const proxyUrl = absoluteApiUrl(resolved?.proxy_url) || fallbackProxyUrl
+        const adapterAllowsDirect = !resolved?.requires_proxy && resolved?.direct_playable !== false
+        const canDirectPlay = Boolean(resolvedUrl && adapterAllowsDirect && !sourceForcesProxy(u))
+        const sourceId = String(u.source_id || '').trim()
+        const pendingEntries = proxyOnlyUrls.filter((entry) => (
+          sourceId
+          && entry?.source_id === sourceId
+          && entry?.adapter_transport_pending
+        ))
+        const activeEntry = this.iptvUrls[this.iptvUrlIndex]
+        const activePending = pendingEntries.some((entry) => sourceRaceKey(entry) === sourceRaceKey(activeEntry))
+        if (!canDirectPlay && proxyUrl && activePending) {
+          const pendingEntry = pendingEntries[0]
+          Object.assign(pendingEntry, {
+            url: proxyUrl,
+            original_url: originalUrl,
+            adapter,
+            type: 'proxy',
+            via_proxy: true,
+            source_type: resolved?.source_type === 'probe_only' ? 'hls' : resolved?.source_type || 'hls',
+            adapter_transport_pending: false,
+          })
+          return
+        }
+        for (let index = proxyOnlyUrls.length - 1; index >= 0; index -= 1) {
+          if (
+            sourceId
+            && proxyOnlyUrls[index]?.source_id === sourceId
+            && proxyOnlyUrls[index]?.adapter_transport_pending
+            && (!activePending || !canDirectPlay)
+          ) {
+            proxyOnlyUrls.splice(index, 1)
+          }
+        }
+        if (canDirectPlay) {
+          directUrls.push({
+            ...u,
+            url: resolvedUrl,
+            original_url: originalUrl,
+            adapter,
+            adapter_source_url: resolved._resolve_url,
+            adapter_proxy_url: proxyUrl,
+            adapter_volatile_url: resolved.volatile_url === true,
+            source_type: resolved.source_type || 'hls',
+            type: 'direct',
+          })
+          return
+        }
+        if (proxyUrl) {
+          proxyOnlyUrls.push({
+            ...u,
+            url: proxyUrl,
+            original_url: originalUrl,
+            adapter,
+            type: 'proxy',
+            via_proxy: true,
+            source_type: resolved?.source_type === 'probe_only' ? 'hls' : resolved?.source_type || 'hls',
+          })
+        }
+      }
+
+      const handleAdapterResolveFailure = (u, error) => {
+        const url = sourceUrl(u)
+        const adapter = u.adapter || adapterNameFromUrl(url)
+        const originalUrl = u.original_url || url
+        const fallbackProxyUrl = proxyUrlFor(u)
+        if (selectionToken !== this.iptvSelectionToken) return
+        if (error?.name !== 'AbortError') console.warn('[IPTV] adapter resolve failed:', error?.message || error)
+        if (!sourceForcesProxy(u)) {
+          directUrls.push({
+            ...u,
+            url,
+            original_url: originalUrl,
+            adapter,
+            adapter_source_url: resolveUrlFor(u),
+            adapter_volatile_url: true,
+            source_type: 'adapter',
+            type: 'direct',
+          })
+        }
+        addPendingAdapterProxy(u)
+      }
+
+      const addYoutubeSource = (u) => {
+        const originalUrl = u.original_url || sourceUrl(u)
+        const youtubeVideoId = parseYoutubeVideoId(originalUrl) || u.youtube_video_id || ''
+        const youtubeChannelId = parseYoutubeChannelId(originalUrl) || u.youtube_channel_id || ''
+        if ((youtubeVideoId || youtubeChannelId) && !sourceForcesProxy(u)) {
+          directUrls.push({
+            ...u,
+            url: originalUrl,
+            original_url: originalUrl,
+            type: 'youtube',
+            engine: 'youtube',
+            source_type: 'youtube',
+            youtube_video_id: youtubeVideoId,
+            youtube_channel_id: youtubeChannelId,
+            youtube_live_embed_url: youtubeChannelId && !youtubeVideoId
+              ? `https://www.youtube.com/embed/live_stream?channel=${encodeURIComponent(youtubeChannelId)}&autoplay=1&playsinline=1&controls=1&rel=0`
+              : '',
+          })
+        }
+      }
+
+      const progressive = options.progressive === true
+      if (progressive) {
+        // Publish anything already known before waiting for provider resolves.
+        // Adapter-only channels wait for the first completed provider resolve;
+        // their fallback entry is added only when that provider fails. This
+        // avoids starting an opaque proxy before a real transport is known.
+        for (const u of adapterSources) {
+          const adapter = u.adapter || adapterNameFromUrl(sourceUrl(u))
+          if (adapter === 'youtube') addYoutubeSource(u)
+        }
+        setProgressiveQueue(buildQueue(), { initial: true })
+
+        const pendingAdapters = adapterSources.filter((u) => (u.adapter || adapterNameFromUrl(sourceUrl(u))) !== 'youtube')
+        let nextAdapterIndex = 0
+        const worker = async () => {
+          while (selectionToken === this.iptvSelectionToken) {
+            const u = pendingAdapters[nextAdapterIndex++]
+            if (!u) return
+            try {
+              const resolved = await resolveAdapterSource(u)
+              if (selectionToken !== this.iptvSelectionToken) return
+              if (!resolved) throw new Error('adapter resolve unavailable')
+              applyResolvedAdapter(u, resolved)
+              setProgressiveQueue(buildQueue())
+            } catch (error) {
+              if (selectionToken !== this.iptvSelectionToken) return
+              handleAdapterResolveFailure(u, error)
+              setProgressiveQueue(buildQueue())
+            }
+          }
+        }
+        const workerCount = Math.min(3, pendingAdapters.length)
+        if (workerCount) {
+          void Promise.all(Array.from({ length: workerCount }, () => worker()))
+            .then(() => {
+              if (selectionToken !== this.iptvSelectionToken) return
+              setProgressiveQueue(buildQueue(), { final: true })
+              if (!this.iptvUrls.length) {
+                this.playbackError = '没有可播放的源'
+                this.isLoading = false
+              }
+            })
+            .catch((error) => {
+              if (selectionToken !== this.iptvSelectionToken) return
+              this.playbackError = error?.message || '频道起播失败'
+              this.isLoading = false
+            })
+        } else if (!this.iptvUrls.length) {
+          setProgressiveQueue(buildQueue(), { final: true })
+          this.playbackError = this.iptvUrls.length ? '' : '没有可播放的源'
+          this.isLoading = Boolean(this.iptvUrls.length)
+        }
+        return
+      }
+
       for (const u of adapterSources) {
         const url = sourceUrl(u)
         const adapter = u.adapter || adapterNameFromUrl(url)
         const originalUrl = u.original_url || url
         const fallbackProxyUrl = proxyUrlFor(u)
         if (adapter === 'youtube') {
-          const youtubeVideoId = parseYoutubeVideoId(originalUrl) || u.youtube_video_id || ''
-          const youtubeChannelId = parseYoutubeChannelId(originalUrl) || u.youtube_channel_id || ''
-          if ((youtubeVideoId || youtubeChannelId) && !sourceForcesProxy(u)) {
-            directUrls.push({
-              ...u,
-              url: originalUrl,
-              original_url: originalUrl,
-              type: 'youtube',
-              engine: 'youtube',
-              source_type: 'youtube',
-              youtube_video_id: youtubeVideoId,
-              youtube_channel_id: youtubeChannelId,
-              youtube_live_embed_url: youtubeChannelId && !youtubeVideoId
-                ? `https://www.youtube.com/embed/live_stream?channel=${encodeURIComponent(youtubeChannelId)}&autoplay=1&playsinline=1&controls=1&rel=0`
-                : '',
-            })
-          }
+          addYoutubeSource(u)
         }
         if (adapter !== 'youtube') {
           try {
@@ -556,26 +813,7 @@ export const usePlayerStore = defineStore('player', {
         }
       }
       if (selectionToken !== this.iptvSelectionToken) return
-      // 先所有直连，再所有直连的代理回退，最后是必须代理的
-      for (const u of directUrls) {
-        list.push({ ...u, url: u.url, original_url: u.original_url || u.url, type: u.type || 'direct' })
-      }
-      for (const u of directUrls) {
-        const url = sourceUrl(u)
-        const st = sourceType(u)
-        if (st === 'youtube' || st === 'adapter') continue
-        const proxyUrl = u.adapter_proxy_url || proxyUrlFor(u)
-        if (!proxyUrl) continue
-        list.push({
-          ...u,
-          url: proxyUrl,
-          original_url: u.original_url || url,
-          type: st === 'mpegts' || st === 'http_flv' ? 'direct' : 'proxy',
-          via_proxy: true,
-          source_type: st,
-        })
-      }
-      list.push(...proxyOnlyUrls)
+      const list = buildQueue()
       this.currentIptvChannel = channel
       this.pendingIptvChannel = null
       this.iptvUrls = list
@@ -608,6 +846,7 @@ export const usePlayerStore = defineStore('player', {
       const url = String(resolveUrl || '').trim()
       if (!url || !/\/api\/media\/channel\/.+\/resolve(?:\?|$)/i.test(url)) return null
       const ctrl = new AbortController()
+      activeIptvResolveControllers.add(ctrl)
       const timer = setTimeout(() => ctrl.abort(), 10_000)
       try {
         const res = await fetch(url, { signal: ctrl.signal, cache: 'no-store' })
@@ -618,6 +857,7 @@ export const usePlayerStore = defineStore('player', {
         return data
       } finally {
         clearTimeout(timer)
+        activeIptvResolveControllers.delete(ctrl)
       }
     },
   },

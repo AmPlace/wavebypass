@@ -29,6 +29,17 @@ test('正在直播图标保持为非交互的无背景装饰', () => {
   assert.doesNotMatch(home, /iptv-live-section-icon[^>]*bg-\[var\(--surface\)\]/)
 })
 
+test('IPTV 移动端隐藏正在直播标题，桌面端保留标题', () => {
+  const home = fs.readFileSync(path.join(frontendRoot, 'src/views/IptvHome.vue'), 'utf8')
+  assert.match(home, /<h1 class="hidden truncate text-lg font-semibold leading-none text-\[var\(--text-primary\)\] lg:block">正在直播<\/h1>/)
+})
+
+test('IPTV 频道计数与默认排序使用一致的文字比例', () => {
+  const home = fs.readFileSync(path.join(frontendRoot, 'src/views/IptvHome.vue'), 'utf8')
+  assert.match(home, /<span class="shrink-0 text-sm font-medium text-\[var\(--text-secondary\)\]">\s*共 \{\{ filteredChannels\.length \}\} 个频道/)
+  assert.match(home, /iptv-sort-trigger[^>]*text-sm font-medium/)
+})
+
 test('IPTV Home 支持 Standard/Compact presentation density，Compact 不渲染 footer', () => {
   const home = fs.readFileSync(path.join(frontendRoot, 'src/views/IptvHome.vue'), 'utf8')
   const styles = fs.readFileSync(path.join(frontendRoot, 'src/style.css'), 'utf8')
@@ -44,6 +55,14 @@ test('IPTV Home 支持 Standard/Compact presentation density，Compact 不渲染
   assert.match(styles, /\.iptv-main\.iptv-density-compact \.channel-card--logo-card::after,/)
   assert.match(styles, /\.iptv-main\.iptv-density-compact \.channel-card__logo-stage:not\(/)
   assert.match(styles, /\.iptv-main\.iptv-density-compact \.channel-card__compact-status/)
+})
+
+test('IPTV Home Light Theme only edges identity logos, not cover or text fallback', () => {
+  const styles = fs.readFileSync(path.join(frontendRoot, 'src/style.css'), 'utf8')
+  assert.match(styles, /\.iptv-main \.channel-card__center-logo--badge,\s*\.iptv-main \.channel-card__center-logo--wide[\s\S]*?drop-shadow\(0 0 1px rgba\(15, 23, 42, 0\.52\)\)[\s\S]*?drop-shadow\(0 1px 1px rgba\(15, 23, 42, 0\.18\)\)/)
+  assert.match(styles, /\.iptv-main \.channel-card__center-logo--cover,[\s\S]*?filter: none;/)
+  assert.match(styles, /\.dark \.iptv-main \.channel-card__center-logo,[\s\S]*?filter: none;/)
+  assert.doesNotMatch(styles, /\.iptv-main \.channel-card__text-logo[\s\S]*?filter:/)
 })
 
 test('IPTV density direct toggle keeps the user-facing information semantics', () => {

@@ -5,6 +5,21 @@ import { createPinia, setActivePinia } from 'pinia'
 
 import { usePlayerStore } from '../../src/stores/player.js'
 
+function deferred() {
+  let resolve
+  let reject
+  const promise = new Promise((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
+}
+
+async function flushTasks() {
+  await new Promise((resolve) => setImmediate(resolve))
+  await Promise.resolve()
+}
+
 function installFetchStub(payloads) {
   const calls = []
   globalThis.fetch = async (url) => {
@@ -32,6 +47,102 @@ function adapterChannel(source = {}) {
     }],
   }
 }
+
+test('progressive 模式先发布 direct candidate，不等待慢 adapter resolve', async () => {
+  setActivePinia(createPinia())
+  const response = deferred()
+  const calls = []
+  globalThis.fetch = async (url) => {
+    calls.push(String(url))
+    return await response.promise
+  }
+  const store = usePlayerStore()
+  const play = store.playIptvChannel({
+    canonical_key: 'mixed-progressive',
+    urls: [
+      { url: 'https://cdn.example/live.m3u8', source_id: 'src-direct', source_type: 'hls' },
+      { url: 'huya://31421', source_id: 'src-adapter', source_type: 'adapter' },
+    ],
+  }, { progressive: true })
+
+  assert.equal(store.currentIptvChannel.canonical_key, 'mixed-progressive')
+  const currentChannel = store.currentIptvChannel
+  assert.equal(store.iptvUrls[0].source_id, 'src-direct')
+  assert.equal(store.iptvUrls[0].type, 'direct')
+  assert.equal(calls.length, 1)
+
+  response.resolve({
+    ok: true,
+    json: async () => ({
+      ok: true,
+      url: 'https://cdn.example/adapter.flv',
+      source_type: 'http_flv',
+      direct_playable: true,
+    }),
+  })
+  await play
+  await flushTasks()
+
+  assert.ok(store.iptvUrls.some((entry) => entry.source_id === 'src-adapter' && entry.type === 'direct'))
+  assert.equal(store.currentIptvChannel, currentChannel)
+  assert.equal(store.pendingIptvChannel, null)
+})
+
+test('progressive adapter resolve 使用最多 3 个并发 worker，并按完成顺序补入队列', async () => {
+  setActivePinia(createPinia())
+  const responses = new Map()
+  const calls = []
+  globalThis.fetch = async (url) => {
+    const sourceId = new URL(url, 'http://waveflow.test').searchParams.get('source_id')
+    calls.push(sourceId)
+    const pending = deferred()
+    responses.set(sourceId, pending)
+    return await pending.promise
+  }
+  const store = usePlayerStore()
+  const play = store.playIptvChannel({
+    canonical_key: 'parallel-progressive',
+    urls: ['a', 'b', 'c', 'd'].map((id) => ({
+      url: `huya://${id}`,
+      source_id: `src-${id}`,
+      source_type: 'adapter',
+    })),
+  }, { progressive: true })
+
+  await play
+  assert.deepEqual(calls.sort(), ['src-a', 'src-b', 'src-c'])
+  responses.get('src-b').resolve({ ok: true, json: async () => ({ ok: true, url: 'https://cdn.example/b.flv', source_type: 'http_flv' }) })
+  await flushTasks()
+  assert.equal(calls.length, 4)
+  assert.ok(store.iptvUrls.some((entry) => entry.source_id === 'src-b' && entry.type === 'direct'))
+
+  for (const id of ['src-a', 'src-c', 'src-d']) {
+    responses.get(id)?.resolve({ ok: true, json: async () => ({ ok: true, url: `https://cdn.example/${id}.flv`, source_type: 'http_flv' }) })
+  }
+  await flushTasks()
+})
+
+test('progressive 旧频道 resolve 晚返回不得覆盖最新频道', async () => {
+  setActivePinia(createPinia())
+  const lateA = deferred()
+  globalThis.fetch = async () => await lateA.promise
+  const store = usePlayerStore()
+  const playA = store.playIptvChannel({
+    canonical_key: 'channel-a',
+    urls: [{ url: 'huya://a', source_id: 'src-a', source_type: 'adapter' }],
+  }, { progressive: true })
+  await store.playIptvChannel({
+    canonical_key: 'channel-b',
+    urls: [{ url: 'https://cdn.example/b.m3u8', source_id: 'src-b', source_type: 'hls' }],
+  }, { progressive: true })
+
+  lateA.resolve({ ok: true, json: async () => ({ ok: true, url: 'https://cdn.example/a.flv', source_type: 'http_flv' }) })
+  await playA
+  await flushTasks()
+
+  assert.equal(store.currentIptvChannel.canonical_key, 'channel-b')
+  assert.equal(store.iptvUrls[0].source_id, 'src-b')
+})
 
 test('adapter source resolves to direct plus source_id proxy fallback by default', async () => {
   setActivePinia(createPinia())

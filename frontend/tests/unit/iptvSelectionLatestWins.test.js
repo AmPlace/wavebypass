@@ -156,3 +156,22 @@ test('播放页频道列表切台必须更新 selection owner 后再正式起播
 
   assert.deepEqual(starts, [1])
 })
+
+test('频道进入 pending 时必须立即 hard teardown，而不是只 pause 旧视频', () => {
+  const source = fs.readFileSync(fullPlayerPath, 'utf8')
+  const teardown = extractFunction(source, 'function beginIptvChannelSwitch()')
+  assert.match(teardown, /destroyIptvEngines\(\)/)
+  assert.match(teardown, /resetIptvVideo\(\)/)
+  assert.match(teardown, /cancelCurrentStartup\(\)/)
+  assert.match(teardown, /cancelActiveProxyRace\(\)/)
+
+  const fullPlayerSwitch = extractFunction(source, 'async function playIptvChannelFromFullPlayer(channel)')
+  assert.doesNotMatch(fullPlayerSwitch, /videoEl\.play\(\)/)
+  assert.match(source, /watch\(\(\) => playerStore\.pendingIptvChannel, \(pending\) => \{/)
+
+  const homeSource = fs.readFileSync(new URL('../../src/views/IptvHome.vue', import.meta.url), 'utf8')
+  const homeStart = homeSource.indexOf('async function playChannel(ch)')
+  assert.notEqual(homeStart, -1)
+  const homeEnd = homeSource.indexOf('\n}', homeStart)
+  assert.doesNotMatch(homeSource.slice(homeStart, homeEnd), /videoEl\.play\(\)/)
+})
