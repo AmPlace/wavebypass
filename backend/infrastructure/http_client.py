@@ -6,7 +6,154 @@ from urllib.parse import urljoin
 import httpx
 
 from core.settings_service import get_effective_settings_sync
-from ssrf_guard import assert_safe_target_url
+from ssrf_guard import UnsafeTargetError, assert_safe_target_url
+
+
+REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+MEDIA_MAX_REDIRECTS = 5
+_CROSS_ORIGIN_SENSITIVE_HEADERS = frozenset({
+    "authorization",
+    "cookie",
+    "proxy-authorization",
+})
+
+
+class RedirectTargetRejected(httpx.HTTPError):
+    """A redirect target failed WaveFlow's SSRF policy before any request."""
+
+    def __init__(self, cause: Exception):
+        super().__init__(f"redirect target rejected: {cause}")
+        self.cause = cause
+
+
+def _origin(url: str) -> tuple[str, str, int | None]:
+    parsed = httpx.URL(url)
+    scheme = parsed.scheme.lower()
+    host = (parsed.host or "").lower()
+    port = parsed.port
+    if port is None and scheme in {"http", "https"}:
+        port = 443 if scheme == "https" else 80
+    return scheme, host, port
+
+
+def _headers_for_redirect(
+    headers: dict[str, str],
+    current_url: str,
+    next_url: str,
+) -> dict[str, str]:
+    """Keep media headers, but do not carry credentials to another origin."""
+    if _origin(current_url) == _origin(next_url):
+        return headers
+    return {
+        key: value
+        for key, value in headers.items()
+        if key.lower() not in _CROSS_ORIGIN_SENSITIVE_HEADERS
+    }
+
+
+async def request_with_safe_redirects(
+    client: httpx.AsyncClient,
+    method: str,
+    url: str,
+    *,
+    headers: dict[str, str] | None = None,
+    timeout=None,
+    max_redirects: int = MEDIA_MAX_REDIRECTS,
+) -> httpx.Response:
+    """Send a buffered HTTP request with SSRF validation on every redirect hop."""
+    current_url = url
+    current_headers = dict(headers or {})
+    for redirect_count in range(max_redirects + 1):
+        try:
+            await assert_safe_target_url(
+                current_url,
+                allowed_schemes={"http", "https"},
+            )
+        except UnsafeTargetError as exc:
+            # Keep the original policy exception available to callers without
+            # making infrastructure code depend on FastAPI response semantics.
+            raise RedirectTargetRejected(exc) from exc
+
+        request_kwargs = {
+            "headers": current_headers,
+            "follow_redirects": False,
+        }
+        if timeout is not None:
+            request_kwargs["timeout"] = timeout
+        response = await client.request(method, current_url, **request_kwargs)
+        if response.status_code not in REDIRECT_STATUSES:
+            return response
+
+        location = response.headers.get("location")
+        if not location:
+            await response.aclose()
+            raise httpx.HTTPError("redirect missing Location")
+        if redirect_count >= max_redirects:
+            await response.aclose()
+            raise httpx.TooManyRedirects(
+                "too many redirects",
+                request=response.request,
+            )
+
+        next_url = str(httpx.URL(current_url).join(location))
+        next_headers = _headers_for_redirect(current_headers, current_url, next_url)
+        await response.aclose()
+        current_url = next_url
+        current_headers = next_headers
+    raise httpx.HTTPError("safe redirect request failed")
+
+
+async def stream_with_safe_redirects(
+    client: httpx.AsyncClient,
+    method: str,
+    url: str,
+    *,
+    headers: dict[str, str] | None = None,
+    timeout=None,
+    max_redirects: int = MEDIA_MAX_REDIRECTS,
+) -> httpx.Response:
+    """Open a streaming response after validating every redirect target.
+
+    Redirect responses are closed immediately. The returned non-redirect
+    response remains open for the caller and therefore preserves streaming and
+    backpressure semantics.
+    """
+    current_url = url
+    current_headers = dict(headers or {})
+    for redirect_count in range(max_redirects + 1):
+        try:
+            await assert_safe_target_url(
+                current_url,
+                allowed_schemes={"http", "https"},
+            )
+        except UnsafeTargetError as exc:
+            raise RedirectTargetRejected(exc) from exc
+
+        request_kwargs = {"headers": current_headers}
+        if timeout is not None:
+            request_kwargs["timeout"] = timeout
+        request = client.build_request(method, current_url, **request_kwargs)
+        response = await client.send(request, stream=True, follow_redirects=False)
+        if response.status_code not in REDIRECT_STATUSES:
+            return response
+
+        location = response.headers.get("location")
+        if not location:
+            await response.aclose()
+            raise httpx.HTTPError("redirect missing Location")
+        if redirect_count >= max_redirects:
+            await response.aclose()
+            raise httpx.TooManyRedirects(
+                "too many redirects",
+                request=response.request,
+            )
+
+        next_url = str(httpx.URL(current_url).join(location))
+        next_headers = _headers_for_redirect(current_headers, current_url, next_url)
+        await response.aclose()
+        current_url = next_url
+        current_headers = next_headers
+    raise httpx.HTTPError("safe streaming request failed")
 
 
 @dataclass(frozen=True)

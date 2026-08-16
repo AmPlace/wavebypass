@@ -49,6 +49,11 @@ from security.dependencies import (
     resolve_media_access,
 )
 from plugin_runtime import PluginError
+from infrastructure.http_client import (
+    RedirectTargetRejected,
+    request_with_safe_redirects,
+    stream_with_safe_redirects,
+)
 from security.proxy_context import ProxyContext, get_registry as get_proxy_context_registry
 from security.proxy_handles import (
     DEFAULT_TTL_BY_KIND,
@@ -576,6 +581,8 @@ async def _serve_radio_station_playlist(
     try:
         upstream = await _m.fetch_real_m3u8_text(real_url, station_id)
         upstream.raise_for_status()
+    except RedirectTargetRejected as exc:
+        raise HTTPException(status_code=403, detail=str(exc.cause)) from exc
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"真实 m3u8 拉取失败: {exc}") from exc
 
@@ -989,10 +996,16 @@ async def media_proxy_playlist(
     else:
         # 扩窗路径的原始直拉行为
         try:
-            upstream = await _m.http_client.get(
-                payload.url, follow_redirects=True, timeout=12, headers=headers
+            upstream = await request_with_safe_redirects(
+                _m.http_client,
+                "GET",
+                payload.url,
+                timeout=12,
+                headers=headers,
             )
             upstream.raise_for_status()
+        except RedirectTargetRejected as exc:
+            raise HTTPException(status_code=403, detail=str(exc.cause)) from exc
         except httpx.HTTPError as exc:
             raise HTTPException(status_code=502, detail=f"拉取 M3U8 失败: {exc}") from exc
         base_url = str(upstream.url)
@@ -1063,8 +1076,14 @@ async def media_proxy_chunk(
             headers["-".join(part.capitalize() for part in header_name.split("-"))] = value
 
     try:
-        req = _m.http_client.build_request("GET", payload.url, headers=headers)
-        upstream = await _m.http_client.send(req, stream=True, follow_redirects=True)
+        upstream = await stream_with_safe_redirects(
+            _m.http_client,
+            "GET",
+            payload.url,
+            headers=headers,
+        )
+    except RedirectTargetRejected as exc:
+        raise HTTPException(status_code=403, detail=str(exc.cause)) from exc
     except httpx.TimeoutException:
         return Response(content=b"", status_code=504, media_type="text/plain")
     except httpx.HTTPError as exc:
@@ -1125,18 +1144,6 @@ async def media_proxy_rtsp(
     import main as _m
 
     payload = _safe_decode(handle, expected_kind="rtsp")
-    # rtsp 校验同步路径
-    parsed = urlparse(payload.url)
-    if parsed.scheme.lower() != "rtsp":
-        raise HTTPException(status_code=400, detail="rtsp handle scheme 不匹配")
-    if not parsed.hostname:
-        raise HTTPException(status_code=400, detail="rtsp handle host 缺失")
-    try:
-        from ssrf_guard import assert_safe_host_ips
-        assert_safe_host_ips(parsed.hostname)
-    except UnsafeTargetError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
-
     ctx = get_proxy_context_registry().get(payload.ctx) if payload.ctx else None
     custom_ua = ctx.custom_ua if ctx else ""
 
@@ -1184,12 +1191,15 @@ async def media_proxy_image(
         )
 
     try:
-        upstream = await _m.http_client.get(
+        upstream = await request_with_safe_redirects(
+            _m.http_client,
+            "GET",
             payload.url,
             headers={"User-Agent": "Mozilla/5.0", "Referer": referer},
-            follow_redirects=True,
         )
         upstream.raise_for_status()
+    except RedirectTargetRejected:
+        raise HTTPException(status_code=403, detail="封面图片重定向目标不安全")
     except Exception:
         raise HTTPException(status_code=502, detail="封面图片获取失败")
 

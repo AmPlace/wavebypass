@@ -4,6 +4,7 @@ import inspect
 import sys
 import time
 import types
+from unittest import mock
 
 from adapters import AdapterResolveError
 from security.dependencies import MediaAccessContext
@@ -447,6 +448,10 @@ class MediaProxyLogicTest(unittest.TestCase):
         async def noop_validate(*args, **kwargs):
             return None
 
+        async def fake_stream(client, method, url, *, headers=None, **_kwargs):
+            request = client.build_request(method, url, headers=headers)
+            return await client.send(request, stream=True)
+
         try:
             sys.modules["main"] = fake_main
             media_proxy._validate_handle_url_or_403 = noop_validate
@@ -455,11 +460,12 @@ class MediaProxyLogicTest(unittest.TestCase):
                 url="https://cdn.example.test/live/expired.ts",
                 ttl_seconds=3600,
             )
-            response = asyncio.run(media_proxy.media_proxy_chunk(
-                handle,
-                types.SimpleNamespace(headers={}, method="GET"),
-                MediaAccessContext(source="anonymous"),
-            ))
+            with mock.patch.object(media_proxy, "stream_with_safe_redirects", new=fake_stream):
+                response = asyncio.run(media_proxy.media_proxy_chunk(
+                    handle,
+                    types.SimpleNamespace(headers={}, method="GET"),
+                    MediaAccessContext(source="anonymous"),
+                ))
         finally:
             media_proxy._validate_handle_url_or_403 = old_validate
             if old_main is not None:

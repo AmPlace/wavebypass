@@ -95,13 +95,18 @@ async def _make_stream_response(upstream, stream_type="http_flv", request=None):
     def client_factory(*args, **kwargs):
         return FakeAsyncClient(*args, response=upstream, **kwargs)
 
+    async def fake_stream(client, method, url, *, headers=None, **_kwargs):
+        request = client.build_request(method, url, headers=headers)
+        return await client.send(request, stream=True)
+
     with mock.patch.object(main_mod.httpx, "AsyncClient", client_factory):
-        response = await main_mod.serve_iptv_proxy_stream_response(
-            request=request,
-            upstream_url="https://stream.example.test/live.flv",
-            upstream_headers={"User-Agent": "UA"},
-            stream_type=stream_type,
-        )
+        with mock.patch.object(main_mod, "stream_with_safe_redirects", new=fake_stream):
+            response = await main_mod.serve_iptv_proxy_stream_response(
+                request=request,
+                upstream_url="https://stream.example.test/live.flv",
+                upstream_headers={"User-Agent": "UA"},
+                stream_type=stream_type,
+            )
     return response
 
 

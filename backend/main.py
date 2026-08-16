@@ -59,6 +59,11 @@ from radio_tasks import reconcile_radio_automation_tasks
 from ssrf_guard import UnsafeTargetError, assert_safe_target_url, assert_safe_host_ips
 from core.config import get_settings
 from core.settings_service import get_effective_settings
+from infrastructure.http_client import (
+    RedirectTargetRejected,
+    request_with_safe_redirects,
+    stream_with_safe_redirects,
+)
 from routers.auth import router as auth_router
 from routers.media_credentials import router as media_credentials_router
 from routers.media_proxy import router as media_proxy_router
@@ -294,6 +299,26 @@ def _validate_rtsp_url(target_url: str) -> None:
         raise HTTPException(status_code=400, detail="target_url 只允许 rtsp 地址。")
     if not parsed.netloc:
         raise HTTPException(status_code=400, detail="无效的 rtsp 地址。")
+
+
+def _validate_rtsp_proxy_request(target_url: str) -> None:
+    """在任何 RTSP→HLS session 创建前执行统一的有效策略检查。
+
+    这是 RTSP proxy 的最终安全边界，而不是某个具体 HTTP route 的入口检查。
+    这样 smart IPTV、signed handle 以及未来的 RTSP 入口都不能绕过有效开关和
+    现有 host/IP policy。
+    """
+    if not config_rtsp_proxy_enabled():
+        raise HTTPException(status_code=503, detail="RTSP 代理已禁用")
+
+    _validate_rtsp_url(target_url)
+    parsed = urlparse(target_url)
+    if not parsed.hostname:
+        raise HTTPException(status_code=400, detail="rtsp 地址缺少 host。")
+    try:
+        assert_safe_host_ips(parsed.hostname)
+    except UnsafeTargetError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
 
 
 def _rtsp_proc_returncode(proc) -> int | None:
@@ -723,10 +748,14 @@ async def fetch_real_m3u8_text(real_m3u8_url: str, station_id: str) -> httpx.Res
     
     async with httpx.AsyncClient(
         timeout=HTTP_TIMEOUT,
-        follow_redirects=True,
         verify=CDN_VERIFY_SSL,
     ) as client:
-        return await client.get(real_m3u8_url, headers=headers)
+        return await request_with_safe_redirects(
+            client,
+            "GET",
+            real_m3u8_url,
+            headers=headers,
+        )
 
 
 @app.get("/api/config")
@@ -2510,8 +2539,12 @@ async def _thin_playlist_fetch(url: str, headers: dict[str, str] | None = None, 
 
         for attempt in range(2):
             try:
-                resp = await http_client.get(
-                    url, follow_redirects=True, timeout=8, headers=_h,
+                resp = await request_with_safe_redirects(
+                    http_client,
+                    "GET",
+                    url,
+                    headers=_h,
+                    timeout=8,
                 )
                 resp.raise_for_status()
                 last_text = resp.text
@@ -2534,6 +2567,8 @@ async def _thin_playlist_fetch(url: str, headers: dict[str, str] | None = None, 
                             break
 
                 return last_text, last_url
+            except RedirectTargetRejected as exc:
+                raise HTTPException(status_code=403, detail=str(exc.cause)) from exc
             except httpx.HTTPError as exc:
                 last_exc = exc
                 if attempt == 0:
@@ -3208,7 +3243,13 @@ async def _run_wide_refresher(cache_key: str, target_url: str, ctx_id: str, src_
         active_target_url = cache.get('target_url') or target_url
 
         try:
-            resp = await http_client.get(active_target_url, follow_redirects=True, timeout=6, headers=_h)
+            resp = await request_with_safe_redirects(
+                http_client,
+                "GET",
+                active_target_url,
+                headers=_h,
+                timeout=6,
+            )
             resp.raise_for_status()
             playlist_base_url = str(resp.url)
             segments, target_duration, _ = _parse_live_segments(resp.text, playlist_base_url)
@@ -3363,11 +3404,12 @@ async def _initialize_wide_playlist_cache(
     last_text = ""
     for attempt in range(4):
         try:
-            resp = await http_client.get(
+            resp = await request_with_safe_redirects(
+                http_client,
+                "GET",
                 upstream_url,
-                follow_redirects=True,
-                timeout=8,
                 headers=headers,
+                timeout=8,
             )
             resp.raise_for_status()
             playlist_base_url = str(resp.url)
@@ -3381,6 +3423,8 @@ async def _initialize_wide_playlist_cache(
                     queue.append(seg)
                     seen.add(seg['url'])
                     tail_seq = seg['seq']
+        except RedirectTargetRejected as exc:
+            raise HTTPException(status_code=403, detail=str(exc.cause)) from exc
         except Exception:
             pass
         if attempt < 3:
@@ -3390,11 +3434,12 @@ async def _initialize_wide_playlist_cache(
         # Preserve the existing master-playlist fallback, but do not publish
         # an empty cache or background task for it.
         try:
-            resp = await http_client.get(
+            resp = await request_with_safe_redirects(
+                http_client,
+                "GET",
                 upstream_url,
-                follow_redirects=True,
-                timeout=8,
                 headers=headers,
+                timeout=8,
             )
             _ensure_hls_playlist_text(resp.text, str(resp.url))
             rewritten = _rewrite_iptv_wide_m3u8_text(
@@ -3411,6 +3456,8 @@ async def _initialize_wide_playlist_cache(
                 media_type="application/x-mpegURL",
                 headers={'Cache-Control': 'no-cache, no-store, must-revalidate'},
             )
+        except RedirectTargetRejected as exc:
+            raise HTTPException(status_code=403, detail=str(exc.cause)) from exc
         except httpx.HTTPError as exc:
             raise HTTPException(status_code=502, detail=f"拉取失败: {exc}") from exc
 
@@ -3608,10 +3655,11 @@ async def serve_rtsp_playlist_response(
 ) -> FileResponse:
     """供 media_proxy router 调用的 RTSP 内部入口。
 
-    handle payload 已通过 SSRF 校验，此处不再做 URL 校验。
+    这里是 RTSP proxy 的最终安全边界；不假设调用方已经执行过校验。
     """
     if not upstream_url:
         raise HTTPException(status_code=400, detail="缺少 target_url")
+    _validate_rtsp_proxy_request(upstream_url)
     try:
         session_id, playlist_path = await _ensure_rtsp_hls_session(upstream_url, custom_ua, compat=compat)
     except HTTPException:
@@ -3677,15 +3725,19 @@ async def serve_iptv_proxy_stream_response(
     stream_timeout = httpx.Timeout(None, connect=10.0, read=IPTV_STREAM_READ_TIMEOUT_SECONDS)
     stream_client = httpx.AsyncClient(
         timeout=stream_timeout,
-        follow_redirects=True,
+        follow_redirects=False,
         verify=CDN_VERIFY_SSL,
     )
 
     async def open_upstream() -> httpx.Response:
-        req = stream_client.build_request("GET", upstream_url, headers=headers)
         response: httpx.Response | None = None
         try:
-            response = await stream_client.send(req, stream=True)
+            response = await stream_with_safe_redirects(
+                stream_client,
+                "GET",
+                upstream_url,
+                headers=headers,
+            )
             response.raise_for_status()
         except httpx.HTTPError:
             if response is not None:
@@ -3705,6 +3757,9 @@ async def serve_iptv_proxy_stream_response(
 
     try:
         initial_upstream = await open_upstream()
+    except RedirectTargetRejected as exc:
+        await stream_client.aclose()
+        raise HTTPException(status_code=403, detail=str(exc.cause)) from exc
     except httpx.HTTPError as exc:
         await stream_client.aclose()
         raise HTTPException(status_code=502, detail=f"拉取直播流失败: {exc}") from exc
@@ -3797,6 +3852,12 @@ async def serve_iptv_proxy_stream_response(
                         return
                     try:
                         upstream = await open_upstream()
+                        break
+                    except RedirectTargetRejected as exc:
+                        logger.warning(
+                            "IPTV stream redirect target rejected: %s",
+                            exc.cause,
+                        )
                         break
                     except httpx.HTTPError as exc:
                         no_data_retries += 1
