@@ -36,6 +36,11 @@ test('FullPlayer video-first geometry has one sizing authority and no fixed rail
 test('FullPlayer 1.5 overlay provides delayed loading, status, and unified volume semantics', () => {
   assert.match(template, /class="video-loading-indicator"/)
   assert.match(template, /class="video-loading-spinner"/)
+  assert.match(template, /class="video-playback-failure"[\s\S]*?:aria-label="overlayPlaybackStatusText"/)
+  assert.match(template, /class="video-playback-failure-label">\{\{ overlayPlaybackStatusText \}\}/)
+  assert.match(template, /class="video-overlay-button video-overlay-button--main video-playback-failure-retry"[\s\S]*?aria-label="重新播放"/)
+  assert.match(fullPlayer, /const showPlaybackFailureIndicator = computed/)
+  assert.match(fullPlayer, /async function retryPlayback\(\)/)
   assert.match(template, /class="video-overlay-status"/)
   assert.match(template, /class="video-overlay-volume-panel"/)
   assert.match(template, /:value="effectiveVolume"/)
@@ -43,6 +48,37 @@ test('FullPlayer 1.5 overlay provides delayed loading, status, and unified volum
   assert.match(fullPlayer, /setTimeout\(\(\) => \{[\s\S]*?isOverlayLoadingCandidate\.value/s)
   assert.match(fullPlayer, /const overlayPlaybackStatusText = computed/)
   assert.match(fullPlayer, /const volumeIconState = computed/)
+})
+
+test('FullPlayer failure retry keeps desktop and mobile main control sizes', () => {
+  assert.match(fullPlayer, /\.video-loading-spinner \{[\s\S]*?width: 48px;[\s\S]*?height: 48px;/)
+  assert.match(fullPlayer, /\.video-playback-failure-icon \{[\s\S]*?width: 48px;[\s\S]*?height: 48px;[\s\S]*?color: rgba\(255, 255, 255, 0\.94\);/)
+  assert.match(fullPlayer, /\.video-playback-failure-label \{[\s\S]*?font-size: 15px;/)
+  assert.match(fullPlayer, /\.video-overlay-button\.video-playback-failure-retry \{[\s\S]*?width: 48px;[\s\S]*?height: 48px;/)
+  assert.match(fullPlayer, /\.video-playback-failure-retry svg \{[\s\S]*?width: 24px;[\s\S]*?height: 24px;/)
+  assert.match(fullPlayer, /\.video-overlay-button\.video-playback-failure-retry \{[\s\S]*?background: rgba\(15, 23, 42, 0\.62\);/)
+  assert.doesNotMatch(fullPlayer, /\.video-overlay-button\.video-playback-failure-retry \{[\s\S]*?background: rgba\(255, 255, 255, 0\.94\);/)
+  assert.match(fullPlayer, /\.full-player--mobile-layout \.video-playback-failure-retry \{[\s\S]*?width: 48px;[\s\S]*?height: 48px;/)
+  assert.match(fullPlayer, /\.full-player--mobile-layout \.video-playback-failure-retry svg \{[\s\S]*?width: 22px;[\s\S]*?height: 22px;/)
+})
+
+test('Mobile FullPlayer consolidates transport and utility controls into the video overlay', () => {
+  assert.match(template, /v-if="isMobileLayout"[\s\S]*?class="video-overlay mobile-video-overlay"/)
+  assert.match(template, /class="program-progress mobile-video-overlay-progress"[\s\S]*?role="progressbar"/)
+  assert.match(template, /class="mobile-video-overlay-transport"[\s\S]*?aria-label="上一个"[\s\S]*?aria-label="下一个"/)
+  assert.match(template, /class="mobile-video-overlay-status"[\s\S]*?overlayPlaybackStatusText/)
+  assert.match(template, /class="mobile-video-overlay-button mobile-video-overlay-button--utility"[\s\S]*?aria-label="切换播放源"/)
+  assert.match(fullPlayer, /const isMobileOverlayHidden = computed/)
+  assert.match(fullPlayer, /function scheduleMobileOverlayHide\(\)/)
+  assert.doesNotMatch(template, /mobile-now-controls/)
+})
+
+test('Mobile FullPlayer overlay keeps transport centered and utility controls transparent', () => {
+  const mobileStyles = fullPlayer.match(/\.full-player--mobile-layout \.mobile-video-overlay \{[\s\S]*?\.full-player--mobile-layout \.media-video \{/)?.[0] || ''
+  assert.match(mobileStyles, /\.full-player--mobile-layout \.mobile-video-overlay-transport \{[\s\S]*?position: absolute;[\s\S]*?top: 50%;[\s\S]*?left: 50%;[\s\S]*?transform: translate\(-50%, -50%\)/)
+  assert.match(mobileStyles, /\.full-player--mobile-layout \.mobile-video-overlay-bottom \{[\s\S]*?position: absolute;[\s\S]*?bottom: 10px;/)
+  assert.match(mobileStyles, /\.full-player--mobile-layout \.mobile-video-overlay-button--utility \{[\s\S]*?background: transparent;[\s\S]*?box-shadow: none;/)
+  assert.match(mobileStyles, /\.full-player--mobile-layout \.mobile-video-overlay\.is-loading \.mobile-video-overlay-transport,[\s\S]*?opacity: 0;[\s\S]*?pointer-events: none;/)
 })
 
 test('FullPlayer 1.5 desktop metadata uses structured next-programme fields', () => {
@@ -111,4 +147,32 @@ test('Desktop rail keeps its presentation rules scoped away from Mobile FullPlay
   assert.match(fullPlayer, /\.side-panel \.sort-btn:focus-visible/)
   assert.match(fullPlayer, /\.desktop-panel-scroll::-webkit-scrollbar/)
   assert.match(fullPlayer, /class="channel-title-text">\{\{ item\.name \}\}<\/span>/)
+})
+
+test('Desktop rail reuses shared logo modes and gives wide marks horizontal optical space', () => {
+  assert.match(fullPlayer, /import \{ useLogoVisual \} from '..\/composables\/useLogoVisual'/)
+  assert.match(fullPlayer, /logoVisualMode: railLogoVisualMode/)
+  assert.match(fullPlayer, /classifyLogo: classifyRailLogo/)
+  assert.match(fullPlayer, /enableWide: true/)
+  assert.match(template, /class="channel-logo" :class="`channel-logo--\$\{railLogoVisualMode\(item\)\}`"/)
+  assert.match(template, /:class="`channel-logo-image--\$\{railLogoVisualMode\(item\)\}`"[\s\S]*?@load="classifyRailLogo\(item, \$event\)"/)
+  assert.match(fullPlayer, /--channel-grid: 64px minmax\(0, 1fr\) 22px/)
+  assert.match(fullPlayer, /--channel-logo-width: 64px;/)
+  assert.match(fullPlayer, /--channel-logo-height: 46px;/)
+  assert.match(fullPlayer, /\.side-panel \.channel-logo img \{[\s\S]*?width: 44px;[\s\S]*?height: 44px;[\s\S]*?object-fit: contain;/)
+  assert.match(fullPlayer, /\.side-panel \.channel-logo--wide img \{[\s\S]*?width: 60px;[\s\S]*?height: 44px;/)
+  assert.match(fullPlayer, /\.side-panel \.channel-logo--cover img \{[\s\S]*?width: 44px;[\s\S]*?height: 44px;/)
+})
+
+test('Desktop rail uses a light neutral logo plate without changing dark geometry', () => {
+  assert.match(fullPlayer, /\.side-panel \.channel-logo \{[\s\S]*?width: var\(--channel-logo-width\);[\s\S]*?height: var\(--channel-logo-height\);[\s\S]*?background: #f1f2f3;[\s\S]*?border: 1px solid rgba\(15, 23, 42, 0\.1\);/)
+  assert.match(fullPlayer, /\.full-player\.theme-dark \.side-panel \.channel-logo \{[\s\S]*?background: var\(--surface-bg\);[\s\S]*?border-color: transparent;/)
+  assert.match(fullPlayer, /--channel-logo-width: 64px;/)
+  assert.match(fullPlayer, /--channel-logo-height: 46px;/)
+  assert.match(fullPlayer, /\.side-panel \.channel-logo img \{[\s\S]*?object-fit: contain;/)
+})
+
+test('Desktop rail adds a light-only logo edge without changing dark rendering', () => {
+  assert.match(fullPlayer, /\.side-panel \.channel-logo img \{[\s\S]*?filter: drop-shadow\(0 0 1px rgba\(15, 23, 42, 0\.52\)\) drop-shadow\(0 1px 1px rgba\(15, 23, 42, 0\.18\)\);/)
+  assert.match(fullPlayer, /\.full-player\.theme-dark \.side-panel \.channel-logo img \{[\s\S]*?filter: none;/)
 })

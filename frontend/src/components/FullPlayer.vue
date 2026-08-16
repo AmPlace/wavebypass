@@ -110,6 +110,32 @@
                 </div>
               </Transition>
 
+              <Transition name="video-failure">
+                <div
+                  v-if="showPlaybackFailureIndicator"
+                  class="video-playback-failure"
+                  role="alert"
+                  :aria-label="overlayPlaybackStatusText"
+                >
+                  <svg class="video-playback-failure-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <circle cx="12" cy="12" r="8.5" stroke="currentColor" stroke-width="1.8" />
+                    <path d="M12 7.7v5.1M12 16.2h.01" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" />
+                  </svg>
+                  <span class="video-playback-failure-label">{{ overlayPlaybackStatusText }}</span>
+                  <button
+                    type="button"
+                    class="video-overlay-button video-overlay-button--main video-playback-failure-retry"
+                    aria-label="重新播放"
+                    @click.stop="retryPlayback"
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                      <path d="M20 11a8 8 0 1 1-2.34-5.66L20 7.68" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+                      <path d="M20 4v3.68h-3.68" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+                    </svg>
+                  </button>
+                </div>
+              </Transition>
+
               <div
                 class="video-overlay desktop-video-overlay"
                 :class="{ 'is-hidden': isDesktopOverlayHidden }"
@@ -249,6 +275,99 @@
                   </div>
                 </div>
               </div>
+              <div
+                v-if="isMobileLayout"
+                class="video-overlay mobile-video-overlay"
+                :class="{ 'is-hidden': isMobileOverlayHidden, 'is-loading': isLoading, 'is-switching': isSourceSwitching }"
+                aria-label="移动端播放控制"
+                @pointerenter="handleOverlayActivity"
+                @pointerleave="scheduleOverlayHide"
+              >
+                <div
+                  v-if="isIptvMode && hasCurrentEpgProgram"
+                  class="program-progress mobile-video-overlay-progress"
+                  role="progressbar"
+                  aria-label="节目进度"
+                  aria-valuemin="0"
+                  aria-valuemax="100"
+                  :aria-valuenow="currentProgram.progress"
+                >
+                  <div class="progress-track">
+                    <div class="progress-fill" :style="{ width: currentProgramProgressPercent }"></div>
+                  </div>
+                  <div class="progress-times">
+                    <span>{{ currentProgram.start }}</span>
+                    <span>{{ currentProgram.end }}</span>
+                  </div>
+                </div>
+
+                <div class="mobile-video-overlay-transport">
+                  <button type="button" class="mobile-video-overlay-button mobile-video-overlay-button--side" aria-label="上一个" @click="playPrev">
+                    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M5.5 5.5h2.6v13H5.5zm4.8 6.5 8.2 6.1V5.9z"/></svg>
+                  </button>
+                  <button
+                    type="button"
+                    class="mobile-video-overlay-button mobile-video-overlay-button--main"
+                    :aria-label="isPlaying ? '暂停' : '播放'"
+                    @click="playerStore.togglePlay()"
+                  >
+                    <svg v-if="isPlaying" viewBox="0 0 24 24" fill="none"><path d="M8.5 5.5v13M15.5 5.5v13" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/></svg>
+                    <svg v-else viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.6v12.8c0 .75.83 1.2 1.46.78l9.65-6.39a.95.95 0 0 0 0-1.58L9.46 4.82A.94.94 0 0 0 8 5.6Z"/></svg>
+                  </button>
+                  <button type="button" class="mobile-video-overlay-button mobile-video-overlay-button--side" aria-label="下一个" @click="playNext">
+                    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M15.9 5.5h2.6v13h-2.6zM5.5 18.1l8.2-6.1-8.2-6.1z"/></svg>
+                  </button>
+                </div>
+
+                <div class="mobile-video-overlay-bottom">
+                  <span
+                    class="mobile-video-overlay-status"
+                    :class="overlayPlaybackStateClass"
+                    role="status"
+                    aria-live="polite"
+                  >
+                    {{ overlayPlaybackStatusText }}
+                  </span>
+                  <div class="mobile-video-overlay-utility">
+                    <button
+                      type="button"
+                      class="mobile-video-overlay-button mobile-video-overlay-button--utility"
+                      :aria-label="iptvMuted ? '取消静音' : '静音'"
+                      @click="toggleMute()"
+                    >
+                      <svg v-if="iptvMuted" viewBox="0 0 24 24" fill="none"><path d="M4 10v4a1 1 0 0 0 1 1h3l4.2 3.15A.5.5 0 0 0 13 17.75V6.25a.5.5 0 0 0-.8-.4L8 9H5a1 1 0 0 0-1 1Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="m21 3-18 18" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>
+                      <svg v-else viewBox="0 0 24 24" fill="none"><path d="M4 10v4a1 1 0 0 0 1 1h3l4.2 3.15A.5.5 0 0 0 13 17.75V6.25a.5.5 0 0 0-.8-.4L8 9H5a1 1 0 0 0-1 1Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M16 9a4 4 0 0 1 0 6M18.5 6.5a7.5 7.5 0 0 1 0 11" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+                    </button>
+                    <button
+                      v-if="isIptvMode && iptvSourceOptions.length"
+                      ref="sourceButtonRef"
+                      type="button"
+                      class="mobile-video-overlay-button mobile-video-overlay-button--utility"
+                      :aria-expanded="sourceMenuOpen"
+                      aria-controls="iptv-source-menu"
+                      aria-label="切换播放源"
+                      @click.stop="toggleSourceMenu"
+                    >
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4.5 7 7.5-3 7.5 3-7.5 3-7.5-3Z"/><path d="m4.5 12 7.5 3 7.5-3"/><path d="m4.5 17 7.5 3 7.5-3"/></svg>
+                    </button>
+                    <button
+                      v-if="!isIptvMode && currentRadioSourceOptions.length > 1"
+                      ref="sourceButtonRef"
+                      type="button"
+                      class="mobile-video-overlay-button mobile-video-overlay-button--utility"
+                      :aria-expanded="sourceMenuOpen"
+                      aria-controls="radio-source-menu"
+                      aria-label="切换电台播放源"
+                      @click.stop="toggleSourceMenu"
+                    >
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4.5 7 7.5-3 7.5 3-7.5 3-7.5-3Z"/><path d="m4.5 12 7.5 3 7.5-3"/><path d="m4.5 17 7.5 3 7.5-3"/></svg>
+                    </button>
+                    <button type="button" class="mobile-video-overlay-button mobile-video-overlay-button--utility" aria-label="全屏" :aria-pressed="isFullscreen" @click="toggleFullscreen">
+                      <svg viewBox="0 0 24 24" fill="none"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z" fill="currentColor"/></svg>
+                    </button>
+                  </div>
+                </div>
+              </div>
             </section>
 
             <section ref="nowPanelRef" class="now-panel">
@@ -268,6 +387,9 @@
                   <p v-if="nextProgramSummary" class="now-program-next mobile-now-program-next">
                     下一节目 · {{ nextProgramSummary }}
                   </p>
+                  <p v-if="showProgramRemaining" class="now-program-remaining mobile-now-program-remaining">
+                    剩余 {{ currentProgram.remaining }} 分钟
+                  </p>
                   <div v-if="nextProgramSummary" class="desktop-now-program-next" aria-label="下一节目">
                     <span class="desktop-now-program-next__label">下一节目</span>
                     <span class="desktop-now-program-next__title">{{ nextProgramSummary }}</span>
@@ -275,116 +397,6 @@
                   <p v-if="showProgramRemaining" class="now-program-remaining desktop-now-program-meta">
                     剩余 {{ currentProgram.remaining }} 分钟
                   </p>
-                </div>
-              </div>
-
-              <div class="mobile-now-controls">
-                <div v-if="hasCurrentEpgProgram"
-                  class="program-progress"
-                  :class="{ empty: !hasCurrentEpgProgram }"
-                  role="progressbar"
-                  aria-label="节目进度"
-                  aria-valuemin="0"
-                  aria-valuemax="100"
-                  :aria-valuenow="hasCurrentEpgProgram ? currentProgram.progress : 0"
-                >
-                  <div class="progress-track">
-                    <div v-if="hasCurrentEpgProgram" class="progress-fill" :style="{ width: currentProgramProgressPercent }"></div>
-                  </div>
-                  <div v-if="hasCurrentEpgProgram" class="progress-times">
-                    <span>{{ currentProgram.start }}</span>
-                    <span>{{ currentProgram.end }}</span>
-                  </div>
-                </div>
-
-                <p class="program-state">
-                  <span class="state-dot" :class="playbackStateClass"></span>
-                  <span>{{ fullPlayerStatusText }}</span>
-                  <span v-if="showProgramRemaining">·</span>
-                  <span v-if="showProgramRemaining">剩余 {{ currentProgram.remaining }} 分钟</span>
-                </p>
-
-                <div class="transport-row">
-                <button type="button" class="transport-side" aria-label="上一个" @click="playPrev">
-                  <svg viewBox="0 0 24 24" fill="currentColor"><path d="M5.5 5.5h2.6v13H5.5zm4.8 6.5 8.2 6.1V5.9z"/></svg>
-                </button>
-                <button
-                  type="button"
-                  class="transport-main"
-                  :aria-label="isPlaying ? '暂停' : '播放'"
-                  @click="playerStore.togglePlay()"
-                >
-                  <svg v-if="isPlaying" viewBox="0 0 24 24" fill="none"><path d="M8.5 5.5v13M15.5 5.5v13" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/></svg>
-                  <svg v-else viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.6v12.8c0 .75.83 1.2 1.46.78l9.65-6.39a.95.95 0 0 0 0-1.58L9.46 4.82A.94.94 0 0 0 8 5.6Z"/></svg>
-                </button>
-                <button type="button" class="transport-side" aria-label="下一个" @click="playNext">
-                  <svg viewBox="0 0 24 24" fill="currentColor"><path d="M15.9 5.5h2.6v13h-2.6zM5.5 18.1l8.2-6.1-8.2-6.1z"/></svg>
-                </button>
-                </div>
-
-                <div class="utility-row">
-                <button
-                  type="button"
-                  class="utility-btn"
-                  :aria-label="iptvMuted ? '取消静音' : '静音'"
-                  @click="toggleMute()"
-                >
-                  <svg v-if="iptvMuted" viewBox="0 0 24 24" fill="none">
-                    <path d="M4 10v4a1 1 0 0 0 1 1h3l4.2 3.15A.5.5 0 0 0 13 17.75V6.25a.5.5 0 0 0-.8-.4L8 9H5a1 1 0 0 0-1 1Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
-                    <path d="m21 3-18 18" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/>
-                  </svg>
-                  <svg v-else viewBox="0 0 24 24" fill="none">
-                    <path d="M4 10v4a1 1 0 0 0 1 1h3l4.2 3.15A.5.5 0 0 0 13 17.75V6.25a.5.5 0 0 0-.8-.4L8 9H5a1 1 0 0 0-1 1Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
-                    <path d="M16 9a4 4 0 0 1 0 6M18.5 6.5a7.5 7.5 0 0 1 0 11" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
-                  </svg>
-                </button>
-
-                <div v-if="!isIOS || !isIptvMode" class="volume-control">
-                  <svg viewBox="0 0 24 24" fill="none"><path d="M4 10v4a1 1 0 0 0 1 1h3l4.2 3.15A.5.5 0 0 0 13 17.75V6.25a.5.5 0 0 0-.8-.4L8 9H5a1 1 0 0 0-1 1Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
-                  <input
-                    type="range"
-                    min="0"
-                    max="1"
-                    step="0.01"
-                    :value="volume"
-                    aria-label="音量"
-                    @pointerdown="beginOverlayPinnedInteraction"
-                    @pointerup="endOverlayPinnedInteraction"
-                    @pointercancel="endOverlayPinnedInteraction"
-                    @focus="beginOverlayPinnedInteraction"
-                    @blur="endOverlayPinnedInteraction"
-                    @input="playerStore.setVolume($event.target.value)"
-                  />
-                </div>
-
-                <button type="button" class="utility-btn" aria-label="全屏" :aria-pressed="isFullscreen" @click="toggleFullscreen">
-                  <svg viewBox="0 0 24 24" fill="none"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z" fill="currentColor"/></svg>
-                </button>
-
-                <button
-                  v-if="isIptvMode && iptvSourceOptions.length"
-                  ref="sourceButtonRef"
-                  type="button"
-                  class="utility-btn relative"
-                  :aria-expanded="sourceMenuOpen"
-                  aria-controls="iptv-source-menu"
-                  aria-label="切换播放源"
-                  @click.stop="toggleSourceMenu"
-                >
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4.5 7 7.5-3 7.5 3-7.5 3-7.5-3Z"/><path d="m4.5 12 7.5 3 7.5-3"/><path d="m4.5 17 7.5 3 7.5-3"/></svg>
-                </button>
-                <button
-                  v-if="!isIptvMode && currentRadioSourceOptions.length > 1"
-                  ref="sourceButtonRef"
-                  type="button"
-                  class="utility-btn relative"
-                  :aria-expanded="sourceMenuOpen"
-                  aria-controls="radio-source-menu"
-                  aria-label="切换电台播放源"
-                  @click.stop="toggleSourceMenu"
-                >
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4.5 7 7.5-3 7.5 3-7.5 3-7.5-3Z"/><path d="m4.5 12 7.5 3 7.5-3"/><path d="m4.5 17 7.5 3 7.5-3"/></svg>
-                </button>
                 </div>
               </div>
             </section>
@@ -533,8 +545,15 @@
                   :disabled="item.disabled"
                   @click="handleChannelRowClick(item)"
                 >
-                  <span class="channel-logo">
-                    <img v-if="item.logo" :src="item.logo" :alt="item.name" @error="useDefaultLogo" />
+                  <span class="channel-logo" :class="`channel-logo--${railLogoVisualMode(item)}`">
+                    <img
+                      v-if="item.logo"
+                      :src="item.logo"
+                      :alt="item.name"
+                      :class="`channel-logo-image--${railLogoVisualMode(item)}`"
+                      @load="classifyRailLogo(item, $event)"
+                      @error="useDefaultLogo"
+                    />
                     <span v-else>{{ item.name.slice(0, 2) }}</span>
                   </span>
                   <span class="channel-copy">
@@ -670,6 +689,7 @@ import Hls from 'hls.js'
 import { usePlayerStore } from '../stores/player'
 import { fetchAggregatedChannels } from '../api/iptv'
 import { useEpg } from '../composables/useEpg'
+import { useLogoVisual } from '../composables/useLogoVisual'
 import { formatEpgClock } from '../utils/epgViewing'
 import { API_BASE } from '../apiBase'
 import { publicAsset } from '../publicAsset'
@@ -691,6 +711,16 @@ import { IPTV_CHANNEL_SORT_MODES, sortIptvChannels } from '../utils/iptvChannelL
 const playerStore = usePlayerStore()
 const { isPlayerExpanded, currentStation, isPlaying, isLoading, volume, isMuted, stationMap, stationList } = storeToRefs(playerStore)
 const toastStore = useToastStore()
+const {
+  logoVisualMode: railLogoVisualMode,
+  classifyLogo: classifyRailLogo,
+} = useLogoVisual({
+  getLogoUrl: (item) => item?.logo,
+  getDisplayName: (item) => item?.name,
+  getIdentityKey: (item) => item?.key || item?.name,
+  getVisualKey: (item) => `${item?.key || item?.name}|${item?.logo || ''}`,
+  enableWide: true,
+})
 
 const iptvVideoRef = ref(null)
 const iptvHlsRef = ref(null)
@@ -1052,6 +1082,7 @@ function updateSourceMenuPosition() {
 }
 
 async function toggleSourceMenu() {
+  handleOverlayActivity()
   sourceMenuOpen.value = !sourceMenuOpen.value
   if (sourceMenuOpen.value) {
     await nextTick()
@@ -1073,10 +1104,27 @@ function showMobileOverlayControls() {
   if (isDesktopLayout.value) return
   mobileOverlayVisible.value = true
   clearMobileOverlayTimer()
+  if (overlayMustStayVisible.value) return
   mobileOverlayTimer = setTimeout(() => {
-    mobileOverlayVisible.value = false
+    if (!overlayMustStayVisible.value && isMobileLayout.value) {
+      mobileOverlayVisible.value = false
+    }
     mobileOverlayTimer = null
-  }, 5000)
+  }, 2800)
+}
+
+function scheduleMobileOverlayHide() {
+  clearMobileOverlayTimer()
+  if (overlayMustStayVisible.value || !isMobileLayout.value) {
+    mobileOverlayVisible.value = true
+    return
+  }
+  mobileOverlayTimer = setTimeout(() => {
+    mobileOverlayTimer = null
+    if (!overlayMustStayVisible.value && isMobileLayout.value) {
+      mobileOverlayVisible.value = false
+    }
+  }, 900)
 }
 
 const overlayMustStayVisible = computed(() => (
@@ -1092,6 +1140,12 @@ const overlayMustStayVisible = computed(() => (
 const isDesktopOverlayHidden = computed(() => (
   isDesktopLayout.value
   && !desktopOverlayVisible.value
+  && !overlayMustStayVisible.value
+))
+
+const isMobileOverlayHidden = computed(() => (
+  isMobileLayout.value
+  && !mobileOverlayVisible.value
   && !overlayMustStayVisible.value
 ))
 
@@ -1115,6 +1169,10 @@ function applyOverlayVisibility() {
 
 function scheduleOverlayHide() {
   clearOverlayHideTimer()
+  if (isMobileLayout.value) {
+    scheduleMobileOverlayHide()
+    return
+  }
   if (overlayMustStayVisible.value || !isDesktopLayout.value) {
     desktopOverlayVisible.value = true
     return
@@ -1225,7 +1283,7 @@ function handleOverlayFocusOut() {
     overlayControlsFocused.value = Boolean(
       mediaSurfaceRef.value?.contains(document.activeElement),
     )
-    applyOverlayVisibility()
+    scheduleOverlayHide()
   })
 }
 
@@ -1435,6 +1493,33 @@ const overlayPlaybackStateClass = computed(() => (
     : playbackStateClass.value
 ))
 
+const canRetryPlayback = computed(() => (
+  isIptvMode.value
+    ? Boolean(playerStore.currentIptvChannel || playerStore.pendingIptvChannel)
+    : Boolean(currentStation.value)
+))
+
+const showPlaybackFailureIndicator = computed(() => (
+  Boolean(playerStore.playbackError)
+  && !isLoading.value
+  && !isTransientPlaybackMessage.value
+  && canRetryPlayback.value
+))
+
+async function retryPlayback() {
+  if (isLoading.value) return
+  if (isIptvMode.value) {
+    const channel = playerStore.currentIptvChannel || playerStore.pendingIptvChannel
+    if (channel) await playIptvChannelFromFullPlayer(channel)
+    return
+  }
+  const stationId = currentStation.value
+  if (!stationId) return
+  playerStore.currentStation = ''
+  await nextTick()
+  playerStore.switchStation(stationId)
+}
+
 const isOverlayLoadingCandidate = computed(() => {
   if (!isLoading.value) return false
   if (playerStore.playbackError && !isTransientPlaybackMessage.value) return false
@@ -1580,27 +1665,29 @@ async function playIptvChannelFromFullPlayer(channel) {
     toastStore.info('该频道上次检测未开播，正在尝试播放')
   }
 
-  const videoEl = playerStore.iptvVideoEl || iptvVideoRef.value
-  if (videoEl) videoEl.play().catch(() => {})
   _manualIptvStartPending += 1
   try {
-    await playerStore.playIptvChannel(channel)
+    await playerStore.playIptvChannel(channel, { progressive: true })
   } catch (e) {
     _manualIptvStartPending = Math.max(0, _manualIptvStartPending - 1)
     playerStore.setPlaybackError(e?.message || '频道起播失败')
     return
   }
   const selectionToken = playerStore.iptvSelectionToken
+  const selectedChannelKey = (value) => String(
+    value?.logical_channel_id || value?.canonical_key || value?.name || '',
+  )
   nextTick(() => {
     _manualIptvStartPending = Math.max(0, _manualIptvStartPending - 1)
     if (
       selectionToken !== playerStore.iptvSelectionToken
-      || playerStore.currentIptvChannel !== channel
+      || selectedChannelKey(playerStore.currentIptvChannel) !== selectedChannelKey(channel)
       || !iptvVideoRef.value
       || !playerStore.currentIptvChannel
     ) {
       return
     }
+    _hardIptvSwitchTeardown = false
     resetRacedLosers()
     _playSelectionToken = selectionToken
     const attemptId = ++_playAttemptId
@@ -2438,7 +2525,7 @@ async function preflightProxyPlaylistTransport(url, usingProxy, signal = null) {
       resolve(value)
     }
     if (signal?.aborted) {
-      settle({ url: finalUrl, sourceType: 'hls' })
+      settle(null)
       return
     }
     if (signal) {
@@ -2635,6 +2722,7 @@ let _youtubeApiPromise = null
 let _youtubeApiReachable = null
 let _youtubeApiCheckedAt = 0
 let _componentDisposed = false
+let _hardIptvSwitchTeardown = false
 function isAttemptActive(attemptId) {
   return !_componentDisposed
     && attemptId === _playAttemptId
@@ -2922,7 +3010,11 @@ async function switchIptvSource(index) {
 
   if (isProxyLikeEntry(entry)) {
     try {
-      await tryPlayIptv(entry.url, true, entry.custom_ua || '', attemptId, index, sourceType(entry))
+      const entryType = sourceType(entry)
+      const playbackType = entryType === 'adapter' && entry?.adapter_transport_pending
+        ? 'hls'
+        : entryType
+      await tryPlayIptv(entry.url, true, entry.custom_ua || '', attemptId, index, playbackType)
       if (!isAttemptActive(attemptId)) return
       setSourceRuntimeStatus(index, 'playing')
       playerStore.clearPlaybackError()
@@ -3658,7 +3750,10 @@ async function playCurrentIptvUrl(attemptId = 0, options = {}) {
     if (st === 'youtube') {
       await startYoutubeCandidate(entry, attemptId, idx)
     } else {
-      await tryPlayIptv(entry.url, isProxyLikeEntry(entry), entry.custom_ua || '', attemptId, idx, st, {
+      const playbackType = st === 'adapter' && isProxyLikeEntry(entry) && entry?.adapter_transport_pending
+        ? 'hls'
+        : st
+      await tryPlayIptv(entry.url, isProxyLikeEntry(entry), entry.custom_ua || '', attemptId, idx, playbackType, {
         startupTimeoutMs: options.startupTimeoutMs,
         preserveFrame: options.preserveFrame,
       })
@@ -4516,6 +4611,31 @@ function disposeIptvPlayback() {
   _mpegtsRecoveries.clear()
 }
 
+// A pending channel is a channel switch, not a pause.  Tear down every
+// playback backend before waiting for the next channel's provider resolves so
+// the previous audio/video cannot remain attached during the resolve window.
+function beginIptvChannelSwitch() {
+  _hardIptvSwitchTeardown = true
+  _playAttemptId++
+  _recoverySeq++
+  _recoveryInFlight = false
+  clearPauseReleaseTimer()
+  _softPausedAt = 0
+  _softPauseReleased = false
+  stopPlaybackWatchdogs()
+  cancelCurrentStartup()
+  cancelActiveProxyRace()
+  destroyIptvEngines()
+  resetIptvVideo()
+  clearIptvMediaSession()
+  iptvSourceRuntimeStatus.value = {}
+  _racedLosers.clear()
+  _mpegtsRecoveries.clear()
+  playerStore.isPlaying = false
+  playerStore.isLoading = true
+  playerStore.clearPlaybackError()
+}
+
 // 注册 video 元素到 store，同步 muted 状态
 watch(iptvVideoRef, (el) => {
   playerStore.iptvVideoEl = el
@@ -4533,7 +4653,12 @@ watch(() => playerStore.iptvSelectionToken, (selectionToken) => {
   cancelActiveProxyRace()
 })
 
-// IptvHome 已同步设置 src + play，这里跳过
+watch(() => playerStore.pendingIptvChannel, (pending) => {
+  if (!pending) return
+  beginIptvChannelSwitch()
+})
+
+// 频道队列就绪后统一从这里启动正式播放管线。
 watch(() => playerStore.currentIptvChannel, async (ch) => {
   const selectionToken = playerStore.iptvSelectionToken
   if (!ch) {
@@ -4543,6 +4668,12 @@ watch(() => playerStore.currentIptvChannel, async (ch) => {
     return
   }
   if (ch) {
+    const channelKey = (value) => String(
+      value?.logical_channel_id || value?.canonical_key || value?.name || '',
+    )
+    if (playerStore.pendingIptvChannel && channelKey(playerStore.pendingIptvChannel) === channelKey(ch)) {
+      playerStore.pendingIptvChannel = null
+    }
     sourceMenuOpen.value = false
     iptvSourceRuntimeStatus.value = {}
     if (_manualIptvStartPending > 0) return
@@ -4552,6 +4683,7 @@ watch(() => playerStore.currentIptvChannel, async (ch) => {
       || playerStore.currentIptvChannel !== ch
     ) return
     if (iptvVideoRef.value) {
+      _hardIptvSwitchTeardown = false
       resetRacedLosers()
       _playSelectionToken = selectionToken
       const attemptId = ++_playAttemptId
@@ -4560,16 +4692,50 @@ watch(() => playerStore.currentIptvChannel, async (ch) => {
   }
 })
 
+// Progressive adapter results can arrive after an earlier candidate has
+// already exhausted. Resume the newly appended fallback only from the
+// explicit all-sources-failed state; a user pause must never be mistaken for
+// a request to auto-start again.
+watch(() => playerStore.iptvUrls.length, async (length, previousLength) => {
+  if (
+    length <= previousLength
+    || !isIptvMode.value
+    || isPlaying.value
+    || isLoading.value
+    || playerStore.playbackError !== '所有播放源均不可用'
+    || _hardIptvSwitchTeardown
+  ) return
+  const selectionToken = playerStore.iptvSelectionToken
+  await nextTick()
+  if (
+    selectionToken !== playerStore.iptvSelectionToken
+    || !isIptvMode.value
+    || isPlaying.value
+    || isLoading.value
+    || playerStore.playbackError !== '所有播放源均不可用'
+    || !iptvVideoRef.value
+  ) return
+  _playSelectionToken = selectionToken
+  const attemptId = ++_playAttemptId
+  await playCurrentIptvUrl(attemptId)
+})
+
 watch(sourceMenuOpen, async (open) => {
   if (!open) return
   await nextTick()
   updateSourceMenuPosition()
 })
 
-watch([overlayMustStayVisible, isDesktopLayout], () => {
+watch([overlayMustStayVisible, isDesktopLayout, isMobileLayout], () => {
   if (overlayMustStayVisible.value) {
     clearOverlayHideTimer()
+    clearMobileOverlayTimer()
     desktopOverlayVisible.value = true
+    if (isMobileLayout.value) mobileOverlayVisible.value = true
+    return
+  }
+  if (isMobileLayout.value) {
+    scheduleMobileOverlayHide()
     return
   }
   applyOverlayVisibility()
@@ -4596,6 +4762,7 @@ watch(isPlayerExpanded, (expanded) => {
 })
 
 watch(isPlaying, (playing) => {
+  if (typeof _hardIptvSwitchTeardown !== 'undefined' && _hardIptvSwitchTeardown) return
   if (!isIptvMode.value) return
   if (activeIptvEngine.value === 'youtube') {
     if (!_youtubePlayer) return
@@ -5093,12 +5260,59 @@ onBeforeUnmount(() => {
 }
 
 .video-loading-spinner {
-  width: 42px;
-  height: 42px;
+  width: 48px;
+  height: 48px;
   border: 3px solid rgba(255, 255, 255, 0.26);
   border-top-color: currentColor;
   border-radius: 999px;
   animation: video-loading-spin 0.9s linear infinite;
+}
+
+.video-failure-enter-active,
+.video-failure-leave-active {
+  transition: opacity 180ms ease, transform 180ms ease;
+}
+
+.video-failure-enter-from,
+.video-failure-leave-to {
+  opacity: 0;
+  transform: translateY(4px);
+}
+
+.video-playback-failure {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  pointer-events: auto;
+  color: rgba(255, 255, 255, 0.92);
+  text-align: center;
+}
+
+.video-playback-failure-icon {
+  width: 48px;
+  height: 48px;
+  color: rgba(255, 255, 255, 0.94);
+}
+
+.video-playback-failure-label {
+  color: rgba(255, 255, 255, 0.88);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.video-playback-failure-retry {
+  margin-top: 4px;
+}
+
+.video-playback-failure-retry svg {
+  width: 24px;
+  height: 24px;
 }
 
 @keyframes video-loading-spin {
@@ -5126,6 +5340,88 @@ onBeforeUnmount(() => {
 .video-overlay.is-hidden {
   opacity: 0;
   pointer-events: none;
+}
+
+.mobile-video-overlay {
+  display: none;
+}
+
+.mobile-video-overlay-button {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  padding: 0;
+  border: 0;
+  color: rgba(255, 255, 255, 0.9);
+  background: transparent;
+  cursor: pointer;
+  transition: color 0.16s ease, background 0.16s ease, transform 0.16s ease;
+}
+
+.mobile-video-overlay-button:hover,
+.mobile-video-overlay-button:focus-visible {
+  color: #fff;
+}
+
+.mobile-video-overlay-button:focus-visible {
+  outline: 2px solid rgba(255, 255, 255, 0.86);
+  outline-offset: 2px;
+}
+
+.mobile-video-overlay-button--side {
+  width: 44px;
+  height: 44px;
+}
+
+.mobile-video-overlay-button--main {
+  width: 56px;
+  height: 56px;
+  border-radius: 999px;
+  color: #111827;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.24);
+}
+
+.mobile-video-overlay-button--utility {
+  width: 44px;
+  height: 44px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.42);
+}
+
+.mobile-video-overlay-button--utility:hover,
+.mobile-video-overlay-button--utility:focus-visible {
+  background: rgba(15, 23, 42, 0.62);
+}
+
+.mobile-video-overlay-button--side svg {
+  width: 22px;
+  height: 22px;
+}
+
+.mobile-video-overlay-button--main svg {
+  width: 23px;
+  height: 23px;
+}
+
+.mobile-video-overlay-button--utility svg {
+  width: 19px;
+  height: 19px;
+}
+
+.full-player--mobile-layout .video-playback-failure-icon {
+  width: 48px;
+  height: 48px;
+}
+
+.full-player--mobile-layout .video-playback-failure-retry {
+  width: 48px;
+  height: 48px;
+}
+
+.full-player--mobile-layout .video-playback-failure-retry svg {
+  width: 22px;
+  height: 22px;
 }
 
 .media-surface--overlay-hidden {
@@ -5244,6 +5540,19 @@ onBeforeUnmount(() => {
 .video-overlay-button--main svg {
   width: 22px;
   height: 22px;
+}
+
+.video-overlay-button.video-playback-failure-retry {
+  width: 48px;
+  height: 48px;
+  color: rgba(255, 255, 255, 0.94);
+  background: rgba(15, 23, 42, 0.62);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.24);
+}
+
+.video-overlay-button.video-playback-failure-retry:hover {
+  color: #fff;
+  background: rgba(15, 23, 42, 0.78);
 }
 
 .video-overlay-button--utility {
@@ -5506,10 +5815,6 @@ onBeforeUnmount(() => {
   display: none;
 }
 
-.mobile-now-controls {
-  display: block;
-}
-
 @media (min-width: 981px) {
   .now-panel {
     padding-top: 12px;
@@ -5579,9 +5884,6 @@ onBeforeUnmount(() => {
     display: block;
   }
 
-  .mobile-now-controls {
-    display: none;
-  }
 }
 
 @media (max-width: 980px) {
@@ -5591,6 +5893,10 @@ onBeforeUnmount(() => {
 
   .now-panel .desktop-now-program-meta {
     display: none;
+  }
+
+  .now-panel .mobile-now-program-remaining {
+    display: block;
   }
 }
 
@@ -5645,6 +5951,10 @@ onBeforeUnmount(() => {
   font-weight: 500;
 }
 
+.now-panel .mobile-now-program-remaining {
+  display: none;
+}
+
 .program-progress {
   margin-top: 10px;
 }
@@ -5674,8 +5984,7 @@ onBeforeUnmount(() => {
   box-shadow: 0 0 0 1px var(--progress-knob-ring);
 }
 
-.progress-times,
-.program-state {
+.progress-times {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -5685,140 +5994,15 @@ onBeforeUnmount(() => {
   font-weight: 400;
 }
 
-.program-state {
-  justify-content: center;
-  gap: 7px;
-  color: var(--text-secondary);
-  font-weight: 500;
-}
-
-.state-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 999px;
-  background: var(--text-quaternary);
-}
-
-.state-dot.playing {
-  background: var(--accent);
-}
-
-.state-dot.playing + span {
-  color: var(--accent);
-}
-
-.state-dot.loading {
-  border: 1px solid var(--text-quaternary);
-  border-top-color: var(--gold);
-  background: transparent;
-  animation: spin 0.9s linear infinite;
-}
-
-.state-dot.error {
-  background: rgba(239, 68, 68, 0.75);
-}
-
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-.transport-row {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--control-gap);
-  margin-top: 10px;
-}
-
-.transport-side,
-.transport-main,
-.utility-btn {
-  display: grid;
-  place-items: center;
-  border: 0;
-  background: transparent;
-  color: var(--text-primary);
-  cursor: pointer;
-}
-
-.transport-side {
-  width: var(--control-side-size);
-  height: var(--control-side-size);
-}
-
-.transport-side svg {
-  width: var(--control-side-icon);
-  height: var(--control-side-icon);
-}
-
-.transport-main {
-  width: var(--control-main-size);
-  height: var(--control-main-size);
-  border-radius: 999px;
-  background: var(--control-surface);
-  box-shadow: var(--control-shadow);
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
-}
-
-.transport-main svg {
-  width: var(--control-main-icon);
-  height: var(--control-main-icon);
-}
-
-.utility-row {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--utility-gap);
-  margin-top: 6px;
-  min-height: var(--utility-size);
-}
-
-.utility-btn {
-  position: relative;
-  display: grid;
-  place-items: center;
-  width: var(--utility-size);
-  height: var(--utility-size);
-  padding: 0;
-  line-height: 0;
-  color: var(--tag-text);
-}
-
-.utility-btn svg {
-  display: block;
-  width: var(--utility-icon);
-  height: var(--utility-icon);
-}
-
-.volume-control {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  color: var(--text-tertiary);
-}
-
-.volume-control svg {
-  display: block;
-  width: 21px;
-  height: 21px;
-}
-
-.volume-control input {
-  width: 70px;
-  accent-color: var(--text-primary);
-}
-
 .side-panel {
   min-width: 0;
   min-height: 0;
   padding-top: var(--player-main-offset);
-  --channel-grid: 46px minmax(0, 1fr) 22px;
+  --channel-grid: 64px minmax(0, 1fr) 22px;
   --channel-gap: 10px;
   --channel-logo-size: 46px;
+  --channel-logo-width: 64px;
+  --channel-logo-height: 46px;
   --channel-min-height: 62px;
   --channel-margin: 2px;
   --channel-padding: 7px 8px;
@@ -5958,7 +6142,41 @@ onBeforeUnmount(() => {
 }
 
 .side-panel .channel-logo img {
+  display: block;
+  width: 44px;
+  height: 44px;
   object-fit: contain;
+  filter: drop-shadow(0 0 1px rgba(15, 23, 42, 0.52)) drop-shadow(0 1px 1px rgba(15, 23, 42, 0.18));
+}
+
+.side-panel .channel-logo--wide img {
+  width: 60px;
+  height: 44px;
+}
+
+.side-panel .channel-logo--cover img {
+  width: 44px;
+  height: 44px;
+}
+
+.side-panel .channel-logo {
+  width: var(--channel-logo-width);
+  height: var(--channel-logo-height);
+  background: #f1f2f3;
+  border: 1px solid rgba(15, 23, 42, 0.1);
+}
+
+.full-player.theme-dark .side-panel .channel-logo {
+  background: var(--surface-bg);
+  border-color: transparent;
+}
+
+.full-player.theme-dark .side-panel .channel-logo img {
+  filter: none;
+}
+
+.side-panel .channel-copy {
+  min-height: var(--channel-logo-height);
 }
 
 .side-panel .channel-row.active {
@@ -6474,80 +6692,29 @@ onBeforeUnmount(() => {
     font-weight: 400;
   }
 
-  .program-state {
-    justify-content: center;
-    margin-top: 10px;
-    color: var(--text-secondary);
-    font-size: var(--meta-size);
-    font-weight: 400;
-  }
 
-  .transport-row {
-    gap: var(--control-gap);
-    margin-top: 16px;
-  }
 
-  .transport-side {
-    width: var(--control-side-size);
-    height: var(--control-side-size);
-  }
 
-  .transport-side svg {
-    width: var(--control-side-icon);
-    height: var(--control-side-icon);
-  }
 
-  .transport-main {
-    width: var(--control-main-size);
-    height: var(--control-main-size);
-  }
 
-  .transport-main svg {
-    width: var(--control-main-icon);
-    height: var(--control-main-icon);
-  }
 
-  .utility-row {
-    display: grid;
-    grid-auto-flow: column;
-    grid-auto-columns: var(--utility-size);
-    align-items: center;
-    justify-content: center;
-    gap: var(--utility-gap);
-    margin-top: 10px;
-    min-height: var(--utility-size);
-  }
 
-  .utility-btn {
-    display: grid;
-    place-items: center;
-    width: var(--utility-size);
-    height: var(--utility-size);
-    padding: 0;
-    line-height: 0;
-  }
 
-  .utility-btn svg {
-    width: var(--utility-icon);
-    height: var(--utility-icon);
-  }
 
-  .volume-control {
-    display: grid;
-    place-items: center;
-    width: var(--utility-size);
-    height: var(--utility-size);
-    line-height: 0;
-  }
 
-  .volume-control svg {
-    width: var(--utility-icon);
-    height: var(--utility-icon);
-  }
 
-  .volume-control input {
-    display: none;
-  }
+
+
+
+
+
+
+
+
+
+
+
+
 
   .side-panel {
     display: none;
@@ -6800,6 +6967,111 @@ onBeforeUnmount(() => {
     display: none;
   }
 
+  .full-player--mobile-layout .mobile-video-overlay {
+    inset: 0;
+    display: block;
+    min-height: 0;
+    padding: 0 16px 10px;
+    background: linear-gradient(to top, rgba(0, 0, 0, 0.82), rgba(0, 0, 0, 0.46) 58%, transparent);
+  }
+
+  .full-player--mobile-layout .mobile-video-overlay-progress {
+    position: absolute;
+    right: 16px;
+    bottom: 62px;
+    left: 16px;
+    margin: 0;
+  }
+
+  .full-player--mobile-layout .mobile-video-overlay-progress .progress-track {
+    height: 2px;
+    background: rgba(255, 255, 255, 0.34);
+  }
+
+  .full-player--mobile-layout .mobile-video-overlay-progress .progress-fill {
+    background: rgba(255, 255, 255, 0.92);
+  }
+
+  .full-player--mobile-layout .mobile-video-overlay-progress .progress-times {
+    margin-top: 5px;
+    color: rgba(255, 255, 255, 0.7);
+    font-size: 11px;
+  }
+
+  .full-player--mobile-layout .mobile-video-overlay-transport {
+    display: flex;
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    align-items: center;
+    justify-content: center;
+    gap: 28px;
+    min-height: 56px;
+    transform: translate(-50%, -50%);
+    pointer-events: auto;
+  }
+
+  .full-player--mobile-layout .mobile-video-overlay-bottom {
+    display: flex;
+    position: absolute;
+    right: 16px;
+    bottom: 10px;
+    left: 16px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    min-width: 0;
+    margin: 0;
+    pointer-events: auto;
+  }
+
+  .full-player--mobile-layout .mobile-video-overlay-status {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    color: rgba(255, 255, 255, 0.72);
+    font-size: 12px;
+    font-weight: 500;
+    line-height: 1.2;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .full-player--mobile-layout .mobile-video-overlay-status.playing {
+    color: rgba(142, 245, 185, 0.94);
+  }
+
+  .full-player--mobile-layout .mobile-video-overlay-status.loading {
+    color: rgba(255, 255, 255, 0.82);
+  }
+
+  .full-player--mobile-layout .mobile-video-overlay-status.error {
+    color: rgba(255, 184, 184, 0.94);
+  }
+
+  .full-player--mobile-layout .mobile-video-overlay-utility {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .full-player--mobile-layout .mobile-video-overlay-button--utility {
+    background: transparent;
+    box-shadow: none;
+  }
+
+  .full-player--mobile-layout .mobile-video-overlay-button--utility:hover,
+  .full-player--mobile-layout .mobile-video-overlay-button--utility:focus-visible {
+    background: transparent;
+  }
+
+  .full-player--mobile-layout .mobile-video-overlay.is-loading .mobile-video-overlay-transport,
+  .full-player--mobile-layout .mobile-video-overlay.is-switching .mobile-video-overlay-transport {
+    opacity: 0;
+    pointer-events: none;
+  }
+
   .full-player--mobile-layout .media-video {
     object-position: center center;
   }
@@ -6889,80 +7161,29 @@ onBeforeUnmount(() => {
     font-weight: 400;
   }
 
-  .full-player--mobile-layout .program-state {
-    justify-content: center;
-    margin-top: 10px;
-    color: var(--text-secondary);
-    font-size: var(--meta-size);
-    font-weight: 400;
-  }
 
-  .full-player--mobile-layout .transport-row {
-    gap: var(--control-gap);
-    margin-top: 16px;
-  }
 
-  .full-player--mobile-layout .transport-side {
-    width: var(--control-side-size);
-    height: var(--control-side-size);
-  }
 
-  .full-player--mobile-layout .transport-side svg {
-    width: var(--control-side-icon);
-    height: var(--control-side-icon);
-  }
 
-  .full-player--mobile-layout .transport-main {
-    width: var(--control-main-size);
-    height: var(--control-main-size);
-  }
 
-  .full-player--mobile-layout .transport-main svg {
-    width: var(--control-main-icon);
-    height: var(--control-main-icon);
-  }
 
-  .full-player--mobile-layout .utility-row {
-    display: grid;
-    grid-auto-flow: column;
-    grid-auto-columns: var(--utility-size);
-    align-items: center;
-    justify-content: center;
-    gap: var(--utility-gap);
-    margin-top: 10px;
-    min-height: var(--utility-size);
-  }
 
-  .full-player--mobile-layout .utility-btn {
-    display: grid;
-    place-items: center;
-    width: var(--utility-size);
-    height: var(--utility-size);
-    padding: 0;
-    line-height: 0;
-  }
 
-  .full-player--mobile-layout .utility-btn svg {
-    width: var(--utility-icon);
-    height: var(--utility-icon);
-  }
 
-  .full-player--mobile-layout .volume-control {
-    display: grid;
-    place-items: center;
-    width: var(--utility-size);
-    height: var(--utility-size);
-    line-height: 0;
-  }
 
-  .full-player--mobile-layout .volume-control svg {
-    width: var(--utility-icon);
-    height: var(--utility-icon);
-  }
 
-  .full-player--mobile-layout .volume-control input {
-    display: none;
-  }
+
+
+
+
+
+
+
+
+
+
+
+
 
   .full-player--mobile-layout .side-panel {
     display: none;
