@@ -3,14 +3,16 @@
     <Transition name="ios-sheet">
       <div
         v-show="isPlayerExpanded"
+        ref="playerRootRef"
+        tabindex="-1"
         class="full-player fixed inset-0 z-50 overflow-y-auto"
         :class="{ 'theme-dark': isFullPlayerDark, 'safari-chrome-refresh': isSafariChromeRefreshing, 'full-player--mobile-layout': isMobileLayout, 'full-player--theater': isTheaterLayout }"
         @pointerenter="handleOverlayActivity"
         @pointermove="handleOverlayActivity"
         @mousemove="handleOverlayActivity"
-        @pointerdown="handleOverlayActivity"
+        @pointerdown="handlePlayerPointerDown"
         @touchstart="handleOverlayActivity"
-        @keydown.capture="handleOverlayActivity"
+        @keydown.capture="handlePlayerKeyboard"
         @focusin.capture="handleOverlayFocusIn"
         @focusout.capture="handleOverlayFocusOut"
       >
@@ -694,6 +696,7 @@ const iptvVideoRef = ref(null)
 const iptvHlsRef = ref(null)
 const iptvMpegtsRef = ref(null)
 const youtubeHostRef = ref(null)
+const playerRootRef = ref(null)
 const playerLayoutRef = ref(null)
 const playerMainRef = ref(null)
 const mediaSurfaceRef = ref(null)
@@ -720,6 +723,7 @@ const DEFAULT_MEDIA_ASPECT_VALUE = 16 / 9
 const DEFAULT_MEDIA_ASPECT_RATIO = '16 / 9'
 const ULTRAWIDE_MEDIA_ASPECT = 2
 const MAX_ADAPTIVE_LANDSCAPE_ASPECT = 2.4
+const KEYBOARD_VOLUME_STEP = 0.05
 
 function tabIndicatorStyle(tabsRef) {
   tabIndicatorRevision.value
@@ -1121,6 +1125,78 @@ function scheduleOverlayHide() {
   }, 900)
 }
 
+function isInteractiveKeyboardTarget(target) {
+  return Boolean(target?.closest?.(
+    'input, textarea, select, option, button, a, [contenteditable="true"], [role="slider"], [role="menu"], [role="menuitem"]',
+  ))
+}
+
+function isKeyboardTextEntryTarget(target) {
+  return Boolean(target?.closest?.(
+    'input, textarea, select, [contenteditable="true"]',
+  ))
+}
+
+function handlePlayerPointerDown(event) {
+  handleOverlayActivity()
+  if (!isDesktopLayout.value || isInteractiveKeyboardTarget(event?.target)) return
+  playerRootRef.value?.focus?.({ preventScroll: true })
+}
+
+function handlePlayerKeyboard(event) {
+  // Keep this in the existing FullPlayer capture path so shortcuts do not
+  // become a second global listener with a separate cleanup/lifecycle.
+  handleOverlayActivity()
+  if (
+    !isPlayerExpanded.value
+    || !isDesktopLayout.value
+    || event?.isComposing
+    || event?.ctrlKey
+    || event?.metaKey
+    || event?.altKey
+  ) return
+
+  const code = String(event?.code || '')
+  const key = String(event?.key || '').toLowerCase()
+  const isVolumeShortcut = code === 'ArrowUp' || code === 'ArrowDown'
+  const isPlaybackShortcut = code === 'Space' || code === 'KeyK'
+  const isMuteShortcut = code === 'KeyM'
+  const isFullscreenShortcut = code === 'KeyF'
+  const isChannelShortcut = code === 'PageUp' || code === 'PageDown'
+
+  if (key === 'escape') {
+    // Escape should close the open source surface even when focus is on one
+    // of its menu buttons, but must remain native for text-entry controls.
+    if (!sourceMenuOpen.value || isKeyboardTextEntryTarget(event?.target)) return
+    closeSourceMenu()
+    event.preventDefault()
+    return
+  }
+
+  if (isInteractiveKeyboardTarget(event?.target)) return
+
+  if (!isVolumeShortcut && !isPlaybackShortcut && !isMuteShortcut && !isFullscreenShortcut && !isChannelShortcut) return
+
+  // Toggle/channel actions are one-shot. Volume remains repeatable so a held
+  // ArrowUp/ArrowDown behaves like a normal desktop volume control.
+  event.preventDefault()
+  if (event.repeat && !isVolumeShortcut) return
+
+  if (isVolumeShortcut) {
+    const delta = code === 'ArrowUp' ? KEYBOARD_VOLUME_STEP : -KEYBOARD_VOLUME_STEP
+    setOverlayVolume(effectiveVolume.value + delta)
+  } else if (isPlaybackShortcut) {
+    playerStore.togglePlay()
+  } else if (isMuteShortcut) {
+    toggleOverlayMute()
+  } else if (isFullscreenShortcut) {
+    void toggleFullscreen()
+  } else if (isChannelShortcut) {
+    if (code === 'PageUp') playPrev()
+    else playNext()
+  }
+}
+
 function handleOverlayActivity() {
   desktopOverlayVisible.value = true
   applyOverlayVisibility()
@@ -1137,8 +1213,8 @@ function endOverlayPinnedInteraction() {
   applyOverlayVisibility()
 }
 
-function handleOverlayFocusIn() {
-  overlayControlsFocused.value = true
+function handleOverlayFocusIn(event) {
+  overlayControlsFocused.value = event?.target !== playerRootRef.value
   handleOverlayActivity()
 }
 
@@ -4507,6 +4583,7 @@ watch(isPlayerExpanded, (expanded) => {
     showMobileOverlayControls()
     if (isIptvMode.value) loadIptvChannels()
     nextTick(() => {
+      if (isDesktopLayout.value) playerRootRef.value?.focus?.({ preventScroll: true })
       scheduleMediaFrameSizeUpdate()
       scheduleTabIndicatorUpdate()
     })
@@ -4670,6 +4747,9 @@ onMounted(() => {
   updateMediaFrameSize()
   syncFullPlayerTheme()
   setFullPlayerChromeOpen(isPlayerExpanded.value)
+  if (isPlayerExpanded.value && isDesktopLayout.value) {
+    nextTick(() => playerRootRef.value?.focus?.({ preventScroll: true }))
+  }
   themeObserver = new MutationObserver(syncFullPlayerTheme)
   themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] })
   themeObserver.observe(document.body, { attributes: true, attributeFilter: ['class'] })

@@ -626,6 +626,72 @@ test('FullPlayer desktop volume panel mutes at zero and restores the last non-ze
   assert.equal(store.volume, 0.42)
 })
 
+test('FullPlayer desktop keyboard shortcuts reuse the overlay capture path', async () => {
+  channels = [channel('Alpha', 'alpha'), channel('Bravo', 'bravo')]
+  installFetch()
+  const originalWidth = window.innerWidth
+  const originalMatchMedia = window.matchMedia
+  Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1440 })
+  window.matchMedia = (query) => ({
+    matches: query.includes('hover: hover') || query.includes('pointer: fine'),
+    addListener() {},
+    removeListener() {},
+    addEventListener() {},
+    removeEventListener() {},
+  })
+  try {
+    const { store } = await mountPlayer({ current: channels[0] })
+    const root = domElement('.full-player')
+    const dispatchKey = (key, code = key) => {
+      const event = new window.KeyboardEvent('keydown', {
+        key,
+        code,
+        bubbles: true,
+        cancelable: true,
+      })
+      root.dispatchEvent(event)
+      return event
+    }
+
+    assert.equal(store.isPlaying, true)
+    assert.equal(dispatchKey(' ', 'Space').defaultPrevented, true)
+    assert.equal(store.isPlaying, false)
+    dispatchKey('k', 'KeyK')
+    assert.equal(store.isPlaying, true)
+
+    store.setVolume(0.5)
+    store.setMuted(false)
+    dispatchKey('ArrowUp', 'ArrowUp')
+    assert.equal(store.volume, 0.55)
+    dispatchKey('ArrowDown', 'ArrowDown')
+    assert.equal(store.volume, 0.5)
+
+    dispatchKey('m', 'KeyM')
+    assert.equal(store.isMuted, true)
+    dispatchKey('m', 'KeyM')
+    assert.equal(store.isMuted, false)
+
+    dispatchKey('PageDown', 'PageDown')
+    await flushPromises()
+    assert.equal(store.currentIptvChannel.name, 'Bravo')
+
+    store.isPlaying = true
+    const slider = domElement('.desktop-video-overlay .video-overlay-volume-panel input[type="range"]')
+    const ignored = new window.KeyboardEvent('keydown', {
+      key: ' ',
+      code: 'Space',
+      bubbles: true,
+      cancelable: true,
+    })
+    slider.dispatchEvent(ignored)
+    assert.equal(ignored.defaultPrevented, false)
+    assert.equal(store.isPlaying, true)
+  } finally {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth })
+    window.matchMedia = originalMatchMedia
+  }
+})
+
 test('FullPlayer loading indicator is delayed, follows loading state, and is hidden when paused', async () => {
   channels = [channel('Alpha', 'alpha')]
   installFetch()

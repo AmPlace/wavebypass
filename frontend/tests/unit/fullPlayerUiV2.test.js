@@ -57,7 +57,7 @@ test('FullPlayer 1.5 desktop metadata uses structured next-programme fields', ()
 test('FullPlayer overlay activity hides only stable playback and restores on interaction', () => {
   assert.match(template, /@pointerenter="handleOverlayActivity"/)
   assert.match(template, /@pointermove="handleOverlayActivity"/)
-  assert.match(template, /@keydown\.capture="handleOverlayActivity"/)
+  assert.match(template, /@keydown\.capture="handlePlayerKeyboard"/)
   assert.match(template, /@focusin\.capture="handleOverlayFocusIn"/)
   assert.match(template, /:class="\{ 'is-hidden': isDesktopOverlayHidden \}"/)
   assert.match(fullPlayer, /}, 2800\)/)
@@ -65,6 +65,20 @@ test('FullPlayer overlay activity hides only stable playback and restores on int
   assert.match(fullPlayer, /overlayControlsFocused\.value/)
   assert.match(fullPlayer, /overlayVolumeInteracting\.value/)
   assert.match(fullPlayer, /sourceMenuOpen\.value/)
+})
+
+test('FullPlayer desktop shortcuts reuse the existing capture path without a second global keydown listener', () => {
+  assert.match(template, /ref="playerRootRef"[\s\S]*?tabindex="-1"/)
+  assert.match(fullPlayer, /function handlePlayerKeyboard\(event\)/)
+  assert.match(fullPlayer, /const KEYBOARD_VOLUME_STEP = 0\.05/)
+  assert.match(fullPlayer, /code === 'Space' \|\| code === 'KeyK'/)
+  assert.match(fullPlayer, /code === 'KeyM'/)
+  assert.match(fullPlayer, /code === 'KeyF'/)
+  assert.match(fullPlayer, /code === 'PageUp' \|\| code === 'PageDown'/)
+  assert.match(fullPlayer, /event\.repeat && !isVolumeShortcut/)
+  assert.match(fullPlayer, /event\.preventDefault\(\)/)
+  assert.match(fullPlayer, /input, textarea, select, option, button, a/)
+  assert.doesNotMatch(fullPlayer, /addEventListener\(['"]keydown['"]/)
 })
 
 test('FullPlayer custom fullscreen targets the media wrapper and tracks fullscreenchange', () => {
