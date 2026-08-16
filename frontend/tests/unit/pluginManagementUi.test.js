@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 
 import { ApiError } from '../../src/api/client.js'
 import { pluginErrorCode, pluginErrorMessage } from '../../src/api/plugins.js'
-import { isPluginPackage, packageActionLabel, packageInstallable, pluginIdentity, pluginSchemeLabels, providerContractLabels } from '../../src/views/marketPackageUi.js'
+import { isLogoPackage, isPluginPackage, packageActionLabel, packageInstallable, pluginIdentity, pluginSchemeLabels, providerContractLabels } from '../../src/views/marketPackageUi.js'
 
 const frontendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const source = relative => fs.readFileSync(path.join(frontendRoot, relative), 'utf8')
@@ -24,6 +24,14 @@ test('Market presenter 区分 Content 与 Plugin Package 语义', () => {
   assert.deepEqual(pluginSchemeLabels({ plugin: { owned_schemes: [{ scheme: 'ptbtv', contract: 'tv_provider' }] } }), ['ptbtv'])
   assert.equal(packageActionLabel(plugin, 'install'), '安装 Plugin')
   assert.equal(packageActionLabel({ package_type: 'content_package' }, 'install'), '导入')
+})
+
+test('Logo Package 只描述台标改善，不伪装成频道包', () => {
+  const logoPack = { package_type: 'content_package', kind: 'logo_pack', content_capabilities: ['logos'], supported_in_v1: true, importable: true }
+  assert.equal(isLogoPackage(logoPack), true)
+  assert.equal(packageInstallable(logoPack), true)
+  assert.equal(packageActionLabel(logoPack, 'install'), '安装 Logo')
+  assert.equal(isLogoPackage({ package_type: 'content_package', kind: 'playlist' }), false)
 })
 
 test('Plugin stable errors 使用 code 映射而非回显任意服务端消息', () => {

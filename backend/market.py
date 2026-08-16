@@ -6,17 +6,25 @@ import logging
 import os
 import re
 import secrets
+import shutil
 import socket
 import time
 from copy import deepcopy
 from datetime import datetime, timezone
+from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
 import httpx
 
 import database as db
-from m3u8_parser import detect_source_type, parse_m3u, parse_youtube_video_id
+from m3u8_parser import (
+    channel_name_semantics,
+    detect_source_type,
+    normalize_channel_name,
+    parse_m3u,
+    parse_youtube_video_id,
+)
 from plugin_runtime.manifest import RANGE_PART_RE, SUPPORTED_CONTRACTS
 
 
@@ -25,6 +33,13 @@ SUPPORTED_IMPORT_KINDS = {"playlist", "dynamic_playlist", "mixed"}
 SUPPORTED_CHANNEL_SOURCE_TYPES = {"inline_channels", "playlist"}
 CONTENT_PACKAGE_TYPE = "content_package"
 PLUGIN_PACKAGE_TYPE = "plugin_package"
+LOGO_PACKAGE_KIND = "logo_pack"
+LOGO_CAPABILITY = "logos"
+LOGO_MEDIA_TYPES = {"image/png", "image/webp", "image/jpeg"}
+LOGO_MAX_ASSETS = 512
+LOGO_MAX_ASSET_BYTES = 5 * 1024 * 1024
+LOGO_MAX_ID_LENGTH = 128
+LOGO_MAX_PATH_LENGTH = 256
 INDEX_EXECUTION_FIELDS = {
     "defaults",
     "channel_sources",
@@ -33,6 +48,8 @@ INDEX_EXECUTION_FIELDS = {
     "channels_url",
     "source_defaults",
     "headers",
+    "assets",
+    "logos",
 }
 RECOMMENDED_INDEX_FIELDS = {
     "id",
@@ -242,7 +259,121 @@ def _merge_source_defaults(*items: dict | None) -> dict:
     return result
 
 
+def _logo_safe_relative_path(value: Any) -> str:
+    if not isinstance(value, str) or not value.strip() or len(value) > LOGO_MAX_PATH_LENGTH:
+        raise MarketError("Logo asset path 无效", 400)
+    raw = value.replace("\\", "/").strip()
+    path = PurePosixPath(raw)
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        raise MarketError("Logo asset path 必须是安全的 package-relative path", 400)
+    return "/".join(path.parts)
+
+
+def _normalize_logo_assets(value: Any) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    if not isinstance(value, list) or len(value) > LOGO_MAX_ASSETS:
+        raise MarketError("assets 必须是受限 array", 400)
+    result: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    seen_paths: set[str] = set()
+    for raw in value:
+        if not isinstance(raw, dict):
+            raise MarketError("asset 项格式无效", 400)
+        asset_id = str(raw.get("asset_id") or "").strip()
+        if not asset_id or len(asset_id) > LOGO_MAX_ID_LENGTH or asset_id in seen_ids:
+            raise MarketError("asset_id 无效或重复", 400)
+        relative_path = _logo_safe_relative_path(raw.get("path") or raw.get("relative_path"))
+        if relative_path in seen_paths:
+            raise MarketError("asset path 重复", 400)
+        media_type = str(raw.get("media_type") or "").strip().lower()
+        if media_type not in LOGO_MEDIA_TYPES:
+            raise MarketError("Logo 仅支持 PNG/WebP/JPEG", 400)
+        try:
+            size = int(raw.get("size"))
+        except (TypeError, ValueError) as exc:
+            raise MarketError("asset size 无效", 400) from exc
+        digest = str(raw.get("sha256") or "").strip().lower()
+        if size <= 0 or size > LOGO_MAX_ASSET_BYTES or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise MarketError("asset size 或 sha256 无效", 400)
+        seen_ids.add(asset_id)
+        seen_paths.add(relative_path)
+        result.append({
+            "asset_id": asset_id,
+            "relative_path": relative_path,
+            "media_type": media_type,
+            "sha256": digest,
+            "size_bytes": size,
+        })
+    return result
+
+
+def _logo_match_keys(value: Any) -> list[str]:
+    text = str(value or "").strip()
+    if not text:
+        return []
+    keys: list[str] = []
+    try:
+        semantic = channel_name_semantics(text)
+        keys.extend([str(semantic.get("canonical_candidate") or "").strip()])
+    except Exception:
+        pass
+    try:
+        keys.append(normalize_channel_name(text))
+    except Exception:
+        pass
+    keys.append(text)
+    return list(dict.fromkeys(item for item in keys if item))
+
+
+def _normalize_logo_entries(value: Any, assets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    if not isinstance(value, list) or len(value) > LOGO_MAX_ASSETS:
+        raise MarketError("logos 必须是受限 array", 400)
+    asset_ids = {item["asset_id"] for item in assets}
+    result: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for raw in value:
+        if not isinstance(raw, dict):
+            raise MarketError("logos 项格式无效", 400)
+        asset_id = str(raw.get("logo_asset_id") or raw.get("asset_id") or "").strip()
+        canonical_key = str(raw.get("canonical_key") or raw.get("channel_key") or "").strip()
+        if not asset_id or asset_id not in asset_ids or not canonical_key:
+            raise MarketError("logo entry 缺少有效 canonical_key/asset_id", 400)
+        key = (canonical_key, asset_id)
+        if key in seen:
+            raise MarketError("logo entry 重复", 400)
+        aliases = raw.get("aliases") or []
+        if not isinstance(aliases, list):
+            raise MarketError("logo aliases 必须是 array", 400)
+        try:
+            priority = max(0, min(100, int(raw.get("priority", 0))))
+        except (TypeError, ValueError) as exc:
+            raise MarketError("logo priority 无效", 400) from exc
+        seen.add(key)
+        result.append({
+            "canonical_key": canonical_key[:LOGO_MAX_ID_LENGTH],
+            "aliases": [str(alias).strip()[:LOGO_MAX_ID_LENGTH] for alias in aliases[:16] if str(alias).strip()],
+            "asset_id": asset_id,
+            "priority": priority,
+        })
+    return result
+
+
 def _package_supported(package: dict) -> bool:
+    if (
+        package.get("package_type", CONTENT_PACKAGE_TYPE) == CONTENT_PACKAGE_TYPE
+        and package.get("kind") == LOGO_PACKAGE_KIND
+    ):
+        return (
+            bool(package.get("supported_in_v1", True))
+            and LOGO_CAPABILITY in (package.get("content_capabilities") or [])
+            and (
+                bool(package.get("assets")) and bool(package.get("logos"))
+                or bool(package.get("manifest_url"))
+            )
+        )
     return (
         package.get("package_type", CONTENT_PACKAGE_TYPE) == CONTENT_PACKAGE_TYPE
         and package.get("kind") in SUPPORTED_IMPORT_KINDS
@@ -259,7 +390,12 @@ def _schema_warnings(package: dict, *, index: bool = False, manifest: bool = Fal
         missing = sorted(field for field in RECOMMENDED_INDEX_FIELDS if field not in package)
         if missing:
             warnings.append(f"market.json 索引字段不完整: {', '.join(missing[:8])}{'…' if len(missing) > 8 else ''}")
-    if manifest and package.get("kind") in SUPPORTED_IMPORT_KINDS:
+    if manifest and package.get("kind") == LOGO_PACKAGE_KIND:
+        if LOGO_CAPABILITY not in (package.get("content_capabilities") or []):
+            warnings.append("logo_pack 必须声明 content_capabilities: logos")
+        if not package.get("assets") or not package.get("logos"):
+            warnings.append("logo_pack 缺少 assets 或 logos")
+    elif manifest and package.get("kind") in SUPPORTED_IMPORT_KINDS:
         channel_sources = package.get("channel_sources")
         if not isinstance(channel_sources, list) or not channel_sources:
             warnings.append("manifest 缺少 channel_sources，无法预览或导入")
@@ -783,6 +919,18 @@ def _normalize_package(raw: dict, *, manifest_url: str = "", market_url: str = "
     package.setdefault("channel_sources", [])
     package.setdefault("channel_count", 0)
     package.setdefault("source_count", 0)
+    capabilities = package.get("content_capabilities") or []
+    if not isinstance(capabilities, list):
+        raise MarketError("content_capabilities 必须是 array", 400)
+    package["content_capabilities"] = list(dict.fromkeys(
+        str(item).strip() for item in capabilities if str(item).strip()
+    ))
+    package["assets"] = _normalize_logo_assets(package.get("assets"))
+    package["logos"] = _normalize_logo_entries(package.get("logos"), package["assets"])
+    try:
+        package["logo_priority"] = max(0, min(100, int(package.get("logo_priority", 0))))
+    except (TypeError, ValueError) as exc:
+        raise MarketError("logo_priority 无效", 400) from exc
     package.setdefault("contributors", [])
     package.setdefault("manifest_url", manifest_url)
     package.setdefault("market_url", market_url)
@@ -793,7 +941,7 @@ def _normalize_package(raw: dict, *, manifest_url: str = "", market_url: str = "
 
     supported = _package_supported(package)
     package["supported_in_v1"] = supported
-    package["previewable"] = bool(package.get("previewable", supported)) and supported
+    package["previewable"] = bool(package.get("previewable", supported)) and supported and package.get("kind") != LOGO_PACKAGE_KIND
     package["importable"] = bool(package.get("importable", supported)) and supported
     package["plugin_installable"] = bool(
         package["package_type"] == PLUGIN_PACKAGE_TYPE
@@ -851,6 +999,13 @@ async def _resolve_package_manifest(package: dict) -> dict:
 
     _validate_package_minimal(manifest, context="manifest")
     manifest_warnings = _schema_warnings(manifest, manifest=True)
+    if manifest.get("kind") == LOGO_PACKAGE_KIND and (
+        not isinstance(manifest.get("assets"), list)
+        or not manifest.get("assets")
+        or not isinstance(manifest.get("logos"), list)
+        or not manifest.get("logos")
+    ):
+        raise MarketError("Logo Package manifest 缺少 assets 或 logos", 400)
     if any("缺少 channel_sources" in warning for warning in manifest_warnings):
         raise MarketError("; ".join(manifest_warnings), 400)
 
@@ -1205,8 +1360,13 @@ async def _installed_map() -> dict[str, dict]:
         sub_id = row.get("installed_subscription_id")
         sub = await db.get_subscription(sub_id) if sub_id else None
         if not sub:
-            await db.delete_market_install(row["package_id"])
-            continue
+            try:
+                metadata = json.loads(row.get("metadata_json") or "{}")
+            except json.JSONDecodeError:
+                metadata = {}
+            if metadata.get("kind") != LOGO_PACKAGE_KIND:
+                await db.delete_market_install(row["package_id"])
+                continue
         row["subscription"] = sub
         result[row["package_id"]] = row
     for row in await db.list_plugin_installations():
@@ -1342,9 +1502,12 @@ def _package_card(package: dict) -> dict:
         "installed_version", "auto_update", "update_available",
         "version_status",
         "package_type", "requires_plugins", "plugin_manifest",
-        "plugin_installable",
+        "plugin_installable", "content_capabilities", "asset_count", "logo_count",
+        "logo_priority",
     ]
     card = {key: deepcopy(package.get(key)) for key in keys if key in package}
+    card["asset_count"] = len(package.get("assets") or [])
+    card["logo_count"] = len(package.get("logos") or [])
     if card.get("package_type") == PLUGIN_PACKAGE_TYPE:
         manifest = card.pop("plugin_manifest", None) or {}
         if isinstance(manifest, dict):
@@ -1393,7 +1556,7 @@ def _package_card(package: dict) -> dict:
     return card
 
 
-async def get_package(package_id: str) -> dict:
+async def get_package(package_id: str, *, include_internal: bool = False) -> dict:
     await ensure_market_loaded()
     installed = await _installed_map()
     package = next((item for item in _market_cache.get("packages") or [] if item.get("id") == package_id), None)
@@ -1409,6 +1572,10 @@ async def get_package(package_id: str) -> dict:
         package["unsupported_reason"] = f"manifest 加载失败: {exc}"
         _cache_package(package)
     result = deepcopy(package)
+    # Trusted local resource roots are lifecycle inputs, never API data.
+    if not include_internal:
+        result.pop("_asset_root", None)
+        result.pop("_bundled_asset_root", None)
     if result.get("package_type") == PLUGIN_PACKAGE_TYPE:
         # Local artifact references are lifecycle-service inputs, not an admin
         # read projection. In particular, never expose Core filesystem paths.
@@ -1461,7 +1628,10 @@ async def _run_epg_binding_maintenance(trigger: str) -> None:
 async def uninstall_package(package_id: str) -> dict:
     lock = _package_update_locks.setdefault(package_id, asyncio.Lock())
     async with lock:
+        old_assets = await db.get_package_assets(package_id)
         uninstalled = await db.uninstall_market_package_atomic(package_id)
+        if uninstalled:
+            await _remove_old_logo_files(old_assets, [])
     if uninstalled:
         await _run_epg_binding_maintenance('market_uninstall')
     return {"ok": True, "uninstalled": uninstalled}
@@ -1669,6 +1839,7 @@ def _normalize_source(
         "name": str(channel.get("name") or "未命名频道"),
         "url": url,
         "logo_url": str(channel.get("logo") or channel.get("logo_url") or ""),
+        "logo_asset_id": str(channel.get("logo_asset_id") or ""),
         "group_name": str(channel.get("group_name") or channel.get("group") or _first(channel.get("categories")) or "其他"),
         "tvg_id": str((channel.get("epg") or {}).get("tvg_id") or channel.get("tvg_id") or channel.get("id") or ""),
         "tvg_name": str((channel.get("epg") or {}).get("tvg_name") or channel.get("tvg_name") or channel.get("name") or ""),
@@ -1751,7 +1922,7 @@ async def _channels_from_playlist(source: dict, package: dict) -> tuple[list[dic
 
 
 async def build_preview(package_id: str) -> dict:
-    package = await get_package(package_id)
+    package = await get_package(package_id, include_internal=True)
     if not package.get("previewable"):
         raise MarketError(package.get("unsupported_reason") or "该包当前版本不可预览", 400)
 
@@ -1834,6 +2005,197 @@ def _drop_expired_previews() -> None:
             _preview_cache.pop(preview_id, None)
 
 
+def _logo_store_root() -> Path:
+    configured = os.environ.get("WAVEFLOW_MARKET_ASSET_ROOT", "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    db_path = os.environ.get("WAVEFLOW_DB_PATH", "").strip()
+    if db_path and db_path != ":memory:":
+        return (Path(db_path).expanduser().resolve().parent / "market_assets").resolve()
+    return (Path(__file__).resolve().parent / "data" / "market_assets").resolve()
+
+
+def _trusted_logo_asset_root(package: dict) -> Path:
+    # Asset bytes must come from a trusted bundled/developer-local package
+    # resource root.  A public manifest cannot supply an arbitrary filesystem
+    # path; remote asset URLs are deliberately unsupported in V1.
+    candidate = package.get("_asset_root") or package.get("_bundled_asset_root")
+    if not candidate:
+        raise MarketError("Logo Package 缺少受控的本地资源根目录", 400)
+    root = Path(str(candidate)).expanduser().resolve()
+    if not root.is_dir():
+        raise MarketError("Logo Package 资源根目录不存在", 400)
+    return root
+
+
+def _asset_magic_matches(media_type: str, payload: bytes) -> bool:
+    if media_type == "image/png":
+        return payload.startswith(b"\x89PNG\r\n\x1a\n")
+    if media_type == "image/jpeg":
+        return payload.startswith(b"\xff\xd8\xff")
+    if media_type == "image/webp":
+        return len(payload) >= 12 and payload[:4] == b"RIFF" and payload[8:12] == b"WEBP"
+    return False
+
+
+async def _stage_logo_assets(package: dict) -> tuple[list[dict], Path | None]:
+    assets = package.get("assets") or []
+    if not assets:
+        return [], None
+    source_root = _trusted_logo_asset_root(package)
+    store_root = _logo_store_root()
+    package_key = hashlib.sha256(str(package.get("id") or "").encode("utf-8")).hexdigest()[:24]
+    version_key = hashlib.sha256(str(package.get("version") or "").encode("utf-8")).hexdigest()[:24]
+    token = secrets.token_hex(8)
+    staging = store_root / ".staging" / token
+    final_dir = store_root / package_key / version_key / token
+
+    def _stage() -> tuple[list[dict], Path]:
+        try:
+            staging.mkdir(parents=True, exist_ok=False)
+            staged: list[dict] = []
+            for asset in assets:
+                relative = str(asset["relative_path"])
+                source = (source_root / relative).resolve()
+                if source != source_root and source_root not in source.parents:
+                    raise MarketError("Logo asset path 越过 package 根目录", 400)
+                if not source.is_file() or source.is_symlink():
+                    raise MarketError(f"Logo asset 不存在: {relative}", 400)
+                payload = source.read_bytes()
+                if len(payload) != int(asset["size_bytes"]):
+                    raise MarketError(f"Logo asset size 不匹配: {asset['asset_id']}", 400)
+                digest = hashlib.sha256(payload).hexdigest()
+                if digest != str(asset["sha256"]):
+                    raise MarketError(f"Logo asset digest 不匹配: {asset['asset_id']}", 400)
+                if not _asset_magic_matches(str(asset["media_type"]), payload):
+                    raise MarketError(f"Logo asset media_type 不匹配: {asset['asset_id']}", 400)
+                target = staging / asset["asset_id"]
+                target.write_bytes(payload)
+                staged.append({
+                    **asset,
+                    "stored_path": str(final_dir / asset["asset_id"]),
+                })
+            final_dir.parent.mkdir(parents=True, exist_ok=True)
+            staging.rename(final_dir)
+            return staged, final_dir
+        except BaseException:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+
+    return await asyncio.to_thread(_stage)
+
+
+async def _logo_binding_specs(package: dict, preview_entries: list[dict] | None = None) -> list[dict]:
+    logical_rows = [
+        row for row in await db.get_iptv_logical_channels()
+        if str(row.get("status") or "") != "orphaned"
+    ]
+    if not logical_rows:
+        return []
+    exact: dict[str, list[dict]] = {}
+    normalized: dict[str, list[dict]] = {}
+    for row in logical_rows:
+        canonical = str(row.get("canonical_key") or "").strip()
+        exact.setdefault(canonical, []).append(row)
+        for key in _logo_match_keys(canonical):
+            normalized.setdefault(key, []).append(row)
+
+    specs: list[dict] = []
+    if package.get("kind") == LOGO_PACKAGE_KIND:
+        for entry in package.get("logos") or []:
+            candidates = [(str(entry.get("canonical_key") or ""), "exact")]
+            candidates.extend((alias, "alias") for alias in entry.get("aliases") or [])
+            for key, match_kind in candidates:
+                matches = exact.get(key, [])
+                match_type = "stable_identity" if matches and key in exact else match_kind
+                if not matches:
+                    normalized_matches = []
+                    for candidate_key in _logo_match_keys(key):
+                        normalized_matches.extend(normalized.get(candidate_key, []))
+                    unique = {str(row["id"]): row for row in normalized_matches}
+                    matches = list(unique.values()) if len(unique) == 1 else []
+                    match_type = "normalized" if matches else match_type
+                if len(matches) != 1:
+                    continue
+                specs.append({
+                    "logical_channel_id": str(matches[0]["id"]),
+                    "asset_id": entry["asset_id"],
+                    "binding_type": "logo_pack",
+                    "match_type": match_type,
+                    "match_key": key,
+                    "priority": int(package.get("logo_priority") or 0) + int(entry.get("priority") or 0),
+                })
+    else:
+        entries = preview_entries or []
+        for entry in entries:
+            asset_id = str(entry.get("logo_asset_id") or "")
+            if not asset_id:
+                continue
+            keys = _logo_match_keys(entry.get("name")) + _logo_match_keys(entry.get("tvg_name"))
+            found: dict[str, tuple[dict, str, str]] = {}
+            for key in keys:
+                matches = exact.get(key, [])
+                if len(matches) == 1:
+                    found[str(matches[0]["id"])] = (matches[0], "stable_identity", key)
+                    continue
+                normalized_matches: dict[str, dict] = {}
+                for normalized_key in _logo_match_keys(key):
+                    for row in normalized.get(normalized_key, []):
+                        normalized_matches[str(row["id"])] = row
+                if len(normalized_matches) == 1:
+                    row = next(iter(normalized_matches.values()))
+                    found[str(row["id"])] = (row, "normalized", key)
+            for row, match_type, key in found.values():
+                specs.append({
+                    "logical_channel_id": str(row["id"]),
+                    "asset_id": asset_id,
+                    "binding_type": "content_package",
+                    "match_type": match_type,
+                    "match_key": key,
+                    "priority": int(package.get("logo_priority") or 0),
+                })
+    unique: dict[tuple[str, str, str, str], dict] = {}
+    for spec in specs:
+        unique[(spec["logical_channel_id"], spec["asset_id"], spec["match_type"], spec["match_key"])] = spec
+    return list(unique.values())
+
+
+async def _publish_logo_state(
+    package: dict,
+    staged_assets: list[dict],
+    preview_entries: list[dict] | None = None,
+) -> None:
+    bindings = await _logo_binding_specs(package, preview_entries)
+    valid_asset_ids = {item["asset_id"] for item in staged_assets}
+    bindings = [item for item in bindings if item["asset_id"] in valid_asset_ids]
+    await db.replace_package_logo_state(
+        str(package["id"]), str(package.get("version") or ""), staged_assets, bindings,
+    )
+
+
+async def _remove_old_logo_files(old_assets: list[dict], new_assets: list[dict]) -> None:
+    keep = {str(item.get("stored_path") or "") for item in new_assets}
+    paths = {str(item.get("stored_path") or "") for item in old_assets} - keep
+
+    def _remove() -> None:
+        for raw in paths:
+            path = Path(raw)
+            if not raw or path.is_symlink() or not path.is_file():
+                continue
+            try:
+                path.unlink()
+            except OSError:
+                continue
+        parents = {Path(raw).parent for raw in paths if raw}
+        for parent in sorted(parents, key=lambda item: len(item.parts), reverse=True):
+            try:
+                parent.rmdir()
+            except OSError:
+                pass
+
+    await asyncio.to_thread(_remove)
+
+
 async def import_package(
     package_id: str,
     preview_id: str = "",
@@ -1856,16 +2218,64 @@ async def _import_package_locked(
     prefer_cached_preview: bool = True,
     reinstall: bool = False,
 ) -> dict:
-    package = await get_package(package_id)
+    package = await get_package(package_id, include_internal=True)
     if not package.get("importable"):
         raise MarketError(package.get("unsupported_reason") or "该包当前版本不可导入", 400)
 
     installed = await db.get_market_install(package_id)
     preserved_auto_update = int(installed.get("auto_update") or 0) if installed else 0
-    if installed and installed.get("installed_subscription_id"):
-        sub = await db.get_subscription(installed["installed_subscription_id"])
-        if sub and not reinstall:
+    if installed:
+        try:
+            installed_metadata = json.loads(installed.get("metadata_json") or "{}")
+        except json.JSONDecodeError:
+            installed_metadata = {}
+        previous_kind = str(installed_metadata.get("kind") or "").strip()
+        if previous_kind and previous_kind != str(package.get("kind") or ""):
+            raise MarketError("Market 包类型不能在原地切换", 409)
+    if installed and not reinstall:
+        sub = await db.get_subscription(installed.get("installed_subscription_id")) if installed.get("installed_subscription_id") else None
+        if sub:
             raise MarketError(f"Market 包已安装: {sub.get('title')}", 409)
+        raise MarketError("Market 包已安装", 409)
+
+    if package.get("kind") == LOGO_PACKAGE_KIND:
+        old_assets = await db.get_package_assets(package_id)
+        staged_assets: list[dict] = []
+        final_dir: Path | None = None
+        try:
+            staged_assets, final_dir = await _stage_logo_assets(package)
+            metadata = {
+                "name": package.get("name"),
+                "kind": LOGO_PACKAGE_KIND,
+                "package_type": CONTENT_PACKAGE_TYPE,
+                "version": package.get("version", ""),
+                "content_capabilities": package.get("content_capabilities", []),
+                "logos": package.get("logos", []),
+                "imported_at": _now_iso(),
+            }
+            bindings = await _logo_binding_specs(package)
+            await db.install_logo_package_atomic(
+                package_id=package_id,
+                market_url=package.get("market_url") or _market_cache.get("market_url", ""),
+                installed_version=package.get("version", ""),
+                metadata_json=json.dumps(metadata, ensure_ascii=False),
+                assets=staged_assets,
+                bindings=bindings,
+                auto_update=preserved_auto_update,
+            )
+        except BaseException:
+            if final_dir and final_dir.exists():
+                await asyncio.to_thread(shutil.rmtree, final_dir, True)
+            raise
+        await _remove_old_logo_files(old_assets, staged_assets)
+        return {
+            "ok": True,
+            "package_id": package_id,
+            "channel_count": 0,
+            "source_count": 0,
+            "logo_count": len(staged_assets),
+            "bindings": len(bindings),
+        }
 
     preview = None
     _drop_expired_previews()
@@ -1880,6 +2290,20 @@ async def _import_package_locked(
     channels = preview.get("all_channels") or []
     if not channels:
         raise MarketError("没有可导入的频道源", 400)
+
+    asset_ids = {item["asset_id"] for item in package.get("assets") or []}
+    for entry in channels:
+        logo_asset_id = str(entry.get("logo_asset_id") or "")
+        if logo_asset_id and logo_asset_id not in asset_ids:
+            raise MarketError(f"频道引用了不存在的 logo_asset_id: {logo_asset_id}", 400)
+
+    old_assets = await db.get_package_assets(package_id)
+    staged_assets: list[dict] = []
+    final_dir: Path | None = None
+    try:
+        staged_assets, final_dir = await _stage_logo_assets(package)
+    except BaseException:
+        raise
 
     # subscription 级属性只允许来自 manifest 明确声明，不得从子 source 聚合。
     # 一个 source 因 Referer/headers 需要代理，不能影响同包其他 source。
@@ -1924,8 +2348,24 @@ async def _import_package_locked(
             auto_update=preserved_auto_update,
         )
     except db.DuplicateSubscriptionError as exc:
+        if final_dir and final_dir.exists():
+            await asyncio.to_thread(shutil.rmtree, final_dir, True)
         raise MarketError("Market 包已安装", 409) from exc
     await _run_epg_binding_maintenance('market_install')
+    if staged_assets:
+        try:
+            await _publish_logo_state(package, staged_assets, channels)
+        except BaseException:
+            # The channel transaction is already durable, but the old logo
+            # binding remains authoritative when publication fails.  Do not
+            # expose an unverified asset or delete the old files.
+            if final_dir and final_dir.exists():
+                await asyncio.to_thread(shutil.rmtree, final_dir, True)
+            raise
+        await _remove_old_logo_files(old_assets, staged_assets)
+    elif old_assets:
+        await _publish_logo_state(package, [], channels)
+        await _remove_old_logo_files(old_assets, [])
     return {
         "ok": True,
         "subscription_id": sub_id,

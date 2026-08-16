@@ -32,13 +32,16 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
+from pathlib import Path
 from urllib.parse import quote, urlparse
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
-from fastapi.responses import RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 
+import database as db
 from core.m3u8_rewriter import RewriteContext, rewrite_m3u8
 from security.dependencies import (
     MediaAccessContext,
@@ -63,6 +66,38 @@ from core.visual_metadata import empty_visual, get_visual_metadata_cache
 logger = logging.getLogger("media.proxy")
 
 router = APIRouter(tags=["media"])
+_PACKAGE_ASSET_INTEGRITY_CACHE: dict[tuple[str, str], tuple[int, int, str]] = {}
+
+
+@router.get("/api/media/package-assets/{package_id}/{asset_id}")
+async def package_asset(
+    package_id: str,
+    asset_id: str,
+    _access: MediaAccessContext = Depends(resolve_media_access),
+):
+    """Serve only the currently installed, verified package asset."""
+    asset = await db.get_active_package_asset(package_id, asset_id)
+    if not asset:
+        raise HTTPException(status_code=404, detail="Package asset 不存在")
+    path = Path(str(asset.get("stored_path") or ""))
+    if not path.is_file() or path.is_symlink():
+        raise HTTPException(status_code=404, detail="Package asset 不可用")
+    try:
+        stat = path.stat()
+        cache_key = (package_id, asset_id)
+        cached = _PACKAGE_ASSET_INTEGRITY_CACHE.get(cache_key)
+        if cached and cached[:2] == (stat.st_mtime_ns, stat.st_size):
+            digest = cached[2]
+        else:
+            digest = await asyncio.to_thread(lambda: hashlib.sha256(path.read_bytes()).hexdigest())
+            _PACKAGE_ASSET_INTEGRITY_CACHE[cache_key] = (stat.st_mtime_ns, stat.st_size, digest)
+        if stat.st_size != int(asset.get("size_bytes") or 0) or digest != str(asset.get("sha256") or ""):
+            raise HTTPException(status_code=404, detail="Package asset integrity failure")
+    except HTTPException:
+        raise
+    except OSError as exc:
+        raise HTTPException(status_code=404, detail="Package asset 不可用") from exc
+    return FileResponse(path, media_type=str(asset.get("media_type") or "application/octet-stream"))
 
 
 # ── helpers ────────────────────────────────────────────────────────────────

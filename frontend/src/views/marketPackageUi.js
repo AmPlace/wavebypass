@@ -1,8 +1,14 @@
 export const CONTENT_PACKAGE = 'content_package'
 export const PLUGIN_PACKAGE = 'plugin_package'
+export const LOGO_PACKAGE_KIND = 'logo_pack'
 
 export function isPluginPackage(pkg) {
   return pkg?.package_type === PLUGIN_PACKAGE
+}
+
+export function isLogoPackage(pkg) {
+  return !isPluginPackage(pkg) && pkg?.kind === LOGO_PACKAGE_KIND &&
+    Array.isArray(pkg?.content_capabilities) && pkg.content_capabilities.includes('logos')
 }
 
 export function pluginIdentity(pkg) {
@@ -17,6 +23,7 @@ export function packageInstallable(pkg) {
 }
 
 export function packageActionLabel(pkg, action) {
+  if (isLogoPackage(pkg)) return ({ install: '安装 Logo', installing: '安装中…', update: '更新 Logo', updating: '更新中…', uninstall: '卸载 Logo' })[action] || action
   if (!isPluginPackage(pkg)) return ({ install: '导入', installing: '导入中…', update: '更新', updating: '更新中…', uninstall: '卸载' })[action] || action
   return ({ install: '安装 Plugin', installing: '安装中…', update: '更新 Plugin', updating: '更新中…', uninstall: '卸载 Plugin' })[action] || action
 }

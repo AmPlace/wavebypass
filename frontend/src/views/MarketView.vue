@@ -190,7 +190,7 @@
         >
           <div class="market-card-head">
             <span class="market-region-badge" :class="isPluginPackage(pkg) ? 'market-region-violet' : regionBadgeClass(pkg)">
-              {{ isPluginPackage(pkg) ? 'P' : regionBadge(pkg) }}
+              {{ isPluginPackage(pkg) ? 'P' : isLogoPackage(pkg) ? 'L' : regionBadge(pkg) }}
             </span>
             <div class="min-w-0 flex-1">
               <h2 class="truncate text-[15px] font-semibold leading-snug text-[var(--text-primary)]">{{ pkg.name }}</h2>
@@ -300,7 +300,7 @@
         >
           <header class="market-drawer-header">
             <span class="market-region-badge" :class="isPluginPackage(selectedPackage) ? 'market-region-violet' : regionBadgeClass(selectedPackage || {})">
-              {{ isPluginPackage(selectedPackage) ? 'P' : regionBadge(selectedPackage || {}) }}
+              {{ isPluginPackage(selectedPackage) ? 'P' : isLogoPackage(selectedPackage) ? 'L' : regionBadge(selectedPackage || {}) }}
             </span>
             <div class="min-w-0 flex-1">
               <h2 :id="drawerTitleId" class="truncate text-[16px] font-semibold leading-snug text-[var(--text-primary)]">{{ selectedPackage?.name }}</h2>
@@ -316,6 +316,11 @@
               <h3 class="market-section-title">可用性</h3>
               <p class="text-[13.5px] font-medium text-[var(--text-primary)]">{{ availabilitySummary.headline }}</p>
               <p v-if="availabilitySummary.detail" class="mt-1 text-[12.5px] leading-5 text-[var(--text-secondary)]">{{ availabilitySummary.detail }}</p>
+            </section>
+
+            <section v-if="isLogoPackage(selectedPackage)" class="market-drawer-section">
+              <h3 class="market-section-title">Logo Package</h3>
+              <p class="text-[13px] leading-5 text-[var(--text-secondary)]">改善已有频道台标，不添加频道或播放源。{{ selectedPackage?.logo_count ? `包含 ${selectedPackage.logo_count} 个台标。` : '' }}</p>
             </section>
 
             <section v-if="!isPluginPackage(selectedPackage) && (drawerTags.length || selectedPackage?.previewable)" ref="channelSectionRef" class="market-drawer-section">
@@ -426,7 +431,7 @@
               <template v-if="installState(selectedPackage || {}) === 'update'">发现新版本</template>
               <template v-else-if="installState(selectedPackage || {}) === 'installed'">已安装</template>
               <template v-else-if="installState(selectedPackage || {}) === 'unsupported'">{{ selectedPackage?.unsupported_reason || '暂不支持' }}</template>
-              <template v-else>{{ isPluginPackage(selectedPackage) ? '可安装 Plugin Package' : `${selectedPackage?.channel_count || 0} 个频道` }}</template>
+              <template v-else>{{ isPluginPackage(selectedPackage) ? '可安装 Plugin Package' : isLogoPackage(selectedPackage) ? `改善 ${selectedPackage?.logo_count || 0} 个台标` : `${selectedPackage?.channel_count || 0} 个频道` }}</template>
             </div>
             <button
               v-if="installState(selectedPackage || {}) === 'unsupported'"
@@ -619,7 +624,7 @@ import { approvePluginPermission, pluginErrorCode, pluginErrorDetails, pluginErr
 import { useToastStore } from '../stores/toast'
 import MarketFilterDropdown from '../components/MarketFilterDropdown.vue'
 import AdaptiveTagList from '../components/AdaptiveTagList.vue'
-import { isPluginPackage, packageActionLabel, packageInstallable, permissionLabel, pluginDependencies, pluginIdentity, pluginRuntimeLabel, pluginSchemeLabels, providerContractLabels, requestedPermissions } from './marketPackageUi'
+import { isLogoPackage, isPluginPackage, packageActionLabel, packageInstallable, permissionLabel, pluginDependencies, pluginIdentity, pluginRuntimeLabel, pluginSchemeLabels, providerContractLabels, requestedPermissions } from './marketPackageUi'
 
 const toastStore = useToastStore()
 const route = useRoute()
@@ -1041,6 +1046,7 @@ function normalizeTagLabel(value, pkg) {
 
 function displayMeta(pkg) {
   if (!pkg) return ''
+  if (isLogoPackage(pkg)) return `${pkg.logo_count || 0} 个台标 · 不添加频道`
   const parts = []
   if (pkg.channel_count) parts.push(`${pkg.channel_count} 个频道`)
   const operators = operatorLabels(pkg)
@@ -1250,6 +1256,17 @@ const availabilitySummary = computed(() => {
       return { headline: 'Plugin 已安装', detail: '运行状态、权限和 scheme ownership 请前往 Settings → Plugins 管理。' }
     }
     return { headline: '可以安装', detail: '安装会验证 publisher trust、签名、平台兼容性与所需权限。' }
+  }
+
+  if (isLogoPackage(pkg)) {
+    if (!pkg.supported_in_v1 || !pkg.importable) {
+      return { headline: '当前版本暂不支持', detail: pkg.unsupported_reason || '此 Logo Package 当前不可安装。' }
+    }
+    if (pkg.installed && pkg.update_available) {
+      return { headline: '有可用更新', detail: `已安装 ${pkg.installed_version || '当前版本'}，Market 提供 ${pkg.version || '新版本'}。` }
+    }
+    if (pkg.installed) return { headline: 'Logo Package 已安装', detail: '已安装台标不会改变频道、播放源或频道合并。' }
+    return { headline: '可以安装', detail: '改善已有频道台标，不添加频道或播放源。' }
   }
 
   // 1) 当前版本不支持 / 不可导入。

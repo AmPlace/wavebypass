@@ -395,6 +395,50 @@ CREATE TABLE IF NOT EXISTS market_packages_installed (
     FOREIGN KEY (installed_subscription_id) REFERENCES subscriptions(id) ON DELETE SET NULL
 );
 
+-- Package-scoped visual assets are deliberately separate from channel/source
+-- rows.  A package update replaces the active version's rows as one SQLite
+-- transaction; the filesystem path is only an implementation detail of the
+-- verified package asset store.
+CREATE TABLE IF NOT EXISTS package_assets (
+    package_id      TEXT NOT NULL,
+    asset_id        TEXT NOT NULL,
+    package_version TEXT NOT NULL,
+    relative_path   TEXT NOT NULL,
+    media_type      TEXT NOT NULL,
+    sha256          TEXT NOT NULL,
+    size_bytes      INTEGER NOT NULL CHECK(size_bytes > 0),
+    stored_path     TEXT NOT NULL,
+    state           TEXT NOT NULL DEFAULT 'active'
+                    CHECK(state IN ('staged', 'active', 'retained')),
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+    PRIMARY KEY(package_id, asset_id, package_version)
+);
+CREATE INDEX IF NOT EXISTS idx_package_assets_active
+ON package_assets(package_id, package_version, state);
+
+CREATE TABLE IF NOT EXISTS logical_channel_logo_bindings (
+    logical_channel_id TEXT NOT NULL,
+    package_id         TEXT NOT NULL,
+    asset_id           TEXT NOT NULL,
+    binding_type       TEXT NOT NULL
+                       CHECK(binding_type IN ('content_package', 'logo_pack')),
+    match_type         TEXT NOT NULL
+                       CHECK(match_type IN ('stable_identity', 'exact', 'alias', 'normalized')),
+    match_key          TEXT NOT NULL,
+    priority           INTEGER NOT NULL DEFAULT 0,
+    package_version    TEXT NOT NULL,
+    enabled            INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
+    lifecycle_state    TEXT NOT NULL DEFAULT 'active'
+                       CHECK(lifecycle_state IN ('active', 'retained', 'revoked')),
+    created_at         TEXT NOT NULL,
+    updated_at         TEXT NOT NULL,
+    PRIMARY KEY(logical_channel_id, package_id, asset_id, match_type),
+    FOREIGN KEY(logical_channel_id) REFERENCES iptv_logical_channels(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_logical_logo_bindings_lookup
+ON logical_channel_logo_bindings(logical_channel_id, enabled, lifecycle_state, priority);
+
 CREATE TABLE IF NOT EXISTS market_sources (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     source_key      TEXT NOT NULL UNIQUE,
@@ -2236,6 +2280,81 @@ async def install_market_package_atomic(
     return await asyncio.to_thread(_install)
 
 
+async def install_logo_package_atomic(
+    *,
+    package_id: str,
+    market_url: str,
+    installed_version: str,
+    metadata_json: str,
+    assets: list[dict],
+    bindings: list[dict],
+    auto_update: int = 0,
+) -> None:
+    """Publish a logo-only package without creating subscription/channel rows."""
+    def _install():
+        conn = _connect()
+        try:
+            with conn:
+                now = datetime.now(timezone.utc).isoformat()
+                conn.execute(
+                    "DELETE FROM logical_channel_logo_bindings WHERE package_id=?",
+                    (package_id,),
+                )
+                conn.execute("DELETE FROM package_assets WHERE package_id=?", (package_id,))
+                conn.execute(
+                    """
+                    INSERT INTO market_packages_installed(
+                        package_id, market_url, installed_subscription_id,
+                        installed_version, installed_at, auto_update, metadata_json
+                    ) VALUES(?, ?, NULL, ?, ?, ?, ?)
+                    ON CONFLICT(package_id) DO UPDATE SET
+                        market_url=excluded.market_url,
+                        installed_subscription_id=NULL,
+                        installed_version=excluded.installed_version,
+                        installed_at=excluded.installed_at,
+                        auto_update=excluded.auto_update,
+                        metadata_json=excluded.metadata_json
+                    """,
+                    (package_id, market_url, installed_version, now, auto_update, metadata_json),
+                )
+                for asset in assets:
+                    conn.execute(
+                        """
+                        INSERT INTO package_assets(
+                            package_id, asset_id, package_version, relative_path,
+                            media_type, sha256, size_bytes, stored_path, state,
+                            created_at, updated_at
+                        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
+                        """,
+                        (
+                            package_id, asset["asset_id"], installed_version,
+                            asset["relative_path"], asset["media_type"],
+                            asset["sha256"], int(asset["size_bytes"]),
+                            asset["stored_path"], now, now,
+                        ),
+                    )
+                for binding in bindings:
+                    conn.execute(
+                        """
+                        INSERT INTO logical_channel_logo_bindings(
+                            logical_channel_id, package_id, asset_id, binding_type,
+                            match_type, match_key, priority, package_version,
+                            enabled, lifecycle_state, created_at, updated_at
+                        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 1, 'active', ?, ?)
+                        """,
+                        (
+                            binding["logical_channel_id"], package_id,
+                            binding["asset_id"], binding["binding_type"],
+                            binding["match_type"], binding["match_key"],
+                            int(binding.get("priority", 0)), installed_version,
+                            now, now,
+                        ),
+                    )
+        finally:
+            conn.close()
+    await asyncio.to_thread(_install)
+
+
 async def uninstall_market_package_atomic(package_id: str) -> bool:
     def _uninstall():
         conn = _connect()
@@ -2249,6 +2368,8 @@ async def uninstall_market_package_atomic(package_id: str) -> bool:
                     return False
                 sub_id = install['installed_subscription_id']
                 conn.execute("DELETE FROM market_packages_installed WHERE package_id=?", (package_id,))
+                conn.execute("DELETE FROM logical_channel_logo_bindings WHERE package_id=?", (package_id,))
+                conn.execute("DELETE FROM package_assets WHERE package_id=?", (package_id,))
                 if sub_id:
                     conn.execute("DELETE FROM subscriptions WHERE id=?", (sub_id,))
                 return True
@@ -2739,6 +2860,191 @@ async def get_market_install(package_id: str) -> dict | None:
         conn.close()
         return dict(row) if row else None
     return await asyncio.to_thread(_get)
+
+
+async def get_package_assets(package_id: str, *, package_version: str = '', active_only: bool = True) -> list[dict]:
+    """Return verified package asset metadata, never arbitrary filesystem paths."""
+    def _get():
+        conn = _connect()
+        try:
+            where = ["package_id=?"]
+            params: list[Any] = [package_id]
+            if package_version:
+                where.append("package_version=?")
+                params.append(package_version)
+            if active_only:
+                where.append("state='active'")
+            rows = conn.execute(
+                f"SELECT * FROM package_assets WHERE {' AND '.join(where)} ORDER BY asset_id",
+                params,
+            ).fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+    return await asyncio.to_thread(_get)
+
+
+async def get_active_package_asset(package_id: str, asset_id: str) -> dict | None:
+    def _get():
+        conn = _connect()
+        try:
+            row = conn.execute(
+                """
+                SELECT a.*, i.installed_version
+                FROM package_assets AS a
+                JOIN market_packages_installed AS i ON i.package_id=a.package_id
+                WHERE a.package_id=? AND a.asset_id=?
+                  AND a.package_version=i.installed_version
+                  AND a.state='active'
+                """,
+                (package_id, asset_id),
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+    return await asyncio.to_thread(_get)
+
+
+async def get_logical_channel_logo_bindings(logical_channel_id: str) -> list[dict]:
+    def _get():
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                """
+                SELECT b.*, a.media_type, a.sha256, a.size_bytes, a.stored_path,
+                       i.installed_version
+                FROM logical_channel_logo_bindings AS b
+                JOIN package_assets AS a
+                  ON a.package_id=b.package_id
+                 AND a.asset_id=b.asset_id
+                 AND a.package_version=b.package_version
+                 AND a.state='active'
+                JOIN market_packages_installed AS i
+                  ON i.package_id=b.package_id
+                 AND i.installed_version=b.package_version
+                WHERE b.logical_channel_id=?
+                  AND b.enabled=1
+                  AND b.lifecycle_state='active'
+                ORDER BY CASE b.binding_type WHEN 'content_package' THEN 0 ELSE 1 END,
+                         b.priority DESC,
+                         CASE b.match_type
+                           WHEN 'stable_identity' THEN 0
+                           WHEN 'exact' THEN 1
+                           WHEN 'alias' THEN 2
+                           ELSE 3
+                         END,
+                         b.package_id ASC,
+                         b.asset_id ASC
+                """,
+                (logical_channel_id,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+    return await asyncio.to_thread(_get)
+
+
+async def get_logical_channel_logo_bindings_many(logical_channel_ids: list[str]) -> dict[str, list[dict]]:
+    ids = list(dict.fromkeys(str(item) for item in logical_channel_ids if str(item)))
+    if not ids:
+        return {}
+
+    def _get():
+        conn = _connect()
+        try:
+            placeholders = ",".join("?" for _ in ids)
+            rows = conn.execute(
+                f"""
+                SELECT b.*, a.media_type, a.sha256, a.size_bytes, a.stored_path,
+                       i.installed_version
+                FROM logical_channel_logo_bindings AS b
+                JOIN package_assets AS a
+                  ON a.package_id=b.package_id
+                 AND a.asset_id=b.asset_id
+                 AND a.package_version=b.package_version
+                 AND a.state='active'
+                JOIN market_packages_installed AS i
+                  ON i.package_id=b.package_id
+                 AND i.installed_version=b.package_version
+                WHERE b.logical_channel_id IN ({placeholders})
+                  AND b.enabled=1
+                  AND b.lifecycle_state='active'
+                ORDER BY b.logical_channel_id,
+                         CASE b.binding_type WHEN 'content_package' THEN 0 ELSE 1 END,
+                         b.priority DESC,
+                         CASE b.match_type
+                           WHEN 'stable_identity' THEN 0
+                           WHEN 'exact' THEN 1
+                           WHEN 'alias' THEN 2
+                           ELSE 3
+                         END,
+                         b.package_id ASC,
+                         b.asset_id ASC
+                """,
+                ids,
+            ).fetchall()
+            result: dict[str, list[dict]] = {item: [] for item in ids}
+            for row in rows:
+                result.setdefault(str(row['logical_channel_id']), []).append(dict(row))
+            return result
+        finally:
+            conn.close()
+    return await asyncio.to_thread(_get)
+
+
+async def replace_package_logo_state(
+    package_id: str,
+    package_version: str,
+    assets: list[dict],
+    bindings: list[dict],
+) -> None:
+    """Atomically publish one package's verified assets and logical bindings."""
+    def _replace():
+        conn = _connect()
+        try:
+            with conn:
+                now = datetime.now(timezone.utc).isoformat()
+                conn.execute(
+                    "DELETE FROM logical_channel_logo_bindings WHERE package_id=?",
+                    (package_id,),
+                )
+                conn.execute("DELETE FROM package_assets WHERE package_id=?", (package_id,))
+                for asset in assets:
+                    conn.execute(
+                        """
+                        INSERT INTO package_assets(
+                            package_id, asset_id, package_version, relative_path,
+                            media_type, sha256, size_bytes, stored_path, state,
+                            created_at, updated_at
+                        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
+                        """,
+                        (
+                            package_id, asset["asset_id"], package_version,
+                            asset["relative_path"], asset["media_type"],
+                            asset["sha256"], int(asset["size_bytes"]),
+                            asset["stored_path"], now, now,
+                        ),
+                    )
+                for binding in bindings:
+                    conn.execute(
+                        """
+                        INSERT INTO logical_channel_logo_bindings(
+                            logical_channel_id, package_id, asset_id, binding_type,
+                            match_type, match_key, priority, package_version,
+                            enabled, lifecycle_state, created_at, updated_at
+                        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 1, 'active', ?, ?)
+                        """,
+                        (
+                            binding["logical_channel_id"], package_id,
+                            binding["asset_id"], binding["binding_type"],
+                            binding["match_type"], binding["match_key"],
+                            int(binding.get("priority", 0)), package_version,
+                            now, now,
+                        ),
+                    )
+        finally:
+            conn.close()
+    await asyncio.to_thread(_replace)
 
 
 async def list_market_installs() -> list[dict]:

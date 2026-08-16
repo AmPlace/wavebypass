@@ -2027,6 +2027,27 @@ async def _get_aggregated_iptv_channels(group: str = '', search: str = '') -> tu
         if tmpl_logo:
             ch['logo_url'] = tmpl_logo
 
+    # Installed Content/Logo Packages are the durable stable-logo authority.
+    # Keep the existing ``logo_url`` shape for clients, adding provenance as a
+    # non-breaking projection.  Provider visual metadata remains source-scoped
+    # and is still served by /api/media/channel/{key}/visual.
+    try:
+        from logo_resolver import logo_resolver
+        package_logos = await logo_resolver.resolve_many(list(merged.values()))
+    except Exception:
+        package_logos = {}
+    for ch in merged.values():
+        logo = package_logos.get(str(ch.get('logical_channel_id') or ''))
+        if logo:
+            ch['logo_url'] = logo['logo_url']
+            ch['logo'] = logo
+        elif ch.get('logo_url'):
+            ch['logo'] = {
+                'logo_url': ch['logo_url'],
+                'source_type': 'existing_channel_or_template',
+                'provenance': 'legacy_projection',
+            }
+
     # 合并 logical EPG binding projection.  Runtime channel reads do not use
     # The runtime channel projection is sourced from logical bindings.
     epg_projection = {}
