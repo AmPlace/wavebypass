@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
+from html import unescape
 from typing import Any
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from streamlink import Streamlink
@@ -35,10 +38,9 @@ HUYA_TTL_SECONDS = 60
 def _first_stable_cover(*objects: dict[str, Any]) -> str:
     """Read only explicitly stable room-art fields from Huya metadata.
 
-    ``screenshot`` is deliberately not in this list: it is the live/replay
-    visual and is exposed separately as ``dynamic_cover_url``.  The aliases
-    below are upstream metadata names, not URL templates; no anchorpost URL
-    is ever synthesized by the Plugin.
+    The room-card art field (``liveData.screenshot``) is handled separately by
+    ``_split_card_cover``.  The aliases below are upstream metadata names, not
+    URL templates; no anchorpost URL is ever synthesized by the Plugin.
     """
     stable_fields = (
         "stableCoverUrl", "stable_cover_url", "roomCover", "room_cover",
@@ -55,6 +57,58 @@ def _first_stable_cover(*objects: dict[str, Any]) -> str:
             if value.startswith(("http://", "https://")):
                 return value
     return ""
+
+
+def _split_card_cover(raw: str) -> tuple[str, str]:
+    """Split Huya's single card-cover field into (stable poster, live frame).
+
+    Huya reuses ONE field for the room-card art (``liveData.screenshot`` in
+    profileRoom, the same value the room page SSR renders as ``<meta
+    name="image">``): the anchor poster when the anchor has one, otherwise the
+    current live frame.  The URL is passed through verbatim - only its host
+    classifies it, and no path/hash/query is ever synthesized.
+    """
+    url = str(raw or "").strip()
+    if not url:
+        return "", ""
+    if url.startswith("//"):
+        # Room-page SSR can emit scheme-relative URLs; the generic visual
+        # contract only allows absolute http(s) values.
+        url = f"https:{url}"
+    host = (urlsplit(url).hostname or "").lower()
+    if "anchorpost" in host:
+        return url, ""   # stable channel poster
+    return "", url       # live frame (or unknown host) -> dynamic
+
+
+def _room_page_card_cover(room_id: str) -> tuple[str, str]:
+    """Best-effort read of the room page SSR card cover; (``"", ""``) on failure.
+
+    Some rooms (notably official replay/announced channels) keep
+    ``profileRoom.liveData.screenshot`` empty even though the web room page
+    still renders the anchor poster.  Read the exact field the page embeds
+    (``TT_ROOM_DATA.screenshot``), falling back to the ``og:image`` meta tag.
+    The value goes through the same host classification; nothing is fabricated.
+    """
+    request = Request(
+        f"https://www.huya.com/{room_id.strip('/')}",
+        headers={"User-Agent": "Mozilla/5.0", "Referer": "https://www.huya.com/"},
+    )
+    with urlopen(request, timeout=6.0) as response:
+        html = response.read(512 * 1024).decode("utf-8", errors="replace")
+    match = re.search(r"var TT_ROOM_DATA = (\{.*?\});", html, re.S)
+    if match:
+        field = re.search(r'"screenshot"\s*:\s*"([^"]*)"', match.group(1))
+        if field and field.group(1):
+            return _split_card_cover(field.group(1))
+    for pattern in (
+        r'<meta[^>]+itemProp="image"[^>]+content="([^"]+)"',
+        r'<meta[^>]+name="image"[^>]+content="([^"]+)"',
+    ):
+        meta = re.search(pattern, html)
+        if meta and meta.group(1):
+            return _split_card_cover(unescape(meta.group(1)))
+    return "", ""
 
 
 def _infer_transport(url: str) -> str:
@@ -177,9 +231,24 @@ class Provider(TVProvider):
             live_status = data.get("liveStatus")
             if live_status is None:
                 live_status = live_data.get("liveStatus")
-            dynamic_cover = str(live_data.get("screenshot") or "").strip()
-            stable_cover = _first_stable_cover(profile, live_data, data)
-            is_live = (str(live_status).upper() == "ON") if live_status is not None else bool(dynamic_cover)
+            # Huya's room-card art is a single polymorphic field: the anchor
+            # poster (anchorpost.*) when one exists, otherwise the current
+            # live frame (live-cover.* / tx-live-cover.*).  Both are the exact
+            # URL the web card renders; the host split is the classifier.
+            raw_cover = str(live_data.get("screenshot") or "").strip()
+            stable_cover, dynamic_cover = _split_card_cover(raw_cover)
+            if not raw_cover:
+                # Replay/announced rooms can omit the cover in profileRoom
+                # while the web room page still carries the poster.
+                try:
+                    poster, frame = _room_page_card_cover(room_id)
+                    stable_cover = stable_cover or poster
+                    dynamic_cover = dynamic_cover or frame
+                except Exception:
+                    pass
+            if not stable_cover:
+                stable_cover = _first_stable_cover(profile, live_data, data)
+            is_live = (str(live_status).upper() == "ON") if live_status is not None else bool(dynamic_cover or stable_cover)
             return VisualMetadata(
                 avatar_url=str(live_data.get("avatar180") or profile.get("avatar180") or "").strip(),
                 stable_cover_url=stable_cover,
