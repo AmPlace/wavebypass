@@ -43,7 +43,7 @@ test('IPTV section controls reduce visible weight without changing sort/density 
   assert.match(home, /class="iptv-density-menu"/)
   assert.match(home, /class="iptv-sort-trigger inline-flex h-10/)
   assert.match(css, /\.iptv-main \.iptv-density-menu__trigger::before \{[\s\S]*?inset: 5px;/)
-  assert.match(css, /\.iptv-main \.iptv-sort-trigger::before \{[\s\S]*?inset: 5px;/)
+  assert.match(css, /\.iptv-main \.iptv-sort-trigger::before \{[\s\S]*?inset: 3px;/)
   assert.match(css, /\.iptv-main \.iptv-sort-trigger > svg \{[\s\S]*?width: 1\.0625rem;/)
 })
 

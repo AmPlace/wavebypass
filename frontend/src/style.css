@@ -1413,7 +1413,7 @@
 
   .iptv-main .iptv-sort-trigger::before {
     position: absolute;
-    inset: 5px;
+    inset: 3px;
     z-index: -1;
     content: '';
     border: 1px solid var(--border);
