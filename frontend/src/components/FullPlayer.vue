@@ -84,6 +84,107 @@
                   <span v-else>{{ currentStationData?.logoText || '?' }}</span>
                 </div>
               </div>
+
+              <div class="video-overlay desktop-video-overlay" aria-label="播放控制">
+                <div
+                  v-if="isIptvMode"
+                  class="program-progress video-overlay-progress"
+                  :class="{ empty: !hasCurrentEpgProgram }"
+                  role="progressbar"
+                  aria-label="节目进度"
+                  aria-valuemin="0"
+                  aria-valuemax="100"
+                  :aria-valuenow="hasCurrentEpgProgram ? currentProgram.progress : 0"
+                >
+                  <div class="progress-track">
+                    <div v-if="hasCurrentEpgProgram" class="progress-fill" :style="{ width: currentProgramProgressPercent }"></div>
+                  </div>
+                  <div v-if="hasCurrentEpgProgram" class="progress-times">
+                    <span>{{ currentProgram.start }}</span>
+                    <span>{{ currentProgram.end }}</span>
+                  </div>
+                </div>
+
+                <div class="video-overlay-controls">
+                  <div class="video-overlay-transport">
+                    <button type="button" class="video-overlay-button video-overlay-button--side" aria-label="上一个" @click="playPrev">
+                      <svg viewBox="0 0 24 24" fill="currentColor"><path d="M5.5 5.5h2.6v13H5.5zm4.8 6.5 8.2 6.1V5.9z"/></svg>
+                    </button>
+                    <button
+                      type="button"
+                      class="video-overlay-button video-overlay-button--main"
+                      :aria-label="isPlaying ? '暂停' : '播放'"
+                      @click="playerStore.togglePlay()"
+                    >
+                      <svg v-if="isPlaying" viewBox="0 0 24 24" fill="none"><path d="M8.5 5.5v13M15.5 5.5v13" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/></svg>
+                      <svg v-else viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.6v12.8c0 .75.83 1.2 1.46.78l9.65-6.39a.95.95 0 0 0 0-1.58L9.46 4.82A.94.94 0 0 0 8 5.6Z"/></svg>
+                    </button>
+                    <button type="button" class="video-overlay-button video-overlay-button--side" aria-label="下一个" @click="playNext">
+                      <svg viewBox="0 0 24 24" fill="currentColor"><path d="M15.9 5.5h2.6v13h-2.6zM5.5 18.1l8.2-6.1-8.2-6.1z"/></svg>
+                    </button>
+                  </div>
+
+                  <div class="video-overlay-utility">
+                    <button
+                      type="button"
+                      class="video-overlay-button video-overlay-button--utility"
+                      :aria-label="iptvMuted ? '取消静音' : '静音'"
+                      @click="toggleMute()"
+                    >
+                      <svg v-if="iptvMuted" viewBox="0 0 24 24" fill="none">
+                        <path d="M4 10v4a1 1 0 0 0 1 1h3l4.2 3.15A.5.5 0 0 0 13 17.75V6.25a.5.5 0 0 0-.8-.4L8 9H5a1 1 0 0 0-1 1Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+                        <path d="m21 3-18 18" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/>
+                      </svg>
+                      <svg v-else viewBox="0 0 24 24" fill="none">
+                        <path d="M4 10v4a1 1 0 0 0 1 1h3l4.2 3.15A.5.5 0 0 0 13 17.75V6.25a.5.5 0 0 0-.8-.4L8 9H5a1 1 0 0 0-1 1Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+                        <path d="M16 9a4 4 0 0 1 0 6M18.5 6.5a7.5 7.5 0 0 1 0 11" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+                      </svg>
+                    </button>
+
+                    <div v-if="!isIOS || !isIptvMode" class="video-overlay-volume">
+                      <svg viewBox="0 0 24 24" fill="none"><path d="M4 10v4a1 1 0 0 0 1 1h3l4.2 3.15A.5.5 0 0 0 13 17.75V6.25a.5.5 0 0 0-.8-.4L8 9H5a1 1 0 0 0-1 1Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+                      <input
+                        type="range"
+                        min="0"
+                        max="1"
+                        step="0.01"
+                        :value="volume"
+                        aria-label="音量"
+                        @input="playerStore.setVolume($event.target.value)"
+                      />
+                    </div>
+
+                    <button type="button" class="video-overlay-button video-overlay-button--utility" aria-label="全屏" @click="toggleFullscreen">
+                      <svg viewBox="0 0 24 24" fill="none"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z" fill="currentColor"/></svg>
+                    </button>
+
+                    <button
+                      v-if="isIptvMode && iptvSourceOptions.length"
+                      ref="desktopSourceButtonRef"
+                      type="button"
+                      class="video-overlay-button video-overlay-button--utility"
+                      :aria-expanded="sourceMenuOpen"
+                      aria-controls="iptv-source-menu"
+                      aria-label="切换播放源"
+                      @click.stop="toggleSourceMenu"
+                    >
+                      <svg viewBox="0 0 24 24" fill="none"><path d="M6 7.5h12M6 12h12M6 16.5h12" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>
+                    </button>
+                    <button
+                      v-if="!isIptvMode && currentRadioSourceOptions.length > 1"
+                      ref="desktopSourceButtonRef"
+                      type="button"
+                      class="video-overlay-button video-overlay-button--utility"
+                      :aria-expanded="sourceMenuOpen"
+                      aria-controls="radio-source-menu"
+                      aria-label="切换电台播放源"
+                      @click.stop="toggleSourceMenu"
+                    >
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M6 7.5h12M6 12h12M6 16.5h12"/></svg>
+                    </button>
+                  </div>
+                </div>
+              </div>
             </section>
 
             <section ref="nowPanelRef" class="now-panel">
@@ -100,27 +201,38 @@
                 <p v-if="nextProgramSummary" class="now-program-next">
                   下一节目 · {{ nextProgramSummary }}
                 </p>
+                <p v-if="showProgramRemaining" class="now-program-remaining desktop-now-program-meta">
+                  剩余 {{ currentProgram.remaining }} 分钟
+                </p>
               </template>
 
-              <div class="program-progress" :class="{ empty: !hasCurrentEpgProgram }">
-                <div class="progress-track">
-                  <div v-if="hasCurrentEpgProgram" class="progress-fill" :style="{ width: currentProgramProgressPercent }"></div>
-                  <span v-if="hasCurrentEpgProgram" class="progress-knob" :style="{ left: currentProgramProgressPercent }"></span>
+              <div class="mobile-now-controls">
+                <div
+                  class="program-progress"
+                  :class="{ empty: !hasCurrentEpgProgram }"
+                  role="progressbar"
+                  aria-label="节目进度"
+                  aria-valuemin="0"
+                  aria-valuemax="100"
+                  :aria-valuenow="hasCurrentEpgProgram ? currentProgram.progress : 0"
+                >
+                  <div class="progress-track">
+                    <div v-if="hasCurrentEpgProgram" class="progress-fill" :style="{ width: currentProgramProgressPercent }"></div>
+                  </div>
+                  <div v-if="hasCurrentEpgProgram" class="progress-times">
+                    <span>{{ currentProgram.start }}</span>
+                    <span>{{ currentProgram.end }}</span>
+                  </div>
                 </div>
-                <div v-if="hasCurrentEpgProgram" class="progress-times">
-                  <span>{{ currentProgram.start }}</span>
-                  <span>{{ currentProgram.end }}</span>
-                </div>
-              </div>
 
-              <p class="program-state">
-                <span class="state-dot" :class="playbackStateClass"></span>
-                <span>{{ fullPlayerStatusText }}</span>
-                <span v-if="showProgramRemaining">·</span>
-                <span v-if="showProgramRemaining">剩余 {{ currentProgram.remaining }} 分钟</span>
-              </p>
+                <p class="program-state">
+                  <span class="state-dot" :class="playbackStateClass"></span>
+                  <span>{{ fullPlayerStatusText }}</span>
+                  <span v-if="showProgramRemaining">·</span>
+                  <span v-if="showProgramRemaining">剩余 {{ currentProgram.remaining }} 分钟</span>
+                </p>
 
-              <div class="transport-row">
+                <div class="transport-row">
                 <button type="button" class="transport-side" aria-label="上一个" @click="playPrev">
                   <svg viewBox="0 0 24 24" fill="currentColor"><path d="M5.5 5.5h2.6v13H5.5zm4.8 6.5 8.2 6.1V5.9z"/></svg>
                 </button>
@@ -136,9 +248,9 @@
                 <button type="button" class="transport-side" aria-label="下一个" @click="playNext">
                   <svg viewBox="0 0 24 24" fill="currentColor"><path d="M15.9 5.5h2.6v13h-2.6zM5.5 18.1l8.2-6.1-8.2-6.1z"/></svg>
                 </button>
-              </div>
+                </div>
 
-              <div class="utility-row">
+                <div class="utility-row">
                 <button
                   type="button"
                   class="utility-btn"
@@ -196,6 +308,7 @@
                 >
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M6 7.5h12M6 12h12M6 16.5h12"/></svg>
                 </button>
+                </div>
               </div>
             </section>
 
@@ -505,6 +618,7 @@ const playerMainRef = ref(null)
 const nowPanelRef = ref(null)
 const activeIptvEngine = ref('video')
 const sourceButtonRef = ref(null)
+const desktopSourceButtonRef = ref(null)
 const sourceMenuOpen = ref(false)
 const sourceMenuStyle = ref({
   left: '12px',
@@ -678,18 +792,20 @@ function updateMediaFrameSize() {
   const layoutEl = playerLayoutRef.value
   const layoutStyle = layoutEl ? window.getComputedStyle(layoutEl) : null
   const mainStyle = playerMainRef.value ? window.getComputedStyle(playerMainRef.value) : null
-  const horizontalInset = Math.min(64, Math.max(24, viewportWidth * 0.035))
+  // This value represents the total horizontal deduction from the viewport;
+  // centering the layout therefore leaves a 24–32px inset on each side.
+  const horizontalInset = Math.min(64, Math.max(48, viewportWidth * 0.05))
   const layoutGap = layoutStyle
-    ? cssNumber(layoutStyle, 'column-gap', Math.min(28, Math.max(16, viewportWidth * 0.015)))
-    : Math.min(28, Math.max(16, viewportWidth * 0.015))
+    ? cssNumber(layoutStyle, 'column-gap', Math.min(24, Math.max(20, viewportWidth * 0.017)))
+    : Math.min(24, Math.max(20, viewportWidth * 0.017))
   const layoutPaddingTop = layoutStyle ? cssNumber(layoutStyle, 'padding-top') : Math.min(42, Math.max(22, viewportHeight * 0.035))
   const layoutPaddingBottom = layoutStyle ? cssNumber(layoutStyle, 'padding-bottom') : Math.min(22, Math.max(12, viewportHeight * 0.018))
   const playerMainOffset = mainStyle ? cssNumber(mainStyle, 'padding-top') : 6
   const nowPanelHeight = nowPanelRef.value
     ? Math.ceil(nowPanelRef.value.getBoundingClientRect().height)
     : 150
-  const preferredPanelWidth = Math.min(440, Math.max(280, viewportWidth * 0.2))
-  const minPanelWidth = viewportWidth >= 1180 ? 240 : 220
+  const preferredPanelWidth = Math.min(340, Math.max(320, viewportWidth * 0.24))
+  const minPanelWidth = viewportWidth >= 1180 ? 320 : 300
   const maxHeight = Math.max(
     240,
     viewportHeight - layoutPaddingTop - layoutPaddingBottom - playerMainOffset - nowPanelHeight,
@@ -710,7 +826,9 @@ function updateMediaFrameSize() {
 }
 
 function updateSourceMenuPosition() {
-  const button = sourceButtonRef.value
+  const desktop = window.matchMedia('(min-width: 981px)').matches
+  const button = (desktop ? desktopSourceButtonRef.value : sourceButtonRef.value) ||
+    (desktop ? sourceButtonRef.value : desktopSourceButtonRef.value)
   if (!button) return
   const rect = button.getBoundingClientRect()
   const gutter = 12
@@ -1006,7 +1124,7 @@ const displayChannelRows = computed(() => {
       const active = isCurrentIptv(ch)
       const playing = active && isPlaybackConfirmed.value
       return {
-        key: `iptv-${ch.name}-${index}`,
+        key: `iptv-${channelIdentity(ch) || ch.canonical_key || ch.name}`,
         name: ch.name,
         logo: ch.logo_url || '',
         live: playing,
@@ -4322,9 +4440,9 @@ onBeforeUnmount(() => {
   --gold: #c79a2b;
   --muted: #8d9299;
   --line: rgba(17, 24, 39, 0.08);
-  --layout-width: calc(100% - clamp(24px, 3.5vw, 64px));
+  --layout-width: calc(100% - clamp(48px, 5vw, 64px));
   --layout-height: 100dvh;
-  --layout-gap: clamp(16px, 1.5vw, 28px);
+  --layout-gap: clamp(20px, 1.7vw, 24px);
   --layout-padding: clamp(22px, 3.5vh, 42px) 0 clamp(12px, 1.8vh, 22px);
   --player-main-offset: 6px;
   --media-width: 100%;
@@ -4351,15 +4469,15 @@ onBeforeUnmount(() => {
   --tab-weight: 400;
   --tab-active-weight: 600;
   --tab-line-width: 46px;
-  --channel-grid: 64px minmax(0, 1fr) 34px;
-  --channel-gap: 16px;
-  --channel-logo-size: 58px;
-  --channel-min-height: 68px;
-  --channel-margin: 8px;
-  --channel-padding: 10px 14px 10px 8px;
-  --channel-title-size: 16px;
+  --channel-grid: 48px minmax(0, 1fr) 28px;
+  --channel-gap: 12px;
+  --channel-logo-size: 48px;
+  --channel-min-height: 64px;
+  --channel-margin: 4px;
+  --channel-padding: 8px 10px 8px 6px;
+  --channel-title-size: 14px;
   --channel-title-weight: 500;
-  --channel-subtitle-size: 13px;
+  --channel-subtitle-size: 12px;
   --channel-subtitle-color: rgba(107, 114, 128, 0.68);
   --eq-width: 22px;
   --eq-height: 22px;
@@ -4445,10 +4563,10 @@ onBeforeUnmount(() => {
   position: relative;
   z-index: 1;
   display: grid;
-  grid-template-columns: var(--media-frame-width, minmax(0, 1fr)) var(--side-panel-width, minmax(360px, 500px));
+  grid-template-columns: var(--media-frame-width, minmax(0, 1fr)) var(--side-panel-width, minmax(300px, 340px));
   gap: var(--layout-gap);
   width: var(--layout-width);
-  max-width: calc(100% - clamp(24px, 3.5vw, 64px));
+  max-width: calc(100% - clamp(48px, 5vw, 64px));
   height: var(--layout-height);
   margin: 0 auto;
   padding: var(--layout-padding);
@@ -4503,6 +4621,143 @@ onBeforeUnmount(() => {
   border-radius: var(--media-radius);
   background: var(--media-placeholder-bg);
   box-shadow: var(--media-shadow);
+}
+
+.video-overlay {
+  position: absolute;
+  inset: auto 0 0;
+  z-index: 4;
+  display: flex;
+  min-height: 142px;
+  flex-direction: column;
+  justify-content: flex-end;
+  padding: 48px 20px 16px;
+  color: #fff;
+  pointer-events: none;
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.78), rgba(0, 0, 0, 0.42) 48%, transparent);
+}
+
+.video-overlay-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  pointer-events: auto;
+}
+
+.video-overlay-transport,
+.video-overlay-utility {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.video-overlay-button {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  padding: 0;
+  border: 0;
+  color: rgba(255, 255, 255, 0.92);
+  background: transparent;
+  cursor: pointer;
+  transition: color 0.16s ease, background 0.16s ease, transform 0.16s ease;
+}
+
+.video-overlay-button:hover {
+  color: #fff;
+  transform: translateY(-1px);
+}
+
+.video-overlay-button:focus-visible {
+  outline: 2px solid rgba(255, 255, 255, 0.86);
+  outline-offset: 3px;
+}
+
+.video-overlay-button--side {
+  width: 38px;
+  height: 38px;
+}
+
+.video-overlay-button--side svg {
+  width: 21px;
+  height: 21px;
+}
+
+.video-overlay-button--main {
+  width: 50px;
+  height: 50px;
+  border-radius: 999px;
+  color: #111827;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.24);
+}
+
+.video-overlay-button--main:hover {
+  color: #111827;
+  background: #fff;
+}
+
+.video-overlay-button--main svg {
+  width: 22px;
+  height: 22px;
+}
+
+.video-overlay-button--utility {
+  width: 36px;
+  height: 36px;
+  border-radius: 9px;
+}
+
+.video-overlay-button--utility:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.video-overlay-button--utility svg {
+  width: 19px;
+  height: 19px;
+}
+
+.video-overlay-volume {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: rgba(255, 255, 255, 0.82);
+}
+
+.video-overlay-volume > svg {
+  width: 19px;
+  height: 19px;
+}
+
+.video-overlay-volume input {
+  width: 72px;
+  accent-color: #fff;
+}
+
+.video-overlay-progress {
+  width: 100%;
+  margin: 0 0 10px;
+  pointer-events: none;
+}
+
+.video-overlay-progress .progress-track {
+  height: 3px;
+  background: rgba(255, 255, 255, 0.34);
+}
+
+.video-overlay-progress .progress-fill {
+  background: rgba(255, 255, 255, 0.92);
+}
+
+.video-overlay-progress .progress-times {
+  margin-top: 5px;
+  color: rgba(255, 255, 255, 0.68);
+  font-size: 11px;
+}
+
+.video-overlay-progress .progress-knob {
+  display: none;
 }
 
 .media-video {
@@ -4665,6 +4920,44 @@ onBeforeUnmount(() => {
   text-align: center;
 }
 
+.mobile-now-controls {
+  display: block;
+}
+
+@media (min-width: 981px) {
+  .now-panel {
+    padding-top: 12px;
+    text-align: left;
+  }
+
+  .now-panel h1 {
+    font-size: clamp(20px, 1.8vw, 27px);
+  }
+
+  .now-panel .now-program-title {
+    max-width: 760px;
+    font-size: clamp(14px, 1.05vw, 16px);
+  }
+
+  .now-panel .now-program-next {
+    max-width: 760px;
+  }
+
+  .now-panel .desktop-now-program-meta {
+    display: block;
+  }
+
+  .mobile-now-controls {
+    display: none;
+  }
+}
+
+@media (max-width: 980px) {
+  .now-panel .desktop-now-program-meta {
+    display: none;
+  }
+}
+
 .now-panel h1 {
   margin: 0;
   overflow-wrap: anywhere;
@@ -4715,6 +5008,13 @@ onBeforeUnmount(() => {
   line-height: 1.3;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.now-panel .now-program-remaining {
+  margin-top: 5px;
+  color: var(--text-tertiary);
+  font-size: var(--meta-size);
+  font-weight: 500;
 }
 
 .program-progress {
@@ -4932,7 +5232,7 @@ onBeforeUnmount(() => {
 }
 
 .desktop-panel-scroll {
-  max-height: calc(100dvh - 80px);
+  max-height: calc(100dvh - 68px);
   overflow-y: auto;
   padding-right: 8px;
 }
@@ -5285,6 +5585,10 @@ onBeforeUnmount(() => {
     aspect-ratio: var(--media-aspect-ratio);
     border-radius: var(--media-radius);
     box-shadow: var(--media-shadow);
+  }
+
+  .desktop-video-overlay {
+    display: none;
   }
 
   .media-video {
