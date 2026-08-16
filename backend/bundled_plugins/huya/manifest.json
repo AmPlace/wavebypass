@@ -32,7 +32,8 @@
     "network": {
       "allowed_hosts": [
         "www.huya.com",
-        "huya.com"
+        "huya.com",
+        "mp.huya.com"
       ],
       "direct": true
     }

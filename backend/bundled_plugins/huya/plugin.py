@@ -32,6 +32,31 @@ from waveflow_plugin_sdk import (
 HUYA_TTL_SECONDS = 60
 
 
+def _first_stable_cover(*objects: dict[str, Any]) -> str:
+    """Read only explicitly stable room-art fields from Huya metadata.
+
+    ``screenshot`` is deliberately not in this list: it is the live/replay
+    visual and is exposed separately as ``dynamic_cover_url``.  The aliases
+    below are upstream metadata names, not URL templates; no anchorpost URL
+    is ever synthesized by the Plugin.
+    """
+    stable_fields = (
+        "stableCoverUrl", "stable_cover_url", "roomCover", "room_cover",
+        "roomPoster", "room_poster", "anchorPost", "anchorpost", "anchor_post",
+    )
+    for obj in objects:
+        if not isinstance(obj, dict):
+            continue
+        for field in stable_fields:
+            value = obj.get(field)
+            if isinstance(value, dict):
+                value = value.get("url") or value.get("imageUrl") or value.get("image_url")
+            value = str(value or "").strip()
+            if value.startswith(("http://", "https://")):
+                return value
+    return ""
+
+
 def _infer_transport(url: str) -> str:
     lower = url.lower().split("?", 1)[0]
     if lower.endswith(".flv"):
@@ -149,11 +174,18 @@ class Provider(TVProvider):
             data = (payload or {}).get("data") or {}
             live_data = data.get("liveData") or {}
             profile = data.get("profileInfo") or {}
-            live_status = live_data.get("liveStatus")
-            is_live = (str(live_status).upper() == "ON") if live_status is not None else bool(live_data.get("screenshot"))
+            live_status = data.get("liveStatus")
+            if live_status is None:
+                live_status = live_data.get("liveStatus")
+            dynamic_cover = str(live_data.get("screenshot") or "").strip()
+            stable_cover = _first_stable_cover(profile, live_data, data)
+            is_live = (str(live_status).upper() == "ON") if live_status is not None else bool(dynamic_cover)
             return VisualMetadata(
                 avatar_url=str(live_data.get("avatar180") or profile.get("avatar180") or "").strip(),
-                cover_url=str(live_data.get("screenshot") or "").strip(),
+                stable_cover_url=stable_cover,
+                dynamic_cover_url=dynamic_cover,
+                # Keep the pre-1.1 field for older Core/Frontend projections.
+                cover_url=dynamic_cover,
                 is_live=is_live,
                 title=str(live_data.get("introduction") or "").strip(),
                 owner_name=str(live_data.get("nick") or profile.get("nick") or "").strip(),

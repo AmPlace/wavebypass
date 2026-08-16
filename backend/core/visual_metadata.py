@@ -29,6 +29,8 @@ def empty_visual(*, source_id: str = "", source_revision: str = "", logo_url: st
         "source_id": source_id,
         "source_revision": source_revision,
         "avatar_url": "",
+        "stable_cover_url": "",
+        "dynamic_cover_url": "",
         "cover_url": "",
         "is_live": False,
         "title": title,
@@ -114,7 +116,11 @@ class VisualMetadataCache:
             value.setdefault("source_revision", source_revision)
             ttl = int(value.get("ttl_seconds") or _FAILURE_TTL)
             if self._generation == generation:
-                self._put(key, value, ttl if value.get("avatar_url") or value.get("cover_url") else _FAILURE_TTL)
+                has_visual = any(
+                    value.get(field)
+                    for field in ("avatar_url", "stable_cover_url", "dynamic_cover_url", "cover_url")
+                )
+                self._put(key, value, ttl if has_visual else _FAILURE_TTL)
             if not future.done():
                 future.set_result(dict(value))
             return value

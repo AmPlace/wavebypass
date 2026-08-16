@@ -5,6 +5,7 @@ import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 
 import { iptvCardProgrammeTitle } from '../../src/utils/iptvViewing.js'
+import { channelVisualCandidates } from '../../src/utils/channelVisual.js'
 
 const frontendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 
@@ -42,4 +43,32 @@ test('IPTV density direct toggle keeps the user-facing information semantics', (
   assert.match(home, /densityMode === 'standard' \? '仅显示 Logo' : '显示频道信息'/)
   assert.match(home, /densityMode\.value === IPTV_CARD_DENSITIES\.STANDARD\s*\? IPTV_CARD_DENSITIES\.COMPACT/)
   assert.match(home, /densityMode === 'standard' \? '切换为仅显示 Logo' : '切换为显示频道信息'/)
+})
+
+test('Huya generic visual candidates prefer stable art and gate offline screenshots', () => {
+  const home = fs.readFileSync(path.join(frontendRoot, 'src/views/IptvHome.vue'), 'utf8')
+  const helper = fs.readFileSync(path.join(frontendRoot, 'src/utils/channelVisual.js'), 'utf8')
+  assert.match(home, /channelVisualCandidates\(ch\?\.logo_url, visual\)/)
+  assert.match(helper, /stable_cover_url/)
+  assert.match(helper, /dynamic_cover_url.*cover_url/)
+  assert.match(helper, /visual\?\.is_live === true/)
+  assert.match(helper, /cover_role === 'content'/)
+
+  assert.deepEqual(channelVisualCandidates('', {
+    stable_cover_url: 'stable',
+    avatar_url: 'avatar',
+    dynamic_cover_url: 'offline-screenshot',
+    is_live: false,
+  }), ['stable', 'avatar'])
+  assert.deepEqual(channelVisualCandidates('', {
+    avatar_url: 'avatar',
+    dynamic_cover_url: 'live-screenshot',
+    is_live: true,
+  }), ['avatar', 'live-screenshot'])
+  assert.deepEqual(channelVisualCandidates('package-logo', {
+    stable_cover_url: 'stable',
+    avatar_url: 'avatar',
+    dynamic_cover_url: 'live-screenshot',
+    is_live: true,
+  }), ['package-logo', 'stable', 'avatar', 'live-screenshot'])
 })

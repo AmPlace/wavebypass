@@ -81,7 +81,11 @@ export async function fetchGlobalTestStatus() {
 // lookup; Core keeps the actual TTL/cache identity source-scoped.
 //   GET /api/media/channel/{canonical_key}/visual
 export async function fetchChannelVisual(canonicalKey, { signal } = {}) {
-  if (!canonicalKey) return { ok: true, cover_url: '', avatar_url: '', title: '', is_live: false }
+  if (!canonicalKey) {
+    return {
+      ok: true, cover_url: '', stable_cover_url: '', dynamic_cover_url: '', avatar_url: '', title: '', is_live: false,
+    }
+  }
   const res = await request(`/api/media/channel/${encodeURIComponent(canonicalKey)}/visual`, { timeout: 8_000, signal })
   return res.json()
 }

@@ -166,6 +166,7 @@ import {
 import { heightForWidth, IPTV_CARD_RATIOS } from '../utils/iptvCardGeometry'
 import { epgBatchRefreshDelay } from '../utils/epgViewing'
 import { iptvCardProgrammeTitle } from '../utils/iptvViewing'
+import { channelVisualCandidates } from '../utils/channelVisual'
 
 const playerStore = usePlayerStore()
 const toastStore = useToastStore()
@@ -268,7 +269,7 @@ function triggerVisualForChannel(ch) {
     // project an old source result into the new list, even if the browser
     // fetch implementation does not honor AbortController immediately.
     if (!_isCurrentListRequest(seq)) return
-    if (entry?.cover_url || entry?.avatar_url) {
+    if (entry?.stable_cover_url || entry?.avatar_url || entry?.dynamic_cover_url || entry?.cover_url) {
       visualMetadata.value = { ...visualMetadata.value, [key]: entry }
     }
   }).catch(() => {})
@@ -501,15 +502,8 @@ function channelLogoUrl(ch) {
 }
 
 function channelLogoCandidates(ch) {
-  const logoUrl = String(ch?.logo_url || '').trim()
-  const candidates = []
-  if (logoUrl) candidates.push(logoUrl)
   const visual = visualMetadata.value[ch?.canonical_key || '']
-  if (visual?.avatar_url) candidates.push(visual.avatar_url)
-  if (visual?.cover_url && (visual.cover_role === 'content' || visual.is_live === true)) {
-    candidates.push(visual.cover_url)
-  }
-  return Array.from(new Set(candidates))
+  return channelVisualCandidates(ch?.logo_url, visual)
 }
 
 function channelLogoIdentityKey(ch) {

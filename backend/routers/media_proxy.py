@@ -778,19 +778,32 @@ def _normalize_visual_payload(payload: dict, *, source_id: str, source_revision:
     import main as _m
 
     result = dict(fallback)
+    cover_role = str(payload.get("cover_role") or "live")
+    legacy_cover = str(payload.get("cover_url") or "").strip()
+    stable_cover = str(payload.get("stable_cover_url") or "").strip()
+    dynamic_cover = str(payload.get("dynamic_cover_url") or "").strip()
+    if cover_role == "stable" and not stable_cover:
+        stable_cover = legacy_cover
+    elif not dynamic_cover:
+        # Existing artifacts use cover_url for both content thumbnails and
+        # live screenshots.  Keep that field as the compatibility source;
+        # the frontend applies the role/live gate before using it.
+        dynamic_cover = legacy_cover
     result.update({
         "source_id": source_id,
         "source_revision": source_revision,
         "avatar_url": str(payload.get("avatar_url") or payload.get("identity_visual") or "").strip(),
-        "cover_url": str(payload.get("cover_url") or "").strip(),
+        "stable_cover_url": stable_cover,
+        "dynamic_cover_url": dynamic_cover,
+        "cover_url": legacy_cover or stable_cover or dynamic_cover,
         "is_live": bool(payload.get("is_live", False)),
         "title": str(payload.get("title") or "").strip(),
         "owner_name": str(payload.get("owner_name") or payload.get("anchor_name") or "").strip(),
         "ttl_seconds": int(payload.get("ttl_seconds") or 300),
-        "cover_role": str(payload.get("cover_role") or "live"),
+        "cover_role": cover_role,
     })
     # Keep the existing image anti-hotlink behavior in the generic bridge.
-    for field in ("avatar_url", "cover_url"):
+    for field in ("avatar_url", "stable_cover_url", "dynamic_cover_url", "cover_url"):
         raw = result[field]
         if raw:
             result[field] = _m._cover_img_proxy_url(raw)

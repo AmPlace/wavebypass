@@ -144,6 +144,11 @@ class VisualMetadata:
     """Optional source-scoped TV visual metadata, separate from playback."""
 
     avatar_url: str = ""
+    # Stable room/channel art and volatile live art are separate generic
+    # fields.  ``cover_url`` remains for compatibility with existing Plugin
+    # artifacts that predate the distinction.
+    stable_cover_url: str = ""
+    dynamic_cover_url: str = ""
     cover_url: str = ""
     is_live: bool = False
     title: str = ""
@@ -155,6 +160,8 @@ class VisualMetadata:
         return {
             "visual_version": "1.0",
             "avatar_url": self.avatar_url,
+            "stable_cover_url": self.stable_cover_url,
+            "dynamic_cover_url": self.dynamic_cover_url,
             "cover_url": self.cover_url,
             "is_live": self.is_live,
             "title": self.title,

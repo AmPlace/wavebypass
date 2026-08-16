@@ -38,7 +38,7 @@ CHANNEL_CATALOG_KINDS = frozenset({"channel", "event"})
 VISUAL_METADATA_MAX_TTL_SECONDS = 7 * 24 * 60 * 60
 VISUAL_METADATA_MAX_URL_LENGTH = 4096
 VISUAL_METADATA_MAX_TEXT_LENGTH = 512
-VISUAL_METADATA_COVER_ROLES = frozenset({"live", "content"})
+VISUAL_METADATA_COVER_ROLES = frozenset({"stable", "live", "content"})
 RADIO_CATALOG_MAX_ITEMS = 512
 RADIO_CATALOG_MAX_BYTES = 256 * 1024
 RADIO_CATALOG_MAX_TTL_SECONDS = 7 * 24 * 60 * 60
@@ -122,12 +122,13 @@ def validate_visual_metadata(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise invalid_response("TV visual metadata must be an object")
     allowed = {
-        "visual_version", "avatar_url", "cover_url", "is_live", "title", "owner_name",
+        "visual_version", "avatar_url", "stable_cover_url", "dynamic_cover_url", "cover_url",
+        "is_live", "title", "owner_name",
         "ttl_seconds", "cover_role",
     }
     if set(value) - allowed or value.get("visual_version") != "1.0":
         raise invalid_response("TV visual metadata contains unsupported fields")
-    for field in ("avatar_url", "cover_url"):
+    for field in ("avatar_url", "stable_cover_url", "dynamic_cover_url", "cover_url"):
         raw = value.get(field, "")
         if not isinstance(raw, str) or len(raw) > VISUAL_METADATA_MAX_URL_LENGTH:
             raise invalid_response(f"Invalid TV visual {field}")
@@ -157,6 +158,8 @@ def validate_visual_metadata(value: Any) -> dict[str, Any]:
         raise invalid_response("TV visual metadata exceeds the size limit")
     normalized = dict(value)
     normalized.setdefault("avatar_url", "")
+    normalized.setdefault("stable_cover_url", "")
+    normalized.setdefault("dynamic_cover_url", "")
     normalized.setdefault("cover_url", "")
     normalized.setdefault("is_live", False)
     normalized.setdefault("title", "")

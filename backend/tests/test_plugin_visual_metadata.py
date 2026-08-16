@@ -44,7 +44,9 @@ class PluginVisualContractTest(unittest.TestCase):
 
     def test_visual_metadata_is_bounded_and_data_only(self):
         valid = VisualMetadata(
-            avatar_url="https://img.example/avatar.jpg", cover_url="https://img.example/live.jpg",
+            avatar_url="https://img.example/avatar.jpg",
+            stable_cover_url="https://img.example/room.jpg",
+            dynamic_cover_url="https://img.example/live.jpg",
             is_live=True, title="Room", owner_name="Owner", ttl_seconds=300,
         ).as_contract()
         self.assertEqual(validate_visual_metadata(valid)["cover_role"], "live")
@@ -75,7 +77,7 @@ class VisualMetadataProviderMappingTest(unittest.TestCase):
     def _context(self):
         return ResolveContext("visual-fixture", 9_999_999_999_999, {}, None)
 
-    def test_huya_maps_avatar_and_live_screenshot(self):
+    def test_huya_maps_stable_room_cover_separately_from_live_screenshot(self):
         module = _load("huya_visual_fixture", ROOT / "bundled_plugins/huya/plugin.py")
 
         class Response:
@@ -83,25 +85,26 @@ class VisualMetadataProviderMappingTest(unittest.TestCase):
                 return json.dumps({"data": {"liveData": {
                     "avatar180": "https://img.example/avatar.jpg", "screenshot": "https://img.example/live.jpg",
                     "liveStatus": "ON", "introduction": "show", "nick": "host",
-                }}}).encode()
+                }, "profileInfo": {"roomCover": "https://anchorpost.msstatic.com/room.jpg"}}}).encode()
 
             def __enter__(self): return self
             def __exit__(self, *_args): return None
 
         with mock.patch.object(module, "urlopen", return_value=Response()):
             visual = module.Provider().visual_metadata(TVReference("huya", "123"), self._context())
-        self.assertEqual((visual.avatar_url, visual.cover_url, visual.is_live, visual.cover_role),
-                         ("https://img.example/avatar.jpg", "https://img.example/live.jpg", True, "live"))
+        self.assertEqual((visual.avatar_url, visual.stable_cover_url, visual.dynamic_cover_url,
+                          visual.cover_url, visual.is_live, visual.cover_role),
+                         ("https://img.example/avatar.jpg", "https://anchorpost.msstatic.com/room.jpg",
+                          "https://img.example/live.jpg", "https://img.example/live.jpg", True, "live"))
 
     def test_huya_offline_still_returns_avatar_but_cover_policy_is_live(self):
         module = _load("huya_offline_visual_fixture", ROOT / "bundled_plugins/huya/plugin.py")
 
         class Response:
             def read(self, _size):
-                return json.dumps({"data": {"liveData": {
+                return json.dumps({"data": {"liveStatus": "OFF", "liveData": {
                     "avatar180": "https://img.example/avatar.jpg", "screenshot": "https://img.example/old.jpg",
-                    "liveStatus": "OFF",
-                }}}).encode()
+                }, "profileInfo": {"roomCover": "https://anchorpost.msstatic.com/stable-room.jpg"}}}).encode()
 
             def __enter__(self): return self
             def __exit__(self, *_args): return None
@@ -111,6 +114,8 @@ class VisualMetadataProviderMappingTest(unittest.TestCase):
         self.assertFalse(visual.is_live)
         self.assertEqual(visual.cover_role, "live")
         self.assertEqual(visual.avatar_url, "https://img.example/avatar.jpg")
+        self.assertEqual(visual.stable_cover_url, "https://anchorpost.msstatic.com/stable-room.jpg")
+        self.assertEqual(visual.dynamic_cover_url, "https://img.example/old.jpg")
 
     def test_youtube_thumbnail_is_generic_content_visual(self):
         module = _load("youtube_visual_fixture", ROOT / "bundled_plugins/youtube/plugin.py")
