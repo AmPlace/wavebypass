@@ -1,9 +1,9 @@
 <template>
   <div ref="rootRef" class="tag-filter-row relative">
-    <!-- 原地多行 wrap：折叠态用 max-height 限制成单行高度，展开后释放 -->
+    <!-- 原地多行 wrap：只动画容器高度，标签内容不再做额外的进出场动画 -->
     <div
       class="flex flex-wrap items-start gap-2 overflow-hidden"
-      :style="{ maxHeight: expanded ? `${expandedHeight}px` : '44px', transition: 'max-height 260ms cubic-bezier(0.4, 0, 0.2, 1)' }"
+      :style="{ height: expanded ? `${Math.max(expandedHeight, 44)}px` : '44px', transition: 'height 300ms cubic-bezier(0.4, 0, 0.2, 1)', willChange: 'height' }"
       @transitionend="onTransitionEnd"
     >
       <button
@@ -17,24 +17,10 @@
         {{ itemLabel(item) }}
       </button>
 
-      <!-- 折叠态下，被截掉的选中项额外提到行尾保留可见性 -->
-      <Transition name="chip">
-        <button
-          v-if="!expanded && !collapsing && hiddenSelectedItem"
-          type="button"
-          class="tag-filter-row__item h-11 shrink-0 rounded-full border px-5 text-sm font-medium transition-colors"
-          :class="[pillClass(true), 'tag-filter-row__item--selected']"
-          @click="$emit('select', hiddenSelectedItem)"
-        >
-          {{ itemLabel(hiddenSelectedItem) }}
-        </button>
-      </Transition>
-
       <button
         v-if="hasOverflow"
         type="button"
         class="tag-filter-row__more inline-flex h-11 shrink-0 items-center gap-1 rounded-full border border-[var(--border)] bg-[var(--surface)] px-4 text-sm font-medium text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)]"
-        :class="expanded || collapsing ? '' : 'ml-auto'"
         :aria-expanded="expanded || collapsing"
         :aria-label="expanded || collapsing ? '收起标签' : '展开全部标签'"
         @click="toggle"
@@ -91,8 +77,14 @@ const hiddenSelectedItem = computed(() => {
   const hidden = props.items.slice(visibleCount.value)
   return hidden.find((it) => props.isActive(it)) || null
 })
-// 收起过程中保持全量渲染，动画结束后才切回截断
-const displayItems = computed(() => (expanded.value || collapsing.value ? props.items : visibleItems.value))
+// 折叠态把隐藏的当前选中项作为稳定的末尾 chip 保留，避免 Transition
+// 在收起完成后再插入一个 chip，造成闪回或额外的布局跳动。
+const collapsedItems = computed(() => (
+  hiddenSelectedItem.value
+    ? [...visibleItems.value, hiddenSelectedItem.value]
+    : visibleItems.value
+))
+const displayItems = computed(() => (expanded.value ? props.items : collapsedItems.value))
 
 /* 测量：在不可见的克隆容器里逐个累加按钮宽度，得出一行能放下多少个，
    再为「更多」按钮（必要时还有隐藏选中 chip）预留宽度。
@@ -188,7 +180,7 @@ watch(() => props.items, () => nextTick(measure), { deep: false })
 
 function toggle() {
   if (expanded.value) {
-    // 收起：先标记 collapsing，动画结束再清除
+    // 收起时立即切换到稳定的折叠内容，更多按钮保持在同一 flex gap 中。
     collapsing.value = true
     expanded.value = false
   } else {
@@ -197,25 +189,8 @@ function toggle() {
 }
 
 function onTransitionEnd(e) {
-  if (e.propertyName === 'max-height' && collapsing.value) {
+  if (e.propertyName === 'height' && collapsing.value) {
     collapsing.value = false
   }
 }
 </script>
-
-
-<style scoped>
-.chip-enter-active {
-  transition: opacity 200ms ease, transform 200ms ease;
-}
-.chip-leave-active {
-  transition: opacity 150ms ease;
-}
-.chip-enter-from {
-  opacity: 0;
-  transform: translateY(4px);
-}
-.chip-leave-to {
-  opacity: 0;
-}
-</style>
