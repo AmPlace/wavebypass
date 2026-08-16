@@ -14,7 +14,7 @@
 
       <div class="flex items-center justify-between gap-4">
         <div class="flex min-w-0 items-center gap-3">
-          <span class="flex size-8 shrink-0 items-center justify-center rounded-full bg-[var(--surface)] text-[var(--text-primary)]">
+          <span class="iptv-live-section-icon inline-flex size-6 shrink-0 items-center justify-center text-[var(--text-secondary)]">
             <svg class="size-4" viewBox="0 0 24 24" fill="none" aria-hidden="true">
               <path d="M5 12a7 7 0 0 1 14 0M2.5 12a9.5 9.5 0 0 1 19 0M9 12a3 3 0 0 1 6 0" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
             </svg>

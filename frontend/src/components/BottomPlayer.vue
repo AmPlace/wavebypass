@@ -19,14 +19,14 @@
         <div ref="nameWrapperRef" class="min-w-0 overflow-hidden">
           <p
             ref="nameRef"
-            class="mobile-player-title whitespace-nowrap text-sm font-semibold text-[var(--text-primary)]"
+            class="mobile-player-title whitespace-nowrap text-sm font-semibold text-[var(--text-primary)] lg:text-[13px]"
             :class="{ 'marquee': isNameOverflow }"
           >
             {{ currentStationName }}
           </p>
           <p
             ref="statusRef"
-            class="mobile-player-status mt-1 whitespace-nowrap text-xs font-medium text-[var(--text-secondary)]"
+            class="mobile-player-status mt-1 whitespace-nowrap text-xs font-medium text-[var(--text-secondary)] lg:text-[11px]"
             :class="{ 'marquee': isStatusOverflow }"
           >
             {{ statusText }}

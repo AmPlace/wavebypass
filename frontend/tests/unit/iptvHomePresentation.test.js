@@ -21,6 +21,14 @@ test('IPTV 首页节目卡只显示当前节目名，不显示结束时间', () 
   assert.doesNotMatch(home, /channelProgrammeSubtitle\(/)
 })
 
+test('正在直播图标保持为非交互的无背景装饰', () => {
+  const home = fs.readFileSync(path.join(frontendRoot, 'src/views/IptvHome.vue'), 'utf8')
+  assert.match(home, /class="iptv-live-section-icon inline-flex size-6[^>]*text-\[var\(--text-secondary\)\]"/)
+  assert.match(home, /<span class="iptv-live-section-icon inline-flex size-6[\s\S]*?<svg class="size-4"/)
+  assert.doesNotMatch(home, /iptv-live-section-icon[^>]*rounded-full/)
+  assert.doesNotMatch(home, /iptv-live-section-icon[^>]*bg-\[var\(--surface\)\]/)
+})
+
 test('IPTV Home 支持 Standard/Compact presentation density，Compact 不渲染 footer', () => {
   const home = fs.readFileSync(path.join(frontendRoot, 'src/views/IptvHome.vue'), 'utf8')
   const styles = fs.readFileSync(path.join(frontendRoot, 'src/style.css'), 'utf8')

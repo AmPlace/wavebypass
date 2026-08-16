@@ -68,6 +68,13 @@ test('Mini Player only exposes play, mute and FullPlayer controls', () => {
   assert.doesNotMatch(player, /aria-label="上一个"|aria-label="下一个"|节目列表|mobile-player-volume|dock-list-btn/)
 })
 
+test('Desktop Mini Player identity text stays visually below the logo', () => {
+  const player = source('src/components/BottomPlayer.vue')
+  assert.match(player, /mobile-player-title[^>]*lg:text-\[13px\]/)
+  assert.match(player, /mobile-player-status[^>]*lg:text-\[11px\]/)
+  assert.match(player, /mobile-player-logo[^>]*lg:size-10/)
+})
+
 test('Mini Player mute state is shared with FullPlayer and has accessible controls', () => {
   const player = source('src/components/BottomPlayer.vue')
   const fullPlayer = source('src/components/FullPlayer.vue')
