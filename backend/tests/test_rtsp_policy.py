@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ipaddress
 import os
+import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -52,11 +53,12 @@ class RtspPolicyTest(unittest.IsolatedAsyncioTestCase):
         handle = issue_handle(kind="rtsp", url="rtsp://camera.local/live")
         with mock.patch.object(main, "config_rtsp_proxy_enabled", return_value=False), \
                 mock.patch.object(main, "_ensure_rtsp_hls_session", new=mock.AsyncMock()) as ensure:
-            with self.assertRaises(HTTPException) as ctx:
-                await media_proxy.media_proxy_rtsp(
-                    handle,
-                    MediaAccessContext(source="anonymous"),
-                )
+            with mock.patch.dict(sys.modules, {"main": main}):
+                with self.assertRaises(HTTPException) as ctx:
+                    await media_proxy.media_proxy_rtsp(
+                        handle,
+                        MediaAccessContext(source="anonymous"),
+                    )
             self.assertEqual(ctx.exception.status_code, 503)
             ensure.assert_not_awaited()
 
@@ -78,10 +80,11 @@ class RtspPolicyTest(unittest.IsolatedAsyncioTestCase):
                 await main.iptv_smart_playlist("camera", None)
 
                 handle = issue_handle(kind="rtsp", url="rtsp://camera.local/live")
-                await media_proxy.media_proxy_rtsp(
-                    handle,
-                    MediaAccessContext(source="anonymous"),
-                )
+                with mock.patch.dict(sys.modules, {"main": main}):
+                    await media_proxy.media_proxy_rtsp(
+                        handle,
+                        MediaAccessContext(source="anonymous"),
+                    )
 
                 self.assertEqual(safe_host.call_count, 2)
                 self.assertEqual(ensure.await_count, 2)

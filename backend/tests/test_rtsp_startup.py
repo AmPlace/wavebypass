@@ -47,6 +47,10 @@ class RtspStartupSingleFlightTest(IsolatedAsyncioTestCase):
                 task.cancel()
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
+        await main._stop_all_rtsp_sessions()
+        self.assertEqual(main._RTSP_HLS_STARTUPS, {})
+        self.assertEqual(main._RTSP_RESERVED_SESSIONS, set())
+        self.assertEqual(main.RTSP_HLS_SESSIONS, {})
         main._RTSP_HLS_STARTUPS.clear()
         main._RTSP_RESERVED_SESSIONS.clear()
         main.RTSP_HLS_SESSIONS = self._old_sessions

@@ -11,6 +11,7 @@ os.environ.setdefault("WAVEFLOW_MODE", "nas")
 os.environ.setdefault("WAVEFLOW_DB_PATH", ":memory:")
 
 import main
+from infrastructure import http_client as media_http
 from security.dependencies import MediaAccessContext
 from security import proxy_handles, proxy_context
 
@@ -167,9 +168,11 @@ class WidePlaylistSegmentInjectionTest(unittest.TestCase):
                 return None
 
             real_ssrf = main.assert_safe_target_url
+            real_media_ssrf = media_http.assert_safe_target_url
             main.assert_safe_target_url = _record_ssrf
+            media_http.assert_safe_target_url = _record_ssrf
             try:
-                with mock.patch.object(main.http_client, "get", side_effect=fake.get):
+                with mock.patch.object(main.http_client, "request", side_effect=fake.get):
                     resp = await main.serve_iptv_wide_playlist_by_source(
                         upstream_url="https://up.example/live.m3u8",
                         ctx_id="",
@@ -181,6 +184,7 @@ class WidePlaylistSegmentInjectionTest(unittest.TestCase):
                     body = resp.body.decode("utf-8")
             finally:
                 main.assert_safe_target_url = real_ssrf
+                media_http.assert_safe_target_url = real_media_ssrf
             return body, ssrf_checked
 
         body, ssrf_checked = asyncio.run(go())
@@ -270,7 +274,7 @@ class WidePlaylistLifecycleTest(unittest.IsolatedAsyncioTestCase):
         refresher_release = asyncio.Event()
         calls = 0
 
-        async def fake_get(url, **_kwargs):
+        async def fake_get(_method, url, **_kwargs):
             nonlocal calls
             calls += 1
             if calls == 1:
@@ -282,7 +286,8 @@ class WidePlaylistLifecycleTest(unittest.IsolatedAsyncioTestCase):
             await refresher_release.wait()
 
         with mock.patch.object(main, "assert_safe_target_url", new=self._noop_ssrf), \
-             mock.patch.object(main.http_client, "get", side_effect=fake_get), \
+             mock.patch.object(media_http, "assert_safe_target_url", new=self._noop_ssrf), \
+             mock.patch.object(main.http_client, "request", side_effect=fake_get), \
              mock.patch.object(main, "_run_wide_refresher", new=hold_refresher):
             first = asyncio.create_task(self._serve("same"))
             await entered.wait()
@@ -316,7 +321,7 @@ class WidePlaylistLifecycleTest(unittest.IsolatedAsyncioTestCase):
         maximum_active = 0
         refresher_release = asyncio.Event()
 
-        async def fake_get(url, **_kwargs):
+        async def fake_get(_method, url, **_kwargs):
             nonlocal active, maximum_active
             key = "a" if "/a.m3u8" in url else "b"
             calls[key] += 1
@@ -332,7 +337,8 @@ class WidePlaylistLifecycleTest(unittest.IsolatedAsyncioTestCase):
             await refresher_release.wait()
 
         with mock.patch.object(main, "assert_safe_target_url", new=self._noop_ssrf), \
-             mock.patch.object(main.http_client, "get", side_effect=fake_get), \
+             mock.patch.object(media_http, "assert_safe_target_url", new=self._noop_ssrf), \
+             mock.patch.object(main.http_client, "request", side_effect=fake_get), \
              mock.patch.object(main, "_run_wide_refresher", new=hold_refresher):
             first = asyncio.create_task(self._serve("a"))
             second = asyncio.create_task(self._serve("b"))
@@ -352,7 +358,7 @@ class WidePlaylistLifecycleTest(unittest.IsolatedAsyncioTestCase):
         refresher_release = asyncio.Event()
         calls = 0
 
-        async def fake_get(url, **_kwargs):
+        async def fake_get(_method, url, **_kwargs):
             nonlocal calls
             calls += 1
             if calls == 1:
@@ -364,7 +370,8 @@ class WidePlaylistLifecycleTest(unittest.IsolatedAsyncioTestCase):
             await refresher_release.wait()
 
         with mock.patch.object(main, "assert_safe_target_url", new=self._noop_ssrf), \
-             mock.patch.object(main.http_client, "get", side_effect=fake_get), \
+             mock.patch.object(media_http, "assert_safe_target_url", new=self._noop_ssrf), \
+             mock.patch.object(main.http_client, "request", side_effect=fake_get), \
              mock.patch.object(main, "_run_wide_refresher", new=hold_refresher):
             owner = asyncio.create_task(self._serve("cancel-waiter"))
             await entered.wait()
@@ -384,12 +391,13 @@ class WidePlaylistLifecycleTest(unittest.IsolatedAsyncioTestCase):
     async def test_initializer_cancellation_leaves_no_cache_or_refresher(self):
         entered = asyncio.Event()
 
-        async def blocked_get(_url, **_kwargs):
+        async def blocked_get(_method, _url, **_kwargs):
             entered.set()
             await asyncio.Event().wait()
 
         with mock.patch.object(main, "assert_safe_target_url", new=self._noop_ssrf), \
-             mock.patch.object(main.http_client, "get", side_effect=blocked_get):
+             mock.patch.object(media_http, "assert_safe_target_url", new=self._noop_ssrf), \
+             mock.patch.object(main.http_client, "request", side_effect=blocked_get):
             owner = asyncio.create_task(self._serve("cancel-owner"))
             await entered.wait()
             owner.cancel()
@@ -402,12 +410,13 @@ class WidePlaylistLifecycleTest(unittest.IsolatedAsyncioTestCase):
     async def test_eviction_cancels_inflight_initializer(self):
         entered = asyncio.Event()
 
-        async def blocked_get(_url, **_kwargs):
+        async def blocked_get(_method, _url, **_kwargs):
             entered.set()
             await asyncio.Event().wait()
 
         with mock.patch.object(main, "assert_safe_target_url", new=self._noop_ssrf), \
-             mock.patch.object(main.http_client, "get", side_effect=blocked_get):
+             mock.patch.object(media_http, "assert_safe_target_url", new=self._noop_ssrf), \
+             mock.patch.object(main.http_client, "request", side_effect=blocked_get):
             owner = asyncio.create_task(self._serve("evict-owner"))
             await entered.wait()
             self.assertTrue(main.release_iptv_wide_playlist_by_key(self._cache_key("evict-owner")))
@@ -421,12 +430,13 @@ class WidePlaylistLifecycleTest(unittest.IsolatedAsyncioTestCase):
     async def test_shutdown_cancels_inflight_initializer_before_clearing_state(self):
         entered = asyncio.Event()
 
-        async def blocked_get(_url, **_kwargs):
+        async def blocked_get(_method, _url, **_kwargs):
             entered.set()
             await asyncio.Event().wait()
 
         with mock.patch.object(main, "assert_safe_target_url", new=self._noop_ssrf), \
-             mock.patch.object(main.http_client, "get", side_effect=blocked_get):
+             mock.patch.object(media_http, "assert_safe_target_url", new=self._noop_ssrf), \
+             mock.patch.object(main.http_client, "request", side_effect=blocked_get):
             owner = asyncio.create_task(self._serve("shutdown-owner"))
             await entered.wait()
             self.assertTrue(main._wide_initialization_tasks)
@@ -442,7 +452,7 @@ class WidePlaylistLifecycleTest(unittest.IsolatedAsyncioTestCase):
         should_fail = True
         refresher_release = asyncio.Event()
 
-        async def fake_get(url, **_kwargs):
+        async def fake_get(_method, url, **_kwargs):
             nonlocal calls
             calls += 1
             if should_fail:
@@ -453,7 +463,8 @@ class WidePlaylistLifecycleTest(unittest.IsolatedAsyncioTestCase):
             await refresher_release.wait()
 
         with mock.patch.object(main, "assert_safe_target_url", new=self._noop_ssrf), \
-             mock.patch.object(main.http_client, "get", side_effect=fake_get), \
+             mock.patch.object(media_http, "assert_safe_target_url", new=self._noop_ssrf), \
+             mock.patch.object(main.http_client, "request", side_effect=fake_get), \
              mock.patch.object(main, "_run_wide_refresher", new=hold_refresher):
             with self.assertRaises(HTTPException) as failure:
                 await self._serve("retry")
@@ -475,11 +486,12 @@ class WidePlaylistLifecycleTest(unittest.IsolatedAsyncioTestCase):
             crashed.set()
             raise RuntimeError("fixture refresher failure")
 
-        async def fake_get(url, **_kwargs):
+        async def fake_get(_method, url, **_kwargs):
             return self._response(url)
 
         with mock.patch.object(main, "assert_safe_target_url", new=self._noop_ssrf), \
-             mock.patch.object(main.http_client, "get", side_effect=fake_get), \
+             mock.patch.object(media_http, "assert_safe_target_url", new=self._noop_ssrf), \
+             mock.patch.object(main.http_client, "request", side_effect=fake_get), \
              mock.patch.object(main, "_run_wide_refresher", new=failing_refresher):
             await self._serve("refresher-failure")
             await crashed.wait()
@@ -495,11 +507,12 @@ class WidePlaylistLifecycleTest(unittest.IsolatedAsyncioTestCase):
         async def hold_refresher(*_args):
             await refresher_release.wait()
 
-        async def fake_get(url, **_kwargs):
+        async def fake_get(_method, url, **_kwargs):
             return self._response(url)
 
         with mock.patch.object(main, "assert_safe_target_url", new=self._noop_ssrf), \
-             mock.patch.object(main.http_client, "get", side_effect=fake_get), \
+             mock.patch.object(media_http, "assert_safe_target_url", new=self._noop_ssrf), \
+             mock.patch.object(main.http_client, "request", side_effect=fake_get), \
              mock.patch.object(main, "_run_wide_refresher", new=hold_refresher):
             await self._serve("evict")
             await self._serve("shutdown")
@@ -524,11 +537,12 @@ class WidePlaylistLifecycleTest(unittest.IsolatedAsyncioTestCase):
             refresher_started.set()
             await refresher_release.wait()
 
-        async def fake_get(url, **_kwargs):
+        async def fake_get(_method, url, **_kwargs):
             return self._response(url)
 
         with mock.patch.object(main, "assert_safe_target_url", new=self._noop_ssrf), \
-             mock.patch.object(main.http_client, "get", side_effect=fake_get), \
+             mock.patch.object(media_http, "assert_safe_target_url", new=self._noop_ssrf), \
+             mock.patch.object(main.http_client, "request", side_effect=fake_get), \
              mock.patch.object(main, "_run_wide_refresher", new=hold_refresher):
             await self._serve("recycle")
             await refresher_started.wait()
