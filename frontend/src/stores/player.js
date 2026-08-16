@@ -20,6 +20,8 @@ export const usePlayerStore = defineStore('player', {
   state: () => ({
     isPlaying: false,
     isLoading: false,
+    isMuted: false,
+    isMutedInitialized: false,
     currentStation: '',
     volume: 1,
     playbackError: '',
@@ -90,6 +92,17 @@ export const usePlayerStore = defineStore('player', {
 
     setLoading(nextLoading) {
       this.isLoading = Boolean(nextLoading)
+    },
+
+    initializeMuted(defaultMuted = false) {
+      if (this.isMutedInitialized) return
+      this.isMuted = Boolean(defaultMuted)
+      this.isMutedInitialized = true
+    },
+
+    setMuted(nextMuted) {
+      this.isMuted = Boolean(nextMuted)
+      this.isMutedInitialized = true
     },
 
     setVolume(volumeValue) {

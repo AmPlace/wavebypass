@@ -13,7 +13,7 @@ import { publicAsset } from '../publicAsset'
 import { createRadioAudioEngine } from '../utils/radioAudioEngine'
 
 const playerStore = usePlayerStore()
-const { currentStation, isPlaying, volume } = storeToRefs(playerStore)
+const { currentStation, isPlaying, volume, isMuted } = storeToRefs(playerStore)
 const audioRef = ref(null)
 const hlsRef = ref(null)
 const directStreamMode = ref('')
@@ -44,6 +44,7 @@ watch(
 onMounted(() => {
   if (audioRef.value) {
     audioRef.value.volume = volume.value
+    audioRef.value.muted = isMuted.value
   }
   if (playerStore.isPlaying) {
     radioEngine.loadStation(currentStation.value)
@@ -92,6 +93,10 @@ watch(isPlaying, (nextIsPlaying) => {
 
 watch(volume, (nextVolume) => {
   radioEngine.setVolume(nextVolume)
+})
+
+watch(isMuted, (nextMuted) => {
+  if (audioRef.value) audioRef.value.muted = nextMuted
 })
 
 onBeforeUnmount(() => {

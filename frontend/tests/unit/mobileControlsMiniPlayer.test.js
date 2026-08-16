@@ -39,42 +39,46 @@ test('IPTV filter chips keep 44px interaction boxes with 40px visual pills', () 
   assert.match(css, /\.iptv-main \.tag-filter-row__item::before,[\s\S]*?inset: 2px;/)
 })
 
-test('IPTV section controls reduce visible weight without changing sort/density semantics', () => {
+test('IPTV density is a direct toggle and section controls retain their presentation role', () => {
   const home = source('src/views/IptvHome.vue')
   const css = source('src/style.css')
 
-  assert.match(home, /class="iptv-density-menu"/)
+  assert.match(home, /class="iptv-density-toggle"/)
+  assert.match(home, /data-density-toggle/)
+  assert.match(home, /:aria-pressed="densityMode === 'standard'"/)
+  assert.match(home, /@click="toggleDensityMode"/)
+  assert.doesNotMatch(home, /<details class="iptv-density-menu"|role="switch"|data-density-option=/)
   assert.match(home, /class="iptv-sort-trigger inline-flex h-10/)
-  assert.match(css, /\.iptv-main \.iptv-density-menu__trigger::before \{[\s\S]*?inset: 2px;/)
+  assert.match(css, /\.iptv-main \.iptv-density-toggle::before \{[\s\S]*?inset: 2px;/)
   assert.match(css, /\.iptv-main \.iptv-sort-trigger::before \{[\s\S]*?inset: 2px;/)
   assert.match(css, /\.iptv-main \.iptv-sort-trigger > svg \{[\s\S]*?width: 1\.125rem;/)
 })
 
-test('Mobile BottomPlayer uses bounded 72px presentation and preserves playback controls', () => {
+test('Mini Player only exposes play, mute and FullPlayer controls', () => {
   const player = source('src/components/BottomPlayer.vue')
-  const css = source('src/style.css')
 
-  for (const token of [
-    'mobile-player-shell',
-    'mobile-player-logo',
-    'mobile-player-title',
-    'mobile-player-status',
-    'mobile-player-play-btn',
-    'mobile-player-side-icon',
-    'mobile-player-list-btn',
-    'mobile-player-volume',
-  ]) {
-    assert.match(player, new RegExp(token))
-  }
+  for (const token of ['mobile-player-shell', 'mobile-player-logo', 'mobile-player-title', 'mobile-player-status', 'mobile-player-play-btn', 'mobile-player-action-control', 'mobile-player-action-icon']) assert.match(player, new RegExp(token))
   assert.match(player, /mobile-player-shell[^>]*h-\[72px\][^>]*rounded-\[18px\]/)
-  assert.match(css, /\.mobile-player-shell \{[\s\S]*?height: 4\.5rem;[\s\S]*?border-radius: 1\.125rem;/)
-  assert.match(css, /\.mobile-player-info \{[\s\S]*?flex-basis: 30%;/)
-  assert.match(css, /\.mobile-player-actions \{[\s\S]*?flex-basis: 30%;/)
-  assert.match(css, /\.mobile-player-play-btn \{[\s\S]*?width: 3\.25rem;[\s\S]*?height: 3\.25rem;/)
-  assert.match(css, /\.mobile-player-list-btn::before \{[\s\S]*?inset: 2px;/)
-  assert.match(css, /\.mobile-player-volume \{[\s\S]*?width: 3rem;/)
-  assert.match(css, /\.bottom-player-dock \{[\s\S]*?bottom: calc\(env\(safe-area-inset-bottom\) \+ 0\.75rem\);/)
-  assert.match(css, /\.iptv-main \{\s*padding-bottom: calc\(env\(safe-area-inset-bottom\) \+ 6rem\);/)
+  assert.match(player, /@click="openFullPlayer"/)
+  assert.match(player, /@click\.stop="playerStore\.togglePlay\(\)"/)
+  assert.match(player, /@click\.stop="toggleMute"/)
+  assert.match(player, /@click\.stop="openFullPlayer"/)
+  assert.doesNotMatch(player, /aria-label="上一个"|aria-label="下一个"|节目列表|mobile-player-volume|dock-list-btn/)
+})
+
+test('Mini Player mute state is shared with FullPlayer and has accessible controls', () => {
+  const player = source('src/components/BottomPlayer.vue')
+  const fullPlayer = source('src/components/FullPlayer.vue')
+  const store = source('src/stores/player.js')
+  const audio = source('src/components/AudioEngine.vue')
+
+  assert.match(player, /:aria-label="isMuted \? '取消静音' : '静音'"/)
+  assert.match(player, /:aria-pressed="isMuted"/)
+  assert.match(fullPlayer, /:aria-label="iptvMuted \? '取消静音' : '静音'"/)
+  assert.match(fullPlayer, /playerStore\.initializeMuted\(isIOS\)/)
+  assert.match(store, /isMuted: false/)
+  assert.match(store, /setMuted\(nextMuted\)/)
+  assert.match(audio, /audioRef\.value\.muted = isMuted\.value/)
 })
 
 test('Desktop BottomPlayer sizing remains on the existing lg path', () => {

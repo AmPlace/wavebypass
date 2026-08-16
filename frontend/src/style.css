@@ -915,8 +915,8 @@
 
   .dock-side-control {
     display: flex;
-    width: 2.5rem;
-    height: 2.5rem;
+    width: 2.75rem;
+    height: 2.75rem;
     align-items: center;
     justify-content: center;
     border-radius: 999px;
@@ -933,24 +933,28 @@
     opacity: 0.42;
   }
 
-  .dock-list-btn {
-    display: inline-flex;
-    height: 2.5rem;
-    align-items: center;
-    gap: 0.5rem;
-    border-radius: 999px;
-    border: 1px solid var(--border);
-    background: var(--surface);
-    padding: 0 0.9rem;
-    color: var(--text-primary);
-    font-size: 0.875rem;
-    font-weight: 500;
-    transition: background-color 180ms ease, border-color 180ms ease;
+  .mobile-player-shell {
+    cursor: pointer;
   }
 
-  .dock-list-btn:hover {
-    background: var(--surface-hover);
-    border-color: var(--border-strong);
+  .mobile-player-shell:focus-visible {
+    outline: 2px solid var(--border-strong);
+    outline-offset: 3px;
+  }
+
+  .mobile-player-action-control {
+    flex: 0 0 auto;
+    border: 1px solid transparent;
+  }
+
+  .mobile-player-action-control:focus-visible {
+    outline: 2px solid var(--border-strong);
+    outline-offset: 2px;
+  }
+
+  .mobile-player-action-icon {
+    width: 1.125rem;
+    height: 1.125rem;
   }
 
   @media (max-width: 1023px) {
@@ -1003,80 +1007,10 @@
       height: 1.25rem;
     }
 
-    .dock-side-control {
-      width: 2.75rem;
-      height: 2.75rem;
-    }
-
-    .mobile-player-side-icon {
-      width: 1.125rem;
-      height: 1.125rem;
-    }
-
     .mobile-player-actions {
       flex-basis: 30%;
       gap: 0.25rem;
     }
-
-    .mobile-player-volume {
-      width: 3rem;
-    }
-
-    .mobile-player-list-btn {
-      position: relative;
-      width: 2.75rem;
-      height: 2.75rem;
-      padding: 0;
-      border-color: transparent;
-      background: transparent;
-    }
-
-    .mobile-player-list-btn::before {
-      position: absolute;
-      inset: 2px;
-      content: '';
-      border: 1px solid var(--border);
-      border-radius: 999px;
-      background: var(--surface);
-      transition: background-color 180ms ease, border-color 180ms ease, transform 180ms ease;
-    }
-
-    .mobile-player-list-btn:hover {
-      border-color: transparent;
-      background: transparent;
-    }
-
-    .mobile-player-list-btn:hover::before {
-      border-color: var(--border-strong);
-      background: var(--surface-hover);
-    }
-
-    .mobile-player-list-btn:active::before {
-      transform: scale(0.96);
-    }
-
-    .mobile-player-list-icon {
-      position: relative;
-      z-index: 1;
-      width: 1.125rem;
-      height: 1.125rem;
-    }
-  }
-
-  .dock-volume::-webkit-slider-thumb {
-    width: 12px;
-    height: 12px;
-    appearance: none;
-    border-radius: 999px;
-    background: var(--text-primary);
-  }
-
-  .dock-volume::-moz-range-thumb {
-    width: 12px;
-    height: 12px;
-    border: 0;
-    border-radius: 999px;
-    background: var(--text-primary);
   }
 
   @media (min-width: 1024px) {
@@ -1111,119 +1045,33 @@
 
 /* IPTV Home density control. Keep this scoped to IPTV so Radio cards retain
    their existing card/footer presentation. */
-.iptv-density-menu {
+.iptv-density-toggle {
   position: relative;
-  height: 2.5rem;
-}
-
-.iptv-density-menu__trigger {
   display: inline-flex;
   width: 2.5rem;
   height: 2.5rem;
   cursor: pointer;
   align-items: center;
   justify-content: center;
-  list-style: none;
   border: 1px solid var(--border);
   border-radius: 999px;
   background: var(--surface);
   color: var(--text-secondary);
-  transition: background-color 180ms ease, color 180ms ease, box-shadow 180ms ease;
+  transition: background-color 180ms ease, color 180ms ease, border-color 180ms ease;
 }
 
-.iptv-density-menu__trigger::-webkit-details-marker {
-  display: none;
-}
-
-.iptv-density-menu__trigger:hover,
-.iptv-density-menu[open] .iptv-density-menu__trigger {
+.iptv-density-toggle:hover,
+.iptv-density-toggle--standard {
   background: var(--surface-hover);
   color: var(--text-primary);
+  border-color: var(--border-strong);
 }
 
-.iptv-density-menu__trigger svg {
+.iptv-density-toggle svg {
+  position: relative;
+  z-index: 1;
   width: 1rem;
   height: 1rem;
-}
-
-.iptv-density-menu__popover {
-  position: absolute;
-  top: calc(100% + 8px);
-  right: 0;
-  z-index: 30;
-  width: 13rem;
-  padding: 0.75rem;
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  background: var(--surface);
-  box-shadow: 0 14px 36px rgba(15,23,42,0.14);
-}
-
-.dark .iptv-density-menu__popover {
-  box-shadow: 0 18px 40px rgba(0,0,0,0.32);
-}
-
-.iptv-density-menu__title {
-  padding: 0 0.25rem 0.5rem;
-  color: var(--text-secondary);
-  font-size: 0.75rem;
-  font-weight: 600;
-}
-
-.iptv-density-menu__switch {
-  display: flex;
-  width: 100%;
-  min-height: 2.25rem;
-  cursor: pointer;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
-  border-radius: 9px;
-  color: var(--text-primary);
-  font-size: 0.875rem;
-  font-weight: 600;
-  text-align: left;
-}
-
-.iptv-density-menu__switch:hover {
-  background: var(--surface-hover);
-}
-
-.iptv-density-menu__track {
-  display: inline-flex;
-  width: 2.25rem;
-  height: 1.25rem;
-  flex: 0 0 auto;
-  align-items: center;
-  padding: 2px;
-  border-radius: 999px;
-  background: var(--border-strong);
-  transition: background-color 180ms ease;
-}
-
-.iptv-density-menu__thumb {
-  width: 1rem;
-  height: 1rem;
-  border-radius: 999px;
-  background: var(--surface);
-  box-shadow: 0 1px 2px rgba(15,23,42,0.22);
-  transform: translateX(0);
-  transition: transform 180ms ease;
-}
-
-.iptv-density-menu__thumb.is-on {
-  transform: translateX(1rem);
-}
-
-.iptv-density-menu__switch:has(.iptv-density-menu__thumb.is-on) .iptv-density-menu__track {
-  background: #22C55E;
-}
-
-.iptv-density-menu__hint {
-  padding: 0.5rem 0.25rem 0;
-  color: var(--text-tertiary);
-  font-size: 0.6875rem;
-  line-height: 1.35;
 }
 
 .iptv-main.iptv-density-compact .channel-card--logo-card {
@@ -1392,11 +1240,7 @@
     border-color: var(--border-strong);
   }
 
-  .iptv-main .iptv-density-menu {
-    height: 2.75rem;
-  }
-
-  .iptv-main .iptv-density-menu__trigger {
+  .iptv-main .iptv-density-toggle {
     position: relative;
     width: 2.75rem;
     height: 2.75rem;
@@ -1404,7 +1248,7 @@
     background: transparent;
   }
 
-  .iptv-main .iptv-density-menu__trigger::before {
+  .iptv-main .iptv-density-toggle::before {
     position: absolute;
     inset: 2px;
     content: '';
@@ -1414,13 +1258,13 @@
     transition: background-color 160ms ease, border-color 160ms ease;
   }
 
-  .iptv-main .iptv-density-menu__trigger:hover::before,
-  .iptv-main .iptv-density-menu[open] .iptv-density-menu__trigger::before {
+  .iptv-main .iptv-density-toggle:hover::before,
+  .iptv-main .iptv-density-toggle--standard::before {
     border-color: var(--border-strong);
     background: var(--surface-hover);
   }
 
-  .iptv-main .iptv-density-menu__trigger svg {
+  .iptv-main .iptv-density-toggle svg {
     position: relative;
     z-index: 1;
     width: 1.125rem;

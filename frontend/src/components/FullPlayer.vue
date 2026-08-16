@@ -140,11 +140,10 @@
 
               <div class="utility-row">
                 <button
-                  v-if="isIOS && isIptvMode"
                   type="button"
                   class="utility-btn"
                   :aria-label="iptvMuted ? '取消静音' : '静音'"
-                  @click="toggleIptvMute()"
+                  @click="toggleMute()"
                 >
                   <svg v-if="iptvMuted" viewBox="0 0 24 24" fill="none">
                     <path d="M4 10v4a1 1 0 0 0 1 1h3l4.2 3.15A.5.5 0 0 0 13 17.75V6.25a.5.5 0 0 0-.8-.4L8 9H5a1 1 0 0 0-1 1Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
@@ -494,7 +493,7 @@ import { useToastStore } from '../stores/toast'
 import { IPTV_CHANNEL_SORT_MODES, sortIptvChannels } from '../utils/iptvChannelList'
 
 const playerStore = usePlayerStore()
-const { isPlayerExpanded, currentStation, isPlaying, isLoading, volume, stationMap, stationList } = storeToRefs(playerStore)
+const { isPlayerExpanded, currentStation, isPlaying, isLoading, volume, isMuted, stationMap, stationList } = storeToRefs(playerStore)
 const toastStore = useToastStore()
 
 const iptvVideoRef = ref(null)
@@ -577,7 +576,8 @@ let mediaLayoutRaf = 0
 
 const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
   (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
-const iptvMuted = ref(isIOS)  // iOS 静音绕过自动播放限制
+playerStore.initializeMuted(isIOS)  // iOS 静音绕过自动播放限制
+const iptvMuted = isMuted
 
 const playerLayoutStyle = computed(() => {
   const style = {
@@ -596,8 +596,8 @@ function useDefaultLogo(event) {
   img.src = DEFAULT_LOGO_URL
 }
 
-function toggleIptvMute() {
-  iptvMuted.value = !iptvMuted.value
+function toggleMute() {
+  playerStore.setMuted(!iptvMuted.value)
   if (activeIptvEngine.value === 'youtube') {
     syncYoutubeAudioState()
     return
@@ -4093,6 +4093,14 @@ watch(volume, (v) => {
     return
   }
   if (iptvVideoRef.value) iptvVideoRef.value.volume = v
+})
+
+watch(iptvMuted, (muted) => {
+  if (activeIptvEngine.value === 'youtube') {
+    syncYoutubeAudioState()
+    return
+  }
+  if (iptvVideoRef.value) iptvVideoRef.value.muted = muted
 })
 
 watch(() => playerStore.iptvUrlIndex, () => {

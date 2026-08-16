@@ -568,7 +568,7 @@ test('IptvHome density toggle defaults compact on mobile, persists selection, an
     assert.equal(store.currentIptvChannel.name, 'Alpha')
     assert.equal(domElement('.channel-card').getAttribute('data-canonical-key'), 'alpha')
 
-    await clickDom('[data-density-option="standard"]')
+    await clickDom('[data-density-toggle]')
     assert.equal(domElement('.iptv-main').classList.contains('iptv-density-compact'), false)
     assert.equal(domElements('.channel-card .card-info').length, 2)
     assert.equal(window.localStorage.getItem(storageKey), 'standard')
@@ -581,6 +581,23 @@ test('IptvHome density toggle defaults compact on mobile, persists selection, an
     window.localStorage.removeItem(storageKey)
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth })
   }
+})
+
+test('FullPlayer and shared player store keep mute state synchronized', async () => {
+  channels = [channel('Alpha', 'alpha')]
+  installFetch()
+  const { store } = await mountPlayer()
+
+  assert.equal(store.isMuted, false)
+  assert.equal(domElement('[aria-label="静音"]').getAttribute('aria-label'), '静音')
+
+  await clickDom('[aria-label="静音"]')
+  assert.equal(store.isMuted, true)
+  assert.equal(domElement('[aria-label="取消静音"]').getAttribute('aria-label'), '取消静音')
+
+  await clickDom('[aria-label="取消静音"]')
+  assert.equal(store.isMuted, false)
+  assert.equal(domElement('[aria-label="静音"]').getAttribute('aria-label'), '静音')
 })
 
 test('同名不同 canonical identity 只有当前频道行 active', async () => {

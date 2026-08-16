@@ -27,33 +27,27 @@
         </div>
 
         <div class="flex shrink-0 items-center gap-2">
-          <details class="iptv-density-menu">
-            <summary class="iptv-density-menu__trigger" aria-label="显示频道信息" title="显示频道信息">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
-                <path d="M4 7h10M4 17h16M14 7l2-2m-2 2 2 2M10 17l2-2m-2 2 2 2" />
-              </svg>
-              <span class="sr-only">显示频道信息</span>
-            </summary>
-            <div class="iptv-density-menu__popover" role="menu">
-              <div class="iptv-density-menu__title">显示频道信息</div>
-              <button
-                type="button"
-                class="iptv-density-menu__switch"
-                role="switch"
-                :aria-checked="densityMode === 'standard'"
-                data-density-option="standard"
-                @click="setDensityMode(densityMode === 'standard' ? 'compact' : 'standard')"
-              >
-                <span>显示频道信息</span>
-                <span class="iptv-density-menu__track" aria-hidden="true">
-                  <span class="iptv-density-menu__thumb" :class="{ 'is-on': densityMode === 'standard' }"></span>
-                </span>
-              </button>
-              <div class="iptv-density-menu__hint">
-                {{ densityMode === 'standard' ? '标准：Logo、频道名和节目' : '紧凑：仅显示 Logo' }}
-              </div>
-            </div>
-          </details>
+          <button
+            type="button"
+            class="iptv-density-toggle"
+            :class="{ 'iptv-density-toggle--standard': densityMode === 'standard' }"
+            :aria-pressed="densityMode === 'standard'"
+            :aria-label="densityMode === 'standard' ? '仅显示 Logo' : '显示频道信息'"
+            :title="densityMode === 'standard' ? '切换为仅显示 Logo' : '切换为显示频道信息'"
+            data-density-toggle
+            @click="toggleDensityMode"
+          >
+            <svg v-if="densityMode === 'standard'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+              <path d="M4 7h10M4 17h16M14 7l2-2m-2 2 2 2M10 17l2-2m-2 2 2 2" />
+            </svg>
+            <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+              <rect x="4" y="4" width="6" height="6" rx="1" />
+              <rect x="14" y="4" width="6" height="6" rx="1" />
+              <rect x="4" y="14" width="6" height="6" rx="1" />
+              <rect x="14" y="14" width="6" height="6" rx="1" />
+            </svg>
+            <span class="sr-only">{{ densityMode === 'standard' ? '切换为仅显示 Logo' : '切换为显示频道信息' }}</span>
+          </button>
 
           <button
             type="button"
@@ -678,6 +672,14 @@ function setDensityMode(value) {
   if (value !== IPTV_CARD_DENSITIES.STANDARD && value !== IPTV_CARD_DENSITIES.COMPACT) return
   densityPreference.value = value
   writeIptvCardDensityPreference(value)
+}
+
+function toggleDensityMode() {
+  setDensityMode(
+    densityMode.value === IPTV_CARD_DENSITIES.STANDARD
+      ? IPTV_CARD_DENSITIES.COMPACT
+      : IPTV_CARD_DENSITIES.STANDARD,
+  )
 }
 
 const { y: scrollY } = useScroll(scrollRef)
