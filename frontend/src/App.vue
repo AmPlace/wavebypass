@@ -55,9 +55,7 @@
           <svg v-if="item.icon === 'home'" class="size-6 shrink-0" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m4 10 8-6 8 6v9a1 1 0 0 1-1 1h-5v-6h-4v6H5a1 1 0 0 1-1-1v-9Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
           <svg v-else-if="item.icon === 'tv'" class="size-6 shrink-0" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="4" y="6" width="16" height="12" rx="2" stroke="currentColor" stroke-width="1.8"/><path d="M9 3.5 12 6l3-2.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
           <svg v-else-if="item.icon === 'radio'" class="size-6 shrink-0" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="2.2" fill="currentColor"/><path d="M7.8 7.8a6 6 0 0 0 0 8.4M16.2 7.8a6 6 0 0 1 0 8.4M4.9 4.9a10 10 0 0 0 0 14.2M19.1 4.9a10 10 0 0 1 0 14.2" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
-          <svg v-else-if="item.icon === 'star'" class="size-6 shrink-0" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m12 4 2.35 4.76 5.25.76-3.8 3.7.9 5.23L12 15.98l-4.7 2.47.9-5.23-3.8-3.7 5.25-.76L12 4Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
           <svg v-else-if="item.icon === 'calendar'" class="size-6 shrink-0" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="4" y="5.5" width="16" height="15" rx="2" stroke="currentColor" stroke-width="1.8"/><path d="M8 3.5v4M16 3.5v4M4 10h16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
-          <svg v-else-if="item.icon === 'clock'" class="size-6 shrink-0" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="8" stroke="currentColor" stroke-width="1.8"/><path d="M12 7.5v5l3 1.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
           <span class="nav-label truncate">{{ item.label }}</span>
         </button>
 
@@ -222,8 +220,6 @@ function toggleSidebar() {
 const primaryNavItems = computed(() => [
   { label: '电视', icon: 'tv', route: '/tv', active: route.path === '/tv' },
   { label: '电台', icon: 'radio', route: '/radio', active: route.path === '/radio' },
-  { label: '收藏', icon: 'star', route: '/iptv', active: false },
-  { label: '回看', icon: 'clock', route: '/iptv', active: false },
 ])
 const secondaryNavItems = computed(() => [
   { label: 'Market', icon: 'layers', route: '/market', active: route.path === '/market' },

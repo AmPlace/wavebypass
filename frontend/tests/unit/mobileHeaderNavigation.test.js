@@ -54,7 +54,7 @@ test('More入口状态由当前route推导，且路由变化会关闭菜单', ()
 
   assert.match(app, /active: route\.path === '\/market'/)
   assert.match(app, /active: route\.path\.startsWith\('\/settings'\)/)
-  assert.match(app, /!\['\/', '\/iptv'\]\.includes\(route\.path\)/)
+  assert.match(app, /!\['\/radio', '\/tv'\]\.includes\(route\.path\)/)
   assert.match(app, /watch\(\(\) => route\.path, \(path\) => \{\s*mobileMenuOpen\.value = false/)
 })
 
@@ -71,6 +71,8 @@ test('Desktop sidebar与Desktop header仍保留原有入口，不被More替代',
   const app = source('src/App.vue')
 
   assert.match(app, /class="app-sidebar[\s\S]*hidden[\s\S]*lg:flex/)
+  assert.doesNotMatch(app, /label: '收藏'/)
+  assert.doesNotMatch(app, /label: '回看'/)
   assert.match(app, /label: '电视', icon: 'tv', route: '\/tv'/)
   assert.match(app, /label: '电台', icon: 'radio', route: '\/radio'/)
   assert.match(app, /label: 'Market', icon: 'layers', route: '\/market'/)
