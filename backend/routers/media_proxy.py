@@ -12,7 +12,6 @@
 * ``GET /api/media/proxy/stream/{handle}`` —— MPEG-TS / FLV 直连流。
 * ``GET /api/media/proxy/rtsp/{handle}`` —— RTSP→HLS playlist（基于 handle.url 与 compat）。
 * ``GET /api/media/proxy/image/{handle}`` —— adapter 封面图（Referer 防盗链白名单兜底）。
-* ``POST /api/media/proxy/release/{cache_key}`` —— wide playlist 主动释放（按稳定 cache_key）。
 
 管理员入口
 ==========
@@ -800,8 +799,8 @@ async def _serve_resolved_source_playlist(
         )
         return RedirectResponse(f"/api/media/proxy/stream/{handle}{token_qs}", status_code=307)
 
-    # HLS：复用 main.iptv_wide_playlist 的内部实现（通过 cache key + ctx_id）
-    return await _m.serve_iptv_wide_playlist_by_source(
+    # HLS：统一走 Thin playlist 入口；子 playlist/chunk 仍通过 signed handle 代理。
+    return await _m.serve_iptv_playlist_by_source(
         upstream_url=resolved_url,
         ctx_id=ctx_id,
         src_label=src_label,
@@ -988,28 +987,9 @@ async def media_proxy_playlist(
     headers = _ctx_to_request_headers(ctx)
     headers.setdefault("Accept-Encoding", "identity")
 
-    if not _m.WIDE_ENABLED:
-        # 薄韧性直通：重试 + single-flight + 短暂回退
-        text, final_url = await _m._thin_playlist_fetch(payload.url, headers)
-        base_url = final_url
-        raw_text = text
-    else:
-        # 扩窗路径的原始直拉行为
-        try:
-            upstream = await request_with_safe_redirects(
-                _m.http_client,
-                "GET",
-                payload.url,
-                timeout=12,
-                headers=headers,
-            )
-            upstream.raise_for_status()
-        except RedirectTargetRejected as exc:
-            raise HTTPException(status_code=403, detail=str(exc.cause)) from exc
-        except httpx.HTTPError as exc:
-            raise HTTPException(status_code=502, detail=f"拉取 M3U8 失败: {exc}") from exc
-        base_url = str(upstream.url)
-        raw_text = upstream.text
+    # 所有 signed playlist handle 都走同一条 Thin 拉取链：重试、single-flight、
+    # 短暂成功缓存和安全 redirect guard 均由共享 helper 负责。
+    raw_text, base_url = await _m._thin_playlist_fetch(payload.url, headers)
 
     rewrite_ctx = _build_rewrite_context(
         base_url=base_url,
@@ -1217,24 +1197,6 @@ async def media_proxy_image(
             "Access-Control-Allow-Origin": "*",
         },
     )
-
-
-# ── 释放（按稳定 cache key）────────────────────────────────────────────
-
-
-@router.post("/api/media/proxy/release/{cache_key}")
-async def media_proxy_release(
-    cache_key: str,
-    access: MediaAccessContext = Depends(resolve_media_access),
-):
-    import main as _m
-    # release 是「管理动作」（强制下次 wide playlist 回源），不能让匿名调用——
-    # 否则攻击者可以拿合法 cache_key 反复 release，造成 wide cache 抖动 / 上游
-    # 放大。media credential 来源也允许：使用受限凭证的外部播放器仍属于受信。
-    if access.source == "anonymous":
-        raise HTTPException(status_code=401, detail="release 需要登录或有效凭证")
-    released = _m.release_iptv_wide_playlist_by_key(cache_key)
-    return {"released": released}
 
 
 # ── 管理员 URL probe ──────────────────────────────────────────────────────

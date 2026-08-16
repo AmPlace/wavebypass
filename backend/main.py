@@ -12,7 +12,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from collections.abc import AsyncIterator
 from pathlib import Path
-from urllib.parse import parse_qs, quote, urljoin, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -118,9 +118,6 @@ def get_cdn_headers_for_station(station_id: str) -> dict[str, str]:
 
 TOKEN_REFRESH_HTTP_STATUS_CODES = {401, 403, 404, 410}
 
-
-# RFC 8216: ``EXT-X-DISCONTINUITY-SEQUENCE`` 是 playlist 级别（出现在头部一次），
-# 不是 per-segment。从 prefix tag 列表里挪走，作为 meta 处理（_HLS_META_TAGS）。
 
 # 直连而不走 HLS 处理的电台 ID 集合。空字符串元素是历史遗留，没有任何匹配语义，
 # 留着只会让代码读起来怪。这里替换成真正的空集合，需要新增直连电台时再 union。
@@ -783,7 +780,6 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         await _shutdown_app_background_tasks()
-        await _shutdown_wide_playlist_state()
         try:
             if automation_service is not None:
                 await automation_service.stop()
@@ -2553,50 +2549,9 @@ async def test_status(sub_id: int):
 
 # ── 播放代理 ──
 
-# 扩展窗口代理：定期拉上游 playlist
-_wide_cache: dict[str, dict] = {}
-# Cold initialization is single-flight per stable cache key.  The locks are
-# intentionally per-key rather than global so unrelated channels can start in
-# parallel.  They are retained after eviction as a small synchronization
-# registry; removing a lock while a waiter is acquiring it would reintroduce
-# the duplicate-initializer race.
-_wide_initialization_locks: dict[str, asyncio.Lock] = {}
-# Request tasks waiting for or performing cold initialization.  Lifespan
-# shutdown cancels these before clearing the lock registry, so an in-flight
-# request cannot publish a cache after the HTTP client has been closed.
-_wide_initialization_tasks: dict[str, set[asyncio.Task]] = {}
-# Every live refresher is owned by this map.  Cache eviction/shutdown cancels
-# through this map instead of leaving an untracked asyncio task behind.
-_wide_refresher_tasks: dict[str, asyncio.Task] = {}
-# 扩展窗口设计目标：维持「比上游 sliding window 略大但不要长到老 segment 404」。
-# 实际上游窗口典型 3~6 段；这里取 8 既能覆盖瞬时缺段，又能让 hls.js 看到一个稳定的
-# live edge。``_WIDE_WINDOW`` 只是上限，实际 deque 仍然按 seq 推进。
-# 一些 IPTV 上游会用循环文件名（如 0.ts/1.ts/.../4.ts）+ 滚动 MEDIA-SEQUENCE；
-# 同一文件名的内容会被覆盖。窗口必须 ≤ 上游 sliding window，否则队尾的旧
-# segment URL 拉回来已是新内容，hls.js 会触发 levelParsingError / bufferStalled。
-# 取 6：略大于福建系上游的 5 段，给一两段缓冲；其它源上游窗口通常 ≥ 6。
-_WIDE_WINDOW = 6
-_WIDE_TTL = 120
-# stale grace 不再写死秒数；按 target_duration 折算，至少 30s、最多 90s。
-_WIDE_STALE_GRACE_MIN = 30
-_WIDE_STALE_GRACE_MAX = 90
-_WIDE_REFRESH_LOG_INTERVAL = 30
-# 后台 refresher 的最短/最长睡眠时间，按 target_duration 自适应。
-_WIDE_REFRESH_INTERVAL_MIN = 1.0
-_WIDE_REFRESH_INTERVAL_MAX = 4.0
-# 后台刷新最多允许的连续失败次数。超过后主动释放缓存，让下一请求重新
-# 调用 adapter resolve 拿到新鲜 token。fjtv 等上游的动态 ``_upt`` token
-# 可能几个月也不变，也可能几分钟就过期；我们靠「反复失败」来推断。
-_WIDE_MAX_CONSECUTIVE_ERRORS = 12
-_IPTV_SEGMENT_EXTENSIONS = (".ts", ".m4s", ".mp4", ".m4v", ".aac", ".mp3", ".key")
-_HLS_URI_TAGS = ("EXT-X-KEY", "EXT-X-MAP", "EXT-X-PART", "EXT-X-PRELOAD-HINT", "EXT-X-MEDIA", "EXT-X-I-FRAME-STREAM-INF")
-_HLS_URI_RE = re.compile(r'(URI=")([^"]+)(")', re.IGNORECASE)
-
-WIDE_ENABLED = False  # 全局扩窗开关；False=统一直通重写，True=恢复旧扩窗行为
-
-# ── 薄韧性 playlist 代理缓存（非扩窗）────────────────────────────
-# 扩窗关闭时，所有 playlist 拉取走这里：重试 + single-flight + 短暂成功回退。
-# 不做队列、不做后台 refresher、不自己维护 MEDIA-SEQUENCE。
+# ── Thin playlist 代理缓存 ────────────────────────────
+# 所有 playlist 拉取走这里：重试 + single-flight + 短暂成功回退。
+# 不做队列、不做后台刷新、不自己维护 MEDIA-SEQUENCE。
 _THIN_CACHE: dict[str, tuple[str, str, float]] = {}   # cache_key → (text, final_url, ts)
 _THIN_LOCKS: dict[str, asyncio.Lock] = {}
 _THIN_TTL = 1.5          # 新鲜窗口：合并并发请求 + 极短回放，避免 short-window 上游（如 yxfy 3×5s）丢段
@@ -2615,7 +2570,7 @@ async def _thin_playlist_fetch(url: str, headers: dict[str, str] | None = None, 
 
     - single-flight：同一 URL 并发请求合并为一次上游 fetch
     - 重试 1 次（共 2 次尝试，间隔 0.3s）
-    - 成功结果按稳定 key 缓存 5s，作为后续失败时的回退
+    - 成功结果按稳定 key 缓存 1.5s，作为后续失败时的回退
     - 全失败且缓存中有未过期结果 → 返回缓存
     - 全失败且无缓存 → raise HTTPException(502)
 
@@ -2684,232 +2639,6 @@ async def _thin_playlist_fetch(url: str, headers: dict[str, str] | None = None, 
             return cached[0], cached[1]
 
         raise HTTPException(status_code=502, detail=f"拉取 playlist 失败: {last_exc}")
-
-
-def _wide_stale_grace_for(target_duration: int) -> float:
-    return min(
-        _WIDE_STALE_GRACE_MAX,
-        max(_WIDE_STALE_GRACE_MIN, float(target_duration) * 4.0),
-    )
-
-
-def _wide_refresh_interval_for(target_duration: int) -> float:
-    base = max(1.0, float(target_duration) / 2.0)
-    return min(_WIDE_REFRESH_INTERVAL_MAX, max(_WIDE_REFRESH_INTERVAL_MIN, base))
-
-
-def _wide_initialization_lock_for(cache_key: str) -> asyncio.Lock:
-    return _wide_initialization_locks.setdefault(cache_key, asyncio.Lock())
-
-
-def _track_wide_initializer(cache_key: str) -> asyncio.Task | None:
-    try:
-        task = asyncio.current_task()
-    except RuntimeError:
-        return None
-    if task is not None:
-        _wide_initialization_tasks.setdefault(cache_key, set()).add(task)
-    return task
-
-
-def _untrack_wide_initializer(cache_key: str, task: asyncio.Task | None) -> None:
-    if task is None:
-        return
-    tasks = _wide_initialization_tasks.get(cache_key)
-    if not tasks:
-        return
-    tasks.discard(task)
-    if not tasks:
-        _wide_initialization_tasks.pop(cache_key, None)
-
-
-def _wide_refresher_done(cache_key: str, task: asyncio.Task) -> None:
-    """Remove a completed refresher and invalidate an unexpected failure."""
-    owns_cache = _wide_refresher_tasks.get(cache_key) is task
-    if owns_cache:
-        _wide_refresher_tasks.pop(cache_key, None)
-    if task.cancelled():
-        return
-    try:
-        error = task.exception()
-    except BaseException:
-        return
-    if error is not None and owns_cache:
-        logger.error(
-            "IPTV wide playlist refresher exited unexpectedly: key=%s error=%s",
-            cache_key,
-            type(error).__name__,
-        )
-        # A completed task cannot refresh this cache anymore.  Drop the cache
-        # so the next request can perform a clean initialization.
-        _drop_wide_cache(cache_key)
-
-
-def _start_wide_refresher(
-    cache_key: str,
-    target_url: str,
-    ctx_id: str,
-    src_id: str,
-    src_label: str,
-) -> asyncio.Task:
-    existing = _wide_refresher_tasks.get(cache_key)
-    if existing is not None and not existing.done():
-        return existing
-    if existing is not None and _wide_refresher_tasks.get(cache_key) is existing:
-        _wide_refresher_tasks.pop(cache_key, None)
-    task = asyncio.create_task(
-        _wide_refresher(cache_key, target_url, ctx_id, src_id, src_label),
-        name=f"wide-refresher:{cache_key[:96]}",
-    )
-    _wide_refresher_tasks[cache_key] = task
-    task.add_done_callback(lambda done: _wide_refresher_done(cache_key, done))
-    return task
-
-
-def _drop_wide_cache(cache_key: str) -> None:
-    _wide_cache.pop(cache_key, None)
-    _wide_cache.pop(cache_key + '_ts', None)
-    _wide_cache.pop(cache_key + '_err', None)
-    task = _wide_refresher_tasks.pop(cache_key, None)
-    if task is None or task.done():
-        return
-    try:
-        current = asyncio.current_task()
-    except RuntimeError:
-        current = None
-    if task is not current:
-        task.cancel()
-
-
-async def _shutdown_wide_playlist_state() -> None:
-    """Cancel and await every tracked wide refresher before HTTP shutdown."""
-    try:
-        current = asyncio.current_task()
-    except RuntimeError:
-        current = None
-    initializers = {
-        task
-        for tasks in _wide_initialization_tasks.values()
-        for task in tasks
-        if task is not current and not task.done()
-    }
-    for task in initializers:
-        task.cancel()
-    if initializers:
-        await asyncio.gather(*initializers, return_exceptions=True)
-    tasks = list(_wide_refresher_tasks.values())
-    for cache_key in list(_wide_refresher_tasks):
-        _drop_wide_cache(cache_key)
-    _wide_cache.clear()
-    _wide_initialization_locks.clear()
-    _wide_initialization_tasks.clear()
-    if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
-    _wide_refresher_tasks.clear()
-
-
-def _ensure_hls_playlist_text(text: str, url: str) -> None:
-    if not (text or "").lstrip().startswith("#EXTM3U"):
-        raise HTTPException(status_code=502, detail=f"上游没有返回有效 M3U8: {url}")
-
-
-def _should_proxy_iptv_chunk(seg_url: str, proxy_ts: int = 0) -> bool:
-    scheme = urlparse(seg_url).scheme.lower()
-    return bool(proxy_ts) and scheme in {"http", "https"}
-
-
-def _make_handle_path(*, kind: str, upstream_url: str, ctx_id: str, src_id: str, src_label: str, access_token: str = "") -> str:
-    """统一封装 signed handle URL 生成。
-
-    ctx_id / src_id / src_label 来自调用方所处的请求上下文（rewriter / wide refresher）。
-    access_token 仅在调用方持有 Media Credential 时透传。
-    """
-    from security.proxy_handles import issue_cached_handle as _issue
-    handle = _issue(
-        kind=kind,
-        url=upstream_url,
-        src=src_label,
-        src_id=src_id,
-        ctx=ctx_id,
-    )
-    suffix = ""
-    if access_token:
-        suffix = f"?access_token={quote(access_token, safe='')}"
-    return f"/api/media/proxy/{kind}/{handle}{suffix}"
-
-
-def _iptv_chunk_handle_path(seg_url: str, ctx_id: str, src_id: str, src_label: str, access_token: str = "") -> str:
-    return _make_handle_path(
-        kind="chunk",
-        upstream_url=seg_url,
-        ctx_id=ctx_id,
-        src_id=src_id,
-        src_label=src_label,
-        access_token=access_token,
-    )
-
-
-def _iptv_playlist_handle_path(playlist_url: str, ctx_id: str, src_id: str, src_label: str, access_token: str = "") -> str:
-    return _make_handle_path(
-        kind="playlist",
-        upstream_url=playlist_url,
-        ctx_id=ctx_id,
-        src_id=src_id,
-        src_label=src_label,
-        access_token=access_token,
-    )
-
-
-def _rewrite_hls_tag_uri(line: str, base_url: str, ctx_id: str, src_id: str, src_label: str, *, access_token: str = "", proxy_ts: int = 1) -> str:
-    """重写 HLS 标签行内的 ``URI="..."``。"""
-    upper = line.upper()
-    if not any(f"#{tag}:" in upper for tag in _HLS_URI_TAGS):
-        return line
-
-    def _replace_uri(m):
-        uri = m.group(2)
-        scheme = urlparse(uri).scheme.lower()
-        if scheme and scheme not in ("http", "https"):
-            return m.group(0)
-
-        absolute_url = urljoin(base_url, uri)
-        parsed = urlparse(absolute_url)
-        uri_path = parsed.path.lower()
-
-        if uri_path.endswith(".m3u8"):
-            return f'{m.group(1)}{_iptv_playlist_handle_path(absolute_url, ctx_id, src_id, src_label, access_token)}{m.group(3)}'
-        if uri_path.endswith(_IPTV_SEGMENT_EXTENSIONS) and _should_proxy_iptv_chunk(absolute_url, proxy_ts):
-            return f'{m.group(1)}{_iptv_chunk_handle_path(absolute_url, ctx_id, src_id, src_label, access_token)}{m.group(3)}'
-        return m.group(0)
-
-    return _HLS_URI_RE.sub(_replace_uri, line)
-
-
-def _rewrite_iptv_wide_m3u8_text(raw_m3u8_text: str, base_url: str, ctx_id: str, src_id: str, src_label: str, *, access_token: str = "", proxy_ts: int = 1) -> str:
-    rewritten_lines: list[str] = []
-    for line in raw_m3u8_text.splitlines():
-        stripped_line = line.strip()
-        if not stripped_line:
-            rewritten_lines.append(line)
-            continue
-        if stripped_line.startswith("#"):
-            rewritten_lines.append(_rewrite_hls_tag_uri(line, base_url, ctx_id, src_id, src_label, access_token=access_token, proxy_ts=proxy_ts))
-            continue
-        try:
-            absolute_media_url = urljoin(base_url, stripped_line)
-        except ValueError:
-            logger.warning("跳过无法解析的 HLS URI: base=%s line=%s", base_url, stripped_line[:200])
-            rewritten_lines.append(line)
-            continue
-        parsed_url = urlparse(absolute_media_url)
-        uri_path = parsed_url.path.lower()
-        if uri_path.endswith(".m3u8"):
-            rewritten_lines.append(_iptv_playlist_handle_path(absolute_media_url, ctx_id, src_id, src_label, access_token))
-        elif uri_path.endswith(_IPTV_SEGMENT_EXTENSIONS) and _should_proxy_iptv_chunk(absolute_media_url, proxy_ts):
-            rewritten_lines.append(_iptv_chunk_handle_path(absolute_media_url, ctx_id, src_id, src_label, access_token))
-        else:
-            rewritten_lines.append(absolute_media_url)
-    return "\n".join(rewritten_lines)
 
 
 # 旧 adapter 公共解析/播放入口已被 ``/api/media/channel/{key}/playlist.m3u8`` 取代：
@@ -3166,435 +2895,7 @@ async def fetch_adapter_cover_payload(adapter_url: str) -> dict:
 # 封面元数据走 /api/media/channel/{key}/cover；封面图片走 image handle。
 
 
-# Header-level 全局元数据（出现在 playlist 头部一次的标签）。
-# DISCONTINUITY / DISCONTINUITY-SEQUENCE / PROGRAM-DATE-TIME 是「跨 segment」标签，
-# 必须按出现位置和顺序写入，不能放在头部，故此处不包含。
-_HLS_META_TAGS = (
-    "EXT-X-MAP",
-    "EXT-X-KEY",
-    "EXT-X-VERSION",
-    "EXT-X-PLAYLIST-TYPE",
-    "EXT-X-INDEPENDENT-SEGMENTS",
-    "EXT-X-START",
-    # RFC 8216 §4.3.3.3: DISCONTINUITY-SEQUENCE 只能在 playlist 头部出现一次，
-    # 不是 per-segment。归到 meta（出现一次即可）。
-    "EXT-X-DISCONTINUITY-SEQUENCE",
-)
-
-# 这些标签作用域是「下一个 segment」，要按位置插在 EXTINF 之前。
-_HLS_PER_SEGMENT_PREFIX_TAGS = (
-    "EXT-X-DISCONTINUITY",
-    "EXT-X-PROGRAM-DATE-TIME",
-    "EXT-X-BYTERANGE",
-    "EXT-X-CUE-OUT",
-    "EXT-X-CUE-IN",
-    "EXT-X-CUE",
-)
-
-
-def _extract_hls_meta_lines(m3u8_text: str, base_url: str, ctx_id: str, src_id: str, src_label: str, *, access_token: str = "", proxy_ts: int = 1) -> list[str]:
-    """Extract metadata lines (MAP, KEY, VERSION, etc.) from m3u8 text, rewritten as signed-handle URLs."""
-    meta = []
-    for line in m3u8_text.splitlines():
-        stripped = line.strip()
-        if not stripped.startswith('#'):
-            continue
-        upper = stripped.upper()
-        for tag in _HLS_META_TAGS:
-            if upper.startswith(f'#{tag}:'):
-                meta.append(_rewrite_hls_tag_uri(line, base_url, ctx_id, src_id, src_label, access_token=access_token, proxy_ts=proxy_ts))
-                break
-            if upper == f'#{tag}':
-                # 无值标签（如 #EXT-X-INDEPENDENT-SEGMENTS）
-                meta.append(line)
-                break
-    return meta
-
-
-def _is_per_segment_prefix_tag(line: str) -> bool:
-    upper = line.strip().upper()
-    if not upper.startswith('#'):
-        return False
-    body = upper[1:]
-    for tag in _HLS_PER_SEGMENT_PREFIX_TAGS:
-        if body == tag or body.startswith(f'{tag}:'):
-            return True
-    return False
-
-
-def _parse_live_segments(text: str, base_url: str) -> tuple[list[dict], int, int]:
-    """从 m3u8 文本中提取 segment 列表，并保留每段前置标签（DISCONTINUITY 等）。
-
-    返回 ``(segments, target_duration, last_media_seq)``。每个 segment dict::
-
-        {"url": <abs upstream url>, "dur": "8.080",
-         "seq": <媒体序号>, "prefix_tags": [<原文 #EXT-X-...>...]}
-    """
-    segments: list[dict] = []
-    target_duration = 6
-    media_seq = 0
-    pending_tags: list[str] = []
-    lines = text.splitlines()
-    i = 0
-    while i < len(lines):
-        raw = lines[i]
-        line = raw.strip()
-        upper = line.upper()
-        if upper.startswith('#EXT-X-TARGETDURATION:'):
-            try:
-                target_duration = int(line.split(':', 1)[1].split(',', 1)[0])
-            except Exception:
-                pass
-        elif upper.startswith('#EXT-X-MEDIA-SEQUENCE:'):
-            try:
-                media_seq = int(line.split(':', 1)[1].split(',', 1)[0])
-            except Exception:
-                pass
-        elif _is_per_segment_prefix_tag(line):
-            pending_tags.append(raw.rstrip())
-        elif upper.startswith('#EXTINF:'):
-            dur = line.split(':', 1)[1].rstrip(',')
-            seg_url = ''
-            j = i + 1
-            # 跳过 EXTINF 与 URL 之间可能出现的注释/扩展标签
-            while j < len(lines):
-                nxt = lines[j].strip()
-                if not nxt:
-                    j += 1
-                    continue
-                if nxt.startswith('#'):
-                    if _is_per_segment_prefix_tag(nxt):
-                        pending_tags.append(lines[j].rstrip())
-                    j += 1
-                    continue
-                seg_url = nxt
-                break
-            if seg_url:
-                abs_url = urljoin(base_url, seg_url)
-                segments.append({
-                    'dur': dur,
-                    'url': abs_url,
-                    'seq': media_seq,
-                    'prefix_tags': pending_tags,
-                })
-                pending_tags = []
-                media_seq += 1
-                i = j
-        i += 1
-    return segments, target_duration, media_seq
-
-
-async def _wide_refresher(cache_key: str, target_url: str, ctx_id: str, src_id: str, src_label: str):
-    try:
-        await _run_wide_refresher(cache_key, target_url, ctx_id, src_id, src_label)
-    except asyncio.CancelledError:
-        # Direct task cancellation is treated like eviction: the cache is no
-        # longer valid without its owner, and a later request may retry cleanly.
-        # An external eviction removes the old task from the ownership map
-        # before cancelling it.  Do not let that stale cancellation invalidate
-        # a new cache/refresher already initialized for the same key.
-        if _wide_refresher_tasks.get(cache_key) is asyncio.current_task():
-            _drop_wide_cache(cache_key)
-        raise
-    except Exception as error:
-        logger.exception(
-            "IPTV wide playlist refresher crashed: key=%s error=%s",
-            cache_key,
-            type(error).__name__,
-        )
-        if _wide_refresher_tasks.get(cache_key) is asyncio.current_task():
-            _drop_wide_cache(cache_key)
-    finally:
-        if _wide_refresher_tasks.get(cache_key) is asyncio.current_task():
-            _wide_refresher_tasks.pop(cache_key, None)
-
-
-async def _run_wide_refresher(cache_key: str, target_url: str, ctx_id: str, src_id: str, src_label: str):
-    """后台任务：按 target_duration 自适应频率拉上游 playlist，更新分片队列。
-
-    上游 header 由 ProxyContext (按 ctx_id 索引) 提供；access_token 在生成
-    response 阶段由 wide_playlist 调用方按需注入，refresher 不持有该 token。
-    """
-    from security.proxy_context import get_registry as _get_registry
-    ctx = _get_registry().get(ctx_id) if ctx_id else None
-    _h: dict[str, str] = {}
-    if ctx:
-        if ctx.no_ua:
-            if ctx.custom_ua:
-                _h['User-Agent'] = ctx.custom_ua
-        elif ctx.custom_ua:
-            _h['User-Agent'] = ctx.custom_ua
-        if ctx.referer:
-            _h['Referer'] = ctx.referer
-        if ctx.cookie:
-            _h['Cookie'] = ctx.cookie
-    # 直播 m3u8 不要被中间层缓存，且我们处理 raw 文本，不要 gzip。
-    _h.setdefault('Accept-Encoding', 'identity')
-    while True:
-        cache = _wide_cache.get(cache_key)
-        _consec_error_key = cache_key + '_err'
-        last_access = _wide_cache.get(cache_key + '_ts', 0)
-        if not cache:
-            return
-        if time.time() - last_access > _WIDE_TTL:
-            _drop_wide_cache(cache_key)
-            logger.info("IPTV wide playlist 后台刷新停止: idle %.0fs key=%s", time.time() - last_access, cache_key)
-            return
-        active_target_url = cache.get('target_url') or target_url
-
-        try:
-            resp = await request_with_safe_redirects(
-                http_client,
-                "GET",
-                active_target_url,
-                headers=_h,
-                timeout=6,
-            )
-            resp.raise_for_status()
-            playlist_base_url = str(resp.url)
-            segments, target_duration, _ = _parse_live_segments(resp.text, playlist_base_url)
-
-            # Extract and rewrite metadata lines (MAP, KEY, etc.) — refresher 不带 access_token，
-            # 重写后的 meta 由响应阶段按需附加；此处生成的 path 不含 access_token，
-            # 调用方在写入 cache 后由响应阶段做一次覆盖（细节：response 阶段重新跑 _rewrite_meta_with_token）。
-            meta_lines = _extract_hls_meta_lines(resp.text, playlist_base_url, ctx_id, src_id, src_label, proxy_ts=1)
-
-            cache = _wide_cache.get(cache_key)
-            if not cache:
-                return
-            cache['last_refresh_at'] = time.time()
-            cache['stale_since'] = 0
-            cache['target_duration'] = target_duration
-            # 成功刷新 → 重置连续失败计数
-            _wide_cache[cache_key + '_err'] = 0
-            if meta_lines:
-                cache['meta'] = meta_lines
-            cache['base_url'] = playlist_base_url
-            cache['raw_meta_text'] = resp.text  # 缓存原文，响应阶段按 token 重写
-            # 上游有些频道（如福建 qznews）会循环复用 0.ts/1.ts/... 文件名，
-            # 内容随 MEDIA-SEQUENCE 变化。**只用 URL 去重会让 refresher 永远丢掉
-            # 后续段**，sequence 永远卡在第一次见到的队尾。这里以「比当前队尾大
-            # 的 seq」为追加门槛。
-            #
-            # 但还有一种真实场景需要照顾：上游直播流被中断后重启（CDN 切换、
-            # 编码器重启），新一轮 MEDIA-SEQUENCE 会从一个比当前 tail 小很多的
-            # 值重新开始。如果一直靠 ``seg.seq > tail`` 跳过，整个 queue 会冻结，
-            # 直到 stale_grace 过期才被清掉，造成 30-90s 的假冻结窗口。
-            # 检测条件：上游 playlist 头部 MEDIA-SEQUENCE 比我们记下的 tail_seq
-            # 还小很多（差距 > _WIDE_WINDOW * 2），认为是 reset，清空 queue。
-            queue = cache['queue']
-            current_tail_seq = queue[-1]['seq'] if queue else -1
-            upstream_head_seq = segments[0]['seq'] if segments else -1
-            if (
-                queue
-                and upstream_head_seq >= 0
-                and upstream_head_seq < current_tail_seq - (_WIDE_WINDOW * 2)
-            ):
-                logger.warning(
-                    "IPTV wide playlist 检测到上游 sequence 重置: tail=%d upstream_head=%d key=%s",
-                    current_tail_seq,
-                    upstream_head_seq,
-                    cache_key,
-                )
-                queue.clear()
-                current_tail_seq = -1
-            for seg in segments:
-                if seg['seq'] > current_tail_seq:
-                    queue.append(seg)
-                    current_tail_seq = seg['seq']
-            while len(queue) > _WIDE_WINDOW:
-                queue.popleft()
-            # 维护与 queue 一致的 seen（仅作向后兼容，不再参与去重判定）
-            cache['seen'] = {s['url'] for s in queue}
-        except Exception as exc:
-            cache = _wide_cache.get(cache_key)
-            if cache:
-                now = time.time()
-                consecutive_errors = int(_wide_cache.get(_consec_error_key, 0)) + 1
-                _wide_cache[_consec_error_key] = consecutive_errors
-                if not cache.get('stale_since'):
-                    cache['stale_since'] = now
-                last_log = float(cache.get('last_refresh_log_at') or 0)
-                if now - last_log >= _WIDE_REFRESH_LOG_INTERVAL:
-                    logger.warning(
-                        "IPTV wide playlist 后台刷新失败，暂时保留旧缓存: key=%s error=%s",
-                        cache_key,
-                        exc,
-                    )
-                    cache['last_refresh_log_at'] = now
-                if consecutive_errors >= _WIDE_MAX_CONSECUTIVE_ERRORS:
-                    logger.warning(
-                        "IPTV wide playlist refresher exceeded consecutive failure limit: key=%s",
-                        cache_key,
-                    )
-                    _drop_wide_cache(cache_key)
-                    return
-        # 自适应：按 target_duration 折算，避免对 8s targetDuration 的源 2s 一刷的过密流量。
-        cache_now = _wide_cache.get(cache_key) or {}
-        sleep_for = _wide_refresh_interval_for(cache_now.get('target_duration', 6))
-        await asyncio.sleep(sleep_for)
-
-
-def release_iptv_wide_playlist_by_key(cache_key: str) -> bool:
-    """供 router 调用的稳定 cache_key 释放接口。"""
-    if not cache_key:
-        return False
-    initializer_tasks = list(_wide_initialization_tasks.get(cache_key, ()))
-    released = bool(
-        cache_key in _wide_cache
-        or cache_key + '_ts' in _wide_cache
-        or initializer_tasks
-    )
-    try:
-        current = asyncio.current_task()
-    except RuntimeError:
-        current = None
-    for task in initializer_tasks:
-        if task is not current and not task.done():
-            task.cancel()
-    _drop_wide_cache(cache_key)
-    return released
-
-
-def _wide_cache_key_for(upstream_url: str, ctx_id: str, *, source_id: str = "", source_revision: str = "") -> str:
-    """稳定 cache key：source/config scope + playlist identity + ctx_id。
-
-    不使用 signed handle 当 cache key（每次签发都不同），避免缓存反复失效。
-
-    fjtv 等 adapter 每次 resolve 带不同的 ``_upt`` / session token，导致
-    upstream_url 次次换，cache_key 跟着换，刚建起来的 wide cache + 后台
-    refresher 立刻被孤立成 dead entry。这里只取 scheme://netloc/path 作为
-    playlist 层级，query（含动态 token）不参与 cache key；source_revision
-    负责源配置变更时主动切到新缓存。
-    """
-    parsed = urlparse(upstream_url)
-    stable_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
-    parts = [
-        source_id or "",
-        source_revision or "",
-        stable_url,
-        ctx_id or "",
-    ]
-    return quote("\x1f".join(parts), safe='')
-
-
-async def _initialize_wide_playlist_cache(
-    *,
-    cache_key: str,
-    upstream_url: str,
-    ctx_id: str,
-    src_id: str,
-    src_label: str,
-    headers: dict[str, str],
-    access_token: str,
-) -> Response | None:
-    """Perform one cold initialization while the caller owns the key lock.
-
-    A live segment playlist publishes the cache and exactly one refresher.  A
-    master/empty or failed playlist is served without publishing an empty
-    cache, so it cannot create a phantom refresher; the next request may retry
-    initialization.
-    """
-    from collections import deque
-
-    queue = deque(maxlen=_WIDE_WINDOW)
-    seen = set()
-    target_dur = 6
-    playlist_base_url = upstream_url
-    last_text = ""
-    for attempt in range(4):
-        try:
-            resp = await request_with_safe_redirects(
-                http_client,
-                "GET",
-                upstream_url,
-                headers=headers,
-                timeout=8,
-            )
-            resp.raise_for_status()
-            playlist_base_url = str(resp.url)
-            last_text = resp.text
-            fresh_segs, fresh_target, _ = _parse_live_segments(resp.text, playlist_base_url)
-            if fresh_target:
-                target_dur = fresh_target
-            tail_seq = queue[-1]['seq'] if queue else -1
-            for seg in fresh_segs:
-                if seg['seq'] > tail_seq:
-                    queue.append(seg)
-                    seen.add(seg['url'])
-                    tail_seq = seg['seq']
-        except RedirectTargetRejected as exc:
-            raise HTTPException(status_code=403, detail=str(exc.cause)) from exc
-        except Exception:
-            pass
-        if attempt < 3:
-            await asyncio.sleep(0.3)
-
-    if not queue:
-        # Preserve the existing master-playlist fallback, but do not publish
-        # an empty cache or background task for it.
-        try:
-            resp = await request_with_safe_redirects(
-                http_client,
-                "GET",
-                upstream_url,
-                headers=headers,
-                timeout=8,
-            )
-            _ensure_hls_playlist_text(resp.text, str(resp.url))
-            rewritten = _rewrite_iptv_wide_m3u8_text(
-                resp.text,
-                str(resp.url),
-                ctx_id,
-                src_id,
-                src_label,
-                access_token=access_token,
-                proxy_ts=1,
-            )
-            return Response(
-                content=rewritten,
-                media_type="application/x-mpegURL",
-                headers={'Cache-Control': 'no-cache, no-store, must-revalidate'},
-            )
-        except RedirectTargetRejected as exc:
-            raise HTTPException(status_code=403, detail=str(exc.cause)) from exc
-        except httpx.HTTPError as exc:
-            raise HTTPException(status_code=502, detail=f"拉取失败: {exc}") from exc
-
-    meta_lines = _extract_hls_meta_lines(
-        last_text,
-        playlist_base_url,
-        ctx_id,
-        src_id,
-        src_label,
-        access_token=access_token,
-        proxy_ts=1,
-    ) if last_text else []
-    _wide_cache[cache_key] = {
-        'queue': queue,
-        'seen': seen,
-        'target_duration': target_dur,
-        'meta': meta_lines,
-        'base_url': playlist_base_url,
-        'raw_meta_text': last_text,
-        'target_url': upstream_url,
-        'last_refresh_at': time.time(),
-        'stale_since': 0,
-        'last_refresh_log_at': 0,
-    }
-    _wide_cache[cache_key + '_ts'] = time.time()
-    try:
-        _start_wide_refresher(cache_key, upstream_url, ctx_id, src_id, src_label)
-    except BaseException:
-        # Cache publication and refresher ownership form one initialization
-        # unit.  If task creation is rejected during shutdown or loop teardown,
-        # do not leave a cache that can never be refreshed.
-        _drop_wide_cache(cache_key)
-        raise
-    return None
-
-
-async def serve_iptv_wide_playlist_by_source(
+async def serve_iptv_playlist_by_source(
     *,
     upstream_url: str,
     ctx_id: str,
@@ -3604,143 +2905,55 @@ async def serve_iptv_wide_playlist_by_source(
     source_revision: str = "",
     access,
 ):
-    """供 ``routers/media_proxy.py`` 调用：按上游 URL + ctx_id 拉播放列表。
+    """按上游 URL 拉取并重写 IPTV/Radio 的 Thin HLS playlist。
 
-    内部维护稳定 cache_key + 后台刷新任务。重写产物使用 signed handle，
-    并按 ``access`` 是否来自 Media Credential 决定是否透传 access_token。
+    这是所有新媒体 playlist 入口共用的边界：上游 URL 先经过 SSRF
+    校验，再由 Thin fetch helper 负责安全 redirect、single-flight、短暂
+    成功缓存和失败回退，最后交给统一的 M3U8 rewriter 生成 signed handles。
     """
     from security.proxy_context import get_registry as _get_registry
+    from core.m3u8_rewriter import RewriteContext as _RC, rewrite_m3u8 as _rw
 
     if urlparse(upstream_url).scheme.lower() not in ("http", "https"):
         raise HTTPException(status_code=400, detail="上游 scheme 不被允许")
-    # 第一次拉上游必须跑 SSRF 校验。adapter 解析后的 URL 进入这里之前并没有
-    # 别的拦截层；后续 chunk/playlist 各自的子路由有 _validate_handle_url_or_403
-    # 兜底，但这里是入口，直接 fetch 之前必须挡一次。
+    # adapter 解析后的 URL 进入这里之前没有别的可信拦截层；第一次 fetch
+    # 仍必须在入口执行 SSRF 校验，后续 redirect 由 Thin fetch helper 复核。
     try:
         await assert_safe_target_url(upstream_url, allowed_schemes={"http", "https"})
     except UnsafeTargetError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
 
     ctx = _get_registry().get(ctx_id) if ctx_id else None
-    _headers: dict[str, str] = {}
+    headers: dict[str, str] = {}
     if ctx:
         if ctx.no_ua:
             if ctx.custom_ua:
-                _headers['User-Agent'] = ctx.custom_ua
+                headers["User-Agent"] = ctx.custom_ua
         elif ctx.custom_ua:
-            _headers['User-Agent'] = ctx.custom_ua
+            headers["User-Agent"] = ctx.custom_ua
         if ctx.referer:
-            _headers['Referer'] = ctx.referer
+            headers["Referer"] = ctx.referer
         if ctx.cookie:
-            _headers['Cookie'] = ctx.cookie
-    _headers.setdefault('Accept-Encoding', 'identity')
+            headers["Cookie"] = ctx.cookie
+    headers.setdefault("Accept-Encoding", "identity")
+
     source_ref = source_id or f"channel:{canonical_key}"
     cache_scope = f"{source_ref}:{source_revision or ''}"
-
-    if not WIDE_ENABLED:
-        # ── 薄韧性直通路径（非扩窗）─────────────────────────────
-        text, final_url = await _thin_playlist_fetch(upstream_url, _headers, cache_scope=cache_scope)
-        from core.m3u8_rewriter import RewriteContext as _RC, rewrite_m3u8 as _rw
-        rewrite_ctx = _RC(
-            base_url=final_url,
-            src_id=source_ref,
-            src_label=src_label,
-            ctx_id=ctx_id,
-            propagated_access_token=access.propagated_access_token or "" if access else "",
-            proxy_segments=True,
-        )
-        body = _rw(text, rewrite_ctx)
-        return Response(
-            content=body,
-            media_type="application/x-mpegURL",
-            headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
-        )
-    # ── 扩窗路径（WIDE_ENABLED=True）───────────────────────────
-
-    access_token = access.propagated_access_token or "" if access else ""
-    src_id = source_ref
-    cache_key = _wide_cache_key_for(upstream_url, ctx_id, source_id=source_ref, source_revision=source_revision)
-
-    def _rewrite_ts(seg_url: str, seg_seq: int = -1) -> str:
-        if not _should_proxy_iptv_chunk(seg_url, 1):
-            return seg_url
-        # 上游若复用 segment 文件名（如 0.ts/1.ts/...），仅靠 url 作为 handle cache
-        # key 会让连续不同 sequence 都映射到同一个 handle URL；hls.js 把它当作
-        # 重复段去重，导致缺帧 / bufferStalled。把 seq 注入上游 URL 的 query，
-        # CDN 一般忽略未知 query 参数，但我们的 handle 就能按 seq 区分。
-        upstream_with_seq = seg_url
-        if seg_seq >= 0:
-            sep = '&' if urlparse(seg_url).query else '?'
-            upstream_with_seq = f'{seg_url}{sep}wf_seq={seg_seq}'
-        return _iptv_chunk_handle_path(upstream_with_seq, ctx_id, src_id, src_label, access_token)
-
-    def _emit_segment_lines(seg: dict) -> list[str]:
-        out: list[str] = []
-        for tag in seg.get('prefix_tags') or ():
-            out.append(tag)
-        out.append(f'#EXTINF:{seg["dur"]},')
-        out.append(_rewrite_ts(seg['url'], seg.get('seq', -1)))
-        return out
-
-    if cache_key not in _wide_cache:
-        initializer = _track_wide_initializer(cache_key)
-        try:
-            async with _wide_initialization_lock_for(cache_key):
-                if cache_key not in _wide_cache:
-                    fallback = await _initialize_wide_playlist_cache(
-                        cache_key=cache_key,
-                        upstream_url=upstream_url,
-                        ctx_id=ctx_id,
-                        src_id=src_id,
-                        src_label=src_label,
-                        headers=_headers,
-                        access_token=access_token,
-                    )
-                    if fallback is not None:
-                        return fallback
-        finally:
-            _untrack_wide_initializer(cache_key, initializer)
-
-    # 命中缓存：返回扩展窗口 playlist。重写时根据当前请求的 access_token 重生成（meta + chunk）
-    _wide_cache[cache_key + '_ts'] = time.time()
-    cache = _wide_cache[cache_key]
-    cache['target_url'] = upstream_url
-    target_dur = cache.get('target_duration', 6)
-    stale_since = float(cache.get('stale_since') or 0)
-    if stale_since and time.time() - stale_since > _wide_stale_grace_for(target_dur):
-        _drop_wide_cache(cache_key)
-        # 用 503 显式告诉前端「上游暂不可用」，hls.js 在 levelLoadError 上会重试，
-        # 不会立刻把整个播放器 destroy 掉。
-        raise HTTPException(status_code=503, detail="直播 playlist 刷新失败，缓存已过期")
-    queue = cache['queue']
-    if not queue:
-        # 队列为空（冷启动阶段上游 4 次尝试都失败）：直接释放缓存，让下一轮
-        # 请求重新触发 adapter resolve + 新的缓存 + 新的后台 refresher，
-        # 不再走「每次直接取一次上游但不持久」的 half-baked 路径。
-        # 这里抛 503 告诉 hls.js 暂时不可用；hls.js 的 levelLoadError 会重试，
-        # 重试时 cache_key 已不在 _wide_cache，就会进入带 4 次重试的冷启动。
-        _drop_wide_cache(cache_key)
-        raise HTTPException(status_code=503, detail="直播 playlist 队列未就绪，请稍后重试")
-
-    base_url = cache.get('base_url') or upstream_url
-    raw_meta_text = cache.get('raw_meta_text') or ""
-    meta_lines = _extract_hls_meta_lines(raw_meta_text, base_url, ctx_id, src_id, src_label, access_token=access_token, proxy_ts=1) if raw_meta_text else []
-    out_lines = [
-        '#EXTM3U',
-        '#EXT-X-VERSION:3',
-        f'#EXT-X-TARGETDURATION:{target_dur}',
-        f'#EXT-X-MEDIA-SEQUENCE:{queue[0]["seq"]}',
-    ]
-    for m in meta_lines:
-        if not m.upper().startswith('#EXT-X-VERSION:'):
-            out_lines.append(m)
-    for seg in queue:
-        out_lines.extend(_emit_segment_lines(seg))
-    content = '\n'.join(out_lines)
+    text, final_url = await _thin_playlist_fetch(upstream_url, headers, cache_scope=cache_scope)
+    access_token = access.propagated_access_token if access else ""
+    rewrite_ctx = _RC(
+        base_url=final_url,
+        src_id=source_ref,
+        src_label=src_label,
+        ctx_id=ctx_id,
+        propagated_access_token=access_token or "",
+        proxy_segments=True,
+    )
+    body = _rw(text, rewrite_ctx)
     return Response(
-        content=content,
+        content=body,
         media_type="application/x-mpegURL",
-        headers={'Cache-Control': 'no-cache, no-store, must-revalidate'},
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
     )
 
 

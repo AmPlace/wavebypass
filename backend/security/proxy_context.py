@@ -100,7 +100,7 @@ class ProxyContextRegistry:
         """写入并返回不透明 ctx_id。
 
         若已经存在「内容等价」的 ProxyContext（按 fingerprint 比较），复用其
-        ctx_id 并刷新过期时间。这让 wide playlist 的 cache_key（含 ctx_id）在
+        ctx_id 并刷新过期时间。这让 playlist 的 cache_key（含 ctx_id）在
         同一频道短时间内的请求间稳定，下游 cache 才能真正命中。
         """
         effective_ttl = ttl if ttl is not None else self._default_ttl
