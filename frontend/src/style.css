@@ -976,8 +976,8 @@
   }
 
   .mobile-player-action-icon {
-    width: 1.125rem;
-    height: 1.125rem;
+    width: 1.25rem;
+    height: 1.25rem;
   }
 
   .mobile-player-play-icon--play {
@@ -1178,6 +1178,26 @@
   max-height: 100%;
   object-fit: contain;
   border-radius: 0;
+}
+
+/* Light-only identity-logo edge; cover artwork and text fallback stay clean. */
+.iptv-main .channel-card__center-logo {
+  filter: none;
+}
+
+.iptv-main .channel-card__center-logo--badge,
+.iptv-main .channel-card__center-logo--wide {
+  filter:
+    drop-shadow(0 0 1px rgba(15, 23, 42, 0.52))
+    drop-shadow(0 1px 1px rgba(15, 23, 42, 0.18));
+}
+
+.iptv-main .channel-card__center-logo--cover,
+.dark .iptv-main .channel-card__center-logo,
+.dark .iptv-main .channel-card__center-logo--badge,
+.dark .iptv-main .channel-card__center-logo--wide,
+.dark .iptv-main .channel-card__center-logo--cover {
+  filter: none;
 }
 
 .iptv-main.iptv-density-compact .channel-card__logo-stage--wide {

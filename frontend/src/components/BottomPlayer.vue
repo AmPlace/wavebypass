@@ -9,7 +9,7 @@
       @keydown.enter.prevent="openFullPlayer"
       @keydown.space.prevent="openFullPlayer"
     >
-      <section class="mobile-player-info flex min-w-0 basis-[30%] cursor-pointer items-center gap-2 lg:basis-[42%] lg:gap-2" @click.stop="openFullPlayer">
+      <section class="mobile-player-info flex min-w-0 basis-[40%] cursor-pointer items-center gap-2 lg:basis-[42%] lg:gap-2" @click.stop="openFullPlayer">
         <img
           class="mobile-player-logo size-11 shrink-0 rounded-[10px] border border-[var(--border)] bg-[var(--surface)] object-contain p-1 lg:size-10 lg:rounded-[10px]"
           :src="currentLogoUrl"
@@ -26,7 +26,7 @@
           </p>
           <p
             ref="statusRef"
-            class="mobile-player-status mt-1 whitespace-nowrap text-xs font-medium text-[var(--text-secondary)] lg:text-[11px]"
+            class="mobile-player-status mt-0.5 whitespace-nowrap text-xs font-medium text-[var(--text-secondary)] lg:text-[11px]"
             :class="{ 'marquee': isStatusOverflow }"
           >
             {{ statusText }}
