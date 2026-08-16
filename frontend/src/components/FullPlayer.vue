@@ -539,7 +539,7 @@
                   </span>
                   <span class="channel-copy">
                     <span class="channel-title">
-                      {{ item.name }}
+                      <span class="channel-title-text">{{ item.name }}</span>
                       <span v-if="item.live" class="live-dot"></span>
                     </span>
                     <span class="channel-subtitle">{{ item.summary }}</span>
@@ -732,9 +732,11 @@ function tabIndicatorStyle(tabsRef) {
   const idx = activePlayerPanel.value === 'channels' ? 0 : 1
   const btn = buttons[idx]
   if (!btn || btn.offsetWidth <= 0) return { opacity: 0 }
+  const isDesktopRailTabs = tabsRef === desktopTabsRef.value
+  const indicatorInset = isDesktopRailTabs ? 10 : 0
   return {
-    transform: `translateX(${btn.offsetLeft}px)`,
-    width: `${btn.offsetWidth}px`,
+    transform: `translateX(${btn.offsetLeft + indicatorInset}px)`,
+    width: `${Math.max(28, btn.offsetWidth - indicatorInset * 2)}px`,
     opacity: 1,
   }
 }
@@ -5814,6 +5816,20 @@ onBeforeUnmount(() => {
   min-width: 0;
   min-height: 0;
   padding-top: var(--player-main-offset);
+  --channel-grid: 46px minmax(0, 1fr) 22px;
+  --channel-gap: 10px;
+  --channel-logo-size: 46px;
+  --channel-min-height: 62px;
+  --channel-margin: 2px;
+  --channel-padding: 7px 8px;
+  --channel-title-size: 14px;
+  --channel-title-weight: 600;
+  --channel-subtitle-size: 12px;
+  --timeline-grid: 56px 30px minmax(0, 1fr);
+  --timeline-line-left: 70px;
+  --timeline-row-height: 60px;
+  --timeline-time-size: 13px;
+  --timeline-title-size: 15px;
 }
 
 .mobile-panel {
@@ -5858,13 +5874,161 @@ onBeforeUnmount(() => {
 }
 
 .desktop-panel-scroll {
-  max-height: calc(100dvh - 68px);
+  max-height: calc(100dvh - 62px);
   overflow-y: auto;
-  padding-right: 8px;
+  padding: 6px 6px 12px 0;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: var(--text-quaternary) transparent;
+}
+
+.desktop-panel-scroll::-webkit-scrollbar {
+  width: 6px;
+}
+
+.desktop-panel-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.desktop-panel-scroll::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: var(--text-quaternary);
 }
 
 .channel-panel {
   padding-top: 14px;
+}
+
+.side-panel .panel-tabs {
+  gap: 8px;
+  padding: 0 6px;
+}
+
+.side-panel .panel-tabs button {
+  min-height: 36px;
+  padding: 0 6px;
+  color: var(--text-tertiary);
+  font-size: 14px;
+  font-weight: 550;
+}
+
+.side-panel .panel-tabs button.active {
+  color: var(--text-primary);
+  font-weight: 650;
+}
+
+.side-panel .tab-indicator {
+  height: 2px;
+}
+
+.side-panel .channel-panel {
+  padding: 8px 2px 10px 0;
+}
+
+.side-panel .channel-sort-bar {
+  min-height: 30px;
+  align-items: center;
+  padding: 0 4px 8px;
+}
+
+.side-panel .sort-btn {
+  min-height: 30px;
+  padding: 4px 8px;
+  border-color: transparent;
+  background: var(--surface-soft);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 550;
+}
+
+.side-panel .sort-btn:hover,
+.side-panel .sort-btn:focus-visible {
+  border-color: var(--line);
+  background: var(--tag-bg);
+  color: var(--text-primary);
+}
+
+.side-panel .sort-btn.active {
+  border-color: rgba(53, 200, 122, 0.32);
+  background: rgba(53, 200, 122, 0.08);
+}
+
+.side-panel .channel-row {
+  border-radius: 9px;
+}
+
+.side-panel .channel-logo img {
+  object-fit: contain;
+}
+
+.side-panel .channel-row.active {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.side-panel .channel-copy {
+  gap: 3px;
+}
+
+.side-panel .channel-title {
+  overflow: hidden;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.side-panel .channel-title-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.side-panel .channel-subtitle {
+  font-weight: 400;
+}
+
+.side-panel .channel-row.disabled {
+  opacity: 0.42;
+}
+
+.side-panel .eq-icon.active {
+  opacity: 0.86;
+}
+
+.side-panel .schedule-panel {
+  padding: 12px 2px 12px 0;
+}
+
+.side-panel .schedule-date-list {
+  gap: 6px;
+  padding-bottom: 2px;
+}
+
+.side-panel .schedule-date-chip {
+  min-width: 58px;
+  padding: 6px 10px;
+  font-size: 12px;
+}
+
+.side-panel .schedule-date-chip small {
+  font-size: 10px;
+}
+
+.side-panel .timeline {
+  margin-top: 16px;
+}
+
+.side-panel .timeline-row {
+  min-height: var(--timeline-row-height);
+}
+
+.side-panel .timeline-title {
+  gap: 8px;
+  font-size: var(--timeline-title-size);
+  font-weight: 600;
+}
+
+.side-panel .timeline-time {
+  font-size: var(--timeline-time-size);
 }
 
 .channel-sort-bar {

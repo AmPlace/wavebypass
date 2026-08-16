@@ -101,3 +101,14 @@ test('FullPlayer separates source selector and Desktop channel rail controls', (
   assert.match(fullPlayer, /sourceMenuTeleportTarget/)
   assert.match(fullPlayer, /source-menu-in-fullscreen/)
 })
+
+test('Desktop rail keeps its presentation rules scoped away from Mobile FullPlayer', () => {
+  assert.match(fullPlayer, /\.side-panel \{[\s\S]*?--channel-logo-size: 46px;[\s\S]*?--channel-min-height: 62px;/)
+  assert.match(fullPlayer, /\.side-panel \.channel-logo img \{[\s\S]*?object-fit: contain;/)
+  assert.match(fullPlayer, /\.channel-logo img \{[\s\S]*?object-fit: cover;/)
+  assert.match(fullPlayer, /\.channel-logo \{[\s\S]*?width: var\(--channel-logo-size\);[\s\S]*?height: var\(--channel-logo-size\);[\s\S]*?overflow: hidden;/)
+  assert.match(fullPlayer, /\.side-panel \.channel-row\.active \{[\s\S]*?box-shadow: inset 2px 0 0 var\(--accent\)/)
+  assert.match(fullPlayer, /\.side-panel \.sort-btn:focus-visible/)
+  assert.match(fullPlayer, /\.desktop-panel-scroll::-webkit-scrollbar/)
+  assert.match(fullPlayer, /class="channel-title-text">\{\{ item\.name \}\}<\/span>/)
+})
