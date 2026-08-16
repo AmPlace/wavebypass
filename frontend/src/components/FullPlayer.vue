@@ -4937,6 +4937,10 @@ onBeforeUnmount(() => {
   text-rendering: optimizeLegibility;
 }
 
+.full-player:focus {
+  outline: none;
+}
+
 .full-player::after {
   content: "";
   position: fixed;
