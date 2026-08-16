@@ -1,13 +1,23 @@
 export const appRoutes = [
   {
-    path: '/',
+    path: '/radio',
     name: 'radio',
     component: () => import('../views/Home.vue'),
   },
   {
-    path: '/iptv',
-    name: 'iptv',
+    path: '/tv',
+    name: 'tv',
     component: () => import('../views/IptvHome.vue'),
+  },
+  {
+    path: '/',
+    redirect: '/radio',
+    meta: { compatibilityRoute: true },
+  },
+  {
+    path: '/iptv',
+    redirect: '/tv',
+    meta: { compatibilityRoute: true },
   },
   {
     path: '/settings',

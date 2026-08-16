@@ -24,7 +24,7 @@ router.beforeEach(async (to) => {
   }
 
   if (!auth.requiresSetup && to.path === '/setup') {
-    return { path: '/' }
+    return { path: '/radio' }
   }
 
   if (!to.meta.authPage && !auth.setup.anonymousBrowse && !auth.isAuthenticated) {
@@ -40,7 +40,7 @@ router.beforeEach(async (to) => {
   }
 
   if (to.path === '/login' && auth.isAuthenticated) {
-    return { path: String(to.query.redirect || '/') }
+    return { path: String(to.query.redirect || '/radio') }
   }
 
   return true

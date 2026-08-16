@@ -71,6 +71,8 @@ test('Desktop sidebar与Desktop header仍保留原有入口，不被More替代',
   const app = source('src/App.vue')
 
   assert.match(app, /class="app-sidebar[\s\S]*hidden[\s\S]*lg:flex/)
+  assert.match(app, /label: '电视', icon: 'tv', route: '\/tv'/)
+  assert.match(app, /label: '电台', icon: 'radio', route: '\/radio'/)
   assert.match(app, /label: 'Market', icon: 'layers', route: '\/market'/)
   assert.match(app, /label: '设置', icon: 'settings', route: '\/settings\/sources'/)
   assert.match(app, /class="desktop-top-actions fixed top-6 z-30 hidden items-center gap-3 lg:flex"/)

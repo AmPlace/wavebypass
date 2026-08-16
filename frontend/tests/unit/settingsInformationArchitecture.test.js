@@ -206,12 +206,13 @@ test('EPG 来源和频道匹配分别接入正式 Settings 子页面', () => {
   assert.match(sources, /添加节目单来源/)
 })
 
-test('App 移除旧节目单一级入口，直播、Market 和设置导航保持', () => {
+test('App 移除旧节目单一级入口，电视、电台、Market 和设置导航保持', () => {
   const app = source('src/App.vue')
   const primaryNavigation = app
     .split('const primaryNavItems')[1]
     .split('const secondaryNavItems')[0]
-  assert.match(primaryNavigation, /label: '直播'[\s\S]*route: '\/iptv'/)
+  assert.match(primaryNavigation, /label: '电视'[\s\S]*route: '\/tv'/)
+  assert.match(primaryNavigation, /label: '电台'[\s\S]*route: '\/radio'/)
   assert.doesNotMatch(primaryNavigation, /label: '节目单'|route: '\/admin\/epg'/)
   assert.match(app, /label: '设置'[\s\S]*route: '\/settings\/sources'/)
   assert.match(app, /label: 'Market'[\s\S]*route: '\/market'/)

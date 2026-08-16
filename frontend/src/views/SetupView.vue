@@ -64,7 +64,7 @@ async function submit() {
   loading.value = true
   try {
     await auth.initialize({ username: username.value, password: password.value })
-    router.replace('/')
+    router.replace('/radio')
   } catch (err) {
     error.value = err?.message || '初始化失败'
   } finally {
