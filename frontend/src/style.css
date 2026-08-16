@@ -232,6 +232,12 @@
     transition: padding-left 260ms cubic-bezier(0.4, 0, 0.2, 1);
   }
 
+  /* Keep the floating desktop actions on the same right edge as the
+     content's lg:px-10 boundary, including the native scrollbar gutter. */
+  .desktop-top-actions {
+    right: 56px;
+  }
+
   .page-with-mini-player {
     padding-bottom: var(--mini-player-occupied-height);
   }
@@ -1218,6 +1224,11 @@
     isolation: isolate;
     height: 2.75rem;
     border-color: transparent;
+    background: transparent;
+  }
+
+  .iptv-main .tag-filter-row__item:not(.tag-filter-row__item--selected),
+  .iptv-main .tag-filter-row__more {
     background: transparent;
   }
 

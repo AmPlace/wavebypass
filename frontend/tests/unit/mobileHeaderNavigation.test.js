@@ -12,7 +12,7 @@ function source(relativePath) {
 
 function mobileHeader(sourceText) {
   const start = sourceText.indexOf('class="fixed inset-x-0 top-0')
-  const end = sourceText.indexOf('class="fixed right-10 top-6')
+  const end = sourceText.indexOf('class="desktop-top-actions fixed top-6')
   assert.notEqual(start, -1, 'mobile app shell is present')
   assert.notEqual(end, -1, 'desktop app shell is present')
   return sourceText.slice(start, end)
@@ -73,7 +73,23 @@ test('Desktop sidebar与Desktop header仍保留原有入口，不被More替代',
   assert.match(app, /class="app-sidebar[\s\S]*hidden[\s\S]*lg:flex/)
   assert.match(app, /label: 'Market', icon: 'layers', route: '\/market'/)
   assert.match(app, /label: '设置', icon: 'settings', route: '\/settings\/sources'/)
-  assert.match(app, /class="fixed right-10 top-6 z-30 hidden items-center gap-3 lg:flex"/)
+  assert.match(app, /class="desktop-top-actions fixed top-6 z-30 hidden items-center gap-3 lg:flex"/)
+  assert.match(source('src/style.css'), /\.desktop-top-actions \{\s*right: 56px;/)
+})
+
+test('Desktop header移除未使用的最近播放时钟和通知按钮', () => {
+  const app = source('src/App.vue')
+  const start = app.indexOf('class="desktop-top-actions fixed top-6')
+  const end = app.indexOf('\n    </div>', start)
+  const desktopHeader = app.slice(start, end)
+
+  assert.doesNotMatch(desktopHeader, /aria-label="最近播放"/)
+  assert.doesNotMatch(desktopHeader, /aria-label="通知"/)
+  assert.doesNotMatch(desktopHeader, /aria-label="用户"/)
+  assert.match(desktopHeader, /aria-label="搜索"/)
+  assert.match(desktopHeader, /切换到浅色模式|切换到深色模式/)
+  assert.match(source('src/style.css'), /\.desktop-action-btn[\s\S]*?background: var\(--surface\);/)
+  assert.doesNotMatch(source('src/style.css'), /\.desktop-action-btn[\s\S]*?box-shadow: 0 8px 20px/)
 })
 
 test('Search只把焦点交给当前viewport对应的输入框', () => {

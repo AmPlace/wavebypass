@@ -139,7 +139,7 @@
       </div>
     </div>
 
-    <div v-if="showAppShell" class="fixed right-10 top-6 z-30 hidden items-center gap-3 lg:flex">
+    <div v-if="showAppShell" class="desktop-top-actions fixed top-6 z-30 hidden items-center gap-3 lg:flex">
       <div
         class="flex h-11 items-center overflow-hidden rounded-full border border-[var(--border)] bg-[var(--surface)] text-[var(--text-secondary)] backdrop-blur-[12px] backdrop-saturate-110 transition-all duration-300 ease-out"
         :class="searchExpanded ? 'w-[260px] px-1' : 'w-11 px-0'"
@@ -163,18 +163,9 @@
         />
       </div>
 
-      <button type="button" class="desktop-action-btn" aria-label="最近播放">
-        <svg class="size-5" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="8" stroke="currentColor" stroke-width="1.8"/><path d="M12 7.5v5l3.2 1.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
-      </button>
-      <button type="button" class="desktop-action-btn" aria-label="通知">
-        <svg class="size-5" viewBox="0 0 24 24" fill="none"><path d="M18 9.8a6 6 0 1 0-12 0c0 7.2-2.4 7.2-2.4 7.2h16.8S18 17 18 9.8Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M9.5 20a2.8 2.8 0 0 0 5 0" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
-      </button>
       <button type="button" class="desktop-action-btn" :aria-label="isDark ? '切换到浅色模式' : '切换到深色模式'" @click="toggleTheme">
         <svg v-if="isDark" class="size-5" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 3v2M12 19v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M3 12h2M19 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="12" cy="12" r="4" stroke="currentColor" stroke-width="1.8"/></svg>
         <svg v-else class="size-5" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M20.5 14.4A7.7 7.7 0 0 1 9.6 3.5 8.5 8.5 0 1 0 20.5 14.4Z" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
-      </button>
-      <button type="button" class="desktop-action-btn" aria-label="用户">
-        <svg class="size-5" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="8.5" r="3.5" stroke="currentColor" stroke-width="1.8"/><path d="M5.5 20a6.5 6.5 0 0 1 13 0" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
       </button>
     </div>
 
