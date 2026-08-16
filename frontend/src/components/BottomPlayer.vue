@@ -1,9 +1,9 @@
 <template>
   <footer class="bottom-player-dock fixed bottom-4 left-4 right-4 z-40 lg:bottom-7">
-    <div class="relative mx-auto flex h-[88px] items-center justify-between gap-4 rounded-[24px] border border-[var(--border)] bg-[var(--player-bg)] px-4 shadow-[0_12px_32px_rgba(0,0,0,0.12)] backdrop-blur-[12px] backdrop-saturate-110 dark:shadow-[0_14px_36px_rgba(0,0,0,0.34)] sm:px-5 lg:h-24">
-      <section class="flex min-w-0 basis-[42%] cursor-pointer items-center gap-3" @click="playerStore.expandPlayer()">
+    <div class="mobile-player-shell relative mx-auto flex h-[88px] items-center justify-between gap-4 rounded-[24px] border border-[var(--border)] bg-[var(--player-bg)] px-4 shadow-[0_12px_32px_rgba(0,0,0,0.12)] backdrop-blur-[12px] backdrop-saturate-110 dark:shadow-[0_14px_36px_rgba(0,0,0,0.34)] sm:px-5 lg:h-24">
+      <section class="mobile-player-info flex min-w-0 basis-[42%] cursor-pointer items-center gap-3" @click="playerStore.expandPlayer()">
         <img
-          class="size-12 shrink-0 rounded-xl border border-[var(--border)] bg-[var(--surface)] object-contain p-1"
+          class="mobile-player-logo size-12 shrink-0 rounded-xl border border-[var(--border)] bg-[var(--surface)] object-contain p-1"
           :src="currentLogoUrl"
           :alt="currentStationName"
           @error="useDefaultLogo"
@@ -11,14 +11,14 @@
         <div ref="nameWrapperRef" class="min-w-0 overflow-hidden">
           <p
             ref="nameRef"
-            class="whitespace-nowrap text-sm font-semibold text-[var(--text-primary)]"
+            class="mobile-player-title whitespace-nowrap text-sm font-semibold text-[var(--text-primary)]"
             :class="{ 'marquee': isNameOverflow }"
           >
             {{ currentStationName }}
           </p>
           <p
             ref="statusRef"
-            class="mt-1 whitespace-nowrap text-xs font-medium text-[var(--text-secondary)]"
+            class="mobile-player-status mt-1 whitespace-nowrap text-xs font-medium text-[var(--text-secondary)]"
             :class="{ 'marquee': isStatusOverflow }"
           >
             {{ statusText }}
@@ -26,13 +26,13 @@
         </div>
       </section>
 
-      <section class="absolute inset-0 flex items-center justify-center gap-4 pointer-events-none">
+      <section class="mobile-player-controls absolute inset-0 flex items-center justify-center gap-4 pointer-events-none">
         <button type="button" class="dock-side-control pointer-events-auto" aria-label="上一个" disabled>
-          <svg class="size-5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M5.5 5.5h2.6v13H5.5zm4.8 6.5 8.2 6.1V5.9z"/></svg>
+          <svg class="mobile-player-side-icon size-5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M5.5 5.5h2.6v13H5.5zm4.8 6.5 8.2 6.1V5.9z"/></svg>
         </button>
         <button
           type="button"
-          class="pointer-events-auto flex size-14 items-center justify-center rounded-full bg-neutral-950 text-white transition-all duration-200 ease-out hover:scale-[1.03] active:scale-95 dark:bg-white dark:text-black"
+          class="mobile-player-play-btn pointer-events-auto flex size-14 items-center justify-center rounded-full bg-neutral-950 text-white transition-all duration-200 ease-out hover:scale-[1.03] active:scale-95 dark:bg-white dark:text-black"
           :aria-label="isPlaying ? '暂停播放' : '开始播放'"
           @click="playerStore.togglePlay()"
         >
@@ -44,11 +44,11 @@
           </svg>
         </button>
         <button type="button" class="dock-side-control pointer-events-auto" aria-label="下一个" disabled>
-          <svg class="size-5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M15.9 5.5h2.6v13h-2.6zM5.5 18.1l8.2-6.1-8.2-6.1z"/></svg>
+          <svg class="mobile-player-side-icon size-5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M15.9 5.5h2.6v13h-2.6zM5.5 18.1l8.2-6.1-8.2-6.1z"/></svg>
         </button>
       </section>
 
-      <section class="flex basis-[36%] items-center justify-end gap-3">
+      <section class="mobile-player-actions flex basis-[36%] items-center justify-end gap-3">
         <button type="button" class="hidden h-9 rounded-full border border-[var(--border)] bg-[var(--surface)] px-4 text-xs font-semibold text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-hover)] sm:inline-flex sm:items-center">
           LIVE
         </button>
@@ -57,7 +57,7 @@
           <path d="M16 9a4 4 0 0 1 0 6M18.5 6.5a7.5 7.5 0 0 1 0 11" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
         </svg>
         <input
-          class="dock-volume h-1 w-16 cursor-pointer appearance-none rounded-full bg-[var(--surface-strong)] outline-none transition-colors duration-200 sm:w-28"
+          class="mobile-player-volume dock-volume h-1 w-16 cursor-pointer appearance-none rounded-full bg-[var(--surface-strong)] outline-none transition-colors duration-200 sm:w-28"
           type="range"
           min="0"
           max="1"
@@ -66,8 +66,8 @@
           aria-label="音量"
           @input="playerStore.setVolume($event.target.value)"
         />
-        <button type="button" class="dock-list-btn" aria-label="节目列表" @click="playerStore.expandPlayer()">
-          <svg class="size-5" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M8 7h11M8 12h11M8 17h11M4 7h.01M4 12h.01M4 17h.01" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        <button type="button" class="mobile-player-list-btn dock-list-btn" aria-label="节目列表" @click="playerStore.expandPlayer()">
+          <svg class="mobile-player-list-icon size-5" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M8 7h11M8 12h11M8 17h11M4 7h.01M4 12h.01M4 17h.01" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
           <span class="hidden sm:inline">节目列表</span>
         </button>
       </section>

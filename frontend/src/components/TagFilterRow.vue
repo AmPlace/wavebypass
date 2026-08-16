@@ -10,8 +10,8 @@
         v-for="(item, index) in displayItems"
         :key="`t-${itemKey(item, index)}`"
         type="button"
-        class="h-11 shrink-0 rounded-full border px-5 text-sm font-medium transition-colors"
-        :class="pillClass(isActive(item))"
+        class="tag-filter-row__item h-11 shrink-0 rounded-full border px-5 text-sm font-medium transition-colors"
+        :class="[pillClass(isActive(item)), { 'tag-filter-row__item--selected': isActive(item) }]"
         @click="$emit('select', item)"
       >
         {{ itemLabel(item) }}
@@ -22,8 +22,8 @@
         <button
           v-if="!expanded && !collapsing && hiddenSelectedItem"
           type="button"
-          class="h-11 shrink-0 rounded-full border px-5 text-sm font-medium transition-colors"
-          :class="pillClass(true)"
+          class="tag-filter-row__item h-11 shrink-0 rounded-full border px-5 text-sm font-medium transition-colors"
+          :class="[pillClass(true), 'tag-filter-row__item--selected']"
           @click="$emit('select', hiddenSelectedItem)"
         >
           {{ itemLabel(hiddenSelectedItem) }}
@@ -33,7 +33,7 @@
       <button
         v-if="hasOverflow"
         type="button"
-        class="inline-flex h-11 shrink-0 items-center gap-1 rounded-full border border-[var(--border)] bg-[var(--surface)] px-4 text-sm font-medium text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)]"
+        class="tag-filter-row__more inline-flex h-11 shrink-0 items-center gap-1 rounded-full border border-[var(--border)] bg-[var(--surface)] px-4 text-sm font-medium text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)]"
         :class="expanded || collapsing ? '' : 'ml-auto'"
         :aria-expanded="expanded || collapsing"
         :aria-label="expanded || collapsing ? '收起标签' : '展开全部标签'"

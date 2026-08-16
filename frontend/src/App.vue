@@ -338,11 +338,11 @@ const searchInputRef = ref(null)
 const desktopSearchInputRef = ref(null)
 
 const mobileNavigationItems = computed(() => [
-  { label: 'Radio', route: '/', active: route.path === '/' },
-  { label: 'TV', route: '/iptv', active: route.path === '/iptv' },
+  ...(!['/', '/iptv'].includes(route.path)
+    ? [{ label: '返回内容', route: activeMode.value === 'radio' ? '/' : '/iptv', active: false }]
+    : []),
   { label: 'Market', route: '/market', active: route.path === '/market' },
   { label: '设置', route: '/settings/sources', active: route.path.startsWith('/settings') },
-  { label: '关于', route: '', active: false, disabled: true },
 ])
 
 function navItemClass(item) {

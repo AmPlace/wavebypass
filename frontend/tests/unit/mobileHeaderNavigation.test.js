@@ -32,14 +32,19 @@ test('Mobile header只保留内容切换、搜索、主题和More', () => {
   assert.doesNotMatch(header, /v-show="activeMode === 'iptv'"/)
 })
 
-test('More菜单提供真实入口并明确标记尚未实现的About', () => {
+test('More菜单只保留低频入口，不伪造About或重复内容域切换', () => {
   const app = source('src/App.vue')
   const header = mobileHeader(app)
+  const itemsStart = app.indexOf('const mobileNavigationItems')
+  const itemsEnd = app.indexOf('\n])', itemsStart)
+  const items = app.slice(itemsStart, itemsEnd)
 
   assert.match(header, /role="menu" aria-label="更多导航"/)
   assert.match(app, /label: 'Market', route: '\/market'/)
   assert.match(app, /label: '设置', route: '\/settings\/sources'/)
-  assert.match(app, /label: '关于', route: '', active: false, disabled: true/)
+  assert.doesNotMatch(items, /label: 'Radio'|label: 'TV'/)
+  assert.doesNotMatch(items, /label: '关于'|disabled: true/)
+  assert.match(items, /label: '返回内容'/)
   assert.match(app, /function navigateMobile\(item\)/)
   assert.match(app, /if \(item\.disabled \|\| !item\.route\) return/)
 })
@@ -47,10 +52,9 @@ test('More菜单提供真实入口并明确标记尚未实现的About', () => {
 test('More入口状态由当前route推导，且路由变化会关闭菜单', () => {
   const app = source('src/App.vue')
 
-  assert.match(app, /active: route\.path === '\/'/)
-  assert.match(app, /active: route\.path === '\/iptv'/)
   assert.match(app, /active: route\.path === '\/market'/)
   assert.match(app, /active: route\.path\.startsWith\('\/settings'\)/)
+  assert.match(app, /!\['\/', '\/iptv'\]\.includes\(route\.path\)/)
   assert.match(app, /watch\(\(\) => route\.path, \(path\) => \{\s*mobileMenuOpen\.value = false/)
 })
 
