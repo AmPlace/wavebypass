@@ -9,9 +9,15 @@ from urllib.parse import quote, urljoin
 import httpx
 
 from adapters import AdapterResolveError
+from infrastructure.http_client import (
+    RedirectTargetRejected,
+    request_with_safe_redirects,
+    stream_with_safe_redirects,
+)
 from plugin_runtime import PluginError
 from m3u8_parser import adapter_provider, detect_source_type, is_youtube_url
 from media_tools import media_tool_bin
+from ssrf_guard import UnsafeTargetError, assert_safe_target_url
 
 
 STREAM_READ_BYTES = 1024 * 1024
@@ -20,6 +26,7 @@ PLAYLIST_TIMEOUT = 8.0
 SEGMENT_TIMEOUT = 5.0
 STREAM_TIMEOUT = 8.0
 HLS_SEGMENT_SAMPLE_LIMIT = 3
+PROBE_EXTERNAL_SCHEMES = {"http", "https", "rtmp", "rtsp"}
 
 
 def _youtube_adapter_url(url: str) -> str:
@@ -150,6 +157,25 @@ def _ffmpeg_probe_timeout(url: str) -> float:
 
 def _requires_headers(headers: dict[str, str]) -> bool:
     return any(str(v or "").strip() for v in headers.values())
+
+
+def _security_rejected_result(probe_method: str) -> dict[str, Any]:
+    """Keep a policy rejection distinct from an upstream reachability error."""
+    return _empty_result(
+        probe_status="error",
+        live_status="error",
+        probe_method=probe_method,
+        last_error="ssrf_policy_rejected",
+        probe_meta_json=_safe_meta({
+            "probe_quality": "blocked",
+            "security_rejection": "ssrf_policy",
+        }),
+    )
+
+
+async def _validate_external_probe_target(url: str) -> None:
+    """Validate a URL before handing it to an external media process."""
+    await assert_safe_target_url(url, allowed_schemes=PROBE_EXTERNAL_SCHEMES)
 
 
 def _truthy(value: Any) -> bool:
@@ -325,6 +351,15 @@ async def _kill_process(proc: asyncio.subprocess.Process | None) -> None:
 
 
 async def _probe_media_info(url: str, headers: dict[str, str]) -> dict[str, Any]:
+    try:
+        await _validate_external_probe_target(url)
+    except UnsafeTargetError:
+        return {"meta": {
+            "ffprobe": False,
+            "ffprobe_error": "ssrf_policy_rejected",
+            "security_rejection": "ssrf_policy",
+        }}
+
     ffprobe_bin = media_tool_bin("ffprobe")
     if not ffprobe_bin:
         return {"meta": {"ffprobe": False, "ffprobe_error": "ffprobe_not_found"}}
@@ -397,7 +432,8 @@ async def _enrich_with_ffprobe(result: dict[str, Any], url: str, headers: dict[s
         return result
     if result.get("probe_method") == "ffmpeg":
         return result
-    info = await _probe_media_info(url, headers)
+    safe_final_url = str(_meta_value(result, "safe_final_url", "") or url)
+    info = await _probe_media_info(safe_final_url, headers)
     for key in ("resolution", "fps", "video_codec", "audio_codec"):
         if info.get(key):
             result[key] = info[key]
@@ -416,6 +452,11 @@ def _meta_value(result: dict[str, Any], key: str, default: Any = None) -> Any:
 
 
 async def _probe_with_ffmpeg(url: str, headers: dict[str, str], *, reason: str) -> dict[str, Any]:
+    try:
+        await _validate_external_probe_target(url)
+    except UnsafeTargetError:
+        return _security_rejected_result("ffmpeg")
+
     ffmpeg_bin = media_tool_bin("ffmpeg")
     if not ffmpeg_bin:
         return _empty_result(
@@ -545,13 +586,27 @@ async def _read_stream_sample(
     timeout: float,
     max_bytes: int = STREAM_READ_BYTES,
     max_seconds: float = STREAM_READ_SECONDS,
-) -> dict[str, float | int | bool]:
+) -> dict[str, float | int | bool | str]:
     started = time.monotonic()
     first_byte_at: float | None = None
     total = 0
-    async with client.stream("GET", url, headers=headers, follow_redirects=True, timeout=timeout) as response:
+    response = await stream_with_safe_redirects(
+        client,
+        "GET",
+        url,
+        headers=headers,
+        timeout=timeout,
+    )
+    try:
+        safe_final_url = str(response.url)
         if response.status_code >= 400:
-            return {"ok": False, "latency_ms": 0, "speed_mbps": 0, "bytes": 0}
+            return {
+                "ok": False,
+                "latency_ms": 0,
+                "speed_mbps": 0,
+                "bytes": 0,
+                "safe_final_url": safe_final_url,
+            }
         async for chunk in response.aiter_bytes():
             if not chunk:
                 continue
@@ -561,6 +616,8 @@ async def _read_stream_sample(
             total += len(chunk)
             if total >= max_bytes or now - started >= max_seconds:
                 break
+    finally:
+        await response.aclose()
 
     elapsed = max(time.monotonic() - started, 0.001)
     latency_ms = ((first_byte_at or time.monotonic()) - started) * 1000
@@ -569,36 +626,61 @@ async def _read_stream_sample(
         "latency_ms": round(latency_ms, 1),
         "speed_mbps": round(total / elapsed / 1024 / 1024, 3),
         "bytes": total,
+        "safe_final_url": safe_final_url,
     }
 
 
 async def _probe_hls(client: httpx.AsyncClient, url: str, headers: dict[str, str]) -> dict[str, Any]:
     started = time.monotonic()
-    response = await client.get(url, headers=headers, follow_redirects=True, timeout=PLAYLIST_TIMEOUT)
-    latency_ms = (time.monotonic() - started) * 1000
-    if response.status_code >= 400:
+    response = await request_with_safe_redirects(
+        client,
+        "GET",
+        url,
+        headers=headers,
+        timeout=PLAYLIST_TIMEOUT,
+    )
+    try:
+        latency_ms = (time.monotonic() - started) * 1000
+        playlist_url = str(response.url)
+        playlist_status = response.status_code
+        playlist_text = response.text
+    finally:
+        await response.aclose()
+
+    if playlist_status >= 400:
         return _empty_result(
             probe_status="offline",
             probe_method="http_segment",
             latency_ms=round(latency_ms, 1),
-            last_error=f"http_status_{response.status_code}",
+            last_error=f"http_status_{playlist_status}",
+            probe_meta_json=_safe_meta({"safe_final_url": playlist_url}),
         )
 
-    playlist_url = str(response.url)
-    playlist_text = response.text
     variant_url = _pick_variant_url(playlist_text, playlist_url)
     if variant_url:
-        variant_response = await client.get(variant_url, headers=headers, follow_redirects=True, timeout=PLAYLIST_TIMEOUT)
-        if variant_response.status_code < 400:
-            playlist_text = variant_response.text
-            playlist_url = str(variant_response.url)
+        variant_response = await request_with_safe_redirects(
+            client,
+            "GET",
+            variant_url,
+            headers=headers,
+            timeout=PLAYLIST_TIMEOUT,
+        )
+        try:
+            variant_status = variant_response.status_code
+            variant_text = variant_response.text
+            variant_final_url = str(variant_response.url)
+        finally:
+            await variant_response.aclose()
+        if variant_status < 400:
+            playlist_text = variant_text
+            playlist_url = variant_final_url
         else:
             return _empty_result(
                 probe_status="offline",
                 probe_method="http_segment",
                 latency_ms=round(latency_ms, 1),
-                last_error=f"variant_http_status_{variant_response.status_code}",
-                probe_meta_json=_safe_meta({"variant": True}),
+                last_error=f"variant_http_status_{variant_status}",
+                probe_meta_json=_safe_meta({"variant": True, "safe_final_url": variant_final_url}),
             )
 
     segment_urls = _pick_recent_segment_urls(playlist_text, playlist_url)
@@ -607,13 +689,22 @@ async def _probe_hls(client: httpx.AsyncClient, url: str, headers: dict[str, str
             probe_status="online",
             probe_method="http_segment",
             latency_ms=round(latency_ms, 1),
-            probe_meta_json=_safe_meta({"hls_no_segments": True, "variant": bool(variant_url)}),
+            probe_meta_json=_safe_meta({
+                "hls_no_segments": True,
+                "variant": bool(variant_url),
+                "safe_final_url": playlist_url,
+            }),
         )
 
     samples = []
     for segment_url in segment_urls:
         try:
             samples.append(await _read_stream_sample(client, segment_url, headers, timeout=SEGMENT_TIMEOUT, max_bytes=384 * 1024))
+        except (RedirectTargetRejected, UnsafeTargetError):
+            # A child resource is part of the probe target. Do not downgrade a
+            # blocked segment to an ordinary network failure or try fallback
+            # subprocess probing for the same unsafe source.
+            raise
         except Exception:
             continue
     ok_samples = [item for item in samples if item.get("ok")]
@@ -623,7 +714,11 @@ async def _probe_hls(client: httpx.AsyncClient, url: str, headers: dict[str, str
             probe_method="http_segment",
             latency_ms=round(latency_ms, 1),
             last_error="segment_unreachable",
-            probe_meta_json=_safe_meta({"variant": bool(variant_url), "segment_count": len(segment_urls)}),
+            probe_meta_json=_safe_meta({
+                "variant": bool(variant_url),
+                "segment_count": len(segment_urls),
+                "safe_final_url": playlist_url,
+            }),
         )
 
     total_bytes = sum(int(item.get("bytes") or 0) for item in ok_samples)
@@ -634,7 +729,12 @@ async def _probe_hls(client: httpx.AsyncClient, url: str, headers: dict[str, str
         probe_method="http_segment",
         latency_ms=round(latency_ms + min(float(item.get("latency_ms") or 0) for item in ok_samples), 1),
         speed_mbps=round(sum(speed_values) / len(speed_values), 3) if speed_values else 0,
-        probe_meta_json=_safe_meta({"variant": bool(variant_url), "segments_tested": len(ok_samples), "bytes": total_bytes}),
+        probe_meta_json=_safe_meta({
+            "variant": bool(variant_url),
+            "segments_tested": len(ok_samples),
+            "bytes": total_bytes,
+            "safe_final_url": playlist_url,
+        }),
     )
 
 
@@ -645,6 +745,9 @@ async def _probe_http_stream(client: httpx.AsyncClient, url: str, headers: dict[
             probe_status="offline",
             probe_method="http_stream",
             last_error="stream_unreachable",
+            probe_meta_json=_safe_meta({
+                "safe_final_url": str(sample.get("safe_final_url") or url),
+            }),
         )
     return _empty_result(
         probe_status="online",
@@ -652,7 +755,10 @@ async def _probe_http_stream(client: httpx.AsyncClient, url: str, headers: dict[
         probe_method="http_stream",
         latency_ms=float(sample.get("latency_ms") or 0),
         speed_mbps=float(sample.get("speed_mbps") or 0),
-        probe_meta_json=_safe_meta({"bytes": int(sample.get("bytes") or 0)}),
+        probe_meta_json=_safe_meta({
+            "bytes": int(sample.get("bytes") or 0),
+            "safe_final_url": str(sample.get("safe_final_url") or url),
+        }),
     )
 
 
@@ -796,8 +902,9 @@ async def probe_channel_source(ch: dict[str, Any], client: httpx.AsyncClient, *,
             )
         )
         if should_try_ffmpeg:
+            safe_final_url = str(_meta_value(result, "safe_final_url", "") or url)
             ffmpeg_result = await _probe_with_ffmpeg(
-                url,
+                safe_final_url,
                 headers,
                 reason=str(result.get("last_error") or result.get("probe_method") or "weak_http_probe"),
             )
@@ -805,6 +912,10 @@ async def probe_channel_source(ch: dict[str, Any], client: httpx.AsyncClient, *,
                 result = ffmpeg_result
             elif result.get("probe_status") == "online":
                 _merge_meta(result, {"ffmpeg_fallback": False, "ffmpeg_fallback_error": ffmpeg_result.get("last_error")})
+    except (RedirectTargetRejected, UnsafeTargetError):
+        result = _security_rejected_result(
+            "ffmpeg" if is_rt_stream else "http_segment" if source_type == "hls" else "http_stream"
+        )
     except httpx.TimeoutException:
         result = await _probe_with_ffmpeg(url, headers, reason="http_timeout")
         if result.get("probe_status") != "online":

@@ -1259,34 +1259,36 @@ async def admin_probe_url(
     url = str((payload or {}).get("url") or "").strip()
     if not url:
         raise HTTPException(status_code=400, detail="url 不能为空")
+    upstream = None
     try:
-        await assert_safe_target_url(url, allowed_schemes={"http", "https"})
-    except UnsafeTargetError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
-
-    try:
-        upstream = await _m.http_client.get(
+        upstream = await request_with_safe_redirects(
+            _m.http_client,
+            "GET",
             url,
-            follow_redirects=True,
             timeout=8.0,
             headers={"User-Agent": _m.CDN_REQUEST_HEADERS["User-Agent"]},
         )
+    except RedirectTargetRejected as exc:
+        raise HTTPException(status_code=403, detail="探测目标被 SSRF 安全策略拒绝") from exc
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"探测失败: {exc}") from exc
 
-    body_preview = upstream.content[: 2 * 1024]
     try:
-        text_preview = body_preview.decode("utf-8", errors="replace")
-    except Exception:
-        text_preview = ""
-    return {
-        "ok": True,
-        "status": upstream.status_code,
-        "final_url": str(upstream.url),
-        "content_type": upstream.headers.get("content-type", ""),
-        "content_length": int(upstream.headers.get("content-length") or 0),
-        "preview": text_preview,
-    }
+        body_preview = upstream.content[: 2 * 1024]
+        try:
+            text_preview = body_preview.decode("utf-8", errors="replace")
+        except Exception:
+            text_preview = ""
+        return {
+            "ok": True,
+            "status": upstream.status_code,
+            "final_url": str(upstream.url),
+            "content_type": upstream.headers.get("content-type", ""),
+            "content_length": int(upstream.headers.get("content-length") or 0),
+            "preview": text_preview,
+        }
+    finally:
+        await upstream.aclose()
 def _provider_resolver(main_module, request: Request | None = None):
     request_app = getattr(request, "app", None) if request is not None else None
     app = request_app or getattr(main_module, "app", None)
