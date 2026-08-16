@@ -1,6 +1,6 @@
 <template>
   <main
-    class="iptv-main min-h-screen w-full px-5 pb-32 pt-[calc(env(safe-area-inset-top)+4rem)] sm:px-8 lg:px-10 lg:pb-40 lg:pt-6"
+    class="iptv-main min-h-screen w-full px-5 pt-[calc(env(safe-area-inset-top)+4rem)] sm:px-8 lg:px-10 lg:pt-6 page-with-mini-player"
     :class="{ 'iptv-density-compact': densityMode === 'compact' }"
   >
     <header class="mb-7 space-y-7">

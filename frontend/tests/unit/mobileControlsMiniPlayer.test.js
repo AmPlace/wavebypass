@@ -58,11 +58,13 @@ test('Mini Player only exposes play, mute and FullPlayer controls', () => {
   const player = source('src/components/BottomPlayer.vue')
 
   for (const token of ['mobile-player-shell', 'mobile-player-logo', 'mobile-player-title', 'mobile-player-status', 'mobile-player-play-btn', 'mobile-player-action-control', 'mobile-player-action-icon']) assert.match(player, new RegExp(token))
-  assert.match(player, /mobile-player-shell[^>]*h-\[72px\][^>]*rounded-\[18px\]/)
+  assert.match(player, /mobile-player-shell[^>]*h-\[72px\][^>]*rounded-\[18px\][\s\S]*?lg:h-16/)
   assert.match(player, /@click="openFullPlayer"/)
   assert.match(player, /@click\.stop="playerStore\.togglePlay\(\)"/)
   assert.match(player, /@click\.stop="toggleMute"/)
   assert.match(player, /@click\.stop="openFullPlayer"/)
+  assert.match(player, /mobile-player-play-icon--play/)
+  assert.match(player, /<path d="m6 14 6-6 6 6"/)
   assert.doesNotMatch(player, /aria-label="上一个"|aria-label="下一个"|节目列表|mobile-player-volume|dock-list-btn/)
 })
 
@@ -81,10 +83,27 @@ test('Mini Player mute state is shared with FullPlayer and has accessible contro
   assert.match(audio, /audioRef\.value\.muted = isMuted\.value/)
 })
 
-test('Desktop BottomPlayer sizing remains on the existing lg path', () => {
+test('Mini Player uses compact desktop geometry and one occupied-height authority', () => {
   const player = source('src/components/BottomPlayer.vue')
   const css = source('src/style.css')
 
-  assert.match(player, /lg:h-24/)
-  assert.match(css, /@media \(min-width: 1024px\) \{[\s\S]*?\.bottom-player-dock \{[\s\S]*?left: calc\(var\(--sidebar-w\) \+ 40px\);/)
+  assert.match(player, /lg:h-16/)
+  assert.match(player, /lg:size-12/)
+  assert.match(css, /--mini-player-occupied-height: calc\(var\(--mini-player-height\) \+ var\(--mini-player-bottom-offset\) \+ var\(--mini-player-content-gap\)\)/)
+  assert.match(css, /\.page-with-mini-player \{\s*padding-bottom: var\(--mini-player-occupied-height\);/)
+  assert.match(css, /@media \(min-width: 1024px\) \{[\s\S]*?--mini-player-height: 64px;[\s\S]*?\.bottom-player-dock \{[\s\S]*?max-width: 600px;/)
+  assert.match(css, /\.mobile-player-play-icon--play \{\s*transform: translateX\(-1px\);/)
+})
+
+test('All shell pages reserve the shared Mini Player occupied height', () => {
+  for (const relativePath of [
+    'src/views/Home.vue',
+    'src/views/IptvHome.vue',
+    'src/views/MarketView.vue',
+    'src/views/settings/SettingsView.vue',
+  ]) {
+    const view = source(relativePath)
+    assert.match(view, /page-with-mini-player/)
+    assert.doesNotMatch(view, /pb-32|lg:pb-40/)
+  }
 })

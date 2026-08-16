@@ -41,15 +41,16 @@
     --sidebar-w-collapsed: 72px;
     --page-gutter: clamp(16px, 2vw, 32px);
     --page-top: calc(env(safe-area-inset-top) + 4rem);
-    --page-bottom: calc(env(safe-area-inset-bottom) + 8rem);
-    --page-bottom-lg: calc(env(safe-area-inset-bottom) + 10rem);
+    --mini-player-height: 72px;
+    --mini-player-bottom-offset: calc(env(safe-area-inset-bottom) + 12px);
+    --mini-player-content-gap: 12px;
+    --mini-player-occupied-height: calc(var(--mini-player-height) + var(--mini-player-bottom-offset) + var(--mini-player-content-gap));
     --card-radius: 16px;
     --card-padding: 18px;
     --card-gap: 14px;
     --control-height: 38px;
     --chip-height: 44px;
     --drawer-width: 440px;
-    --player-safe-bottom: 10rem;
   }
 
   .dark {
@@ -229,6 +230,10 @@
 
   .app-main {
     transition: padding-left 260ms cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  .page-with-mini-player {
+    padding-bottom: var(--mini-player-occupied-height);
   }
 
   @media (min-width: 1024px) {
@@ -933,8 +938,14 @@
     opacity: 0.42;
   }
 
+  .bottom-player-dock {
+    bottom: var(--mini-player-bottom-offset);
+    pointer-events: none;
+  }
+
   .mobile-player-shell {
     cursor: pointer;
+    pointer-events: auto;
   }
 
   .mobile-player-shell:focus-visible {
@@ -957,12 +968,11 @@
     height: 1.125rem;
   }
 
-  @media (max-width: 1023px) {
-    /* Keep mobile playback compact without changing the desktop dock. */
-    .bottom-player-dock {
-      bottom: calc(env(safe-area-inset-bottom) + 0.75rem);
-    }
+  .mobile-player-play-icon--play {
+    transform: translateX(-1px);
+  }
 
+  @media (max-width: 1023px) {
     .mobile-player-shell {
       height: 4.5rem;
       gap: 0.5rem;
@@ -971,7 +981,7 @@
     }
 
     .mobile-player-info {
-      flex-basis: 30%;
+      flex-basis: 40%;
       gap: 0.5rem;
     }
 
@@ -1014,11 +1024,19 @@
   }
 
   @media (min-width: 1024px) {
+    :root {
+      --mini-player-height: 64px;
+      --mini-player-bottom-offset: 28px;
+      --mini-player-content-gap: 20px;
+    }
+
     .bottom-player-dock {
       left: calc(var(--sidebar-w) + 40px);
       right: 40px;
-      max-width: none;
+      max-width: 600px;
       margin-inline: 0;
+      margin-left: auto;
+      margin-right: auto;
       transition: left 260ms cubic-bezier(0.4, 0, 0.2, 1);
     }
   }
@@ -1192,11 +1210,6 @@
 }
 
 @media (max-width: 1023px) {
-  /* 72px dock + safe-area/bottom margin + a small breathing gap. */
-  .iptv-main {
-    padding-bottom: calc(env(safe-area-inset-bottom) + 6rem);
-  }
-
   /* A 44px hit target carries a 40px visual chip. This keeps the existing
      row measurement and expand/collapse semantics unchanged. */
   .iptv-main .tag-filter-row__item,
