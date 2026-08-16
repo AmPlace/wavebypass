@@ -5179,14 +5179,23 @@ onBeforeUnmount(() => {
   margin: 0 auto;
   padding: var(--layout-padding);
   background: var(--page-bg);
+  transition: grid-template-columns 320ms cubic-bezier(0.22, 1, 0.36, 1),
+    column-gap 320ms cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: grid-template-columns, column-gap;
 }
 
 .full-player.full-player--theater .player-layout {
-  grid-template-columns: minmax(0, var(--media-frame-width, 1fr));
+  grid-template-columns: minmax(0, var(--media-frame-width, 1fr)) 0fr;
+  column-gap: 0;
 }
 
 .full-player.full-player--theater .side-panel {
-  display: none;
+  opacity: 0;
+  transform: translate3d(12px, 0, 0);
+  pointer-events: none;
+  visibility: hidden;
+  transition: opacity 180ms ease, transform 320ms cubic-bezier(0.22, 1, 0.36, 1),
+    visibility 0s linear 320ms;
 }
 
 .desktop-collapse-btn {
@@ -6014,6 +6023,14 @@ onBeforeUnmount(() => {
   --timeline-row-height: 60px;
   --timeline-time-size: 13px;
   --timeline-title-size: 15px;
+  overflow: hidden;
+  opacity: 1;
+  transform: translate3d(0, 0, 0);
+  pointer-events: auto;
+  visibility: visible;
+  transition: opacity 220ms ease, transform 320ms cubic-bezier(0.22, 1, 0.36, 1),
+    visibility 0s linear 0s;
+  will-change: opacity, transform;
 }
 
 .mobile-panel {

@@ -112,6 +112,7 @@ export function useLogoVisual(options = {}) {
     logoVisualModes,
     displayName,
     shouldShowLogo,
+    logoVisualMode,
     logoStageClass,
     logoImageClass,
     classifyLogo,

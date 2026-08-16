@@ -138,6 +138,13 @@ test('FullPlayer separates source selector and Desktop channel rail controls', (
   assert.match(fullPlayer, /source-menu-in-fullscreen/)
 })
 
+test('FullPlayer side channel rail uses the shared panel transition when opening and closing', () => {
+  assert.match(fullPlayer, /\.player-layout \{[\s\S]*?transition: grid-template-columns 320ms cubic-bezier\(0\.22, 1, 0\.36, 1\),[\s\S]*?column-gap 320ms cubic-bezier\(0\.22, 1, 0\.36, 1\);/)
+  assert.match(fullPlayer, /\.full-player\.full-player--theater \.player-layout \{[\s\S]*?grid-template-columns: minmax\(0, var\(--media-frame-width, 1fr\)\) 0fr;[\s\S]*?column-gap: 0;/)
+  assert.match(fullPlayer, /\.full-player\.full-player--theater \.side-panel \{[\s\S]*?opacity: 0;[\s\S]*?transform: translate3d\(12px, 0, 0\);[\s\S]*?visibility: hidden;/)
+  assert.doesNotMatch(fullPlayer, /\.full-player\.full-player--theater \.side-panel \{\s*display: none;/)
+})
+
 test('Desktop rail keeps its presentation rules scoped away from Mobile FullPlayer', () => {
   assert.match(fullPlayer, /\.side-panel \{[\s\S]*?--channel-logo-size: 46px;[\s\S]*?--channel-min-height: 62px;/)
   assert.match(fullPlayer, /\.side-panel \.channel-logo img \{[\s\S]*?object-fit: contain;/)
