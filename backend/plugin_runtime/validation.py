@@ -35,6 +35,10 @@ CHANNEL_CATALOG_MAX_GROUP_LENGTH = 128
 CHANNEL_CATALOG_MAX_LOGO_LENGTH = 2048
 CHANNEL_CATALOG_MAX_TTL_SECONDS = 24 * 60 * 60
 CHANNEL_CATALOG_KINDS = frozenset({"channel", "event"})
+VISUAL_METADATA_MAX_TTL_SECONDS = 7 * 24 * 60 * 60
+VISUAL_METADATA_MAX_URL_LENGTH = 4096
+VISUAL_METADATA_MAX_TEXT_LENGTH = 512
+VISUAL_METADATA_COVER_ROLES = frozenset({"live", "content"})
 RADIO_CATALOG_MAX_ITEMS = 512
 RADIO_CATALOG_MAX_BYTES = 256 * 1024
 RADIO_CATALOG_MAX_TTL_SECONDS = 7 * 24 * 60 * 60
@@ -111,6 +115,54 @@ def validate_descriptor_metadata(value: Any, *, field: str = "descriptor metadat
     if len(encoded.encode("utf-8")) > DESCRIPTOR_METADATA_MAX_BYTES:
         raise invalid_response(f"{field} exceeds maximum size")
     return dict(value)
+
+
+def validate_visual_metadata(value: Any) -> dict[str, Any]:
+    """Validate the bounded, data-only TV visual metadata contract."""
+    if not isinstance(value, dict):
+        raise invalid_response("TV visual metadata must be an object")
+    allowed = {
+        "visual_version", "avatar_url", "cover_url", "is_live", "title", "owner_name",
+        "ttl_seconds", "cover_role",
+    }
+    if set(value) - allowed or value.get("visual_version") != "1.0":
+        raise invalid_response("TV visual metadata contains unsupported fields")
+    for field in ("avatar_url", "cover_url"):
+        raw = value.get(field, "")
+        if not isinstance(raw, str) or len(raw) > VISUAL_METADATA_MAX_URL_LENGTH:
+            raise invalid_response(f"Invalid TV visual {field}")
+        if raw:
+            try:
+                if urlsplit(raw).scheme.lower() not in {"http", "https"}:
+                    raise invalid_response(f"Invalid TV visual {field}")
+            except ValueError as exc:
+                raise invalid_response(f"Invalid TV visual {field}") from exc
+    if not isinstance(value.get("is_live", False), bool):
+        raise invalid_response("Invalid TV visual is_live")
+    for field in ("title", "owner_name"):
+        raw = value.get(field, "")
+        if not isinstance(raw, str) or len(raw) > VISUAL_METADATA_MAX_TEXT_LENGTH:
+            raise invalid_response(f"Invalid TV visual {field}")
+    ttl = value.get("ttl_seconds")
+    if isinstance(ttl, bool) or not isinstance(ttl, int) or ttl < 1 or ttl > VISUAL_METADATA_MAX_TTL_SECONDS:
+        raise invalid_response("Invalid TV visual TTL")
+    role = value.get("cover_role", "live")
+    if role not in VISUAL_METADATA_COVER_ROLES:
+        raise invalid_response("Invalid TV visual cover role")
+    try:
+        encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise invalid_response("TV visual metadata is not JSON serializable") from exc
+    if len(encoded.encode("utf-8")) > DESCRIPTOR_METADATA_MAX_BYTES:
+        raise invalid_response("TV visual metadata exceeds the size limit")
+    normalized = dict(value)
+    normalized.setdefault("avatar_url", "")
+    normalized.setdefault("cover_url", "")
+    normalized.setdefault("is_live", False)
+    normalized.setdefault("title", "")
+    normalized.setdefault("owner_name", "")
+    normalized.setdefault("cover_role", "live")
+    return normalized
 
 
 def validate_channel_catalog(value: Any, *, owned_schemes: set[str] | frozenset[str]) -> dict[str, Any]:

@@ -150,10 +150,10 @@ import { computed, inject, nextTick, onBeforeUnmount, onMounted, onUnmounted, re
 import { useScroll, useThrottleFn } from '@vueuse/core'
 import { usePlayerStore } from '../stores/player'
 import { useToastStore } from '../stores/toast'
-import { fetchAggregatedChannels, fetchAdapterCover } from '../api/iptv'
+import { fetchAggregatedChannels, fetchChannelVisual } from '../api/iptv'
 import { useEpg } from '../composables/useEpg'
 import { useLogoVisual } from '../composables/useLogoVisual'
-import { loadCover, abortPendingCoverRequests } from '../composables/coverLoader'
+import { loadVisual, abortPendingVisualRequests } from '../composables/visualLoader'
 import TagFilterRow from '../components/TagFilterRow.vue'
 import { channelIdentity, isChannelAllNotLive, isChannelAllUnsupported, isChannelAllUrlsBlocked } from '../utils/sourceIdentity'
 import { IPTV_CHANNEL_SORT_MODES, sortIptvChannels } from '../utils/iptvChannelList'
@@ -249,28 +249,27 @@ const logoCandidateIndexes = ref({})
 const channelSortMode = computed(() => playerStore.iptvChannelSortMode)
 const categoryTabs = computed(() => ['全部', ...allGroups.value])
 
-const YOUTUBE_THUMBNAIL_VARIANTS = ['maxresdefault', 'hq720', 'hqdefault']
+// Core owns source-scoped visual metadata TTL/cache.  The Home keeps only
+// the current projection needed to render each card; it does not key a
+// second long-lived cache by canonical channel.
+const visualMetadata = ref({})
 
-// adapter 直播间封面/头像懒加载。
-// 哪些 adapter 支持 cover 不在前端硬编码，由后端 /api/iptv/channels response 顶层
-// adapter_capabilities 字段提供：{ bilibili: ["cover"], douyu: ["cover"], ... }。
-// 这样后端给某个 adapter 加 ADAPTER_CAPABILITIES = {"cover": True} 后，前端不用改。
-const adapterCoverSupported = ref(new Set())
-const adapterCoverCache = ref({})    // canonical_key -> { cover_url, avatar_url }
-
-// 封面请求包装函数：signal 贯穿到 fetch
-async function _fetchCoverForKey(key, signal) {
-  return fetchAdapterCover(key, { signal })
+async function _fetchVisualForKey(key, signal) {
+  return fetchChannelVisual(key, { signal })
 }
 
-function triggerCoverForChannel(ch) {
+function triggerVisualForChannel(ch) {
   const key = ch?.canonical_key || ''
   if (!key) return
-  // 已经在缓存中
-  if (adapterCoverCache.value[key]) return
-  loadCover(key, _fetchCoverForKey).then(entry => {
+  if (visualMetadata.value[key]) return
+  const seq = activeRequestSeq
+  loadVisual(key, _fetchVisualForKey).then(entry => {
+    // A lazy visual request may outlive a search/group refresh.  It must not
+    // project an old source result into the new list, even if the browser
+    // fetch implementation does not honor AbortController immediately.
+    if (!_isCurrentListRequest(seq)) return
     if (entry?.cover_url || entry?.avatar_url) {
-      adapterCoverCache.value = { ...adapterCoverCache.value, [key]: entry }
+      visualMetadata.value = { ...visualMetadata.value, [key]: entry }
     }
   }).catch(() => {})
 }
@@ -290,13 +289,6 @@ const {
   getFailureKey: channelLogoCandidateKey,
   getVisualKey: (ch) => `${channelLogoIdentityKey(ch)}|${channelLogoUrl(ch)}`,
   enableWide: true,
-  // onBeforeShow: cover 加载已迁移到 IntersectionObserver（coverLoader）
-  onBeforeClassify: (ch, { width, height }) => (
-    isCurrentYoutubeThumbnailCandidate(ch)
-    && width < 480
-    && height < 240
-    && advanceChannelLogoCandidate(ch)
-  ),
   onBeforeFail: advanceChannelLogoCandidate,
   fallbackName: '未知频道',
 })
@@ -309,7 +301,7 @@ function nextSortMode() {
 const currentSortLabel = computed(() => IPTV_CHANNEL_SORT_MODES.find(m => m.key === channelSortMode.value)?.label || '默认排序')
 
 function selectCategoryTab(tab) {
-  abortPendingCoverRequests()
+  abortPendingVisualRequests()
   selectedGroup.value = tab === '全部' ? '' : tab
   loadChannels()
 }
@@ -320,6 +312,7 @@ function isSelectedCategory(tab) {
 
 async function loadChannels() {
   _invalidateListRequest()
+  abortPendingVisualRequests()
   epgMap.value = {}
   const seq = ++requestSeq
   activeRequestSeq = seq
@@ -333,6 +326,9 @@ async function loadChannels() {
     const data = await fetchAggregatedChannels({ group, search, signal: ctrl.signal })
     if (!_isCurrentListRequest(seq)) return { applied: false }
     allChannels.value = data.channels || []
+    visualMetadata.value = {}
+    if (_visualObserver) _visualObserver.disconnect()
+    _visualObservedKeys.clear()
     playerStore.refreshIptvChannelContext({
       group,
       search,
@@ -341,18 +337,11 @@ async function loadChannels() {
     if (!group && !search) {
       allGroups.value = data.groups || []
     }
-    // 同步后端 adapter 能力表：仅取支持 "cover" 的 adapter 名字。
-    const caps = data.adapter_capabilities || {}
-    const next = new Set()
-    for (const [name, list] of Object.entries(caps)) {
-      if (Array.isArray(list) && list.includes('cover')) next.add(String(name).toLowerCase())
-    }
-    if (_isCurrentListRequest(seq)) adapterCoverSupported.value = next
     const keys = (data.channels || []).map(c => c.canonical_key).filter(Boolean)
     if (keys.length && _isCurrentListRequest(seq)) {
       void _refreshBatchCurrent(seq, keys)
     }
-    // 延迟触发封面加载：等 DOM 更新后，IntersectionObserver 开始观察可见卡片
+    // 延迟触发视觉元数据加载：等 DOM 更新后，IntersectionObserver 开始观察可见卡片
     await nextTick()
     _observeVisibleCards()
     return { applied: true }
@@ -366,22 +355,22 @@ async function loadChannels() {
   }
 }
 
-// ── IntersectionObserver：仅加载视口附近频道的封面 ──
-let _coverObserver = null
-let _coverObservedKeys = new Set()
+// ── IntersectionObserver：仅加载视口附近频道的视觉元数据 ──
+let _visualObserver = null
+let _visualObservedKeys = new Set()
 let _observeTimer = null
 
-function _setupCoverObserver() {
-  if (_coverObserver) _coverObserver.disconnect()
-  _coverObserver = new IntersectionObserver(
+function _setupVisualObserver() {
+  if (_visualObserver) _visualObserver.disconnect()
+  _visualObserver = new IntersectionObserver(
     (entries) => {
       for (const entry of entries) {
         if (entry.isIntersecting) {
           const key = entry.target.dataset.canonicalKey
           if (key) {
-            _coverObserver.unobserve(entry.target)
-            _coverObservedKeys.delete(key)
-            triggerCoverForChannel({ canonical_key: key })
+            _visualObserver.unobserve(entry.target)
+            _visualObservedKeys.delete(key)
+            triggerVisualForChannel({ canonical_key: key })
           }
         }
       }
@@ -391,14 +380,14 @@ function _setupCoverObserver() {
 }
 
 function _observeVisibleCards() {
-  if (!_coverObserver) _setupCoverObserver()
+  if (!_visualObserver) _setupVisualObserver()
   // 查找所有已渲染但未观察的 channel card 元素
   const cards = document.querySelectorAll('.channel-card[data-canonical-key]')
   for (const card of cards) {
     const key = card.dataset.canonicalKey
-    if (key && !_coverObservedKeys.has(key)) {
-      _coverObservedKeys.add(key)
-      _coverObserver.observe(card)
+    if (key && !_visualObservedKeys.has(key)) {
+      _visualObservedKeys.add(key)
+      _visualObserver.observe(card)
     }
   }
 }
@@ -412,16 +401,17 @@ function _scheduleObserveCards() {
 }
 
 onMounted(() => {
-  _setupCoverObserver()
+  _setupVisualObserver()
 })
 
 onUnmounted(() => {
   _invalidateListRequest()
-  if (_coverObserver) {
-    _coverObserver.disconnect()
-    _coverObserver = null
+  abortPendingVisualRequests()
+  if (_visualObserver) {
+    _visualObserver.disconnect()
+    _visualObserver = null
   }
-  _coverObservedKeys.clear()
+  _visualObservedKeys.clear()
   if (_observeTimer) {
     clearTimeout(_observeTimer)
     _observeTimer = null
@@ -512,14 +502,13 @@ function channelLogoUrl(ch) {
 
 function channelLogoCandidates(ch) {
   const logoUrl = String(ch?.logo_url || '').trim()
-  const youtubeVideoId = channelYoutubeVideoId(ch)
-  const candidates = youtubeVideoId ? youtubeThumbnailUrls(youtubeVideoId) : []
-  const adapterCover = adapterCoverCache.value[ch?.canonical_key || '']
-  if (adapterCover) {
-    if (adapterCover.cover_url) candidates.push(adapterCover.cover_url)
-    if (adapterCover.avatar_url) candidates.push(adapterCover.avatar_url)
-  }
+  const candidates = []
   if (logoUrl) candidates.push(logoUrl)
+  const visual = visualMetadata.value[ch?.canonical_key || '']
+  if (visual?.avatar_url) candidates.push(visual.avatar_url)
+  if (visual?.cover_url && (visual.cover_role === 'content' || visual.is_live === true)) {
+    candidates.push(visual.cover_url)
+  }
   return Array.from(new Set(candidates))
 }
 
@@ -547,98 +536,6 @@ function advanceChannelLogoCandidate(ch) {
     return true
   }
   return false
-}
-
-function youtubeThumbnailUrls(videoId) {
-  if (!videoId) return []
-  return YOUTUBE_THUMBNAIL_VARIANTS.map(variant => `https://i.ytimg.com/vi/${videoId}/${variant}.jpg`)
-}
-
-function isCurrentYoutubeThumbnailCandidate(ch) {
-  const youtubeVideoId = channelYoutubeVideoId(ch)
-  if (!youtubeVideoId) return false
-  const key = channelLogoCandidateKey(ch)
-  const index = logoCandidateIndexes.value[key] || 0
-  return index < YOUTUBE_THUMBNAIL_VARIANTS.length
-}
-
-function channelYoutubeVideoId(ch) {
-  const urls = Array.isArray(ch?.urls) ? ch.urls : []
-  for (const item of urls) {
-    const parsedId = parseYoutubeVideoId(item?.url)
-    if (parsedId) return parsedId
-    const directId = sanitizeYoutubeVideoId(item?.youtube_video_id)
-    if (directId) return directId
-  }
-  return parseYoutubeThumbnailVideoId(ch?.logo_url)
-}
-
-function sanitizeYoutubeVideoId(value) {
-  const id = String(value || '').trim()
-  return /^[a-zA-Z0-9_-]{11}$/.test(id) ? id : ''
-}
-
-function parseYoutubeVideoId(url) {
-  try {
-    const value = String(url || '').trim()
-    if (!value) return ''
-    const parsed = new URL(value)
-    const host = parsed.hostname.toLowerCase()
-    const parts = parsed.protocol === 'youtube:'
-      ? [parsed.hostname, ...parsed.pathname.split('/')].filter(Boolean)
-      : parsed.pathname.split('/').filter(Boolean)
-
-    if (parsed.protocol === 'youtube:') {
-      if (parts[0] === 'resolve') {
-        return parseYoutubeVideoId(parsed.searchParams.get('url') || '')
-      }
-      if (parts.length === 1) return sanitizeYoutubeVideoId(parts[0])
-      if (parts.length >= 2 && ['live', 'embed', 'shorts'].includes(parts[0])) {
-        return sanitizeYoutubeVideoId(parts[1])
-      }
-      return ''
-    }
-
-    if (host === 'youtu.be' || host === 'www.youtu.be') {
-      return sanitizeYoutubeVideoId(parts[0])
-    }
-
-    const isYoutubeHost = host === 'youtube.com'
-      || host.endsWith('.youtube.com')
-      || host === 'youtube-nocookie.com'
-      || host.endsWith('.youtube-nocookie.com')
-    if (!isYoutubeHost) return ''
-
-    const queryVideoId = sanitizeYoutubeVideoId(parsed.searchParams.get('v'))
-    if (queryVideoId) return queryVideoId
-    if (parts.length >= 2 && ['live', 'embed', 'shorts'].includes(parts[0])) {
-      return sanitizeYoutubeVideoId(parts[1])
-    }
-  } catch {
-    return ''
-  }
-  return ''
-}
-
-function parseYoutubeThumbnailVideoId(url) {
-  try {
-    const parsed = new URL(String(url || '').trim())
-    const host = parsed.hostname.toLowerCase()
-    if (
-      host !== 'i.ytimg.com'
-      && host !== 'img.youtube.com'
-      && !host.endsWith('.ytimg.com')
-      && !host.endsWith('.youtube.com')
-    ) {
-      return ''
-    }
-    const parts = parsed.pathname.split('/').filter(Boolean)
-    const viIndex = parts.findIndex(part => part === 'vi' || part === 'vi_webp')
-    if (viIndex < 0 || viIndex + 1 >= parts.length) return ''
-    return sanitizeYoutubeVideoId(parts[viIndex + 1])
-  } catch {
-    return ''
-  }
 }
 
 async function playChannel(ch) {

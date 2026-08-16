@@ -52,7 +52,7 @@ export function useLogoVisual(options = {}) {
   }
 
   function shouldShowLogo(item) {
-    // onBeforeShow 已迁移到 IntersectionObserver（coverLoader.js），
+    // Visual metadata is loaded by the Home IntersectionObserver,
     // 不在渲染路径中触发网络请求
     const url = logoUrl(item)
     if (!url) return false

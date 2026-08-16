@@ -17,7 +17,7 @@ IDENTITY_RE = re.compile(r"^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$")
 PLUGIN_ID_RE = re.compile(r"^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$")
 SCHEME_RE = re.compile(r"^[a-z][a-z0-9+.-]*$")
 API_VERSION = "1.0"
-SUPPORTED_CONTRACTS = frozenset({"tv_provider", "radio_provider", "channel_catalog"})
+SUPPORTED_CONTRACTS = frozenset({"tv_provider", "tv_visual_provider", "radio_provider", "channel_catalog"})
 SUPPORTED_PERMISSIONS = frozenset({
     "network", "secrets", "cache", "state", "filesystem", "runtime", "subprocess", "crypto", "media",
 })
@@ -54,6 +54,7 @@ class ProviderContract:
     contract: str
     contract_version: str
     features: frozenset[str]
+    schemes: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -123,6 +124,7 @@ def validate_manifest(data: Any, *, core_version: str = "0.1.0") -> PluginManife
         raise _malformed("provider_contracts must not be empty")
     contracts: list[ProviderContract] = []
     contract_names: set[str] = set()
+    visual_contract_schemes: list[set[str]] = []
     for item in contracts_raw:
         if not isinstance(item, dict) or item.get("contract") not in SUPPORTED_CONTRACTS or item.get("contract_version") != "1.0":
             raise PluginError("PLUGIN_INCOMPATIBLE", "Unsupported provider contract", category="compatibility")
@@ -131,10 +133,24 @@ def validate_manifest(data: Any, *, core_version: str = "0.1.0") -> PluginManife
             raise _malformed("Invalid provider contract features")
         if item["contract"] == "channel_catalog" and "discover" not in features:
             raise _malformed("Channel catalog contract must declare discover")
+        if item["contract"] == "tv_visual_provider":
+            if set(item) != {"contract", "contract_version", "features", "schemes"} or "metadata" not in features:
+                raise _malformed("TV visual contract must declare metadata and schemes")
+            schemes_value = item.get("schemes")
+            if (not isinstance(schemes_value, list) or not schemes_value
+                    or any(not isinstance(value, str) or not SCHEME_RE.fullmatch(value) for value in schemes_value)
+                    or len(set(schemes_value)) != len(schemes_value)):
+                raise _malformed("Invalid TV visual contract schemes")
+            visual_contract_schemes.append(set(schemes_value))
+        elif set(item) - {"contract", "contract_version", "features"}:
+            raise _malformed("Provider contract contains unsupported fields")
         if item["contract"] in contract_names:
             raise _malformed("Duplicate provider contract")
         contract_names.add(item["contract"])
-        contracts.append(ProviderContract(item["contract"], "1.0", frozenset(features)))
+        contracts.append(ProviderContract(
+            item["contract"], "1.0", frozenset(features),
+            frozenset(item.get("schemes") or ()),
+        ))
 
     schemes_raw = data["owned_schemes"]
     if not isinstance(schemes_raw, list):
@@ -153,6 +169,13 @@ def validate_manifest(data: Any, *, core_version: str = "0.1.0") -> PluginManife
             raise PluginError("SCHEME_CONFLICT", "Plugin declares the same scheme more than once", category="registry")
         seen.add(scheme)
         schemes.append((scheme, contract))
+
+    tv_schemes = {scheme for scheme, contract in schemes if contract == "tv_provider"}
+    for visual_schemes in visual_contract_schemes:
+        if not visual_schemes.issubset(tv_schemes):
+            raise PluginError(
+                "SCHEME_CONFLICT", "TV visual metadata must belong to a TV-owned scheme", category="registry",
+            )
 
     if "channel_catalog" in contract_names and "tv_provider" not in contract_names:
         raise PluginError(

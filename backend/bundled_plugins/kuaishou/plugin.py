@@ -22,6 +22,7 @@ from waveflow_plugin_sdk import (
     StreamDescriptor,
     TVProvider,
     TVReference,
+    VisualMetadata,
 )
 
 
@@ -172,12 +173,39 @@ class Provider(TVProvider):
             },
         )
 
+    def visual_metadata(self, reference: TVReference, context: ResolveContext) -> VisualMetadata:
+        context.raise_if_cancelled()
+        room_id = reference.resource_id.strip("/")
+        if not room_id:
+            raise InvalidResource("Kuaishou room id is empty")
+        try:
+            status, html = _resolve_direct(KUAISHOU_URL.format(room_id=room_id))
+            if status != 200:
+                raise _provider_failure("kuaishou_visual_http_error", "Kuaishou visual request failed", status=status)
+            playlist = _parse_initial_state(html)
+            live_stream = playlist.get("liveStream") or {}
+            author = playlist.get("author") or {}
+            return VisualMetadata(
+                avatar_url=str(author.get("avatar") or author.get("headurl") or "").strip(),
+                cover_url=str(live_stream.get("poster") or live_stream.get("coverUrl") or "").strip(),
+                is_live=bool(live_stream),
+                title=str(live_stream.get("caption") or "").strip(),
+                owner_name=str(author.get("name") or "").strip(),
+                ttl_seconds=300,
+                cover_role="live",
+            )
+        except PluginError:
+            raise
+        except Exception as exc:
+            raise _provider_failure("kuaishou_visual_failed", "Kuaishou visual request failed") from exc
+
 
 def main() -> None:
     identity, version = PluginApplication.identity_args("org.waveflow/kuaishou")
+    provider = Provider()
     PluginApplication(identity=identity, version=version, permissions=["network"]).register_tv(
-        "kuaishou", Provider()
-    ).run()
+        "kuaishou", provider
+    ).register_tv_visual("kuaishou", provider).run()
 
 
 if __name__ == "__main__":

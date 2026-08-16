@@ -10,17 +10,37 @@
     {
       "contract": "tv_provider",
       "contract_version": "1.0",
-      "features": ["resolve_stream"]
+      "features": [
+        "resolve_stream"
+      ]
+    },
+    {
+      "contract": "tv_visual_provider",
+      "contract_version": "1.0",
+      "features": [
+        "metadata"
+      ],
+      "schemes": [
+        "kuaishou"
+      ]
     }
   ],
   "owned_schemes": [
-    {"scheme": "kuaishou", "contract": "tv_provider"}
+    {
+      "scheme": "kuaishou",
+      "contract": "tv_provider"
+    }
   ],
-  "capabilities": ["tv.resolve_stream"],
+  "capabilities": [
+    "tv.resolve_stream",
+    "tv.visual_metadata"
+  ],
   "permissions": {
     "network": {
       "direct": true,
-      "allowed_hosts": ["live.kuaishou.com"]
+      "allowed_hosts": [
+        "live.kuaishou.com"
+      ]
     }
   },
   "runtime": {

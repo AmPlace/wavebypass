@@ -13,7 +13,10 @@ from .manifest import PluginManifest
 from .permissions import PermissionGate, PermissionPolicy
 from .process import PluginProcess
 from .registry import LifecycleState, PluginInstance, PluginRegistry
-from .validation import validate_channel_catalog, validate_radio_catalog, validate_radio_programme, validate_stream_descriptor
+from .validation import (
+    validate_channel_catalog, validate_radio_catalog, validate_radio_programme,
+    validate_stream_descriptor, validate_visual_metadata,
+)
 
 
 logger = logging.getLogger("waveflow.plugin_runtime")
@@ -121,6 +124,10 @@ class PluginRuntime:
             features = item.get("features")
             if key not in declared_contracts or not isinstance(features, list) or not set(features).issubset(declared_contracts[key]):
                 raise invalid_response("Plugin hello exceeds declared contracts")
+            if item.get("contract") == "tv_visual_provider":
+                declared = next(c for c in instance.manifest.provider_contracts if c.contract == "tv_visual_provider")
+                if set(item.get("schemes") or []) != set(declared.schemes):
+                    raise invalid_response("Plugin hello visual scheme declaration mismatch")
             claimed_contracts[key] = set(features)
         if set(claimed_contracts) != set(declared_contracts):
             raise invalid_response("Plugin hello omits a declared contract")
@@ -140,6 +147,12 @@ class PluginRuntime:
         result = await instance.process.call(method, payload, timeout=timeout)
         if method in {"tv.resolve_stream", "radio.resolve_stream"}:
             return validate_stream_descriptor(result)
+        if method == "tv.visual_metadata":
+            contract = next((item for item in instance.manifest.provider_contracts if item.contract == "tv_visual_provider"), None)
+            scheme = str(payload.get("scheme") or "").lower()
+            if contract is None or "metadata" not in contract.features or scheme not in contract.schemes:
+                raise PluginError("RESOURCE_NOT_FOUND", "Plugin does not implement TV visual metadata", category="request")
+            return validate_visual_metadata(result)
         if method == "radio.catalog":
             contract = next(
                 (item for item in instance.manifest.provider_contracts if item.contract == "radio_provider"),

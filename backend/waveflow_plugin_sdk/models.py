@@ -137,3 +137,28 @@ class StreamDescriptor:
     @classmethod
     def rtsp(cls, url: str, **kwargs: Any) -> "StreamDescriptor":
         return cls(url=url, transport="rtsp", **kwargs)
+
+
+@dataclass(frozen=True)
+class VisualMetadata:
+    """Optional source-scoped TV visual metadata, separate from playback."""
+
+    avatar_url: str = ""
+    cover_url: str = ""
+    is_live: bool = False
+    title: str = ""
+    owner_name: str = ""
+    ttl_seconds: int = 300
+    cover_role: str = "live"
+
+    def as_contract(self) -> dict[str, Any]:
+        return {
+            "visual_version": "1.0",
+            "avatar_url": self.avatar_url,
+            "cover_url": self.cover_url,
+            "is_live": self.is_live,
+            "title": self.title,
+            "owner_name": self.owner_name,
+            "ttl_seconds": self.ttl_seconds,
+            "cover_role": self.cover_role,
+        }

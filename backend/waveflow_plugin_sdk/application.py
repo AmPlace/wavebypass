@@ -11,12 +11,20 @@ from typing import Any, BinaryIO
 
 from .capabilities import CapabilityClient, capability_error
 from .errors import PluginError
-from .models import ChannelCatalog, RadioReference, ResolveContext, StreamDescriptor, TVReference
+from .models import ChannelCatalog, RadioReference, ResolveContext, StreamDescriptor, TVReference, VisualMetadata
 
 
 class TVProvider(ABC):
     @abstractmethod
     def resolve_stream(self, reference: TVReference, context: ResolveContext) -> StreamDescriptor:
+        raise NotImplementedError
+
+
+class VisualMetadataProvider(ABC):
+    """Optional source-scoped TV visual metadata provider."""
+
+    @abstractmethod
+    def visual_metadata(self, reference: TVReference, context: ResolveContext) -> VisualMetadata | dict[str, Any]:
         raise NotImplementedError
 
 
@@ -46,6 +54,7 @@ class PluginApplication:
         self.version = version
         self.permissions = list(permissions or [])
         self._tv: dict[str, TVProvider] = {}
+        self._tv_visual: dict[str, VisualMetadataProvider] = {}
         self._radio: dict[str, RadioProvider] = {}
         self._channel_catalog: ChannelCatalogProvider | None = None
         self._write_lock = threading.Lock()
@@ -58,6 +67,10 @@ class PluginApplication:
 
     def register_tv(self, scheme: str, provider: TVProvider) -> "PluginApplication":
         self._tv[scheme] = provider
+        return self
+
+    def register_tv_visual(self, scheme: str, provider: VisualMetadataProvider) -> "PluginApplication":
+        self._tv_visual[str(scheme).lower()] = provider
         return self
 
     def register_radio(self, scheme: str, provider: RadioProvider) -> "PluginApplication":
@@ -153,6 +166,13 @@ class PluginApplication:
                     raise PluginError("RESOURCE_NOT_FOUND", "TV Provider scheme is not registered")
                 result = provider.resolve_stream(reference, context)
                 self._provider_response(request, result.as_contract())
+            elif method == "tv.visual_metadata":
+                reference = TVReference.from_payload(payload)
+                provider = self._tv_visual.get(reference.scheme)
+                if provider is None:
+                    raise PluginError("RESOURCE_NOT_FOUND", "TV visual metadata is not registered")
+                result = provider.visual_metadata(reference, context)
+                self._provider_response(request, result.as_contract() if isinstance(result, VisualMetadata) else result)
             elif method == "radio.catalog":
                 provider = next(iter(self._radio.values())) if len(self._radio) == 1 else None
                 if provider is None:
@@ -195,6 +215,12 @@ class PluginApplication:
             contracts.append({"contract": "tv_provider", "contract_version": "1.0", "features": ["resolve_stream"]})
             capabilities.append("tv.resolve_stream")
             schemes.extend({"scheme": scheme, "contract": "tv_provider"} for scheme in self._tv)
+        if self._tv_visual:
+            contracts.append({
+                "contract": "tv_visual_provider", "contract_version": "1.0",
+                "features": ["metadata"], "schemes": sorted(self._tv_visual),
+            })
+            capabilities.append("tv.visual_metadata")
         if self._radio:
             features = ["catalog", "resolve_stream"]
             if any(type(provider).programme is not RadioProvider.programme for provider in self._radio.values()):

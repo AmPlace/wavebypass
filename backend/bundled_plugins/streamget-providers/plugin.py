@@ -63,6 +63,8 @@ from waveflow_plugin_sdk import (
     TVProvider,
     TVReference,
     TemporaryFailure,
+    VisualMetadataProvider,
+    VisualMetadata,
 )
 
 
@@ -421,12 +423,82 @@ class StreamGetProvider(TVProvider):
         )
 
 
+class StreamGetVisualProvider(VisualMetadataProvider):
+    """Optional visual metadata for the Bundle's explicitly supported schemes."""
+
+    def visual_metadata(self, reference: TVReference, context: ResolveContext) -> VisualMetadata:
+        context.raise_if_cancelled()
+        room_id = reference.resource_id.strip("/")
+        if not room_id:
+            raise InvalidResource("StreamGet resource is not supported")
+        try:
+            if reference.scheme == "bilibili":
+                return asyncio.run(self._bilibili(room_id))
+            if reference.scheme == "douyu":
+                return asyncio.run(self._douyu(room_id))
+        except PluginError:
+            raise
+        except Exception as exc:
+            raise TemporaryFailure("StreamGet visual metadata request failed") from exc
+        raise PluginError("RESOURCE_NOT_FOUND", "StreamGet visual metadata is not supported")
+
+    @staticmethod
+    async def _bilibili(room_id: str) -> VisualMetadata:
+        api = f"https://api.live.bilibili.com/xlive/web-room/v1/index/getH5InfoByRoom?room_id={room_id}"
+        async with httpx.AsyncClient(timeout=6.0) as client:
+            response = await client.get(
+                api,
+                headers={"User-Agent": "Mozilla/5.0", "Referer": f"https://live.bilibili.com/{room_id}"},
+            )
+            response.raise_for_status()
+        data = (response.json() or {}).get("data") or {}
+        room_info = data.get("room_info") or {}
+        base_info = ((data.get("anchor_info") or {}).get("base_info")) or {}
+        return VisualMetadata(
+            avatar_url=str(base_info.get("face") or "").strip(),
+            cover_url=str(room_info.get("cover") or room_info.get("keyframe") or "").strip(),
+            is_live=int(room_info.get("live_status") or 0) == 1,
+            title=str(room_info.get("title") or "").strip(),
+            owner_name=str(base_info.get("uname") or "").strip(),
+            ttl_seconds=300,
+            cover_role="live",
+        )
+
+    @staticmethod
+    async def _douyu(room_id: str) -> VisualMetadata:
+        api = f"https://www.douyu.com/betard/{room_id}"
+        async with httpx.AsyncClient(timeout=6.0) as client:
+            response = await client.get(
+                api,
+                headers={"User-Agent": "Mozilla/5.0", "Referer": "https://www.douyu.com/"},
+            )
+            response.raise_for_status()
+        room = (response.json() or {}).get("room") or {}
+        avatar_field = room.get("avatar")
+        if isinstance(avatar_field, Mapping):
+            avatar = avatar_field.get("big") or avatar_field.get("middle") or ""
+        else:
+            avatar = avatar_field or room.get("avatar_mid") or ""
+        return VisualMetadata(
+            avatar_url=str(avatar).strip(),
+            cover_url=str(room.get("room_pic") or "").strip(),
+            is_live=int(room.get("show_status") or 0) == 1 and int(room.get("videoLoop") or 0) == 0,
+            title=str(room.get("room_name") or "").strip(),
+            owner_name=str(room.get("owner_name") or "").strip(),
+            ttl_seconds=300,
+            cover_role="live",
+        )
+
+
 def main() -> None:
     identity, version = PluginApplication.identity_args("org.waveflow/streamget-providers")
     app = PluginApplication(identity=identity, version=version, permissions=["network"])
     provider = StreamGetProvider()
+    visual_provider = StreamGetVisualProvider()
     for scheme in PROVIDER_SPECS:
         app.register_tv(scheme, provider)
+    for scheme in ("bilibili", "douyu"):
+        app.register_tv_visual(scheme, visual_provider)
     app.run()
 
 

@@ -163,7 +163,7 @@ class KuaishouPluginContractTest(unittest.TestCase):
         self.assertEqual(manifest.runtime["dependency_lock"], PTBTV_LOCK)
         source = SOURCE.read_text(encoding="utf-8")
         for forbidden in ("adapters.kuaishou", "backend.adapters.kuaishou", "import httpx",
-                          "managed_http", "CapabilityGateway", "cover"):
+                          "managed_http", "CapabilityGateway"):
             self.assertNotIn(forbidden, source)
 
 

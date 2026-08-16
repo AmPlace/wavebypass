@@ -57,6 +57,7 @@ from security.proxy_handles import (
 )
 from security.source_ids import source_id_for, source_revision_for
 from ssrf_guard import UnsafeTargetError, assert_safe_target_url
+from core.visual_metadata import empty_visual, get_visual_metadata_cache
 
 
 logger = logging.getLogger("media.proxy")
@@ -770,6 +771,116 @@ async def _serve_resolved_source_playlist(
 
 
 # ── Cover (channel-based) ─────────────────────────────────────────────────
+
+
+def _normalize_visual_payload(payload: dict, *, source_id: str, source_revision: str, fallback: dict) -> dict:
+    """Project Plugin/compat metadata without letting it replace stable logo."""
+    import main as _m
+
+    result = dict(fallback)
+    result.update({
+        "source_id": source_id,
+        "source_revision": source_revision,
+        "avatar_url": str(payload.get("avatar_url") or payload.get("identity_visual") or "").strip(),
+        "cover_url": str(payload.get("cover_url") or "").strip(),
+        "is_live": bool(payload.get("is_live", False)),
+        "title": str(payload.get("title") or "").strip(),
+        "owner_name": str(payload.get("owner_name") or payload.get("anchor_name") or "").strip(),
+        "ttl_seconds": int(payload.get("ttl_seconds") or 300),
+        "cover_role": str(payload.get("cover_role") or "live"),
+    })
+    # Keep the existing image anti-hotlink behavior in the generic bridge.
+    for field in ("avatar_url", "cover_url"):
+        raw = result[field]
+        if raw:
+            result[field] = _m._cover_img_proxy_url(raw)
+    return result
+
+
+async def _select_visual_source(_m, channel: dict, resolver, requested_source_id: str = "") -> dict | None:
+    sources = list(channel.get("urls", []) or [])
+    for source in sources:
+        if not source.get("source_id"):
+            source["source_id"] = source_id_for(source)
+    if requested_source_id:
+        return next((source for source in sources if source.get("source_id") == requested_source_id), None)
+    for source in sources:
+        if not _is_truthy(source.get("enabled", True)) or source.get("disabled") is True:
+            continue
+        if resolver is not None and resolver.supports_visual_metadata(str(source.get("url") or "")):
+            return source
+    # Narrow compatibility only for legacy installations which have not yet
+    # received a visual-capable Plugin artifact.  It is never used when a
+    # Plugin has declared the generic feature.
+    for source in sources:
+        adapter = str(source.get("adapter") or "").strip().lower()
+        if not adapter:
+            continue
+        if getattr(_m, "adapter_supports", lambda *_args: False)(adapter, "cover"):
+            return source
+    return None
+
+
+@router.get("/api/media/channel/{channel_key}/visual")
+async def media_channel_visual(
+    channel_key: str,
+    request: Request,
+    source_id: str = Query("", description="Optional source-scoped visual metadata selector"),
+):
+    """Return optional source-scoped visual metadata for an IPTV channel.
+
+    The endpoint selects a visual-capable source generically.  It does not
+    inspect provider names in the frontend and it never accepts an upstream
+    URL from the caller.
+    """
+    import main as _m
+
+    channels, _groups = await _m._get_aggregated_iptv_channels()
+    channel = next((ch for ch in channels if ch.get("canonical_key") == channel_key), None)
+    if not channel:
+        raise HTTPException(status_code=404, detail="频道不存在")
+    try:
+        resolver = _provider_resolver(_m, request)
+    except PluginError:
+        # Visual metadata is non-critical presentation.  A plugin subsystem
+        # that is recovering must not make the channel API fail or affect
+        # playback; the stable channel logo remains the fallback.
+        resolver = None
+    source = await _select_visual_source(_m, channel, resolver, source_id.strip())
+    fallback = empty_visual(
+        source_id=str(source.get("source_id") or "") if source else "",
+        source_revision=source_revision_for(source) if source else "",
+        logo_url=str(channel.get("logo_url") or ""),
+        title=str(channel.get("name") or ""),
+    )
+    if source is None:
+        return fallback
+    source_ref = str(source.get("source_id") or source_id_for(source))
+    source_revision = source_revision_for(source)
+    source_url = str(source.get("url") or "")
+
+    async def fetch() -> dict:
+        try:
+            if resolver is not None and resolver.supports_visual_metadata(source_url):
+                payload = await resolver.visual_metadata(
+                    source_url, source_id=source_ref, source_revision=source_revision,
+                )
+            else:
+                # Compatibility bridge for legacy ownership only.  New Plugin
+                # visual implementations never enter this branch.
+                payload = await _m.fetch_adapter_cover_payload(source_url)
+            return _normalize_visual_payload(
+                payload, source_id=source_ref, source_revision=source_revision, fallback=fallback,
+            )
+        except Exception:
+            return dict(fallback)
+
+    return await get_visual_metadata_cache().get_or_fetch(
+        source_id=source_ref,
+        source_revision=source_revision,
+        fallback=fallback,
+        fetch=fetch,
+    )
 
 
 @router.get("/api/media/channel/{canonical_key}/cover")

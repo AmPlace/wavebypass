@@ -8,7 +8,9 @@ selection diagnostics are data-only generic metadata.
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
+from urllib.request import Request, urlopen
 
 from streamlink import Streamlink
 from streamlink.exceptions import NoPluginError, NoStreamsError
@@ -23,6 +25,7 @@ from waveflow_plugin_sdk import (
     TemporaryFailure,
     TVProvider,
     TVReference,
+    VisualMetadata,
 )
 
 
@@ -130,12 +133,45 @@ class Provider(TVProvider):
             },
         )
 
+    def visual_metadata(self, reference: TVReference, context: ResolveContext) -> VisualMetadata:
+        context.raise_if_cancelled()
+        room_id = reference.resource_id.strip("/")
+        if not room_id:
+            raise InvalidResource("Huya room ID is empty")
+        api = (
+            "https://mp.huya.com/cache.php?m=Live&do=profileRoom&showSecret=1"
+            f"&roomid={room_id}"
+        )
+        try:
+            request = Request(api, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://www.huya.com/"})
+            with urlopen(request, timeout=6.0) as response:
+                payload = json.loads(response.read(1024 * 1024).decode("utf-8", errors="replace"))
+            data = (payload or {}).get("data") or {}
+            live_data = data.get("liveData") or {}
+            profile = data.get("profileInfo") or {}
+            live_status = live_data.get("liveStatus")
+            is_live = (str(live_status).upper() == "ON") if live_status is not None else bool(live_data.get("screenshot"))
+            return VisualMetadata(
+                avatar_url=str(live_data.get("avatar180") or profile.get("avatar180") or "").strip(),
+                cover_url=str(live_data.get("screenshot") or "").strip(),
+                is_live=is_live,
+                title=str(live_data.get("introduction") or "").strip(),
+                owner_name=str(live_data.get("nick") or profile.get("nick") or "").strip(),
+                ttl_seconds=300,
+                cover_role="live",
+            )
+        except PluginError:
+            raise
+        except Exception as exc:
+            raise TemporaryFailure("Huya visual metadata request failed") from exc
+
 
 def main() -> None:
     identity, version = PluginApplication.identity_args("org.waveflow/huya")
+    provider = Provider()
     PluginApplication(identity=identity, version=version, permissions=["network"]).register_tv(
-        "huya", Provider()
-    ).run()
+        "huya", provider
+    ).register_tv_visual("huya", provider).run()
 
 
 if __name__ == "__main__":

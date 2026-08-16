@@ -29,7 +29,6 @@ import epg_read_resolver
 import epg_source_management
 from adapters import (
     AdapterResolveError,
-    adapter_capabilities_map,
     adapter_supports,
     parse_adapter_url,
     resolve_adapter_source,
@@ -2085,9 +2084,6 @@ async def aggregated_channels(group: str = '', search: str = ''):
         "channels": result,
         "groups": groups,
         "total": len(result),
-        # adapter 能力表，前端据此决定要对哪些 adapter 触发 cover 懒加载等增强请求。
-        # 由各 adapter 模块顶层 ADAPTER_CAPABILITIES 自描述 + adapters/__init__.py 采集。
-        "adapter_capabilities": adapter_capabilities_map(),
     }
 
 

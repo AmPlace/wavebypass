@@ -76,11 +76,12 @@ export async function fetchGlobalTestStatus() {
   return res.json()
 }
 
-// ── adapter 直播间封面/头像（B站 / 斗鱼 / 虎牙 / 快手；其他 adapter 后端会返回空对象）──
-// 封面入口已迁移到 channel canonical_key：
-//   GET /api/media/channel/{canonical_key}/cover
-export async function fetchAdapterCover(canonicalKey, { signal } = {}) {
+// ── optional source visual metadata (Plugin-owned when available) ──
+// The endpoint is generic and keyed by the channel only for projection
+// lookup; Core keeps the actual TTL/cache identity source-scoped.
+//   GET /api/media/channel/{canonical_key}/visual
+export async function fetchChannelVisual(canonicalKey, { signal } = {}) {
   if (!canonicalKey) return { ok: true, cover_url: '', avatar_url: '', title: '', is_live: false }
-  const res = await request(`/api/media/channel/${encodeURIComponent(canonicalKey)}/cover`, { timeout: 8_000, signal })
+  const res = await request(`/api/media/channel/${encodeURIComponent(canonicalKey)}/visual`, { timeout: 8_000, signal })
   return res.json()
 }

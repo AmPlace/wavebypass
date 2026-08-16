@@ -27,6 +27,7 @@ from waveflow_plugin_sdk import (
     TemporaryFailure,
     TVProvider,
     TVReference,
+    VisualMetadata,
 )
 
 
@@ -283,12 +284,28 @@ class Provider(TVProvider):
             },
         )
 
+    def visual_metadata(self, reference: TVReference, context: ResolveContext) -> VisualMetadata:
+        context.raise_if_cancelled()
+        youtube_url = _build_youtube_url(reference)
+        video_id = _video_id(youtube_url)
+        if not video_id:
+            return VisualMetadata(ttl_seconds=300, cover_role="content")
+        return VisualMetadata(
+            # Thumbnail is a dynamic content visual; channel-avatar discovery
+            # is intentionally not part of this migration.
+            cover_url=f"https://i.ytimg.com/vi/{video_id}/maxresdefault.jpg",
+            is_live=False,
+            ttl_seconds=1800,
+            cover_role="content",
+        )
+
 
 def main() -> None:
     identity, version = PluginApplication.identity_args("org.waveflow/youtube")
+    provider = Provider()
     PluginApplication(identity=identity, version=version, permissions=["network"]).register_tv(
-        "youtube", Provider()
-    ).run()
+        "youtube", provider
+    ).register_tv_visual("youtube", provider).run()
 
 
 if __name__ == "__main__":

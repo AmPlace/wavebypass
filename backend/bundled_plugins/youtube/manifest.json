@@ -15,7 +15,8 @@
     }
   ],
   "capabilities": [
-    "tv.resolve_stream"
+    "tv.resolve_stream",
+    "tv.visual_metadata"
   ],
   "core_version_range": ">=0.1.0 <1.0.0",
   "dependencies": [],
@@ -49,6 +50,16 @@
       "contract_version": "1.0",
       "features": [
         "resolve_stream"
+      ]
+    },
+    {
+      "contract": "tv_visual_provider",
+      "contract_version": "1.0",
+      "features": [
+        "metadata"
+      ],
+      "schemes": [
+        "youtube"
       ]
     }
   ],

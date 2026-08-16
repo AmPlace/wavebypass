@@ -124,6 +124,63 @@ class ProviderResolver:
         })
         return self._bridge_descriptor(reference.scheme, descriptor)
 
+    def supports_visual_metadata(self, target_url: str) -> bool:
+        """Return whether the active Plugin owns the optional visual feature.
+
+        This is a capability check only.  It never invokes a provider and it
+        deliberately returns false for legacy ownership or unavailable
+        runtimes, so unsupported sources are not probed as a side effect of a
+        Home render.
+        """
+        try:
+            reference = parse_tv_reference(target_url)
+            if self.mode(reference.scheme) != "plugin" or self.runtime is None:
+                return False
+            instance = self.runtime.registry.route(reference.scheme)
+            expected = self._expected_plugins.get(reference.scheme)
+            if expected and instance.manifest.identity != expected:
+                return False
+            contract = next(
+                (item for item in instance.manifest.provider_contracts if item.contract == "tv_visual_provider"),
+                None,
+            )
+            return bool(contract and "metadata" in contract.features and reference.scheme in contract.schemes)
+        except (AdapterResolveError, PluginError, ValueError):
+            return False
+
+    async def visual_metadata(
+        self,
+        target_url: str,
+        *,
+        source_id: str = "",
+        source_revision: str = "",
+    ) -> dict[str, Any]:
+        """Resolve optional source visual metadata through the active Plugin."""
+        reference = parse_tv_reference(target_url)
+        if self.mode(reference.scheme) != "plugin":
+            raise PluginError("RESOURCE_NOT_FOUND", "Source has no Plugin visual metadata", category="request")
+        if self.runtime is None:
+            raise PluginError("PLUGIN_UNAVAILABLE", "Plugin subsystem is unavailable", category="lifecycle")
+        instance = self.runtime.registry.route(reference.scheme)
+        expected = self._expected_plugins.get(reference.scheme)
+        if expected and instance.manifest.identity != expected:
+            raise PluginError("SCHEME_CONFLICT", "Configured Plugin does not own this scheme", category="routing")
+        contract = next(
+            (item for item in instance.manifest.provider_contracts if item.contract == "tv_visual_provider"),
+            None,
+        )
+        if contract is None or "metadata" not in contract.features or reference.scheme not in contract.schemes:
+            raise PluginError("RESOURCE_NOT_FOUND", "Plugin does not implement TV visual metadata", category="request")
+        return await self.runtime.request(instance, "tv.visual_metadata", {
+            "reference_version": "1.0",
+            "scheme": reference.scheme,
+            "resource_id": reference.resource_id,
+            "query": reference.query,
+            "raw_reference": reference.raw_url,
+            "source_id": source_id,
+            "source_revision": source_revision,
+        })
+
     @staticmethod
     def _bridge_descriptor(scheme: str, descriptor: dict[str, Any]) -> dict[str, Any]:
         transport = str(descriptor.get("transport") or "hls")
