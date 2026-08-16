@@ -3544,7 +3544,7 @@ async function tryPlayIptv(url, usingProxy = false, customUa = '', attemptId = 0
     if (canUseHls()) {
       const hlsConfig = {
         enableWorker: true, lowLatencyMode: false, liveDurationInfinity: true,
-        // 直通模式（WIDE_ENABLED=False）下，前端拿到的是上游原始滑动窗口，常见
+        // Thin 直通模式下，前端拿到的是上游原始滑动窗口，常见
         // 6 segments * 10s ≈ 60s。liveSyncDuration 必须明显小于窗口才能留出
         // 安全 buffer 余量；让 hls.js 从靠近 edge 的位置起播，但同时通过
         // maxLiveSyncPlaybackRate 允许轻微加速追赶 live edge。
