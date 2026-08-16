@@ -58,7 +58,7 @@ from epg_tasks import (
 from radio_tasks import reconcile_radio_automation_tasks
 from ssrf_guard import UnsafeTargetError, assert_safe_target_url, assert_safe_host_ips
 from core.config import get_settings
-from core.settings_service import get_effective_settings
+from core.settings_service import get_effective_settings, get_effective_settings_sync
 from infrastructure.http_client import (
     RedirectTargetRejected,
     request_with_safe_redirects,
@@ -244,6 +244,9 @@ http_client = httpx.AsyncClient(
 
 RTSP_HLS_ROOT = Path(os.getenv("RTSP_HLS_ROOT") or (Path(tempfile.gettempdir()) / "waveflow_rtsp_hls"))
 RTSP_HLS_SESSIONS: dict[str, dict] = {}
+_RTSP_HLS_STARTUPS: dict[str, asyncio.Task] = {}
+_RTSP_HLS_QUOTA_LOCK = asyncio.Lock()
+_RTSP_RESERVED_SESSIONS: set[str] = set()
 RTSP_HLS_IDLE_TTL = 90
 RTSP_HLS_START_TIMEOUT = 18
 RTSP_HLS_SEGMENT_SECONDS = _env_int("RTSP_HLS_SEGMENT_SECONDS", 2)
@@ -382,6 +385,12 @@ async def _rtsp_hls_cleanup_task(stop_event: asyncio.Event):
             return
         now = time.time()
         for session_id, session in list(RTSP_HLS_SESSIONS.items()):
+            if session.get("startup_state") == "starting":
+                # A freshly-created process may not have emitted its first
+                # playlist/segment yet. Only the startup owner decides
+                # whether that is a startup failure; ordinary idle/dead
+                # cleanup must not race it.
+                continue
             proc = session.get("process")
             idle = now - float(session.get("last_access", 0))
             if idle > RTSP_HLS_IDLE_TTL or (proc and _rtsp_proc_returncode(proc) is not None):
@@ -448,7 +457,15 @@ def _drain_rtsp_stderr(session_id: str, pipe) -> None:
             pass
 
 
-async def _ensure_rtsp_hls_session(target_url: str, custom_ua: str = "", compat: bool = False) -> tuple[str, Path]:
+def _finish_rtsp_startup(session_id: str, task: asyncio.Task) -> None:
+    current = _RTSP_HLS_STARTUPS.get(session_id)
+    if current is task:
+        _RTSP_HLS_STARTUPS.pop(session_id, None)
+        _RTSP_RESERVED_SESSIONS.discard(session_id)
+    _observe_background_task(task, f"rtsp_hls_startup:{session_id}")
+
+
+async def _start_rtsp_hls_session(target_url: str, custom_ua: str = "", compat: bool = False) -> tuple[str, Path]:
     _validate_rtsp_url(target_url)
     ffmpeg = _ffmpeg_bin()
     if not ffmpeg:
@@ -460,7 +477,12 @@ async def _ensure_rtsp_hls_session(target_url: str, custom_ua: str = "", compat:
     playlist_path = session_dir / "index.m3u8"
     session = RTSP_HLS_SESSIONS.get(session_id)
     proc = session.get("process") if session else None
-    if proc and _rtsp_proc_returncode(proc) is None and playlist_path.exists():
+    if (
+        proc
+        and _rtsp_proc_returncode(proc) is None
+        and playlist_path.exists()
+        and session.get("startup_state") != "starting"
+    ):
         session["last_access"] = time.time()
         return session_id, playlist_path
 
@@ -538,6 +560,7 @@ async def _ensure_rtsp_hls_session(target_url: str, custom_ua: str = "", compat:
         "target_url": target_url,
         "compat": compat,
         "stderr_tail": "",
+        "startup_state": "starting",
     }
     threading.Thread(target=_drain_rtsp_stderr, args=(session_id, proc.stderr), daemon=True).start()
 
@@ -545,6 +568,7 @@ async def _ensure_rtsp_hls_session(target_url: str, custom_ua: str = "", compat:
     while time.monotonic() < deadline:
         if playlist_path.exists() and len(list(session_dir.glob("seg_*.ts"))) >= RTSP_HLS_START_SEGMENTS:
             RTSP_HLS_SESSIONS[session_id]["last_access"] = time.time()
+            RTSP_HLS_SESSIONS[session_id]["startup_state"] = "ready"
             return session_id, playlist_path
         if _rtsp_proc_returncode(proc) is not None:
             stderr = RTSP_HLS_SESSIONS.get(session_id, {}).get("stderr_tail", "")
@@ -555,6 +579,82 @@ async def _ensure_rtsp_hls_session(target_url: str, custom_ua: str = "", compat:
     stderr = RTSP_HLS_SESSIONS.get(session_id, {}).get("stderr_tail", "")
     await _stop_rtsp_session(session_id)
     raise HTTPException(status_code=504, detail=f"RTSP 转 HLS 起播超时{': ' + stderr[-500:] if stderr else ''}")
+
+
+async def _ensure_rtsp_hls_session(target_url: str, custom_ua: str = "", compat: bool = False) -> tuple[str, Path]:
+    """Return one shared RTSP→HLS startup for each session identity.
+
+    The check and task insertion happen before the first await, so two
+    callers on the same event loop cannot both become startup owners. A
+    shielded wait ensures cancellation of one HTTP waiter does not cancel the
+    shared startup task.
+    """
+    _validate_rtsp_url(target_url)
+    session_id = _rtsp_session_id(target_url, custom_ua, compat)
+    session_dir = RTSP_HLS_ROOT / session_id
+    playlist_path = session_dir / "index.m3u8"
+
+    startup = _RTSP_HLS_STARTUPS.get(session_id)
+    if startup is not None:
+        if not startup.done():
+            return await asyncio.shield(startup)
+
+    session = RTSP_HLS_SESSIONS.get(session_id)
+    proc = session.get("process") if session else None
+    if (
+        proc
+        and _rtsp_proc_returncode(proc) is None
+        and playlist_path.exists()
+        and session.get("startup_state") != "starting"
+    ):
+        session["last_access"] = time.time()
+        return session_id, playlist_path
+
+    startup_to_await: asyncio.Task | None = None
+    async with _RTSP_HLS_QUOTA_LOCK:
+        startup = _RTSP_HLS_STARTUPS.get(session_id)
+        if startup is not None and startup.done():
+            if _RTSP_HLS_STARTUPS.get(session_id) is startup:
+                _RTSP_HLS_STARTUPS.pop(session_id, None)
+            _RTSP_RESERVED_SESSIONS.discard(session_id)
+            startup = None
+
+        if startup is not None:
+            # The quota is checked only by a genuine startup owner. Same-key
+            # waiters join the already reserved task and consume no slot.
+            startup_to_await = startup
+        else:
+            session = RTSP_HLS_SESSIONS.get(session_id)
+            proc = session.get("process") if session else None
+            if (
+                proc
+                and _rtsp_proc_returncode(proc) is None
+                and playlist_path.exists()
+                and session.get("startup_state") != "starting"
+            ):
+                session["last_access"] = time.time()
+                return session_id, playlist_path
+
+            settings = get_effective_settings_sync()
+            active_ids = set(RTSP_HLS_SESSIONS) | _RTSP_RESERVED_SESSIONS
+            if session_id not in active_ids and len(active_ids) >= settings.rtsp_max_sessions:
+                raise HTTPException(status_code=503, detail="RTSP session capacity reached")
+
+            _RTSP_RESERVED_SESSIONS.add(session_id)
+            try:
+                startup_to_await = asyncio.create_task(
+                    _start_rtsp_hls_session(target_url, custom_ua, compat),
+                    name=f"rtsp-hls-startup:{session_id}",
+                )
+            except BaseException:
+                _RTSP_RESERVED_SESSIONS.discard(session_id)
+                raise
+            _RTSP_HLS_STARTUPS[session_id] = startup_to_await
+            startup_to_await.add_done_callback(
+                lambda done: _finish_rtsp_startup(session_id, done)
+            )
+
+    return await asyncio.shield(startup_to_await)
 
 
 _TINGFM_STREAMS = {
