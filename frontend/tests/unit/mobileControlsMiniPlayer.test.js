@@ -63,9 +63,11 @@ test('IPTV density is a direct toggle and section controls retain their presenta
 
 test('Mini Player only exposes play, mute and FullPlayer controls', () => {
   const player = source('src/components/BottomPlayer.vue')
+  const css = source('src/style.css')
 
   for (const token of ['mobile-player-shell', 'mobile-player-logo', 'mobile-player-title', 'mobile-player-status', 'mobile-player-play-btn', 'mobile-player-action-control', 'mobile-player-action-icon']) assert.match(player, new RegExp(token))
-  assert.match(player, /mobile-player-shell[^>]*h-\[72px\][^>]*rounded-\[18px\][\s\S]*?lg:h-16/)
+  assert.match(player, /mobile-player-shell[^>]*h-\[72px\][^>]*rounded-\[20px\][\s\S]*?lg:h-16 lg:rounded-\[20px\]/)
+  assert.match(css, /\.mobile-player-shell \{[\s\S]*?border-radius: 1\.25rem;/)
   assert.match(player, /@click="openFullPlayer"/)
   assert.match(player, /@click\.stop="playerStore\.togglePlay\(\)"/)
   assert.match(player, /@click\.stop="toggleMute"/)
