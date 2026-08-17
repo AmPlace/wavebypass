@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import logging
+import math
 import os
 import re
 import shutil
@@ -250,10 +251,14 @@ RTSP_HLS_SEGMENT_SECONDS = _env_int("RTSP_HLS_SEGMENT_SECONDS", 2)
 RTSP_HLS_LIST_SIZE = _env_int("RTSP_HLS_LIST_SIZE", 15, minimum=3)
 RTSP_HLS_START_SEGMENTS = _env_int("RTSP_HLS_START_SEGMENTS", 2, minimum=1)
 RTSP_HLS_DELETE_THRESHOLD = _env_int("RTSP_HLS_DELETE_THRESHOLD", 4, minimum=1)
+RTSP_HLS_CLEANUP_INTERVAL_SECONDS = 10
+RTSP_HLS_STALL_MIN_SECONDS = 15.0
+RTSP_HLS_STALL_MULTIPLIER = 4.0
 RTSP_SEGMENT_RE = re.compile(r"^seg_\d+\.ts$")
 RTSP_SESSION_ID_RE = re.compile(r"^[0-9a-f]{24}$")
 _RTSP_HLS_CLEANUP_TASK: asyncio.Task | None = None
 _RTSP_HLS_CLEANUP_STOP: asyncio.Event | None = None
+_RTSP_HLS_SHUTTING_DOWN = False
 _APP_BACKGROUND_TASKS: set[asyncio.Task] = set()
 
 
@@ -354,49 +359,363 @@ def _clear_stale_rtsp_hls_dirs() -> None:
         logger.warning("清理旧 RTSP 临时目录失败: %s", RTSP_HLS_ROOT, exc_info=True)
 
 
-async def _stop_rtsp_session(session_id: str) -> None:
-    session = RTSP_HLS_SESSIONS.pop(session_id, None)
-    if not session:
-        _delete_rtsp_session_dir(session_id)
-        return
-    proc = session.get("process")
+def _rtsp_hls_segment_name(uri: str) -> str | None:
+    """Return a generated local segment name from one playlist URI."""
+    parsed = urlparse(uri.strip())
+    name = Path(parsed.path).name
+    if not RTSP_SEGMENT_RE.fullmatch(name):
+        return None
+    return name
+
+
+def _rtsp_hls_progress_snapshot(session: dict) -> dict | None:
+    """Read a small, completed-output snapshot from one RTSP HLS session.
+
+    The ffmpeg HLS muxer updates ``index.m3u8`` in place.  A read that ends in
+    an incomplete EXTINF/URI pair is therefore treated as inconclusive rather
+    than as a progress event or an immediate stall.
+    """
+    raw_dir = session.get("dir")
+    if not raw_dir:
+        return None
+    session_dir = Path(raw_dir)
+    playlist_path = session_dir / "index.m3u8"
     try:
-        if proc and _rtsp_proc_returncode(proc) is None:
+        raw = playlist_path.read_bytes()
+        if not raw or len(raw) > 256 * 1024:
+            return None
+        text = raw.decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "#EXTM3U":
+        return None
+
+    target_duration: float | None = None
+    media_sequence: int | None = None
+    pending_duration: float | None = None
+    declared_segments: list[tuple[float, str]] = []
+    for raw_line in lines[1:]:
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("#EXT-X-TARGETDURATION:"):
+            try:
+                value = float(line.split(":", 1)[1].strip())
+            except (ValueError, IndexError):
+                return None
+            if not math.isfinite(value) or value <= 0:
+                return None
+            target_duration = value
+            continue
+        if line.startswith("#EXT-X-MEDIA-SEQUENCE:"):
+            try:
+                media_sequence = int(line.split(":", 1)[1].strip())
+            except (ValueError, IndexError):
+                return None
+            continue
+        if line.startswith("#EXTINF:"):
+            try:
+                value = float(line.split(":", 1)[1].split(",", 1)[0].strip())
+            except (ValueError, IndexError):
+                return None
+            if not math.isfinite(value) or value < 0:
+                return None
+            pending_duration = value
+            continue
+        if line.startswith("#"):
+            continue
+        if pending_duration is None:
+            continue
+        segment_name = _rtsp_hls_segment_name(line)
+        if segment_name is None:
+            return None
+        declared_segments.append((pending_duration, segment_name))
+        pending_duration = None
+
+    # An unfinished EXTINF at EOF is a normal transient state while ffmpeg is
+    # rewriting the playlist.  Do not let it reset the progress clock.
+    if pending_duration is not None or not declared_segments:
+        return None
+
+    latest_duration, latest_segment = declared_segments[-1]
+    try:
+        stat = (session_dir / latest_segment).stat()
+    except OSError:
+        # The playlist can briefly name a segment before the file is visible.
+        return None
+
+    return {
+        "fingerprint": (
+            target_duration,
+            media_sequence,
+            tuple(declared_segments),
+        ),
+        "last_segment_name": latest_segment,
+        "last_segment_mtime_ns": stat.st_mtime_ns,
+        "last_segment_size": stat.st_size,
+        "observed_target_duration": target_duration,
+        "last_extinf": latest_duration,
+    }
+
+
+def _rtsp_hls_store_progress(session: dict, snapshot: dict, now: float | None = None) -> None:
+    session["last_playlist_fingerprint"] = snapshot["fingerprint"]
+    session["last_segment_name"] = snapshot["last_segment_name"]
+    session["last_segment_mtime_ns"] = snapshot["last_segment_mtime_ns"]
+    session["last_segment_size"] = snapshot["last_segment_size"]
+    session["observed_target_duration"] = snapshot["observed_target_duration"]
+    session["last_extinf"] = snapshot["last_extinf"]
+    session["last_progress_at"] = time.monotonic() if now is None else now
+
+
+def _initialize_rtsp_hls_progress(session: dict, now: float | None = None) -> None:
+    """Create a READY baseline without making startup depend on parsing it."""
+    snapshot = _rtsp_hls_progress_snapshot(session)
+    if snapshot is None:
+        session["last_playlist_fingerprint"] = None
+        session["last_segment_name"] = None
+        session["last_segment_mtime_ns"] = None
+        session["last_segment_size"] = None
+        session["observed_target_duration"] = None
+        session["last_extinf"] = None
+        session["progress_read_failures"] = 0
+        session["last_progress_at"] = time.monotonic() if now is None else now
+        return
+    _rtsp_hls_store_progress(session, snapshot, now=now)
+    session["progress_read_failures"] = 0
+
+
+def _refresh_rtsp_hls_progress(session: dict, now: float | None = None) -> bool:
+    """Record progress if the playlist or newest completed segment changed."""
+    snapshot = _rtsp_hls_progress_snapshot(session)
+    if snapshot is None:
+        try:
+            failures = int(session.get("progress_read_failures", 0))
+        except (TypeError, ValueError):
+            failures = 0
+        session["progress_read_failures"] = failures + 1
+        return False
+    session["progress_read_failures"] = 0
+
+    previous_fingerprint = session.get("last_playlist_fingerprint")
+    changed = previous_fingerprint is None or snapshot["fingerprint"] != previous_fingerprint
+    if not changed:
+        changed = (
+            snapshot["last_segment_name"] != session.get("last_segment_name")
+            or snapshot["last_segment_mtime_ns"] != session.get("last_segment_mtime_ns")
+            or snapshot["last_segment_size"] != session.get("last_segment_size")
+        )
+    if not changed:
+        return False
+
+    _rtsp_hls_store_progress(session, snapshot, now=now)
+    return True
+
+
+def _rtsp_hls_stall_timeout(session: dict) -> float:
+    timeout = RTSP_HLS_STALL_MIN_SECONDS
+    for key in ("observed_target_duration", "last_extinf"):
+        try:
+            duration = float(session.get(key))
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(duration) and duration > 0:
+            timeout = max(timeout, duration * RTSP_HLS_STALL_MULTIPLIER)
+    return timeout
+
+
+async def _stop_rtsp_process(proc, stderr_thread: threading.Thread | None = None) -> None:
+    """Stop one ffmpeg process and drain its stderr worker before returning."""
+    if proc and _rtsp_proc_returncode(proc) is None:
+        try:
             proc.terminate()
+        except (ProcessLookupError, OSError):
+            pass
+        try:
+            await asyncio.wait_for(asyncio.to_thread(proc.wait), timeout=5)
+        except (asyncio.TimeoutError, subprocess.TimeoutExpired, OSError):
+            try:
+                proc.kill()
+            except (ProcessLookupError, OSError):
+                pass
             try:
                 await asyncio.wait_for(asyncio.to_thread(proc.wait), timeout=5)
-            except (asyncio.TimeoutError, subprocess.TimeoutExpired):
-                proc.kill()
-                await asyncio.to_thread(proc.wait)
+            except (asyncio.TimeoutError, subprocess.TimeoutExpired, OSError):
+                logger.warning("等待 RTSP ffmpeg 退出超时")
+
+    if (
+        stderr_thread is not None
+        and stderr_thread.is_alive()
+        and stderr_thread is not threading.current_thread()
+    ):
+        pipe = getattr(proc, "stderr", None)
+        if pipe is not None:
+            try:
+                pipe.close()
+            except Exception:
+                pass
+        await asyncio.to_thread(stderr_thread.join, 1.0)
+
+
+async def _stop_rtsp_session_owned(session_id: str, session: dict) -> None:
+    try:
+        await _stop_rtsp_process(session.get("process"), session.get("stderr_thread"))
     finally:
-        _delete_rtsp_session_dir(session_id, session)
+        if RTSP_HLS_SESSIONS.get(session_id) is session:
+            RTSP_HLS_SESSIONS.pop(session_id, None)
+            _delete_rtsp_session_dir(session_id, session)
+        if session.get("stop_task") is asyncio.current_task():
+            session.pop("stop_task", None)
+
+
+async def _stop_rtsp_session(session_id: str, expected_session: dict | None = None) -> None:
+    """Stop a session once, without allowing an old cleanup to touch a retry."""
+    session = RTSP_HLS_SESSIONS.get(session_id)
+    if expected_session is not None and session is not expected_session:
+        return
+    if session is None:
+        # A retry may already own the same deterministic directory. Do not let
+        # a late cleanup from an older task delete it.
+        if expected_session is not None:
+            return
+        if session_id in _RTSP_HLS_STARTUPS or session_id in _RTSP_RESERVED_SESSIONS:
+            return
+        _delete_rtsp_session_dir(session_id)
+        return
+
+    current_task = asyncio.current_task()
+    stop_task = session.get("stop_task")
+    session["startup_state"] = "stopping"
+    if stop_task is None:
+        stop_task = asyncio.create_task(
+            _stop_rtsp_session_owned(session_id, session),
+            name=f"rtsp-session-stop:{session_id}",
+        )
+        session["stop_task"] = stop_task
+    if stop_task is current_task:
+        return
+    try:
+        await asyncio.shield(stop_task)
+    except asyncio.CancelledError:
+        # The caller may be the startup task that is itself being canceled.
+        # Let the independent cleanup task finish before propagating that
+        # cancellation, so a second shutdown/stop caller cannot strand ffmpeg.
+        while not stop_task.done():
+            try:
+                await asyncio.shield(stop_task)
+            except asyncio.CancelledError:
+                continue
+        stop_task.result()
+        raise
 
 
 async def _rtsp_hls_cleanup_task(stop_event: asyncio.Event):
     while not stop_event.is_set():
         try:
-            await asyncio.wait_for(stop_event.wait(), timeout=30)
+            await asyncio.wait_for(stop_event.wait(), timeout=RTSP_HLS_CLEANUP_INTERVAL_SECONDS)
         except asyncio.TimeoutError:
             pass
         if stop_event.is_set():
             return
-        now = time.time()
-        for session_id, session in list(RTSP_HLS_SESSIONS.items()):
-            if session.get("startup_state") == "starting":
-                # A freshly-created process may not have emitted its first
-                # playlist/segment yet. Only the startup owner decides
-                # whether that is a startup failure; ordinary idle/dead
-                # cleanup must not race it.
-                continue
-            proc = session.get("process")
-            idle = now - float(session.get("last_access", 0))
-            if idle > RTSP_HLS_IDLE_TTL or (proc and _rtsp_proc_returncode(proc) is not None):
-                try:
-                    await _stop_rtsp_session(session_id)
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    logger.exception("RTSP session cleanup failed: session=%s", session_id)
+        await _rtsp_hls_cleanup_once()
+
+
+async def _rtsp_hls_cleanup_once() -> None:
+    """Run one idle/dead/stalled RTSP session sweep."""
+    now = time.time()
+    monotonic_now = time.monotonic()
+    for session_id, session in list(RTSP_HLS_SESSIONS.items()):
+        startup_state = session.get("startup_state")
+        if startup_state in {"starting", "stopping"}:
+            # A freshly-created process is governed by the startup owner, and
+            # an independently-running stop task already owns teardown.
+            continue
+
+        proc = session.get("process")
+        idle = now - float(session.get("last_access", 0))
+        if proc and _rtsp_proc_returncode(proc) is not None:
+            try:
+                await _stop_rtsp_session(session_id, expected_session=session)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("RTSP session cleanup failed: session=%s", session_id)
+            continue
+        if idle > RTSP_HLS_IDLE_TTL:
+            try:
+                await _stop_rtsp_session(session_id, expected_session=session)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("RTSP session cleanup failed: session=%s", session_id)
+            continue
+
+        if startup_state != "ready":
+            continue
+
+        # Sessions created by older code/tests may not have progress fields.
+        # Establish a grace-period baseline instead of treating missing state
+        # as a stalled stream.
+        if "last_progress_at" not in session:
+            _initialize_rtsp_hls_progress(session, now=monotonic_now)
+            continue
+
+        if _refresh_rtsp_hls_progress(session, now=monotonic_now):
+            continue
+
+        # One incomplete/read-error snapshot is not enough evidence to kill a
+        # session.  Give the in-place playlist update another sweep while
+        # retaining the old progress timestamp.
+        try:
+            progress_read_failures = int(session.get("progress_read_failures", 0))
+        except (TypeError, ValueError):
+            progress_read_failures = 0
+        if progress_read_failures == 1:
+            continue
+
+        last_progress_at = session.get("last_progress_at")
+        try:
+            progress_age = monotonic_now - float(last_progress_at)
+        except (TypeError, ValueError):
+            _initialize_rtsp_hls_progress(session, now=monotonic_now)
+            continue
+        stall_timeout = _rtsp_hls_stall_timeout(session)
+        if progress_age < stall_timeout:
+            continue
+
+        # Yield once and take a final identity/progress snapshot.  A segment
+        # may have become complete just after the first read; do not kill a
+        # healthy session merely because the sweep caught that boundary.
+        await asyncio.sleep(0)
+        if RTSP_HLS_SESSIONS.get(session_id) is not session:
+            continue
+        if _refresh_rtsp_hls_progress(session):
+            continue
+        try:
+            progress_age = time.monotonic() - float(session.get("last_progress_at"))
+        except (TypeError, ValueError):
+            continue
+        stall_timeout = _rtsp_hls_stall_timeout(session)
+        if progress_age < stall_timeout:
+            continue
+
+        logger.warning(
+            "RTSP session stalled: session=%s progress_age=%.1fs stall_timeout=%.1fs "
+            "target_duration=%s last_segment=%s",
+            session_id,
+            progress_age,
+            stall_timeout,
+            session.get("observed_target_duration"),
+            session.get("last_segment_name"),
+        )
+        try:
+            await _stop_rtsp_session(session_id, expected_session=session)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("RTSP stalled session cleanup failed: session=%s", session_id)
 
 
 def _start_rtsp_hls_cleanup() -> asyncio.Task:
@@ -426,9 +745,42 @@ async def _stop_rtsp_hls_cleanup() -> None:
         await asyncio.gather(task, return_exceptions=True)
 
 
-async def _stop_all_rtsp_sessions():
+async def _stop_all_rtsp_sessions(*, shutdown: bool = False):
+    """Force-drain shared startups before stopping any remaining sessions."""
+    global _RTSP_HLS_SHUTTING_DOWN
+    if shutdown:
+        # Set the gate and take the snapshot under the same quota lock used by
+        # startup creation. This closes the window where a request had passed
+        # the first gate check but was waiting to reserve its slot.
+        async with _RTSP_HLS_QUOTA_LOCK:
+            _RTSP_HLS_SHUTTING_DOWN = True
+            startup_items = list(_RTSP_HLS_STARTUPS.items())
+    else:
+        startup_items = list(_RTSP_HLS_STARTUPS.items())
+    for _session_id, task in startup_items:
+        if task is not asyncio.current_task() and not task.done():
+            task.cancel()
+    if startup_items:
+        await asyncio.gather(
+            *(task for _session_id, task in startup_items),
+            return_exceptions=True,
+        )
+
+    # Done callbacks normally remove these entries. Keep the identity check so
+    # a late callback from startup A cannot clear a newer startup B.
+    for session_id, task in startup_items:
+        if _RTSP_HLS_STARTUPS.get(session_id) is task:
+            _RTSP_HLS_STARTUPS.pop(session_id, None)
+            _RTSP_RESERVED_SESSIONS.discard(session_id)
+
     for session_id in list(RTSP_HLS_SESSIONS):
         await _stop_rtsp_session(session_id)
+
+    # At this point no shared startup or registered session remains. Any
+    # reservation left here belongs to a task that was canceled before its
+    # coroutine body started; shutdown owns the registry and may clear it.
+    if not _RTSP_HLS_STARTUPS and not RTSP_HLS_SESSIONS:
+        _RTSP_RESERVED_SESSIONS.clear()
 
 
 def _drain_rtsp_stderr(session_id: str, pipe) -> None:
@@ -472,19 +824,19 @@ async def _start_rtsp_hls_session(target_url: str, custom_ua: str = "", compat: 
     session_id = _rtsp_session_id(target_url, custom_ua, compat)
     session_dir = RTSP_HLS_ROOT / session_id
     playlist_path = session_dir / "index.m3u8"
-    session = RTSP_HLS_SESSIONS.get(session_id)
-    proc = session.get("process") if session else None
+    existing_session = RTSP_HLS_SESSIONS.get(session_id)
+    proc = existing_session.get("process") if existing_session else None
     if (
         proc
         and _rtsp_proc_returncode(proc) is None
         and playlist_path.exists()
-        and session.get("startup_state") != "starting"
+        and existing_session.get("startup_state") == "ready"
     ):
-        session["last_access"] = time.time()
+        existing_session["last_access"] = time.time()
         return session_id, playlist_path
 
-    if session:
-        await _stop_rtsp_session(session_id)
+    if existing_session:
+        await _stop_rtsp_session(session_id, expected_session=existing_session)
 
     _delete_rtsp_session_dir(session_id)
     session_dir.mkdir(parents=True, exist_ok=True)
@@ -542,15 +894,19 @@ async def _start_rtsp_hls_session(target_url: str, custom_ua: str = "", compat: 
     if os.name == "nt":
         subprocess_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
 
+    session: dict | None = None
+    stderr_thread: threading.Thread | None = None
     try:
         proc = subprocess.Popen(cmd, **subprocess_kwargs)
     except FileNotFoundError as exc:
+        _delete_rtsp_session_dir(session_id)
         raise HTTPException(status_code=503, detail=f"ffmpeg 不存在或不可执行: {ffmpeg}") from exc
     except Exception as exc:
+        _delete_rtsp_session_dir(session_id)
         logger.exception("启动 ffmpeg 失败")
         raise HTTPException(status_code=500, detail=f"启动 ffmpeg 失败: {exc}") from exc
 
-    RTSP_HLS_SESSIONS[session_id] = {
+    session = {
         "process": proc,
         "dir": session_dir,
         "last_access": time.time(),
@@ -559,23 +915,43 @@ async def _start_rtsp_hls_session(target_url: str, custom_ua: str = "", compat: 
         "stderr_tail": "",
         "startup_state": "starting",
     }
-    threading.Thread(target=_drain_rtsp_stderr, args=(session_id, proc.stderr), daemon=True).start()
+    RTSP_HLS_SESSIONS[session_id] = session
+    stderr_thread = threading.Thread(
+        target=_drain_rtsp_stderr,
+        args=(session_id, proc.stderr),
+        daemon=True,
+        name=f"rtsp-stderr:{session_id}",
+    )
+    session["stderr_thread"] = stderr_thread
+    try:
+        stderr_thread.start()
+    except BaseException:
+        await _stop_rtsp_session(session_id, expected_session=session)
+        raise
 
-    deadline = time.monotonic() + RTSP_HLS_START_TIMEOUT
-    while time.monotonic() < deadline:
-        if playlist_path.exists() and len(list(session_dir.glob("seg_*.ts"))) >= RTSP_HLS_START_SEGMENTS:
-            RTSP_HLS_SESSIONS[session_id]["last_access"] = time.time()
-            RTSP_HLS_SESSIONS[session_id]["startup_state"] = "ready"
-            return session_id, playlist_path
-        if _rtsp_proc_returncode(proc) is not None:
-            stderr = RTSP_HLS_SESSIONS.get(session_id, {}).get("stderr_tail", "")
-            await _stop_rtsp_session(session_id)
-            raise HTTPException(status_code=502, detail=f"ffmpeg RTSP 转 HLS 失败: {stderr or '进程退出'}")
-        await asyncio.sleep(0.25)
+    try:
+        deadline = time.monotonic() + RTSP_HLS_START_TIMEOUT
+        while time.monotonic() < deadline:
+            if playlist_path.exists() and len(list(session_dir.glob("seg_*.ts"))) >= RTSP_HLS_START_SEGMENTS:
+                if RTSP_HLS_SESSIONS.get(session_id) is not session:
+                    raise RuntimeError("RTSP startup session ownership lost")
+                session["last_access"] = time.time()
+                _initialize_rtsp_hls_progress(session)
+                session["startup_state"] = "ready"
+                return session_id, playlist_path
+            if _rtsp_proc_returncode(proc) is not None:
+                stderr = session.get("stderr_tail", "")
+                raise HTTPException(status_code=502, detail=f"ffmpeg RTSP 转 HLS 失败: {stderr or '进程退出'}")
+            await asyncio.sleep(0.25)
 
-    stderr = RTSP_HLS_SESSIONS.get(session_id, {}).get("stderr_tail", "")
-    await _stop_rtsp_session(session_id)
-    raise HTTPException(status_code=504, detail=f"RTSP 转 HLS 起播超时{': ' + stderr[-500:] if stderr else ''}")
+        stderr = session.get("stderr_tail", "")
+        raise HTTPException(status_code=504, detail=f"RTSP 转 HLS 起播超时{': ' + stderr[-500:] if stderr else ''}")
+    except asyncio.CancelledError:
+        await _stop_rtsp_session(session_id, expected_session=session)
+        raise
+    except BaseException:
+        await _stop_rtsp_session(session_id, expected_session=session)
+        raise
 
 
 async def _ensure_rtsp_hls_session(target_url: str, custom_ua: str = "", compat: bool = False) -> tuple[str, Path]:
@@ -587,6 +963,8 @@ async def _ensure_rtsp_hls_session(target_url: str, custom_ua: str = "", compat:
     shared startup task.
     """
     _validate_rtsp_url(target_url)
+    if _RTSP_HLS_SHUTTING_DOWN:
+        raise HTTPException(status_code=503, detail="RTSP 服务正在关闭")
     session_id = _rtsp_session_id(target_url, custom_ua, compat)
     session_dir = RTSP_HLS_ROOT / session_id
     playlist_path = session_dir / "index.m3u8"
@@ -602,13 +980,15 @@ async def _ensure_rtsp_hls_session(target_url: str, custom_ua: str = "", compat:
         proc
         and _rtsp_proc_returncode(proc) is None
         and playlist_path.exists()
-        and session.get("startup_state") != "starting"
+        and session.get("startup_state") == "ready"
     ):
         session["last_access"] = time.time()
         return session_id, playlist_path
 
     startup_to_await: asyncio.Task | None = None
     async with _RTSP_HLS_QUOTA_LOCK:
+        if _RTSP_HLS_SHUTTING_DOWN:
+            raise HTTPException(status_code=503, detail="RTSP 服务正在关闭")
         startup = _RTSP_HLS_STARTUPS.get(session_id)
         if startup is not None and startup.done():
             if _RTSP_HLS_STARTUPS.get(session_id) is startup:
@@ -627,7 +1007,7 @@ async def _ensure_rtsp_hls_session(target_url: str, custom_ua: str = "", compat:
                 proc
                 and _rtsp_proc_returncode(proc) is None
                 and playlist_path.exists()
-                and session.get("startup_state") != "starting"
+                and session.get("startup_state") == "ready"
             ):
                 session["last_access"] = time.time()
                 return session_id, playlist_path
@@ -702,6 +1082,8 @@ def _load_tingfm_streams():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _RTSP_HLS_SHUTTING_DOWN
+    _RTSP_HLS_SHUTTING_DOWN = False
     automation_service = None
     plugin_subsystem = None
     app.state.automation_service = None
@@ -779,6 +1161,11 @@ async def lifespan(app: FastAPI):
         _load_tingfm_streams()
         yield
     finally:
+        # RTSP startup tasks are shared session work, not request-owned
+        # background jobs. Stop the periodic cleaner first, then cancel and
+        # drain startup tasks before tearing down the remaining sessions.
+        await _stop_rtsp_hls_cleanup()
+        await _stop_all_rtsp_sessions(shutdown=True)
         await _shutdown_app_background_tasks()
         try:
             if automation_service is not None:
@@ -792,8 +1179,6 @@ async def lifespan(app: FastAPI):
                 app.state.plugin_subsystem = None
                 app.state.provider_resolver = None
                 app.state.radio_resolver = None
-                await _stop_rtsp_hls_cleanup()
-                await _stop_all_rtsp_sessions()
                 await http_client.aclose()
 
 app = FastAPI(

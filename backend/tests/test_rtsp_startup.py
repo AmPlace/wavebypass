@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,6 +15,7 @@ import main
 class _AliveProcess:
     def __init__(self):
         self.terminated = False
+        self.killed = False
         self.stderr = None
         self.returncode = None
 
@@ -24,7 +26,41 @@ class _AliveProcess:
         self.terminated = True
         self.returncode = 0
 
+    def kill(self):
+        self.killed = True
+        self.returncode = -9
+
     def wait(self):
+        return self.returncode
+
+
+class _EofPipe:
+    def __init__(self, payload: bytes = b""):
+        self.payload = payload
+        self.closed = False
+
+    def read(self, _size):
+        if self.payload:
+            payload, self.payload = self.payload, b""
+            return payload
+        return b""
+
+    def close(self):
+        self.closed = True
+
+
+class _StubbornProcess(_AliveProcess):
+    def __init__(self):
+        super().__init__()
+        self.wait_calls = 0
+
+    def terminate(self):
+        self.terminated = True
+
+    def wait(self):
+        self.wait_calls += 1
+        if self.wait_calls == 1:
+            raise subprocess.TimeoutExpired("ffmpeg", 5)
         return self.returncode
 
 
@@ -33,11 +69,15 @@ class RtspStartupSingleFlightTest(IsolatedAsyncioTestCase):
         self._old_sessions = main.RTSP_HLS_SESSIONS
         self._old_startups = main._RTSP_HLS_STARTUPS
         self._old_reserved = main._RTSP_RESERVED_SESSIONS
+        self._old_quota_lock = main._RTSP_HLS_QUOTA_LOCK
+        self._old_shutting_down = main._RTSP_HLS_SHUTTING_DOWN
         self._old_root = main.RTSP_HLS_ROOT
         self._tmp = tempfile.TemporaryDirectory()
         main.RTSP_HLS_SESSIONS = {}
         main._RTSP_HLS_STARTUPS = {}
         main._RTSP_RESERVED_SESSIONS = set()
+        main._RTSP_HLS_QUOTA_LOCK = asyncio.Lock()
+        main._RTSP_HLS_SHUTTING_DOWN = False
         main.RTSP_HLS_ROOT = Path(self._tmp.name)
 
     async def asyncTearDown(self):
@@ -53,9 +93,11 @@ class RtspStartupSingleFlightTest(IsolatedAsyncioTestCase):
         self.assertEqual(main.RTSP_HLS_SESSIONS, {})
         main._RTSP_HLS_STARTUPS.clear()
         main._RTSP_RESERVED_SESSIONS.clear()
+        main._RTSP_HLS_SHUTTING_DOWN = self._old_shutting_down
         main.RTSP_HLS_SESSIONS = self._old_sessions
         main._RTSP_HLS_STARTUPS = self._old_startups
         main._RTSP_RESERVED_SESSIONS = self._old_reserved
+        main._RTSP_HLS_QUOTA_LOCK = self._old_quota_lock
         main.RTSP_HLS_ROOT = self._old_root
         self._tmp.cleanup()
 
@@ -65,6 +107,40 @@ class RtspStartupSingleFlightTest(IsolatedAsyncioTestCase):
                 return
             await asyncio.sleep(0)
         self.fail("RTSP startup entry was not cleaned up")
+
+    async def _cancel_real_startup_after_popen(self, segment_count: int):
+        target = "rtsp://camera-cancel.local/live"
+        session_id = main._rtsp_session_id(target)
+        popen_started = asyncio.Event()
+        process = _AliveProcess()
+        process.stderr = _EofPipe(b"startup stderr")
+
+        def popen(*_args, **_kwargs):
+            session_dir = main.RTSP_HLS_ROOT / session_id
+            (session_dir / "index.m3u8").write_text("#EXTM3U\n", encoding="utf-8") if segment_count else None
+            for index in range(segment_count):
+                (session_dir / f"seg_{index:05d}.ts").write_bytes(b"segment")
+            popen_started.set()
+            return process
+
+        with mock.patch.object(main, "_ffmpeg_bin", return_value="/usr/bin/ffmpeg"), mock.patch.object(
+            main.subprocess, "Popen", side_effect=popen,
+        ):
+            owner = asyncio.create_task(main._ensure_rtsp_hls_session(target))
+            await asyncio.wait_for(popen_started.wait(), timeout=1)
+            old_session = main.RTSP_HLS_SESSIONS[session_id]
+            startup = main._RTSP_HLS_STARTUPS[session_id]
+            startup.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await owner
+            await self._wait_for_no_startup()
+
+        self.assertTrue(process.terminated)
+        self.assertFalse(old_session["stderr_thread"].is_alive())
+        self.assertFalse(main.RTSP_HLS_SESSIONS)
+        self.assertFalse(main._RTSP_RESERVED_SESSIONS)
+        self.assertFalse((main.RTSP_HLS_ROOT / session_id).exists())
+        return process
 
     async def test_ten_same_key_waiters_share_one_startup(self):
         started = asyncio.Event()
@@ -235,6 +311,191 @@ class RtspStartupSingleFlightTest(IsolatedAsyncioTestCase):
         self.assertEqual(calls, 1)
         await self._wait_for_no_startup()
 
+    async def test_creator_waiter_cancellation_does_not_cancel_shared_startup(self):
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def start(target_url, custom_ua, compat):
+            started.set()
+            await release.wait()
+            return "creator-cancel"[:24].ljust(24, "a"), Path("/tmp/creator-cancel.m3u8")
+
+        with mock.patch.object(main, "_start_rtsp_hls_session", new=start):
+            creator = asyncio.create_task(main._ensure_rtsp_hls_session("rtsp://camera.local/live"))
+            survivor = asyncio.create_task(main._ensure_rtsp_hls_session("rtsp://camera.local/live"))
+            await started.wait()
+            creator.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await creator
+            self.assertFalse(survivor.done())
+            release.set()
+            result = await survivor
+
+        self.assertEqual(result[0], "creator-cancel"[:24].ljust(24, "a"))
+        await self._wait_for_no_startup()
+
+    async def test_startup_task_cancelled_before_body_releases_reservation_without_popen(self):
+        target = "rtsp://camera-before-popen.local/live"
+        original_create_task = asyncio.create_task
+        captured = {}
+
+        def create_startup_task(coro, **kwargs):
+            task = original_create_task(coro, **kwargs)
+            captured["task"] = task
+            task.cancel()
+            return task
+
+        with mock.patch.object(main.asyncio, "create_task", side_effect=create_startup_task), mock.patch.object(
+            main.subprocess, "Popen",
+        ) as popen:
+            owner = original_create_task(main._ensure_rtsp_hls_session(target))
+            with self.assertRaises(asyncio.CancelledError):
+                await owner
+
+        await self._wait_for_no_startup()
+        popen.assert_not_called()
+        self.assertFalse(main.RTSP_HLS_SESSIONS)
+        self.assertFalse(main._RTSP_RESERVED_SESSIONS)
+
+    async def test_process_stop_uses_kill_after_bounded_terminate_wait(self):
+        process = _StubbornProcess()
+        await main._stop_rtsp_process(process)
+        self.assertTrue(process.terminated)
+        self.assertTrue(process.killed)
+        self.assertEqual(process.wait_calls, 2)
+
+    async def test_cancel_immediately_after_popen_cleans_process_session_dir_and_stderr(self):
+        await self._cancel_real_startup_after_popen(0)
+
+    async def test_cancel_after_first_segment_cleans_partial_startup(self):
+        await self._cancel_real_startup_after_popen(1)
+
+    async def test_popen_failure_cleans_directory_and_reservation(self):
+        target = "rtsp://camera-popen-failure.local/live"
+        session_id = main._rtsp_session_id(target)
+        with mock.patch.object(main, "_ffmpeg_bin", return_value="/usr/bin/ffmpeg"), mock.patch.object(
+            main.subprocess, "Popen", side_effect=OSError("popen failed"),
+        ):
+            with self.assertRaises(HTTPException) as ctx:
+                await main._ensure_rtsp_hls_session(target)
+
+        self.assertEqual(ctx.exception.status_code, 500)
+        await self._wait_for_no_startup()
+        self.assertFalse(main.RTSP_HLS_SESSIONS)
+        self.assertFalse(main._RTSP_RESERVED_SESSIONS)
+        self.assertFalse((main.RTSP_HLS_ROOT / session_id).exists())
+
+    async def test_cancelled_startup_can_retry_without_old_cleanup_touching_new_session(self):
+        target = "rtsp://camera-retry.local/live"
+        session_id = main._rtsp_session_id(target)
+        calls = 0
+        first_process = _AliveProcess()
+        second_process = _AliveProcess()
+        first_popen = asyncio.Event()
+
+        def popen(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            process = first_process if calls == 1 else second_process
+            if calls == 1:
+                first_popen.set()
+            else:
+                session_dir = main.RTSP_HLS_ROOT / session_id
+                (session_dir / "index.m3u8").write_text("#EXTM3U\n", encoding="utf-8")
+                for index in range(main.RTSP_HLS_START_SEGMENTS):
+                    (session_dir / f"seg_{index:05d}.ts").write_bytes(b"segment")
+            return process
+
+        with mock.patch.object(main, "_ffmpeg_bin", return_value="/usr/bin/ffmpeg"), mock.patch.object(
+            main.subprocess, "Popen", side_effect=popen,
+        ):
+            first = asyncio.create_task(main._ensure_rtsp_hls_session(target))
+            await asyncio.wait_for(first_popen.wait(), timeout=1)
+            old_session = main.RTSP_HLS_SESSIONS[session_id]
+            main._RTSP_HLS_STARTUPS[session_id].cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await first
+            await self._wait_for_no_startup()
+
+            retried = await main._ensure_rtsp_hls_session(target)
+            self.assertEqual(retried[0], session_id)
+            self.assertEqual(main.RTSP_HLS_SESSIONS[session_id]["startup_state"], "ready")
+            await main._stop_rtsp_session(session_id, expected_session=old_session)
+            self.assertIn(session_id, main.RTSP_HLS_SESSIONS)
+
+        self.assertEqual(calls, 2)
+        self.assertTrue(first_process.terminated)
+        self.assertEqual(main.RTSP_HLS_SESSIONS[session_id]["process"], second_process)
+
+    async def test_shutdown_cancels_startups_and_stops_ready_sessions(self):
+        targets = [
+            "rtsp://camera-shutdown-a.local/live",
+            "rtsp://camera-shutdown-b.local/live",
+            "rtsp://camera-shutdown-ready.local/live",
+        ]
+        processes = {}
+        started = {target: asyncio.Event() for target in targets}
+
+        def popen(cmd, **_kwargs):
+            target = cmd[cmd.index("-i") + 1]
+            session_id = main._rtsp_session_id(target)
+            process = _AliveProcess()
+            processes[target] = process
+            if target.endswith("ready.local/live"):
+                session_dir = main.RTSP_HLS_ROOT / session_id
+                (session_dir / "index.m3u8").write_text("#EXTM3U\n", encoding="utf-8")
+                for index in range(main.RTSP_HLS_START_SEGMENTS):
+                    (session_dir / f"seg_{index:05d}.ts").write_bytes(b"segment")
+            started[target].set()
+            return process
+
+        with mock.patch.object(main, "_ffmpeg_bin", return_value="/usr/bin/ffmpeg"), mock.patch.object(
+            main.subprocess, "Popen", side_effect=popen,
+        ):
+            await main._ensure_rtsp_hls_session(targets[2])
+            startup_waiters = [
+                asyncio.create_task(main._ensure_rtsp_hls_session(target))
+                for target in targets[:2]
+            ]
+            await asyncio.gather(*(started[target].wait() for target in targets[:2]))
+            await main._stop_all_rtsp_sessions()
+            results = await asyncio.gather(*startup_waiters, return_exceptions=True)
+
+        self.assertTrue(all(isinstance(result, asyncio.CancelledError) for result in results))
+        self.assertTrue(all(process.terminated for process in processes.values()))
+        self.assertFalse(main.RTSP_HLS_SESSIONS)
+        self.assertFalse(main._RTSP_HLS_STARTUPS)
+        self.assertFalse(main._RTSP_RESERVED_SESSIONS)
+        for target in targets:
+            self.assertFalse((main.RTSP_HLS_ROOT / main._rtsp_session_id(target)).exists())
+
+    async def test_shutdown_gate_prevents_concurrent_startup_creation(self):
+        target = "rtsp://camera-shutdown-race.local/live"
+        processes = []
+
+        def popen(*_args, **_kwargs):
+            process = _AliveProcess()
+            processes.append(process)
+            return process
+
+        with mock.patch.object(main, "_ffmpeg_bin", return_value="/usr/bin/ffmpeg"), mock.patch.object(
+            main.subprocess, "Popen", side_effect=popen,
+        ):
+            await main._RTSP_HLS_QUOTA_LOCK.acquire()
+            owner = asyncio.create_task(main._ensure_rtsp_hls_session(target))
+            await asyncio.sleep(0)
+            shutdown = asyncio.create_task(main._stop_all_rtsp_sessions(shutdown=True))
+            main._RTSP_HLS_QUOTA_LOCK.release()
+            shutdown_result, owner_result = await asyncio.gather(shutdown, owner, return_exceptions=True)
+
+        self.assertIsNone(shutdown_result)
+        self.assertTrue(isinstance(owner_result, (HTTPException, asyncio.CancelledError)), repr(owner_result))
+        self.assertTrue(all(process.terminated for process in processes))
+        self.assertFalse(main.RTSP_HLS_SESSIONS)
+        self.assertFalse(main._RTSP_HLS_STARTUPS)
+        self.assertFalse(main._RTSP_RESERVED_SESSIONS)
+        main._RTSP_HLS_SHUTTING_DOWN = False
+
     async def test_ready_session_uses_hot_path_without_new_startup(self):
         session_id = main._rtsp_session_id("rtsp://camera.local/live")
         session_dir = main.RTSP_HLS_ROOT / session_id
@@ -255,6 +516,27 @@ class RtspStartupSingleFlightTest(IsolatedAsyncioTestCase):
         self.assertEqual(result, (session_id, playlist))
         start.assert_not_awaited()
         self.assertFalse(process.terminated)
+
+    async def test_concurrent_session_stop_is_idempotent(self):
+        session_id = main._rtsp_session_id("rtsp://camera-stop-race.local/live")
+        session_dir = main.RTSP_HLS_ROOT / session_id
+        session_dir.mkdir(parents=True)
+        process = _AliveProcess()
+        main.RTSP_HLS_SESSIONS[session_id] = {
+            "process": process,
+            "dir": session_dir,
+            "last_access": 0,
+            "startup_state": "ready",
+        }
+
+        await asyncio.gather(
+            main._stop_rtsp_session(session_id),
+            main._stop_rtsp_session(session_id),
+        )
+
+        self.assertTrue(process.terminated)
+        self.assertFalse(main.RTSP_HLS_SESSIONS)
+        self.assertFalse(session_dir.exists())
 
     async def test_cleanup_skips_starting_session(self):
         session_id = "e" * 24
