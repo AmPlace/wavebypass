@@ -105,6 +105,32 @@ class StreamHttpxResponseTest(unittest.TestCase):
         asyncio.run(consume_once())
         self.assertTrue(upstream.closed)
 
+    def test_closes_when_consumer_task_is_cancelled(self):
+        entered = asyncio.Event()
+
+        class BlockingUpstream(FakeUpstream):
+            async def aiter_raw(self, _size=0):
+                self.raw_calls += 1
+                entered.set()
+                await asyncio.Event().wait()
+                yield b"unreachable"
+
+        upstream = BlockingUpstream([])
+
+        async def cancel_consumer():
+            async def consume():
+                async for _chunk in _stream_httpx_response(upstream):
+                    pass
+
+            task = asyncio.create_task(consume())
+            await entered.wait()
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+        asyncio.run(cancel_consumer())
+        self.assertTrue(upstream.closed)
+
 
 if __name__ == "__main__":
     unittest.main()

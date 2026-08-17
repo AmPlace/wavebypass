@@ -990,7 +990,6 @@ async def media_proxy_playlist(
     import main as _m
 
     payload = _safe_decode(handle, expected_kind="playlist")
-    await _validate_handle_url_or_403(payload.url, allowed_schemes={"http", "https"})
 
     ctx = get_proxy_context_registry().get(payload.ctx) if payload.ctx else None
     headers = _ctx_to_request_headers(ctx)
@@ -998,7 +997,14 @@ async def media_proxy_playlist(
 
     # 所有 signed playlist handle 都走同一条 Thin 拉取链：重试、single-flight、
     # 短暂成功缓存和安全 redirect guard 均由共享 helper 负责。
-    raw_text, base_url = await _m._thin_playlist_fetch(payload.url, headers)
+    source_revision = ctx.source_revision if ctx else ""
+    cache_scope = f"{payload.src_id}:{source_revision}" if payload.src_id else source_revision
+    raw_text, base_url = await _m._thin_playlist_fetch(
+        payload.url,
+        headers,
+        cache_scope=cache_scope,
+        omit_user_agent=bool(ctx and ctx.no_ua and not ctx.custom_ua),
+    )
 
     rewrite_ctx = _build_rewrite_context(
         base_url=base_url,
@@ -1031,12 +1037,12 @@ async def media_proxy_chunk(
     import main as _m
 
     payload = _safe_decode(handle, expected_kind="chunk")
-    await _validate_handle_url_or_403(payload.url, allowed_schemes={"http", "https"})
 
     # HEAD 请求只回必要的元信息：handle 解析合法 + URL 通过 SSRF 校验就够了。
     # 不去打上游 HEAD（很多直播源会拒 HEAD），也不开 GET 流，避免被预检放大成
     # 真实下载。
     if request.method == "HEAD":
+        await _validate_handle_url_or_403(payload.url, allowed_schemes={"http", "https"})
         return Response(
             content=b"",
             status_code=200,
@@ -1070,6 +1076,7 @@ async def media_proxy_chunk(
             "GET",
             payload.url,
             headers=headers,
+            omit_headers={"User-Agent"} if ctx and ctx.no_ua and not ctx.custom_ua else None,
         )
     except RedirectTargetRejected as exc:
         raise HTTPException(status_code=403, detail=str(exc.cause)) from exc

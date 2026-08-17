@@ -59,6 +59,7 @@ async def request_with_safe_redirects(
     headers: dict[str, str] | None = None,
     timeout=None,
     max_redirects: int = MEDIA_MAX_REDIRECTS,
+    omit_headers: set[str] | frozenset[str] | None = None,
 ) -> httpx.Response:
     """Send a buffered HTTP request with SSRF validation on every redirect hop."""
     current_url = url
@@ -74,13 +75,13 @@ async def request_with_safe_redirects(
             # making infrastructure code depend on FastAPI response semantics.
             raise RedirectTargetRejected(exc) from exc
 
-        request_kwargs = {
-            "headers": current_headers,
-            "follow_redirects": False,
-        }
+        request_kwargs = {"headers": current_headers}
         if timeout is not None:
             request_kwargs["timeout"] = timeout
-        response = await client.request(method, current_url, **request_kwargs)
+        request = client.build_request(method, current_url, **request_kwargs)
+        for header_name in omit_headers or ():
+            request.headers.pop(header_name, None)
+        response = await client.send(request, follow_redirects=False)
         if response.status_code not in REDIRECT_STATUSES:
             return response
 
@@ -111,6 +112,7 @@ async def stream_with_safe_redirects(
     headers: dict[str, str] | None = None,
     timeout=None,
     max_redirects: int = MEDIA_MAX_REDIRECTS,
+    omit_headers: set[str] | frozenset[str] | None = None,
 ) -> httpx.Response:
     """Open a streaming response after validating every redirect target.
 
@@ -133,6 +135,8 @@ async def stream_with_safe_redirects(
         if timeout is not None:
             request_kwargs["timeout"] = timeout
         request = client.build_request(method, current_url, **request_kwargs)
+        for header_name in omit_headers or ():
+            request.headers.pop(header_name, None)
         response = await client.send(request, stream=True, follow_redirects=False)
         if response.status_code not in REDIRECT_STATUSES:
             return response

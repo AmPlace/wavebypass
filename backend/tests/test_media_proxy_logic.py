@@ -22,13 +22,13 @@ class _FakeMain:
 
 
 class ThinPlaylistCacheKeyTest(unittest.TestCase):
-    def test_cache_key_uses_source_revision_scope_without_dynamic_query(self):
+    def test_cache_key_uses_source_revision_scope_and_dynamic_query(self):
         import main
 
         url_a = "https://cdn.example/live/index.m3u8?token=a"
         url_b = "https://cdn.example/live/index.m3u8?token=b"
 
-        self.assertEqual(
+        self.assertNotEqual(
             main._thin_cache_key(url_a, "src_a:rev1"),
             main._thin_cache_key(url_b, "src_a:rev1"),
         )
@@ -415,6 +415,44 @@ class MediaProxyLogicTest(unittest.TestCase):
         self.assertEqual(ctx.source_id, "src_stream")
         self.assertEqual(ctx.source_revision, "rev_stream")
 
+    def test_hls_no_ua_alone_creates_proxy_context(self):
+        reset_proxy_context_for_tests()
+        captured = {}
+
+        async def serve_iptv_playlist_by_source(**kwargs):
+            captured.update(kwargs)
+            return types.SimpleNamespace(status_code=200)
+
+        fake_main = types.SimpleNamespace(serve_iptv_playlist_by_source=serve_iptv_playlist_by_source)
+        old_main = sys.modules.get("main")
+        try:
+            sys.modules["main"] = fake_main
+            response = asyncio.run(media_proxy._serve_resolved_source_playlist(
+                resolved_url="https://stream.example/live.m3u8",
+                resolved_st="hls",
+                custom_ua="",
+                referer="",
+                cookie="",
+                no_ua=True,
+                canonical_key="频道",
+                source_id="src_hls",
+                source_revision="rev_hls",
+                access=MediaAccessContext(source="anonymous"),
+            ))
+        finally:
+            if old_main is not None:
+                sys.modules["main"] = old_main
+            else:
+                sys.modules.pop("main", None)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(captured["ctx_id"])
+        ctx = get_proxy_context_registry().get(captured["ctx_id"])
+        self.assertIsNotNone(ctx)
+        self.assertTrue(ctx.no_ua)
+        self.assertEqual(ctx.source_id, "src_hls")
+        self.assertEqual(ctx.source_revision, "rev_hls")
+
     def test_media_channel_playlist_has_no_source_url_parameter(self):
         params = inspect.signature(media_proxy.media_channel_playlist).parameters
         self.assertIn("source_id", params)
@@ -492,6 +530,183 @@ class MediaProxyLogicTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.media_type, "text/html; charset=utf-8")
+
+    def test_chunk_get_uses_redirect_guard_as_single_ssrf_boundary(self):
+        class FakeUpstreamResponse:
+            status_code = 200
+            headers = {"content-type": "video/mp2t"}
+
+            async def aiter_raw(self, chunk_size=65536):
+                yield b"segment"
+
+            async def aclose(self):
+                return None
+
+        fake_main = types.SimpleNamespace(http_client=object())
+        old_main = sys.modules.get("main")
+        handle = issue_handle(
+            kind="chunk",
+            url="https://cdn.example.test/live/segment.ts",
+            ttl_seconds=3600,
+        )
+        redirect_guard_calls = []
+
+        async def route_guard(*_args, **_kwargs):
+            raise AssertionError("GET must not duplicate the redirect helper's SSRF validation")
+
+        async def fake_stream(_client, _method, url, **_kwargs):
+            redirect_guard_calls.append(url)
+            return FakeUpstreamResponse()
+
+        try:
+            sys.modules["main"] = fake_main
+            with mock.patch.object(media_proxy, "_validate_handle_url_or_403", new=route_guard), mock.patch.object(
+                media_proxy, "stream_with_safe_redirects", new=fake_stream
+            ):
+                response = asyncio.run(media_proxy.media_proxy_chunk(
+                    handle,
+                    types.SimpleNamespace(headers={}, method="GET"),
+                    MediaAccessContext(source="anonymous"),
+                ))
+        finally:
+            if old_main is not None:
+                sys.modules["main"] = old_main
+            else:
+                sys.modules.pop("main", None)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(redirect_guard_calls, ["https://cdn.example.test/live/segment.ts"])
+
+    def test_chunk_head_keeps_route_ssrf_validation_without_upstream_request(self):
+        fake_main = types.SimpleNamespace(http_client=object())
+        old_main = sys.modules.get("main")
+        handle = issue_handle(
+            kind="chunk",
+            url="https://cdn.example.test/live/segment.ts",
+            ttl_seconds=3600,
+        )
+        route_guard_calls = []
+
+        async def route_guard(url, **_kwargs):
+            route_guard_calls.append(url)
+
+        async def unexpected_stream(*_args, **_kwargs):
+            raise AssertionError("HEAD must not contact upstream")
+
+        try:
+            sys.modules["main"] = fake_main
+            with mock.patch.object(media_proxy, "_validate_handle_url_or_403", new=route_guard), mock.patch.object(
+                media_proxy, "stream_with_safe_redirects", new=unexpected_stream
+            ):
+                response = asyncio.run(media_proxy.media_proxy_chunk(
+                    handle,
+                    types.SimpleNamespace(headers={}, method="HEAD"),
+                    MediaAccessContext(source="anonymous"),
+                ))
+        finally:
+            if old_main is not None:
+                sys.modules["main"] = old_main
+            else:
+                sys.modules.pop("main", None)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(route_guard_calls, ["https://cdn.example.test/live/segment.ts"])
+
+    def test_chunk_range_and_conditional_headers_preserve_206_response(self):
+        captured_headers = {}
+
+        class FakeUpstreamResponse:
+            status_code = 206
+            headers = {
+                "content-type": "video/mp2t",
+                "content-length": "100",
+                "content-range": "bytes 0-99/1234",
+                "accept-ranges": "bytes",
+                "etag": '"segment-etag"',
+            }
+
+            async def aiter_raw(self, chunk_size=65536):
+                yield b"x" * 100
+
+            async def aclose(self):
+                return None
+
+        async def fake_stream(_client, _method, _url, *, headers=None, **_kwargs):
+            captured_headers.update(headers or {})
+            return FakeUpstreamResponse()
+
+        fake_main = types.SimpleNamespace(http_client=object())
+        old_main = sys.modules.get("main")
+        handle = issue_handle(kind="chunk", url="https://cdn.example.test/live/segment.ts", ttl_seconds=3600)
+        request_headers = {
+            "range": "bytes=0-99",
+            "if-range": '"segment-etag"',
+            "if-none-match": '"segment-etag"',
+            "if-modified-since": "Wed, 01 Jan 2025 00:00:00 GMT",
+        }
+        try:
+            sys.modules["main"] = fake_main
+            with mock.patch.object(media_proxy, "stream_with_safe_redirects", new=fake_stream):
+                response = asyncio.run(media_proxy.media_proxy_chunk(
+                    handle,
+                    types.SimpleNamespace(headers=request_headers, method="GET"),
+                    MediaAccessContext(source="anonymous"),
+                ))
+        finally:
+            if old_main is not None:
+                sys.modules["main"] = old_main
+            else:
+                sys.modules.pop("main", None)
+
+        self.assertEqual(response.status_code, 206)
+        self.assertEqual(response.headers["content-range"], "bytes 0-99/1234")
+        self.assertEqual(response.headers["accept-ranges"], "bytes")
+        self.assertEqual(response.headers["content-length"], "100")
+        self.assertEqual(captured_headers["Range"], "bytes=0-99")
+        self.assertEqual(captured_headers["If-Range"], '"segment-etag"')
+        self.assertEqual(captured_headers["If-None-Match"], '"segment-etag"')
+        self.assertEqual(captured_headers["If-Modified-Since"], "Wed, 01 Jan 2025 00:00:00 GMT")
+
+    def test_chunk_preserves_upstream_416_and_content_range(self):
+        class FakeUpstreamResponse:
+            status_code = 416
+            headers = {
+                "content-type": "text/plain",
+                "content-length": "0",
+                "content-range": "bytes */1234",
+                "accept-ranges": "bytes",
+            }
+
+            async def aiter_raw(self, chunk_size=65536):
+                if False:
+                    yield b""
+
+            async def aclose(self):
+                return None
+
+        async def fake_stream(*_args, **_kwargs):
+            return FakeUpstreamResponse()
+
+        fake_main = types.SimpleNamespace(http_client=object())
+        old_main = sys.modules.get("main")
+        handle = issue_handle(kind="chunk", url="https://cdn.example.test/live/segment.ts", ttl_seconds=3600)
+        try:
+            sys.modules["main"] = fake_main
+            with mock.patch.object(media_proxy, "stream_with_safe_redirects", new=fake_stream):
+                response = asyncio.run(media_proxy.media_proxy_chunk(
+                    handle,
+                    types.SimpleNamespace(headers={"range": "bytes=9999-"}, method="GET"),
+                    MediaAccessContext(source="anonymous"),
+                ))
+        finally:
+            if old_main is not None:
+                sys.modules["main"] = old_main
+            else:
+                sys.modules.pop("main", None)
+
+        self.assertEqual(response.status_code, 416)
+        self.assertEqual(response.headers["content-range"], "bytes */1234")
+        self.assertEqual(response.headers["accept-ranges"], "bytes")
 
 
 if __name__ == "__main__":

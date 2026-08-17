@@ -48,6 +48,10 @@ _REAL_DNS_MAX_ADDRESSES = 16
 _REAL_DNS_MAX_CNAME_DEPTH = 4
 _REAL_DNS_MAX_ANSWER_RECORDS = 64
 _REAL_DNS_MAX_RESPONSE_BYTES = 64 * 1024
+_REAL_DNS_CACHE_TTL_SECONDS = 5.0
+_REAL_DNS_CACHE_MAX_ENTRIES = 256
+_REAL_DNS_CACHE: dict[tuple[str, tuple[str, ...]], tuple[tuple[str, ...], float]] = {}
+_REAL_DNS_INFLIGHT: dict[tuple[str, tuple[str, ...]], asyncio.Future[list[str]]] = {}
 
 
 class UnsafeTargetError(ValueError):
@@ -233,12 +237,70 @@ async def resolve_host_independently(host: str, *, timeout: float = _REAL_DNS_TI
     return await asyncio.to_thread(_resolve_real_dns_sync, host, timeout=timeout)
 
 
+async def _resolve_host_independently_cached(host: str) -> list[str]:
+    """Short-lived, single-flight cache for expensive fake-IP recovery DNS.
+
+    Only raw resolver answers are cached. The effective private/loopback and
+    hard-block policy is intentionally evaluated by ``assert_safe_target_url``
+    on every request after this function returns.
+    """
+    normalized_host = host.rstrip(".").lower()
+    key = (normalized_host, _configured_real_dns_endpoints())
+    now = time.monotonic()
+    cached = _REAL_DNS_CACHE.get(key)
+    if cached and cached[1] > now:
+        return list(cached[0])
+    if cached:
+        _REAL_DNS_CACHE.pop(key, None)
+
+    inflight = _REAL_DNS_INFLIGHT.get(key)
+    if inflight is not None:
+        return list(await asyncio.shield(inflight))
+
+    inflight = asyncio.get_running_loop().create_future()
+    _REAL_DNS_INFLIGHT[key] = inflight
+    try:
+        addresses = await resolve_host_independently(normalized_host)
+        expires_at = time.monotonic() + _REAL_DNS_CACHE_TTL_SECONDS
+        _REAL_DNS_CACHE[key] = (tuple(addresses), expires_at)
+        if len(_REAL_DNS_CACHE) > _REAL_DNS_CACHE_MAX_ENTRIES:
+            expired = [cache_key for cache_key, value in _REAL_DNS_CACHE.items() if value[1] <= time.monotonic()]
+            for cache_key in expired:
+                _REAL_DNS_CACHE.pop(cache_key, None)
+            while len(_REAL_DNS_CACHE) > _REAL_DNS_CACHE_MAX_ENTRIES:
+                oldest = min(_REAL_DNS_CACHE, key=lambda cache_key: _REAL_DNS_CACHE[cache_key][1])
+                _REAL_DNS_CACHE.pop(oldest, None)
+        if not inflight.done():
+            inflight.set_result(list(addresses))
+        return list(addresses)
+    except asyncio.CancelledError:
+        if not inflight.done():
+            inflight.cancel()
+        raise
+    except BaseException as exc:
+        if not inflight.done():
+            inflight.set_exception(exc)
+            inflight.exception()  # avoid an un-retrieved exception when there are no waiters
+        raise
+    finally:
+        if _REAL_DNS_INFLIGHT.get(key) is inflight:
+            _REAL_DNS_INFLIGHT.pop(key, None)
+
+
+def reset_real_dns_cache_for_tests() -> None:
+    _REAL_DNS_CACHE.clear()
+    for future in tuple(_REAL_DNS_INFLIGHT.values()):
+        if not future.done():
+            future.cancel()
+    _REAL_DNS_INFLIGHT.clear()
+
+
 async def _resolve_host_for_policy(host: str) -> list[str]:
     system_ips = await resolve_host(host)
     if any(_is_synthetic_dns_ip(value) for value in system_ips):
         # Do not return the synthetic answer and do not accept a caller-supplied
         # replacement.  The independent result is the only authorization input.
-        return await resolve_host_independently(host)
+        return await _resolve_host_independently_cached(host)
     return system_ips
 
 

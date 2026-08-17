@@ -18,7 +18,7 @@ class MediaRedirectSecurityTest(IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         clear_handle_cache_for_tests()
 
-    async def _request(self, handler, *, headers=None, max_redirects=5):
+    async def _request(self, handler, *, headers=None, max_redirects=5, omit_headers=None):
         client = httpx.AsyncClient(
             transport=httpx.MockTransport(handler),
             follow_redirects=False,
@@ -30,6 +30,7 @@ class MediaRedirectSecurityTest(IsolatedAsyncioTestCase):
                 "https://a.example/start",
                 headers=headers,
                 max_redirects=max_redirects,
+                omit_headers=omit_headers,
             )
         finally:
             await client.aclose()
@@ -195,6 +196,24 @@ class MediaRedirectSecurityTest(IsolatedAsyncioTestCase):
         self.assertEqual(final_headers.get("range"), "bytes=0-99")
         self.assertEqual(final_headers.get("if-none-match"), '"etag"')
         self.assertEqual(final_headers.get("referer"), "https://player.example/")
+
+    async def test_omitted_default_header_is_removed_on_every_redirect_hop(self):
+        seen_user_agents = []
+
+        def handler(request):
+            seen_user_agents.append(request.headers.get("user-agent"))
+            if request.url.host == "a.example":
+                return httpx.Response(302, headers={"location": "https://b.example/final"}, request=request)
+            return httpx.Response(200, content=b"ok", request=request)
+
+        async def allow(url, **_kwargs):
+            return None
+
+        with mock.patch.object(media_http, "assert_safe_target_url", new=allow):
+            response = await self._request(handler, omit_headers={"User-Agent"})
+
+        self.assertEqual(response.content, b"ok")
+        self.assertEqual(seen_user_agents, [None, None])
 
     async def test_playlist_final_url_is_used_as_rewrite_base(self):
         def handler(request):

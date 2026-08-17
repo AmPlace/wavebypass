@@ -88,9 +88,6 @@ from security.source_ids import source_id_for, source_revision_for
 
 TOKEN_REFRESH_INTERVAL_SECONDS = 18_000
 
-M3U8_CACHE_TTL_SECONDS = 3.0
-
-
 HTTP_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 IPTV_STREAM_READ_TIMEOUT_SECONDS = 12.0
 IPTV_STREAM_RECONNECT_DELAY_SECONDS = 0.25
@@ -210,46 +207,7 @@ STATIC_STATIONS = [
 CURRENT_STREAMS: dict[str, str] = {}
 
 
-M3U8_CACHE: dict[str, dict[str, str | float]] = {}
-
-
-
-# 当缓存过期且同一时间有大量请求进来时，锁可以避免所有请求同时打到真实 CDN
-M3U8_CACHE_LOCKS: dict[str, asyncio.Lock] = {}
-
-
 logger = logging.getLogger("waveflow")
-
-
-
-def get_m3u8_cache_lock(cache_key: str) -> asyncio.Lock:
-    """获取某个 m3u8 地址专用的微缓存锁
-
-    使用 setdefault 可以在第一次访问某个 m3u8 时创建锁，
-    后续同一个缓存键会复用同一把锁
-    """
-
-    return M3U8_CACHE_LOCKS.setdefault(cache_key, asyncio.Lock())
-
-
-def get_cached_m3u8_text(cache_key: str) -> str | None:
-
-    now = time.time()
-
-    cache_item = M3U8_CACHE.get(cache_key)
-
-    if cache_item is None:
-        return None
-
-    cached_text = str(cache_item.get("text", ""))
-
-    # 取出缓存写入时间；没有 timestamp 时按 0 处理，会自然判定为过期
-    cached_timestamp = float(cache_item.get("timestamp", 0.0))
-
-    if cached_text and now - cached_timestamp < M3U8_CACHE_TTL_SECONDS:
-        return cached_text
-
-    return None
 
 
 # NOTE: 旧 ``rewrite_m3u8_text`` 已被 ``core.m3u8_rewriter.rewrite_m3u8`` 取代，
@@ -3029,92 +2987,155 @@ async def test_status(sub_id: int):
 # 所有 playlist 拉取走这里：重试 + single-flight + 短暂成功回退。
 # 不做队列、不做后台刷新、不自己维护 MEDIA-SEQUENCE。
 _THIN_CACHE: dict[str, tuple[str, str, float]] = {}   # cache_key → (text, final_url, ts)
-_THIN_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+class _ThinLockEntry:
+    __slots__ = ("lock", "users")
+
+    def __init__(self) -> None:
+        self.lock = asyncio.Lock()
+        self.users = 0
+
+
+_THIN_LOCKS: dict[str, _ThinLockEntry] = {}
 _THIN_TTL = 1.5          # 新鲜窗口：合并并发请求 + 极短回放，避免 short-window 上游（如 yxfy 3×5s）丢段
+_THIN_STALE_MAX_AGE = 15.0
 _THIN_MAX_ENTRIES = 200
 
 
-def _thin_cache_key(url: str, cache_scope: str = "") -> str:
-    """稳定 cache key：source/config scope + scheme://netloc/path，去掉 query（含动态 token）。"""
+def _thin_cache_key(
+    url: str,
+    cache_scope: str = "",
+    headers: dict[str, str] | None = None,
+    omit_headers: set[str] | frozenset[str] | None = None,
+) -> str:
+    """按完整上游请求语义生成不暴露 token/header 的稳定 cache key。"""
     parsed = urlparse(url)
-    stable_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
-    return f"{cache_scope}\x1f{stable_url}" if cache_scope else stable_url
+    request_url = parsed._replace(fragment="").geturl()
+    normalized_headers = sorted(
+        (str(key).strip().lower(), str(value).strip())
+        for key, value in (headers or {}).items()
+    )
+    material = json.dumps(
+        [cache_scope, request_url, normalized_headers, sorted(name.lower() for name in (omit_headers or ()))],
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
-async def _thin_playlist_fetch(url: str, headers: dict[str, str] | None = None, *, cache_scope: str = "") -> tuple[str, str]:
+def _thin_lock_entry(cache_key: str) -> _ThinLockEntry:
+    """Register one user before it can wait, preventing split-lock races."""
+    entry = _THIN_LOCKS.get(cache_key)
+    if entry is None:
+        entry = _ThinLockEntry()
+        _THIN_LOCKS[cache_key] = entry
+    entry.users += 1
+    return entry
+
+
+def _release_thin_lock_entry(cache_key: str, entry: _ThinLockEntry) -> None:
+    entry.users -= 1
+    if entry.users == 0 and _THIN_LOCKS.get(cache_key) is entry:
+        _THIN_LOCKS.pop(cache_key, None)
+
+
+async def _thin_playlist_fetch(
+    url: str,
+    headers: dict[str, str] | None = None,
+    *,
+    cache_scope: str = "",
+    omit_user_agent: bool = False,
+) -> tuple[str, str]:
     """拉取上游 playlist，带薄韧性。
 
     - single-flight：同一 URL 并发请求合并为一次上游 fetch
     - 重试 1 次（共 2 次尝试，间隔 0.3s）
-    - 成功结果按稳定 key 缓存 1.5s，作为后续失败时的回退
-    - 全失败且缓存中有未过期结果 → 返回缓存
+    - 成功结果按完整请求语义缓存 1.5s，作为后续瞬时失败时的回退
+    - timeout/connect/5xx 全失败且有历史成功结果 → 返回 stale 缓存
+    - 401/403/404/410 明确失效 → 清缓存且禁止 stale 回退
     - 全失败且无缓存 → raise HTTPException(502)
 
     返回 ``(响应文本, 最终 URL)``。
     """
-    _h = dict(headers or {})
+    request_headers = dict(headers or {})
+    omitted_headers = frozenset({"User-Agent"}) if omit_user_agent else frozenset()
+    ck = _thin_cache_key(url, cache_scope, request_headers, omitted_headers)
+    _h = dict(request_headers)
     _h.setdefault("Accept-Encoding", "identity")
 
-    ck = _thin_cache_key(url, cache_scope)
-    lock = _THIN_LOCKS.setdefault(ck, asyncio.Lock())
+    lock_entry = _thin_lock_entry(ck)
 
-    async with lock:
-        # single-flight：锁内再检查一次缓存（可能被上一个持有者写入）
-        cached = _THIN_CACHE.get(ck)
-        if cached and cached[2] > time.time():
-            return cached[0], cached[1]
+    try:
+        async with lock_entry.lock:
+            # single-flight：锁内再检查一次缓存（可能被上一个持有者写入）
+            cached = _THIN_CACHE.get(ck)
+            if cached and cached[2] > time.time():
+                return cached[0], cached[1]
 
-        last_exc = None
-        last_text = ""
-        last_url = ""
+            last_exc = None
+            last_text = ""
+            last_url = ""
+            allow_stale_fallback = True
 
-        for attempt in range(2):
-            try:
-                resp = await request_with_safe_redirects(
-                    http_client,
-                    "GET",
-                    url,
-                    headers=_h,
-                    timeout=8,
+            for attempt in range(2):
+                try:
+                    resp = await request_with_safe_redirects(
+                        http_client,
+                        "GET",
+                        url,
+                        headers=_h,
+                        timeout=8,
+                        omit_headers=omitted_headers,
+                    )
+                    resp.raise_for_status()
+                    last_text = resp.text
+                    last_url = str(resp.url)
+
+                    # 成功：写入短暂缓存（按完整请求语义）
+                    now = time.time()
+                    _THIN_CACHE[ck] = (last_text, last_url, now + _THIN_TTL)
+                    # 防止缓存无限制增长
+                    if len(_THIN_CACHE) > _THIN_MAX_ENTRIES:
+                        expired = [k for k, v in _THIN_CACHE.items() if v[2] <= now]
+                        for k in expired:
+                            _THIN_CACHE.pop(k, None)
+                        # 如果过期清理不够，删最老的
+                        while len(_THIN_CACHE) > _THIN_MAX_ENTRIES:
+                            oldest = min(_THIN_CACHE, key=lambda k: _THIN_CACHE[k][2], default=None)
+                            if oldest:
+                                _THIN_CACHE.pop(oldest, None)
+                            else:
+                                break
+
+                    return last_text, last_url
+                except RedirectTargetRejected as exc:
+                    raise HTTPException(status_code=403, detail=str(exc.cause)) from exc
+                except httpx.HTTPError as exc:
+                    last_exc = exc
+                    response = getattr(exc, "response", None)
+                    if response is not None and response.status_code in TOKEN_REFRESH_HTTP_STATUS_CODES:
+                        # The upstream explicitly rejected this request identity. Returning an
+                        # expired playlist would keep signed child handles pinned to the dead URL.
+                        _THIN_CACHE.pop(ck, None)
+                        allow_stale_fallback = False
+                        break
+                    if attempt == 0:
+                        await asyncio.sleep(0.3)
+
+            # Transient failures may use the last successful playlist even after its fresh TTL.
+            cached = _THIN_CACHE.get(ck)
+            stale_age = time.time() - cached[2] if cached else float("inf")
+            if cached and allow_stale_fallback and stale_age <= _THIN_STALE_MAX_AGE:
+                logger.warning(
+                    "薄韧性回退: 上游 %s 拉取失败 (%s)，返回 %ds 前缓存",
+                    url[:100], last_exc, int(stale_age + _THIN_TTL),
                 )
-                resp.raise_for_status()
-                last_text = resp.text
-                last_url = str(resp.url)
+                return cached[0], cached[1]
 
-                # 成功：写入短暂缓存（按稳定 key）
-                now = time.time()
-                _THIN_CACHE[ck] = (last_text, last_url, now + _THIN_TTL)
-                # 防止缓存无限制增长
-                if len(_THIN_CACHE) > _THIN_MAX_ENTRIES:
-                    expired = [k for k, v in _THIN_CACHE.items() if v[2] <= now]
-                    for k in expired:
-                        _THIN_CACHE.pop(k, None)
-                    # 如果过期清理不够，删最老的
-                    while len(_THIN_CACHE) > _THIN_MAX_ENTRIES:
-                        oldest = min(_THIN_CACHE, key=lambda k: _THIN_CACHE[k][2], default=None)
-                        if oldest:
-                            _THIN_CACHE.pop(oldest, None)
-                        else:
-                            break
-
-                return last_text, last_url
-            except RedirectTargetRejected as exc:
-                raise HTTPException(status_code=403, detail=str(exc.cause)) from exc
-            except httpx.HTTPError as exc:
-                last_exc = exc
-                if attempt == 0:
-                    await asyncio.sleep(0.3)
-
-        # 全部尝试失败 → 尝试返回缓存（即使已过期，作为最后回退）
-        cached = _THIN_CACHE.get(ck)
-        if cached:
-            logger.warning(
-                "薄韧性回退: 上游 %s 拉取失败 (%s)，返回 %ds 前缓存",
-                url[:100], last_exc, int(time.time() - cached[2] + _THIN_TTL),
-            )
-            return cached[0], cached[1]
-
-        raise HTTPException(status_code=502, detail=f"拉取 playlist 失败: {last_exc}")
+            raise HTTPException(status_code=502, detail=f"拉取 playlist 失败: {last_exc}")
+    finally:
+        _release_thin_lock_entry(ck, lock_entry)
 
 
 # 旧 adapter 公共解析/播放入口已被 ``/api/media/channel/{key}/playlist.m3u8`` 取代：
@@ -3392,12 +3413,6 @@ async def serve_iptv_playlist_by_source(
 
     if urlparse(upstream_url).scheme.lower() not in ("http", "https"):
         raise HTTPException(status_code=400, detail="上游 scheme 不被允许")
-    # adapter 解析后的 URL 进入这里之前没有别的可信拦截层；第一次 fetch
-    # 仍必须在入口执行 SSRF 校验，后续 redirect 由 Thin fetch helper 复核。
-    try:
-        await assert_safe_target_url(upstream_url, allowed_schemes={"http", "https"})
-    except UnsafeTargetError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
 
     ctx = _get_registry().get(ctx_id) if ctx_id else None
     headers: dict[str, str] = {}
@@ -3415,7 +3430,15 @@ async def serve_iptv_playlist_by_source(
 
     source_ref = source_id or f"channel:{canonical_key}"
     cache_scope = f"{source_ref}:{source_revision or ''}"
-    text, final_url = await _thin_playlist_fetch(upstream_url, headers, cache_scope=cache_scope)
+    # _thin_playlist_fetch validates the initial target immediately before the
+    # request and every redirect hop. Avoid a second settings/DNS pass here.
+    omit_user_agent = bool(ctx and ctx.no_ua and not ctx.custom_ua)
+    text, final_url = await _thin_playlist_fetch(
+        upstream_url,
+        headers,
+        cache_scope=cache_scope,
+        omit_user_agent=omit_user_agent,
+    )
     access_token = access.propagated_access_token if access else ""
     rewrite_ctx = _RC(
         base_url=final_url,

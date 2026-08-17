@@ -23,23 +23,27 @@ from urllib.parse import quote, urljoin, urlparse
 from security.proxy_handles import issue_cached_handle
 
 
-_HLS_URI_TAGS = (
-    "EXT-X-KEY",
-    "EXT-X-MAP",
+_PLAYLIST_URI_TAGS = frozenset({
     "EXT-X-MEDIA",
     "EXT-X-STREAM-INF",
-    "EXT-X-PART",
-    "EXT-X-PRELOAD-HINT",
     "EXT-X-RENDITION-REPORT",
     "EXT-X-I-FRAME-STREAM-INF",
-)
+})
+_CHUNK_URI_TAGS = frozenset({
+    "EXT-X-KEY",
+    "EXT-X-SESSION-KEY",
+    "EXT-X-MAP",
+    "EXT-X-PART",
+    "EXT-X-PRELOAD-HINT",
+})
+_HLS_URI_TAGS = _PLAYLIST_URI_TAGS | _CHUNK_URI_TAGS
 
 # 形如 #EXT-X-KEY:METHOD=...,URI="https://..."
 _HLS_URI_RE = re.compile(r'(URI=")([^"]*)(")')
 
 _PLAYLIST_EXTENSIONS = (".m3u8", ".m3u")
 _SEGMENT_EXTENSIONS = (
-    ".ts", ".m4s", ".mp4", ".fmp4", ".m4v", ".aac", ".mp3", ".webm", ".cmfa", ".cmfv",
+    ".ts", ".m4s", ".mp4", ".fmp4", ".m4v", ".aac", ".mp3", ".webm", ".cmfa", ".cmfv", ".vtt",
 )
 
 _MEDIA_SEQ_RE = re.compile(r"^\s*#EXT-X-MEDIA-SEQUENCE\s*:\s*(\d+)", re.IGNORECASE)
@@ -117,8 +121,8 @@ def _classify_uri(uri: str) -> str | None:
 
 
 def _rewrite_tag_line(line: str, ctx: RewriteContext) -> str:
-    upper = line.upper()
-    if not any(f"#{tag}:" in upper for tag in _HLS_URI_TAGS):
+    tag_name = line.strip().split(":", 1)[0].lstrip("#").upper()
+    if tag_name not in _HLS_URI_TAGS:
         return line
 
     def _replace(match: re.Match) -> str:
@@ -128,7 +132,7 @@ def _rewrite_tag_line(line: str, ctx: RewriteContext) -> str:
         if scheme and scheme not in ("http", "https"):
             return match.group(0)
         absolute = urljoin(ctx.base_url, uri)
-        kind = _classify_uri(absolute) or "chunk"  # KEY/MAP 兜底走 chunk handle
+        kind = "playlist" if tag_name in _PLAYLIST_URI_TAGS else "chunk"
         if kind == "chunk" and not ctx.proxy_segments:
             return f"{head}{absolute}{tail}"
         return f"{head}{_make_handle_url(kind=kind, upstream_url=absolute, ctx=ctx)}{tail}"
@@ -148,12 +152,14 @@ def rewrite_m3u8(text: str, ctx: RewriteContext) -> str:
     # 没有 MEDIA-SEQUENCE 头的 VOD playlist 默认从 0 开始（RFC 8216 §4.3.3.2）。
     current_seq = 0
     seen_media_seq = False
+    expects_variant_uri = False
     for raw_line in text.splitlines():
         stripped = raw_line.strip()
         if not stripped:
             out.append(raw_line)
             continue
-        if stripped.startswith("#"):
+        directive = stripped.lstrip("\ufeff")
+        if directive.startswith("#"):
             mseq_match = _MEDIA_SEQ_RE.match(raw_line)
             if mseq_match:
                 try:
@@ -162,15 +168,23 @@ def rewrite_m3u8(text: str, ctx: RewriteContext) -> str:
                 except ValueError:
                     pass
             out.append(_rewrite_tag_line(raw_line, ctx))
+            if directive.upper().startswith("#EXT-X-STREAM-INF:"):
+                expects_variant_uri = True
             continue
 
         # URL 行（segment 或 variant playlist）
+        scheme = urlparse(stripped).scheme.lower()
+        if scheme and scheme not in ("http", "https"):
+            out.append(raw_line)
+            expects_variant_uri = False
+            continue
         try:
             absolute = urljoin(ctx.base_url, stripped)
         except ValueError:
             out.append(raw_line)
             continue
-        kind = _classify_uri(absolute)
+        kind = "playlist" if expects_variant_uri else _classify_uri(absolute)
+        expects_variant_uri = False
         if kind == "playlist":
             out.append(_make_handle_url(kind="playlist", upstream_url=absolute, ctx=ctx))
         elif kind == "chunk":
@@ -183,8 +197,14 @@ def rewrite_m3u8(text: str, ctx: RewriteContext) -> str:
             else:
                 out.append(absolute)
         else:
-            # 不识别的扩展（init.mp4 兜底走 chunk；其余罕见情况原样保留）
-            out.append(absolute)
+            # Media playlist URI may be extensionless or query-only. Keeping a raw absolute
+            # URL here would bypass signed handles, ProxyContext, redirects and SSRF checks.
+            if ctx.proxy_segments:
+                tagged = _inject_wf_seq(absolute, current_seq)
+                out.append(_make_handle_url(kind="chunk", upstream_url=tagged, ctx=ctx))
+                current_seq += 1
+            else:
+                out.append(absolute)
     # seen_media_seq 仅作未来扩展位（比如做 sequence 一致性校验时用），目前无副作用。
     _ = seen_media_seq
     rewritten = "\n".join(out)
