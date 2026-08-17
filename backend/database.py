@@ -144,6 +144,8 @@ CREATE TABLE IF NOT EXISTS channels (
     market_source_id TEXT DEFAULT '',
     market_channel_id TEXT DEFAULT '',
     market_source_item_id TEXT DEFAULT '',
+    rtsp_timestamp_mode TEXT NOT NULL DEFAULT 'passthrough'
+                        CHECK(rtsp_timestamp_mode IN ('passthrough', 'pts_from_dts')),
     FOREIGN KEY (subscription_id) REFERENCES subscriptions(id) ON DELETE CASCADE
 );
 
@@ -1112,6 +1114,11 @@ async def initialize():
             ('market_source_id', 'TEXT', "''"),
             ('market_channel_id', 'TEXT', "''"),
             ('market_source_item_id', 'TEXT', "''"),
+            (
+                'rtsp_timestamp_mode',
+                "TEXT NOT NULL CHECK(rtsp_timestamp_mode IN ('passthrough', 'pts_from_dts'))",
+                "'passthrough'",
+            ),
         ]:
             try:
                 conn.execute(f"ALTER TABLE channels ADD COLUMN {col} {typ} DEFAULT {default}")
@@ -1955,6 +1962,7 @@ _CHANNEL_CONFIG_FIELDS = (
     'market_source_id',
     'market_channel_id',
     'market_source_item_id',
+    'rtsp_timestamp_mode',
 )
 
 _CHANNEL_UPDATE_FIELDS = tuple(
@@ -1988,6 +1996,9 @@ def _channel_config_value(channel: dict, field: str):
         return str(channel.get(field) or 'hls').strip().lower()
     if field == 'adapter_provider':
         return str(channel.get(field) or channel.get('adapter') or '').strip().lower()
+    if field == 'rtsp_timestamp_mode':
+        from rtsp_playback import normalize_rtsp_timestamp_mode
+        return normalize_rtsp_timestamp_mode(channel.get(field))
     return str(channel.get(field) or '').strip()
 
 

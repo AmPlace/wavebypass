@@ -15,6 +15,7 @@ Payload schema (v=1)::
         "ctx": "<proxy_context id, optional>",                    # 临时 header 上下文 ID
         "src_id": "<channel canonical_key, optional>",            # 稳定频道引用
         "compat": 0|1,                                            # 仅 rtsp kind 使用
+        "timestamp_mode": "pts_from_dts",                        # 可选；缺失为 passthrough
     }
 
 调用方约束：
@@ -37,6 +38,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from security.secrets import PROXY_HANDLE_PURPOSE, derive_key
+from rtsp_playback import RtspTimestampMode
 
 
 HANDLE_VERSION = 1
@@ -57,7 +59,10 @@ _HANDLE_CACHE_MAX_ENTRIES = 4096
 _HANDLE_CACHE_REFRESH_FLOOR_SECONDS = 30
 _HANDLE_CACHE_REFRESH_CEILING_SECONDS = 5 * 60
 _handle_cache_lock = threading.Lock()
-_handle_cache: OrderedDict[tuple[str, str, str, str, str, int, int], tuple[str, int]] = OrderedDict()
+_handle_cache: OrderedDict[
+    tuple[str, str, str, str, str, int, str, int],
+    tuple[str, int],
+] = OrderedDict()
 
 
 class HandleError(Exception):
@@ -96,6 +101,7 @@ class HandlePayload:
     ctx: str = ""
     src_id: str = ""
     compat: int = 0
+    timestamp_mode: str = RtspTimestampMode.PASSTHROUGH.value
 
 
 def _b64url_encode(data: bytes) -> str:
@@ -137,6 +143,7 @@ def _build_payload(
     ctx: str = "",
     src_id: str = "",
     compat: int = 0,
+    timestamp_mode: str = RtspTimestampMode.PASSTHROUGH.value,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "v": HANDLE_VERSION,
@@ -152,18 +159,31 @@ def _build_payload(
         payload["src_id"] = src_id
     if compat:
         payload["compat"] = 1
+    if timestamp_mode != RtspTimestampMode.PASSTHROUGH.value:
+        payload["timestamp_mode"] = timestamp_mode
     return payload
 
 
-def _validate_issue_args(kind: str, url: str, ttl_seconds: int | None) -> int:
+def _validate_issue_args(
+    kind: str,
+    url: str,
+    ttl_seconds: int | None,
+    timestamp_mode: str,
+) -> tuple[int, str]:
     if kind not in VALID_KINDS:
         raise ValueError(f"未知 handle kind: {kind}")
     if not url:
         raise ValueError("handle url 不能为空")
+    try:
+        normalized_timestamp_mode = RtspTimestampMode(timestamp_mode).value
+    except (TypeError, ValueError) as exc:
+        raise ValueError("无效的 RTSP timestamp mode") from exc
+    if kind != "rtsp" and normalized_timestamp_mode != RtspTimestampMode.PASSTHROUGH.value:
+        raise ValueError("timestamp mode 仅适用于 RTSP handle")
     ttl = int(ttl_seconds) if ttl_seconds is not None else DEFAULT_TTL_BY_KIND[kind]
     if ttl <= 0:
         raise ValueError("handle TTL 必须大于 0")
-    return ttl
+    return ttl, normalized_timestamp_mode
 
 
 def issue_handle(
@@ -175,8 +195,9 @@ def issue_handle(
     ctx: str = "",
     src_id: str = "",
     compat: int = 0,
+    timestamp_mode: str = RtspTimestampMode.PASSTHROUGH.value,
 ) -> str:
-    ttl = _validate_issue_args(kind, url, ttl_seconds)
+    ttl, timestamp_mode = _validate_issue_args(kind, url, ttl_seconds, timestamp_mode)
     return _sign_payload(
         _build_payload(
             kind=kind,
@@ -186,6 +207,7 @@ def issue_handle(
             ctx=ctx,
             src_id=src_id,
             compat=compat,
+            timestamp_mode=timestamp_mode,
         )
     )
 
@@ -199,16 +221,21 @@ def issue_cached_handle(
     ctx: str = "",
     src_id: str = "",
     compat: int = 0,
+    timestamp_mode: str = RtspTimestampMode.PASSTHROUGH.value,
 ) -> str:
     """签发可复用 handle。
 
     同一个媒体上游 URL 在同一上下文内会反复出现在 live playlist 里。如果每次
     重写都把 exp 设置成「当前时间 + TTL」，hls.js 看到的 segment URI 会持续抖动。
-    这里用有界 LRU 缓存把 `(kind, url, src, ctx, src_id, compat, ttl)` 固定到同一
+    这里用有界 LRU 缓存把
+    `(kind, url, src, ctx, src_id, compat, timestamp_mode, ttl)` 固定到同一
     个 handle，直到临近过期时再续签。
     """
-    ttl = _validate_issue_args(kind, url, ttl_seconds)
-    cache_key = (kind, url, src or "", ctx or "", src_id or "", 1 if compat else 0, ttl)
+    ttl, timestamp_mode = _validate_issue_args(kind, url, ttl_seconds, timestamp_mode)
+    cache_key = (
+        kind, url, src or "", ctx or "", src_id or "", 1 if compat else 0,
+        timestamp_mode, ttl,
+    )
     now = _now()
     refresh_margin = _handle_cache_refresh_margin(ttl)
     with _handle_cache_lock:
@@ -230,6 +257,7 @@ def issue_cached_handle(
                 ctx=ctx,
                 src_id=src_id,
                 compat=compat,
+                timestamp_mode=timestamp_mode,
             )
         )
         _handle_cache[cache_key] = (handle, exp)
@@ -309,6 +337,16 @@ def decode_for_kind(raw: str, expected_kind: str) -> HandlePayload:
     src_id = data.get("src_id", "")
     compat_raw = data.get("compat", 0)
     compat = 1 if compat_raw else 0
+    timestamp_mode_raw = data.get(
+        "timestamp_mode",
+        RtspTimestampMode.PASSTHROUGH.value,
+    )
+    try:
+        timestamp_mode = RtspTimestampMode(timestamp_mode_raw).value
+    except (TypeError, ValueError) as exc:
+        raise HandleFormatError("handle timestamp_mode 字段无效") from exc
+    if kind != "rtsp" and timestamp_mode != RtspTimestampMode.PASSTHROUGH.value:
+        raise HandleFormatError("handle timestamp_mode 字段无效")
 
     return HandlePayload(
         v=version,
@@ -319,4 +357,5 @@ def decode_for_kind(raw: str, expected_kind: str) -> HandlePayload:
         ctx=str(ctx) if isinstance(ctx, str) else "",
         src_id=str(src_id) if isinstance(src_id, str) else "",
         compat=compat,
+        timestamp_mode=timestamp_mode,
     )

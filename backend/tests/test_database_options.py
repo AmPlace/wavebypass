@@ -105,6 +105,41 @@ class ChannelOptionsPersistTest(unittest.TestCase):
             self.assertEqual(db._current_db_path(), second_path)
         os.environ["WAVEFLOW_DB_PATH"] = first_path
 
+    def test_rtsp_timestamp_mode_persists_and_invalid_input_is_safe(self):
+        import database as db
+
+        async def go():
+            await db.initialize()
+            sub_id = await db.add_subscription(
+                title="rtsp", url="https://example.test/rtsp.m3u", channel_count=2,
+            )
+            await db.add_channels_bulk(sub_id, [
+                {
+                    "name": "configured",
+                    "url": "rtsp://configured.example/live",
+                    "source_type": "rtsp",
+                    "rtsp_timestamp_mode": "pts_from_dts",
+                },
+                {
+                    "name": "invalid",
+                    "url": "rtsp://invalid.example/live",
+                    "source_type": "rtsp",
+                    "rtsp_timestamp_mode": "-vf evil",
+                },
+            ])
+            rows = {row["name"]: row for row in await db.get_channels(sub_id)}
+            self.assertEqual(rows["configured"]["rtsp_timestamp_mode"], "pts_from_dts")
+            self.assertEqual(rows["invalid"]["rtsp_timestamp_mode"], "passthrough")
+            aggregated = {
+                row["name"]: row for row in await db.get_aggregated_channels()
+            }
+            self.assertEqual(
+                aggregated["configured"]["rtsp_timestamp_mode"],
+                "pts_from_dts",
+            )
+
+        self._run(go())
+
 
 if __name__ == "__main__":
     unittest.main()

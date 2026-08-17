@@ -74,6 +74,12 @@ from plugin_production import ProductionPluginSubsystem, default_plugin_root
 from plugin_tasks import register_plugin_update_task
 from provider_resolver import ProviderResolver
 from radio_core import RadioResolver
+from rtsp_playback import (
+    RtspPlaybackOptions,
+    RtspVideoMode,
+    resolve_rtsp_playback_options,
+    rtsp_video_args,
+)
 from routers.radio import router as radio_router
 from routers.setup import router as setup_router
 from security.dependencies import require_admin, require_browse_access, require_media_access, resolve_media_access
@@ -330,9 +336,19 @@ def _ffmpeg_bin() -> str | None:
     return ffmpeg
 
 
-def _rtsp_session_id(target_url: str, custom_ua: str = "", compat: bool = False) -> str:
-    mode = "compat" if compat else "copy"
-    return hashlib.sha256(f"{target_url}\n{custom_ua}\n{mode}".encode("utf-8")).hexdigest()[:24]
+def _rtsp_session_id(
+    target_url: str,
+    custom_ua: str = "",
+    compat: bool = False,
+    *,
+    playback_options: RtspPlaybackOptions | None = None,
+) -> str:
+    options = playback_options or resolve_rtsp_playback_options(compat=compat)
+    material = (
+        f"{target_url}\n{custom_ua}\n"
+        f"{options.video_mode.value}\n{options.timestamp_mode.value}"
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
 
 
 def _validate_rtsp_url(target_url: str) -> None:
@@ -851,14 +867,64 @@ def _finish_rtsp_startup(session_id: str, task: asyncio.Task) -> None:
     _observe_background_task(task, f"rtsp_hls_startup:{session_id}")
 
 
-async def _start_rtsp_hls_session(target_url: str, custom_ua: str = "", compat: bool = False) -> tuple[str, Path]:
+def _build_rtsp_ffmpeg_command(
+    *,
+    ffmpeg: str,
+    target_url: str,
+    custom_ua: str,
+    session_id: str,
+    session_dir: Path,
+    playback_options: RtspPlaybackOptions,
+) -> list[str]:
+    headers = ["-user_agent", custom_ua] if custom_ua else []
+    hls_flags = "delete_segments+append_list+omit_endlist"
+    if playback_options.video_mode is RtspVideoMode.TRANSCODE:
+        hls_flags += "+independent_segments"
+    return [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel", "warning",
+        "-nostdin",
+        "-fflags", "+genpts",
+        "-rtsp_transport", "tcp",
+        *headers,
+        "-i", target_url,
+        "-map", "0:v:0?",
+        "-map", "0:a:0?",
+        *rtsp_video_args(playback_options),
+        "-c:a", "aac",
+        "-b:a", "128k",
+        "-f", "hls",
+        "-hls_time", str(RTSP_HLS_SEGMENT_SECONDS),
+        "-hls_list_size", str(RTSP_HLS_LIST_SIZE),
+        "-hls_delete_threshold", str(RTSP_HLS_DELETE_THRESHOLD),
+        "-hls_flags", hls_flags,
+        "-hls_segment_filename", str(session_dir / "seg_%05d.ts"),
+        "-hls_base_url", f"/api/media/proxy/rtsp-segments/{session_id}/",
+        str(session_dir / "index.m3u8"),
+    ]
+
+
+async def _start_rtsp_hls_session(
+    target_url: str,
+    custom_ua: str = "",
+    compat: bool = False,
+    *,
+    playback_options: RtspPlaybackOptions | None = None,
+) -> tuple[str, Path]:
     _validate_rtsp_url(target_url)
+    options = playback_options or resolve_rtsp_playback_options(compat=compat)
     ffmpeg = _ffmpeg_bin()
     if not ffmpeg:
         raise HTTPException(status_code=503, detail="未找到 ffmpeg，请安装 ffmpeg 或设置 FFMPEG_BIN")
 
     RTSP_HLS_ROOT.mkdir(parents=True, exist_ok=True)
-    session_id = _rtsp_session_id(target_url, custom_ua, compat)
+    session_id = _rtsp_session_id(
+        target_url,
+        custom_ua,
+        compat,
+        playback_options=options,
+    )
     session_dir = RTSP_HLS_ROOT / session_id
     playlist_path = session_dir / "index.m3u8"
     existing_session = RTSP_HLS_SESSIONS.get(session_id)
@@ -878,51 +944,14 @@ async def _start_rtsp_hls_session(target_url: str, custom_ua: str = "", compat: 
     _delete_rtsp_session_dir(session_id)
     session_dir.mkdir(parents=True, exist_ok=True)
 
-    headers = []
-    if custom_ua:
-        headers.extend(["-user_agent", custom_ua])
-
-    video_args = [
-        "-c:v", "copy",
-    ]
-    if compat:
-        video_args = [
-            "-c:v", "libx264",
-            "-preset", "veryfast",
-            "-tune", "zerolatency",
-            "-profile:v", "baseline",
-            "-level", "3.1",
-            "-pix_fmt", "yuv420p",
-            "-x264-params", "keyint=50:min-keyint=50:scenecut=0",
-            "-force_key_frames", "expr:gte(t,n_forced*2)",
-        ]
-    hls_flags = "delete_segments+append_list+omit_endlist"
-    if compat:
-        hls_flags += "+independent_segments"
-
-    cmd = [
-        ffmpeg,
-        "-hide_banner",
-        "-loglevel", "warning",
-        "-nostdin",
-        "-fflags", "+genpts",
-        "-rtsp_transport", "tcp",
-        *headers,
-        "-i", target_url,
-        "-map", "0:v:0?",
-        "-map", "0:a:0?",
-        *video_args,
-        "-c:a", "aac",
-        "-b:a", "128k",
-        "-f", "hls",
-        "-hls_time", str(RTSP_HLS_SEGMENT_SECONDS),
-        "-hls_list_size", str(RTSP_HLS_LIST_SIZE),
-        "-hls_delete_threshold", str(RTSP_HLS_DELETE_THRESHOLD),
-        "-hls_flags", hls_flags,
-        "-hls_segment_filename", str(session_dir / "seg_%05d.ts"),
-        "-hls_base_url", f"/api/media/proxy/rtsp-segments/{session_id}/",
-        str(playlist_path),
-    ]
+    cmd = _build_rtsp_ffmpeg_command(
+        ffmpeg=ffmpeg,
+        target_url=target_url,
+        custom_ua=custom_ua,
+        session_id=session_id,
+        session_dir=session_dir,
+        playback_options=options,
+    )
 
     subprocess_kwargs = {
         "stdout": subprocess.DEVNULL,
@@ -948,7 +977,9 @@ async def _start_rtsp_hls_session(target_url: str, custom_ua: str = "", compat: 
         "dir": session_dir,
         "last_access": time.time(),
         "target_url": target_url,
-        "compat": compat,
+        "compat": options.compat,
+        "video_mode": options.video_mode.value,
+        "timestamp_mode": options.timestamp_mode.value,
         "stderr_tail": "",
         "startup_state": "starting",
     }
@@ -991,7 +1022,13 @@ async def _start_rtsp_hls_session(target_url: str, custom_ua: str = "", compat: 
         raise
 
 
-async def _ensure_rtsp_hls_session(target_url: str, custom_ua: str = "", compat: bool = False) -> tuple[str, Path]:
+async def _ensure_rtsp_hls_session(
+    target_url: str,
+    custom_ua: str = "",
+    compat: bool = False,
+    *,
+    playback_options: RtspPlaybackOptions | None = None,
+) -> tuple[str, Path]:
     """Return one shared RTSP→HLS startup for each session identity.
 
     The check and task insertion happen before the first await, so two
@@ -1002,7 +1039,13 @@ async def _ensure_rtsp_hls_session(target_url: str, custom_ua: str = "", compat:
     _validate_rtsp_url(target_url)
     if _RTSP_HLS_SHUTTING_DOWN:
         raise HTTPException(status_code=503, detail="RTSP 服务正在关闭")
-    session_id = _rtsp_session_id(target_url, custom_ua, compat)
+    options = playback_options or resolve_rtsp_playback_options(compat=compat)
+    session_id = _rtsp_session_id(
+        target_url,
+        custom_ua,
+        compat,
+        playback_options=options,
+    )
     session_dir = RTSP_HLS_ROOT / session_id
     playlist_path = session_dir / "index.m3u8"
 
@@ -1056,8 +1099,18 @@ async def _ensure_rtsp_hls_session(target_url: str, custom_ua: str = "", compat:
 
             _RTSP_RESERVED_SESSIONS.add(session_id)
             try:
+                start_coro = (
+                    _start_rtsp_hls_session(
+                        target_url,
+                        custom_ua,
+                        compat,
+                        playback_options=options,
+                    )
+                    if playback_options is not None
+                    else _start_rtsp_hls_session(target_url, custom_ua, compat)
+                )
                 startup_to_await = asyncio.create_task(
-                    _start_rtsp_hls_session(target_url, custom_ua, compat),
+                    start_coro,
                     name=f"rtsp-hls-startup:{session_id}",
                 )
             except BaseException:
@@ -2533,6 +2586,7 @@ async def _get_aggregated_iptv_channels(group: str = '', search: str = '') -> tu
             'market_source_id': ch.get('market_source_id', ''),
             'market_channel_id': ch.get('market_channel_id', ''),
             'market_source_item_id': ch.get('market_source_item_id', ''),
+            'rtsp_timestamp_mode': ch.get('rtsp_timestamp_mode', 'passthrough'),
             'source_revision': source_revision_for(ch),
             'logical_channel_id': logical_id,
             'origin_display_name': ch.get('sub_title', ''),
@@ -3387,6 +3441,7 @@ async def serve_rtsp_playlist_response(
     upstream_url: str,
     custom_ua: str = "",
     compat: bool = False,
+    playback_options: RtspPlaybackOptions | None = None,
 ) -> FileResponse:
     """供 media_proxy router 调用的 RTSP 内部入口。
 
@@ -3396,7 +3451,12 @@ async def serve_rtsp_playlist_response(
         raise HTTPException(status_code=400, detail="缺少 target_url")
     _validate_rtsp_proxy_request(upstream_url)
     try:
-        session_id, playlist_path = await _ensure_rtsp_hls_session(upstream_url, custom_ua, compat=compat)
+        session_id, playlist_path = await _ensure_rtsp_hls_session(
+            upstream_url,
+            custom_ua,
+            compat=compat,
+            playback_options=playback_options,
+        )
     except HTTPException:
         raise
     except Exception as exc:
@@ -4577,10 +4637,11 @@ async def iptv_smart_playlist(canonical_key: str, request: Request):
         source_with_key = {**source, "canonical_key": canonical_key}
         try:
             if source_type == 'rtsp':
+                playback_options = resolve_rtsp_playback_options(source)
                 return await serve_rtsp_playlist_response(
                     upstream_url=source['url'],
                     custom_ua=source.get('custom_ua', ''),
-                    compat=False,
+                    playback_options=playback_options,
                 )
             if source_type in {'mpegts', 'http_flv'}:
                 return RedirectResponse(_iptv_proxy_url_for_source(source_with_key, request), status_code=307)

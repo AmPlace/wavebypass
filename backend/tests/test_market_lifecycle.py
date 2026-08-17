@@ -456,6 +456,41 @@ class MarketLifecycleTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(after, before)
 
+    async def test_market_normalize_propagates_safe_rtsp_timestamp_mode(self):
+        package = {"id": "pkg"}
+        channel_source = {"id": "inline"}
+        channel = {"id": "channel", "name": "Channel"}
+
+        configured, warning = self.market._normalize_source(
+            channel,
+            {
+                "url": "rtsp://configured.example/live",
+                "type": "rtsp",
+                "rtsp_timestamp_mode": "pts_from_dts",
+            },
+            package,
+            channel_source,
+            {},
+            0,
+        )
+        self.assertIsNone(warning)
+        self.assertEqual(configured["rtsp_timestamp_mode"], "pts_from_dts")
+
+        invalid, warning = self.market._normalize_source(
+            channel,
+            {
+                "url": "rtsp://invalid.example/live",
+                "type": "rtsp",
+                "rtsp_timestamp_mode": "-vf evil",
+            },
+            package,
+            channel_source,
+            {},
+            1,
+        )
+        self.assertIsNone(warning)
+        self.assertEqual(invalid["rtsp_timestamp_mode"], "passthrough")
+
     async def test_market_update_failure_rolls_back_subscription_install_and_channels(self):
         initial = [{"name": "A", "url": "https://a.test/live.m3u8", "source_type": "hls"}]
         preview_id = self._set_preview(initial, version="1.0.0")

@@ -10,6 +10,7 @@ from unittest import IsolatedAsyncioTestCase, mock
 from fastapi import HTTPException
 
 import main
+from rtsp_playback import resolve_rtsp_playback_options
 
 
 class _AliveProcess:
@@ -216,6 +217,55 @@ class RtspStartupSingleFlightTest(IsolatedAsyncioTestCase):
 
         self.assertNotEqual(results[0][0], results[1][0])
         self.assertEqual(len(started_keys), 2)
+        await self._wait_for_no_startup()
+
+    async def test_timestamp_modes_have_independent_single_flight_sessions(self):
+        started_modes = set()
+        both_started = asyncio.Event()
+        release = asyncio.Event()
+        calls = []
+
+        async def start(target_url, custom_ua, compat, *, playback_options=None):
+            calls.append(playback_options.timestamp_mode.value)
+            started_modes.add(playback_options.timestamp_mode.value)
+            if len(started_modes) == 2:
+                both_started.set()
+            await release.wait()
+            return (
+                main._rtsp_session_id(
+                    target_url,
+                    custom_ua,
+                    compat,
+                    playback_options=playback_options,
+                ),
+                Path("/tmp/index.m3u8"),
+            )
+
+        passthrough = resolve_rtsp_playback_options()
+        pts_from_dts = resolve_rtsp_playback_options(
+            {"rtsp_timestamp_mode": "pts_from_dts"}
+        )
+        target = "rtsp://camera-modes.local/live"
+        with mock.patch.object(main, "_start_rtsp_hls_session", new=start):
+            waiters = [
+                asyncio.create_task(main._ensure_rtsp_hls_session(
+                    target, playback_options=pts_from_dts,
+                )),
+                asyncio.create_task(main._ensure_rtsp_hls_session(
+                    target, playback_options=pts_from_dts,
+                )),
+                asyncio.create_task(main._ensure_rtsp_hls_session(
+                    target, playback_options=passthrough,
+                )),
+            ]
+            await asyncio.wait_for(both_started.wait(), timeout=1)
+            release.set()
+            results = await asyncio.gather(*waiters)
+
+        self.assertEqual(calls.count("pts_from_dts"), 1)
+        self.assertEqual(calls.count("passthrough"), 1)
+        self.assertEqual(results[0], results[1])
+        self.assertNotEqual(results[0][0], results[2][0])
         await self._wait_for_no_startup()
 
     async def test_startup_failure_is_shared_cleaned_and_retryable(self):

@@ -1835,6 +1835,8 @@ def _normalize_source(
     if not url:
         return None, f"{channel.get('name', '未命名频道')} 源缺少 URL"
 
+    from rtsp_playback import normalize_rtsp_timestamp_mode
+
     return {
         "name": str(channel.get("name") or "未命名频道"),
         "url": url,
@@ -1847,6 +1849,9 @@ def _normalize_source(
         "youtube_video_id": str(merged.get("youtube_video_id") or parse_youtube_video_id(url)),
         "custom_ua": custom_ua,
         "referer": referer,
+        "rtsp_timestamp_mode": normalize_rtsp_timestamp_mode(
+            merged.get("rtsp_timestamp_mode")
+        ),
         "force_proxy": 1 if (
             merged.get("requires_proxy")
             or merged.get("requires_referer")

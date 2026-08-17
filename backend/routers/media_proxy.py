@@ -62,6 +62,7 @@ from security.proxy_handles import (
     decode_for_kind,
     issue_cached_handle,
 )
+from rtsp_playback import RtspPlaybackOptions, resolve_rtsp_playback_options
 from security.source_ids import source_id_for, source_revision_for
 from ssrf_guard import UnsafeTargetError, assert_safe_target_url
 from core.visual_metadata import empty_visual, get_visual_metadata_cache
@@ -651,6 +652,7 @@ async def _serve_iptv_source_playlist(
     raw_url = str(source.get("url") or "").strip()
     source_id = str(source.get("source_id") or source_id_for(source))
     source_revision = source_revision_for(source)
+    rtsp_playback_options = resolve_rtsp_playback_options(source)
     if not raw_url:
         raise HTTPException(status_code=502, detail="source url 为空")
 
@@ -687,6 +689,7 @@ async def _serve_iptv_source_playlist(
             source_id=source_id,
             source_revision=source_revision,
             access=access,
+            rtsp_playback_options=rtsp_playback_options,
         )
 
     # 直接 source（非 adapter）
@@ -701,6 +704,7 @@ async def _serve_iptv_source_playlist(
         source_id=source_id,
         source_revision=source_revision,
         access=access,
+        rtsp_playback_options=rtsp_playback_options,
     )
 
 
@@ -716,6 +720,7 @@ async def _serve_resolved_source_playlist(
     source_id: str,
     source_revision: str,
     access: MediaAccessContext,
+    rtsp_playback_options: RtspPlaybackOptions | None = None,
     domain: str = "iptv",
     handle_ttl: int | None = None,
 ) -> Response:
@@ -753,13 +758,15 @@ async def _serve_resolved_source_playlist(
         # 直接签 rtsp handle 并 302；让客户端命中 /api/media/proxy/rtsp/{handle}
         if not _m.config_rtsp_proxy_enabled():
             raise HTTPException(status_code=503, detail="RTSP 代理已禁用")
+        options = rtsp_playback_options or resolve_rtsp_playback_options()
         handle = issue_cached_handle(
             kind="rtsp",
             url=resolved_url,
             src=src_label,
             src_id=source_ref,
             ctx=ctx_id,
-            compat=0,
+            compat=1 if options.compat else 0,
+            timestamp_mode=options.timestamp_mode.value,
             ttl_seconds=handle_ttl,
         )
         token_qs = (
@@ -1130,10 +1137,14 @@ async def media_proxy_rtsp(
     ctx = get_proxy_context_registry().get(payload.ctx) if payload.ctx else None
     custom_ua = ctx.custom_ua if ctx else ""
 
+    playback_options = resolve_rtsp_playback_options(
+        compat=bool(payload.compat),
+        timestamp_mode=payload.timestamp_mode,
+    )
     return await _m.serve_rtsp_playlist_response(
         upstream_url=payload.url,
         custom_ua=custom_ua,
-        compat=bool(payload.compat),
+        playback_options=playback_options,
     )
 
 

@@ -30,6 +30,7 @@ _CONFIG_FIELDS = (
     "adapter_provider",
     "adapter",
     "adapter_source_url",
+    "rtsp_timestamp_mode",
 )
 
 _MARKET_FIELDS = (
@@ -105,6 +106,10 @@ def source_config_fingerprint(source: dict[str, Any]) -> str:
     """Stable fingerprint for playback-relevant original source config."""
 
     payload = {field: _clean(source.get(field)) for field in _CONFIG_FIELDS}
+    from rtsp_playback import normalize_rtsp_timestamp_mode
+    payload["rtsp_timestamp_mode"] = normalize_rtsp_timestamp_mode(
+        source.get("rtsp_timestamp_mode")
+    )
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
