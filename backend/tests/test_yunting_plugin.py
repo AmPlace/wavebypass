@@ -66,10 +66,30 @@ class YuntingPluginTest(unittest.TestCase):
         )
         descriptor = Provider().resolve_stream(reference, _context(capabilities))
         self.assertEqual(descriptor.url, "https://audio.example/340000.m3u8")
-        self.assertEqual(descriptor.transport, "audio_http")
+        self.assertEqual(descriptor.transport, "hls")
         self.assertEqual(descriptor.ttl_seconds, 3600)
         self.assertTrue(descriptor.volatile_url)
         self.assertFalse(descriptor.requires_proxy)
+    def test_resolve_keeps_audio_transport_for_non_hls_stream(self):
+        records = _records()
+        records["340000"][0]["playUrlLow"] = "http://audio.example/340000.mp3"
+        capabilities = _Capabilities(records)
+        reference = __import__("waveflow_plugin_sdk", fromlist=["RadioReference"]).RadioReference(
+            "yunting", "cid-340000", {"province_code": "340000"},
+        )
+        descriptor = Provider().resolve_stream(reference, _context(capabilities))
+        self.assertEqual(descriptor.transport, "audio_http")
+
+    def test_resolve_uses_stream_semantics_when_hls_format_is_in_query(self):
+        records = _records()
+        records["340000"][0]["playUrlLow"] = "http://audio.example/live?id=340000"
+        records["340000"][0]["format"] = "m3u8"
+        capabilities = _Capabilities(records)
+        reference = __import__("waveflow_plugin_sdk", fromlist=["RadioReference"]).RadioReference(
+            "yunting", "cid-340000", {"province_code": "340000"},
+        )
+        descriptor = Provider().resolve_stream(reference, _context(capabilities))
+        self.assertEqual(descriptor.transport, "hls")
 
     def test_programme_is_current_label_snapshot_not_invented_schedule(self):
         capabilities = _Capabilities(_records())

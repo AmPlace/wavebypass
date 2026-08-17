@@ -6,6 +6,7 @@ import hashlib
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 from waveflow_plugin_sdk import InvalidResource, PluginApplication, PluginError, RadioProvider, RadioReference, ResolveContext, StreamDescriptor
 
@@ -27,6 +28,40 @@ PROVINCE_NAMES = {
     "660000": "新疆兵团",
 }
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+
+_HLS_CONTENT_TYPES = {
+    "application/vnd.apple.mpegurl",
+    "application/x-mpegurl",
+    "audio/mpegurl",
+}
+_STREAM_SEMANTIC_FIELDS = (
+    "transport", "stream_type", "streamType", "protocol", "format",
+    "play_type", "playType", "content_type", "contentType", "mime_type", "mimeType",
+)
+
+
+def _is_hls_semantic(value: Any) -> bool:
+    normalized = unquote(str(value or "")).strip().lower()
+    if not normalized:
+        return False
+    media_type = normalized.split(";", 1)[0].strip()
+    return (
+        media_type in _HLS_CONTENT_TYPES
+        or normalized in {"hls", "m3u8", "mpegurl"}
+        or "m3u8" in normalized
+    )
+
+
+def _stream_transport(url: str, record: dict[str, Any]) -> str:
+    """Infer the transport from the URL and provider-declared media semantics."""
+    parsed = urlparse(url)
+    path = unquote(parsed.path or "").strip().lower().rstrip("/")
+    if path.endswith(".m3u8") or any(_is_hls_semantic(value) for value in parsed.query.split("&")):
+        return "hls"
+    for field in _STREAM_SEMANTIC_FIELDS:
+        if _is_hls_semantic(record.get(field)):
+            return "hls"
+    return "audio_http"
 
 
 def _headers(params: dict[str, Any]) -> dict[str, str]:
@@ -118,7 +153,7 @@ class Provider(RadioProvider):
             url = "https://" + url[7:]
         if not url.startswith(("http://", "https://")):
             raise _failure("no_stream", "Yunting station returned no playable stream")
-        return StreamDescriptor(url=url, transport="audio_http",
+        return StreamDescriptor(url=url, transport=_stream_transport(url, record["raw"]),
                                 headers={"User-Agent": UA, "Referer": "https://www.radio.cn/"},
                                 ttl_seconds=3600, volatile_url=True, requires_proxy=False)
 

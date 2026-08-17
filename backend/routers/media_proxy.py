@@ -532,7 +532,7 @@ async def media_radio_stream(
     referer = str(resolved.get("referer") or headers.get("Referer") or headers.get("referer") or "")
     source_ref = f"radio:{str(resolved.get('source_id') or source_id.strip())}"
     ctx_id = ""
-    if custom_ua or referer:
+    if custom_ua or referer or resolved_type in {"audio_http", "mpegts", "http_flv"}:
         ctx_id = get_proxy_context_registry().put(ProxyContext(
             custom_ua=custom_ua,
             referer=referer,
@@ -733,7 +733,9 @@ async def _serve_resolved_source_playlist(
 
     # 是否需要建 ProxyContext（动态 header）
     ctx_id = ""
-    has_dynamic_headers = bool(custom_ua or referer or cookie)
+    has_dynamic_headers = bool(
+        custom_ua or referer or cookie or no_ua or resolved_st == "audio_http"
+    )
     if has_dynamic_headers:
         ctx = ProxyContext(
             custom_ua=custom_ua,
@@ -1108,11 +1110,12 @@ async def media_proxy_stream(
     if ctx and ctx.cookie:
         upstream_headers["Cookie"] = ctx.cookie
 
+    resolved_stream_type = (ctx.source_type if ctx and ctx.source_type else stream_type)
     return await _m.serve_iptv_proxy_stream_response(
         request=request,
         upstream_url=payload.url,
         upstream_headers=upstream_headers,
-        stream_type=stream_type,
+        stream_type=resolved_stream_type,
     )
 
 

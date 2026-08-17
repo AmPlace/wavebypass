@@ -119,6 +119,43 @@ def get_cdn_headers_for_station(station_id: str) -> dict[str, str]:
 
 TOKEN_REFRESH_HTTP_STATUS_CODES = {401, 403, 404, 410}
 
+_AUDIO_MIME_ALIASES = {
+    "audio/mp3": "audio/mpeg",
+    "audio/x-mp3": "audio/mpeg",
+    "audio/x-mpeg": "audio/mpeg",
+    "audio/x-aac": "audio/aac",
+    "application/aac": "audio/aac",
+    "audio/vnd.dlna.adts": "audio/aac",
+}
+_AUDIO_MIME_BY_EXTENSION = {
+    "aac": "audio/aac",
+    "adts": "audio/aac",
+    "flac": "audio/flac",
+    "m4a": "audio/mp4",
+    "mp3": "audio/mpeg",
+    "oga": "audio/ogg",
+    "ogg": "audio/ogg",
+    "opus": "audio/opus",
+    "wav": "audio/wav",
+    "webm": "audio/webm",
+}
+
+
+def _audio_proxy_content_type(upstream_url: str, upstream_content_type: str) -> str:
+    """Return a safe media type for a stream declared as ``audio_http``."""
+    raw_content_type = str(upstream_content_type or "").strip()
+    base_content_type = raw_content_type.split(";", 1)[0].strip().lower()
+    if base_content_type.startswith("audio/"):
+        canonical = _AUDIO_MIME_ALIASES.get(base_content_type, base_content_type)
+        return canonical + raw_content_type[len(base_content_type):]
+    if base_content_type in {"application/ogg", "application/octet-stream"}:
+        if base_content_type == "application/ogg":
+            return raw_content_type
+
+    path = urlparse(upstream_url).path.lower().rstrip("/")
+    extension = path.rsplit(".", 1)[-1] if "." in path else ""
+    return _AUDIO_MIME_BY_EXTENSION.get(extension, "application/octet-stream")
+
 
 # 直连而不走 HLS 处理的电台 ID 集合。空字符串元素是历史遗留，没有任何匹配语义，
 # 留着只会让代码读起来怪。这里替换成真正的空集合，需要新增直连电台时再 union。
@@ -3582,7 +3619,13 @@ async def serve_iptv_proxy_stream_response(
             await stream_client.aclose()
 
     stream_kind = (stream_type or "").strip().lower()
-    media_type = "video/x-flv" if stream_kind == "http_flv" else "video/MP2T"
+    if stream_kind == "audio_http":
+        media_type = _audio_proxy_content_type(
+            upstream_url,
+            initial_upstream.headers.get("content-type", ""),
+        )
+    else:
+        media_type = "video/x-flv" if stream_kind == "http_flv" else "video/MP2T"
 
     return StreamingResponse(
         stream_bytes(),

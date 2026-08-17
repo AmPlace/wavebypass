@@ -21,9 +21,9 @@ class FakeRequest:
 
 
 class FakeUpstreamResponse:
-    def __init__(self, chunks):
+    def __init__(self, chunks, headers=None):
         self.chunks = list(chunks)
-        self.headers = {}
+        self.headers = dict(headers or {})
         self.chunk_size_seen = object()
         self.raw_calls = 0
         self.closed = False
@@ -84,7 +84,12 @@ class FakeAsyncClient:
         self.closed = True
 
 
-async def _make_stream_response(upstream, stream_type="http_flv", request=None):
+async def _make_stream_response(
+    upstream,
+    stream_type="http_flv",
+    request=None,
+    upstream_url="https://stream.example.test/live.flv",
+):
     # The production stream proxy reconnects live streams after EOF. Unit tests use
     # finite fake streams, so the fake client disconnects after the current fake
     # upstream has been fully consumed and the loop checks for disconnection.
@@ -103,7 +108,7 @@ async def _make_stream_response(upstream, stream_type="http_flv", request=None):
         with mock.patch.object(main_mod, "stream_with_safe_redirects", new=fake_stream):
             response = await main_mod.serve_iptv_proxy_stream_response(
                 request=request,
-                upstream_url="https://stream.example.test/live.flv",
+                upstream_url=upstream_url,
                 upstream_headers={"User-Agent": "UA"},
                 stream_type=stream_type,
             )
@@ -181,6 +186,49 @@ class IptvProxyStreamResponseTest(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(upstream.closed)
                 self.assertEqual(response.media_type, media_type)
                 self.assertTrue(FakeAsyncClient.instances[-1].closed)
+
+    async def test_audio_http_preserves_upstream_mpeg_mime(self):
+        upstream = FakeUpstreamResponse(
+            [b"mp3"],
+            headers={"content-type": "audio/mpeg"},
+        )
+
+        response = await _make_stream_response(
+            upstream,
+            stream_type="audio_http",
+            upstream_url="https://stream.example.test/live",
+        )
+
+        self.assertEqual(response.media_type, "audio/mpeg")
+        self.assertEqual(await _consume_response(response), [b"mp3"])
+
+    async def test_audio_http_infers_aac_mime_from_audio_url_when_upstream_is_generic(self):
+        upstream = FakeUpstreamResponse(
+            [b"aac"],
+            headers={"content-type": "application/octet-stream"},
+        )
+
+        response = await _make_stream_response(
+            upstream,
+            stream_type="audio_http",
+            upstream_url="https://stream.example.test/live.aac",
+        )
+
+        self.assertEqual(response.media_type, "audio/aac")
+
+    async def test_audio_http_unknown_mime_does_not_fall_back_to_mpegts(self):
+        upstream = FakeUpstreamResponse(
+            [b"audio"],
+            headers={"content-type": "video/MP2T"},
+        )
+
+        response = await _make_stream_response(
+            upstream,
+            stream_type="audio_http",
+            upstream_url="https://stream.example.test/live",
+        )
+
+        self.assertEqual(response.media_type, "application/octet-stream")
 
     async def test_upstream_closes_when_consumer_cancels_iteration(self):
         release = asyncio.Event()
