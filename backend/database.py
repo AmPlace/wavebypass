@@ -33,6 +33,7 @@ MARKET_UPDATE_FINAL_STATUSES = {'success', 'failed', 'cancelled', 'interrupted'}
 MARKET_AUTOMATION_TASK_ID = 'market_auto_update'
 MARKET_AUTOMATION_CONFLICT_GROUP = 'market'
 MARKET_AUTOMATION_INTERVAL_SECONDS = 86400
+RADIO_CATALOG_DEFAULT_STALE_GRACE_SECONDS = 24 * 60 * 60
 
 DB_PATH_RAW = (
     os.environ.get('WAVEFLOW_DB_PATH')
@@ -3266,7 +3267,7 @@ async def apply_radio_catalog(
     rows: list[dict],
     *,
     now_unix: float,
-    stale_grace_seconds: int = 300,
+    stale_grace_seconds: int = RADIO_CATALOG_DEFAULT_STALE_GRACE_SECONDS,
     generation: int | None = None,
 ) -> dict:
     """Atomically publish one Plugin Radio catalog into its own tables.
@@ -3444,6 +3445,15 @@ async def record_radio_catalog_failure(
                     )
                     if current.rowcount != 1:
                         return
+                else:
+                    conn.execute(
+                        """
+                        UPDATE radio_catalog_states
+                        SET last_error=?, updated_at=?
+                        WHERE owner_identity=?
+                        """,
+                        (message, now, owner),
+                    )
                 conn.execute(
                     "UPDATE radio_stations SET last_catalog_error=?, updated_at=? WHERE owner_identity=?",
                     (message, now, owner),
@@ -3460,7 +3470,7 @@ async def record_radio_catalog_failure(
 
 async def prune_radio_catalog(
     owner_identity: str = "", *, now_unix: float | None = None,
-    stale_grace_seconds: int = 300,
+    stale_grace_seconds: int = RADIO_CATALOG_DEFAULT_STALE_GRACE_SECONDS,
 ) -> dict[str, int]:
     """Remove only expired Radio projections with no live source reference."""
     owner = owner_identity.strip() if isinstance(owner_identity, str) else ""
@@ -3502,7 +3512,12 @@ async def prune_radio_catalog(
     return await asyncio.to_thread(_prune)
 
 
-def _radio_lifecycle(row: dict, now_unix: float, *, stale_grace_seconds: int = 300) -> str:
+def _radio_lifecycle(
+    row: dict,
+    now_unix: float,
+    *,
+    stale_grace_seconds: int = RADIO_CATALOG_DEFAULT_STALE_GRACE_SECONDS,
+) -> str:
     state = str(row.get("lifecycle_state") or "active")
     expiry = float(row.get("catalog_expires_at") or 0)
     if state == "stale" and expiry and now_unix > expiry:
@@ -3514,17 +3529,42 @@ def _radio_lifecycle(row: dict, now_unix: float, *, stale_grace_seconds: int = 3
     return state
 
 
-async def list_radio_stations(*, owner_identity: str = "", include_expired: bool = False, now_unix: float | None = None) -> list[dict]:
+def _radio_catalog_status(row: dict, station_state: str) -> str:
+    published = int(row.get("catalog_published_generation") or 0)
+    error = str(row.get("catalog_last_error") or "")
+    if published <= 0:
+        return "failed" if error else "never"
+    if station_state == "expired":
+        return "expired"
+    if error:
+        return "stale" if station_state == "stale" else "degraded"
+    return "success"
+
+
+async def list_radio_stations(
+    *,
+    owner_identity: str = "",
+    include_expired: bool = False,
+    now_unix: float | None = None,
+    visible_owner_identities: set[str] | frozenset[str] | None = None,
+) -> list[dict]:
     now_value = float(now_unix if now_unix is not None else time.time())
 
     def _list() -> list[dict]:
         conn = _connect()
         try:
             clauses = ["1=1"]
-            values: list[str] = []
+            values: list[Any] = []
             if owner_identity:
                 clauses.append("s.owner_identity=?")
                 values.append(owner_identity)
+            if visible_owner_identities is not None:
+                owners = sorted({str(item).strip() for item in visible_owner_identities if str(item).strip()})
+                if not owners:
+                    return []
+                placeholders = ",".join("?" for _ in owners)
+                clauses.append(f"s.owner_identity IN ({placeholders})")
+                values.extend(owners)
             rows = conn.execute(
                 """
                 SELECT s.*, r.source_id, r.provider_key AS source_provider_key,
@@ -3535,9 +3575,14 @@ async def list_radio_stations(*, owner_identity: str = "", include_expired: bool
                        r.lifecycle_state AS source_lifecycle_state,
                        r.catalog_ttl_seconds AS source_catalog_ttl_seconds,
                        r.catalog_expires_at AS source_catalog_expires_at,
-                       r.resolve_expires_at
+                       r.resolve_expires_at,
+                       c.generation AS catalog_generation,
+                       c.published_generation AS catalog_published_generation,
+                       c.last_success_at AS catalog_last_success_at,
+                       c.last_error AS catalog_last_error
                 FROM radio_stations s
                 LEFT JOIN radio_station_sources r ON r.station_id=s.station_id
+                LEFT JOIN radio_catalog_states c ON c.owner_identity=s.owner_identity
                 WHERE """ + " AND ".join(clauses) + "\n"
                 "ORDER BY s.owner_identity, s.provider_key, s.provider_station_id, r.explicit_priority, r.source_id",
                 values,
@@ -3563,6 +3608,11 @@ async def list_radio_stations(*, owner_identity: str = "", include_expired: bool
                         "metadata": json.loads(row["metadata_json"] or "{}"),
                         "lifecycle_state": _radio_lifecycle(row, now_value),
                         "catalog_expires_at": row["catalog_expires_at"],
+                        "catalog_generation": int(row["catalog_generation"] or 0),
+                        "catalog_published_generation": int(row["catalog_published_generation"] or 0),
+                        "catalog_last_success_at": row["catalog_last_success_at"] or "",
+                        "catalog_last_error": row["catalog_last_error"] or "",
+                        "catalog_status": "",
                         "sources": [],
                     }
                     by_station[station_id] = station
@@ -3589,6 +3639,7 @@ async def list_radio_stations(*, owner_identity: str = "", include_expired: bool
                             "catalog_expires_at": row["source_catalog_expires_at"],
                             "resolve_expires_at": row["resolve_expires_at"],
                         })
+                station["catalog_status"] = _radio_catalog_status(row, station["lifecycle_state"])
             if not include_expired:
                 result = [item for item in result if item["lifecycle_state"] != "expired" and item["sources"]]
             return result
@@ -3598,8 +3649,79 @@ async def list_radio_stations(*, owner_identity: str = "", include_expired: bool
     return await asyncio.to_thread(_list)
 
 
-async def get_radio_station(station_id: str, *, include_expired: bool = False, now_unix: float | None = None) -> dict | None:
-    rows = await list_radio_stations(include_expired=include_expired, now_unix=now_unix)
+async def list_radio_catalog_states(
+    *,
+    owner_identities: set[str] | frozenset[str] | None = None,
+    now_unix: float | None = None,
+) -> list[dict]:
+    """Return bounded provider-level catalog state without exposing run handles."""
+    now_value = float(now_unix if now_unix is not None else time.time())
+
+    def _list() -> list[dict]:
+        conn = _connect()
+        try:
+            owners = None if owner_identities is None else sorted(
+                {str(item).strip() for item in owner_identities if str(item).strip()}
+            )
+            if owners == []:
+                return []
+            clauses = ""
+            values: list[Any] = []
+            if owners is not None:
+                clauses = " WHERE owner_identity IN (" + ",".join("?" for _ in owners) + ")"
+                values.extend(owners)
+            states = conn.execute(
+                "SELECT * FROM radio_catalog_states" + clauses + " ORDER BY owner_identity",
+                values,
+            ).fetchall()
+            result: list[dict] = []
+            for raw in states:
+                state = dict(raw)
+                station_rows = conn.execute(
+                    "SELECT lifecycle_state, catalog_expires_at FROM radio_stations WHERE owner_identity=?",
+                    (state["owner_identity"],),
+                ).fetchall()
+                lifecycle_states = [
+                    _radio_lifecycle(dict(row), now_value)
+                    for row in station_rows
+                ]
+                if int(state.get("published_generation") or 0) <= 0:
+                    status = "failed" if state.get("last_error") else "never"
+                elif not lifecycle_states or all(item == "expired" for item in lifecycle_states):
+                    status = "expired"
+                elif state.get("last_error"):
+                    status = "stale" if any(item == "stale" for item in lifecycle_states) else "degraded"
+                else:
+                    status = "success"
+                result.append({
+                    "owner_identity": state["owner_identity"],
+                    "generation": int(state.get("generation") or 0),
+                    "published_generation": int(state.get("published_generation") or 0),
+                    "last_success_at": state.get("last_success_at") or "",
+                    "last_error": state.get("last_error") or "",
+                    "updated_at": state.get("updated_at") or "",
+                    "status": status,
+                    "station_count": sum(item != "expired" for item in lifecycle_states),
+                })
+            return result
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_list)
+
+
+async def get_radio_station(
+    station_id: str,
+    *,
+    include_expired: bool = False,
+    now_unix: float | None = None,
+    visible_owner_identities: set[str] | frozenset[str] | None = None,
+) -> dict | None:
+    rows = await list_radio_stations(
+        include_expired=include_expired,
+        now_unix=now_unix,
+        visible_owner_identities=visible_owner_identities,
+    )
     return next((row for row in rows if row["station_id"] == station_id), None)
 
 

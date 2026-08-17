@@ -19,14 +19,47 @@ def _radio_resolver(request: Request):
     return resolver
 
 
+def _active_radio_owner_identities(request: Request) -> frozenset[str]:
+    subsystem = getattr(request.app.state, "plugin_subsystem", None)
+    active = getattr(getattr(subsystem, "service", None), "_active", {})
+    if not isinstance(active, dict):
+        return frozenset()
+    owners: set[str] = set()
+    for identity, instance in active.items():
+        state = getattr(getattr(instance, "state", None), "value", getattr(instance, "state", ""))
+        if str(state).upper() != "HEALTHY_ACTIVE" or getattr(instance, "health", "healthy") != "healthy":
+            continue
+        manifest = getattr(instance, "manifest", None)
+        contracts = getattr(manifest, "provider_contracts", ())
+        radio_contract = next(
+            (item for item in contracts if getattr(item, "contract", "") == "radio_provider"),
+            None,
+        )
+        if radio_contract is None or "catalog" not in set(getattr(radio_contract, "features", ())):
+            continue
+        owned_schemes = getattr(manifest, "owned_schemes", ())
+        if any(
+            isinstance(item, (tuple, list)) and len(item) > 1 and item[1] == "radio_provider"
+            for item in owned_schemes
+        ):
+            owners.add(str(identity))
+    return frozenset(owners)
+
+
 @router.get("/api/radio/stations")
-async def list_radio_stations(_access=Depends(require_browse_access)):
-    return {"stations": await database.list_radio_stations()}
+async def list_radio_stations(request: Request, _access=Depends(require_browse_access)):
+    owners = _active_radio_owner_identities(request)
+    return {
+        "stations": await database.list_radio_stations(visible_owner_identities=owners),
+        "catalog_states": await database.list_radio_catalog_states(owner_identities=owners),
+    }
 
 
 @router.get("/api/radio/stations/{station_id}")
-async def get_radio_station(station_id: str, _access=Depends(require_browse_access)):
-    station = await database.get_radio_station(station_id)
+async def get_radio_station(station_id: str, request: Request, _access=Depends(require_browse_access)):
+    station = await database.get_radio_station(
+        station_id, visible_owner_identities=_active_radio_owner_identities(request),
+    )
     if station is None:
         raise HTTPException(status_code=404, detail="Radio station not found")
     return station

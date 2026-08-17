@@ -21,7 +21,7 @@ from security.source_ids import MediaSourceIdentity, media_source_id_for, media_
 
 
 RADIO_DOMAIN = "radio"
-RADIO_CATALOG_STALE_GRACE_SECONDS = 300
+RADIO_CATALOG_STALE_GRACE_SECONDS = 24 * 60 * 60
 RADIO_DESCRIPTOR_CACHE_DEFAULT_TTL_SECONDS = 300
 RADIO_PROGRAMME_CACHE_DEFAULT_TTL_SECONDS = 600
 RADIO_DESCRIPTOR_CACHE_MAX_ENTRIES = 1024
@@ -67,8 +67,12 @@ def radio_station_id(owner_identity: str, provider_key: str, provider_station_id
 
 
 def _error_text(error: BaseException) -> str:
-    text = str(error).replace("\x00", "").strip()
-    return text[:2048] or error.__class__.__name__
+    code = str(getattr(error, "code", "") or "").strip()
+    category = str(getattr(error, "category", "") or "").strip()
+    message = str(getattr(error, "message", "") or str(error)).replace("\x00", "").strip()
+    prefix = ": ".join(value for value in (code, category) if value)
+    text = f"{prefix}: {message}" if prefix else message
+    return text.replace("\r", " ").replace("\n", " ")[:2048] or error.__class__.__name__
 
 
 class RadioCatalogBridge:

@@ -18,6 +18,10 @@ PROVINCES = (
     "360000", "210000", "150000", "640000", "630000", "370000", "140000", "610000",
     "310000", "510000", "540000", "650000", "660000", "530000", "330000",
 )
+CENTRAL_PROVINCE = "0"
+CATALOG_PROVINCES = PROVINCES + (CENTRAL_PROVINCE,)
+YUNTING_MAX_CONCURRENCY = 4
+YUNTING_REQUEST_TIMEOUT_SECONDS = 8
 PROVINCE_NAMES = {
     "110000": "北京", "130000": "河北", "140000": "山西", "150000": "内蒙古", "210000": "辽宁",
     "220000": "吉林", "230000": "黑龙江", "310000": "上海", "320000": "江苏", "330000": "浙江",
@@ -26,6 +30,7 @@ PROVINCE_NAMES = {
     "500000": "重庆", "510000": "四川", "520000": "贵州", "530000": "云南", "540000": "西藏",
     "610000": "陕西", "620000": "甘肃", "630000": "青海", "640000": "宁夏", "650000": "新疆",
     "660000": "新疆兵团",
+    CENTRAL_PROVINCE: "中央广播",
 }
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
 
@@ -75,9 +80,15 @@ def _headers(params: dict[str, Any]) -> dict[str, str]:
     }
 
 
-def _failure(code: str, message: str, *, retryable: bool = True) -> PluginError:
+def _failure(
+    code: str,
+    message: str,
+    *,
+    retryable: bool = True,
+    details: dict[str, Any] | None = None,
+) -> PluginError:
     return PluginError("TEMPORARY_UPSTREAM_FAILURE", message, retryable=retryable, category="provider",
-                       details={"provider_code": code})
+                       details={"provider_code": code, **(details or {})})
 
 
 def _records(response: Any) -> list[dict[str, Any]]:
@@ -99,30 +110,53 @@ def _records(response: Any) -> list[dict[str, Any]]:
 
 class Provider(RadioProvider):
     def _request(self, province: str, context: ResolveContext) -> list[dict[str, Any]]:
-        if province not in PROVINCES:
+        if province not in CATALOG_PROVINCES:
             raise InvalidResource("Unsupported Yunting province")
         params = {"categoryId": 0, "provinceCode": province}
         return _records(context.capabilities.managed_http(
-            API, query=params, headers=_headers(params), response_mode="json", timeout=15,
+            API, query=params, headers=_headers(params), response_mode="json",
+            timeout=YUNTING_REQUEST_TIMEOUT_SECONDS,
         ))
+
+    @staticmethod
+    def _logo_url(raw: dict[str, Any]) -> str:
+        value = raw.get("image")
+        if not isinstance(value, str):
+            return ""
+        value = value.strip()
+        parsed = urlparse(value)
+        if parsed.scheme.lower() != "https" or not parsed.netloc:
+            return ""
+        return value
 
     def catalog(self, payload: dict[str, Any], context: ResolveContext) -> dict[str, Any]:
         records_by_province: dict[str, list[dict[str, Any]]] = {}
-        # The Core capability gateway permits bounded concurrent requests. A
-        # fixed pool keeps the 31-province catalog from serially consuming the
-        # Plugin request deadline while avoiding an unbounded provider fanout.
-        with ThreadPoolExecutor(max_workers=4, thread_name_prefix="yunting-catalog") as pool:
-            futures = {pool.submit(self._request, province, context): province for province in PROVINCES}
+        failures: dict[str, str] = {}
+        with ThreadPoolExecutor(max_workers=YUNTING_MAX_CONCURRENCY, thread_name_prefix="yunting-catalog") as pool:
+            futures = {pool.submit(self._request, province, context): province for province in CATALOG_PROVINCES}
             for future in as_completed(futures):
                 context.raise_if_cancelled()
                 province = futures[future]
                 try:
                     records_by_province[province] = future.result()
-                except PluginError:
-                    continue
+                except PluginError as exc:
+                    failures[province] = str(getattr(exc, "code", "PROVIDER_ERROR"))
+                except Exception as exc:
+                    if hasattr(exc, "code") and hasattr(exc, "message"):
+                        raise
+                    failures[province] = "PROVIDER_ERROR"
+        if failures:
+            failed_regions = [province for province in CATALOG_PROVINCES if province in failures]
+            failed_errors = {province: failures[province] for province in failed_regions}
+            summary = ", ".join(f"{province}={failures[province]}" for province in failed_regions)
+            raise _failure(
+                "catalog_incomplete",
+                f"Yunting catalog incomplete: {summary}",
+                details={"failed_regions": failed_regions, "failed_errors": failed_errors},
+            )
         stations: list[dict[str, Any]] = []
         seen_content_ids: set[str] = set()
-        for province in PROVINCES:
+        for province in CATALOG_PROVINCES:
             context.raise_if_cancelled()
             for record in records_by_province.get(province, []):
                 if record["content_id"] in seen_content_ids:
@@ -131,7 +165,7 @@ class Provider(RadioProvider):
                 raw = record["raw"]
                 stations.append({
                     "station_ref": {"provider_key": "yunting", "provider_station_id": record["content_id"]},
-                    "name": record["title"], "logo_url": str(raw.get("picUrl") or raw.get("logo") or ""),
+                    "name": record["title"], "logo_url": self._logo_url(raw),
                     "group_name": PROVINCE_NAMES.get(province, province), "country": "CN", "language": "zh-CN",
                     "frequency": str(raw.get("frequency") or ""),
                     "metadata": {"province_code": province, "subtitle": str(raw.get("subtitle") or "")},

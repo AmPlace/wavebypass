@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import unittest
+import threading
+import time
 
 from plugin_runtime import PluginError
 from waveflow_plugin_sdk import ResolveContext
 
-from bundled_plugins.yunting.plugin import PROVINCES, Provider
+from bundled_plugins.yunting.plugin import CATALOG_PROVINCES, PROVINCES, YUNTING_MAX_CONCURRENCY, Provider
 
 
 class _Response:
@@ -16,17 +18,30 @@ class _Response:
 
 
 class _Capabilities:
-    def __init__(self, records_by_province, *, fail=False):
+    def __init__(self, records_by_province, *, fail=False, delay=0.0):
         self.records_by_province = records_by_province
         self.fail = fail
+        self.delay = delay
         self.calls = []
+        self.active_calls = 0
+        self.max_active_calls = 0
+        self.lock = threading.Lock()
 
     def managed_http(self, url, *, query, headers, response_mode, timeout):
-        self.calls.append((url, dict(query), dict(headers), response_mode, timeout))
-        if self.fail:
-            raise PluginError("TEMPORARY_UPSTREAM_FAILURE", "fixture upstream unavailable")
-        province = str(query["provinceCode"])
-        return _Response({"data": self.records_by_province.get(province, [])})
+        with self.lock:
+            self.calls.append((url, dict(query), dict(headers), response_mode, timeout))
+            self.active_calls += 1
+            self.max_active_calls = max(self.max_active_calls, self.active_calls)
+        try:
+            if self.delay:
+                time.sleep(self.delay)
+            if self.fail:
+                raise PluginError("TEMPORARY_UPSTREAM_FAILURE", "fixture upstream unavailable")
+            province = str(query["provinceCode"])
+            return _Response({"data": self.records_by_province.get(province, [])})
+        finally:
+            with self.lock:
+                self.active_calls -= 1
 
 
 def _context(capabilities):
@@ -53,11 +68,18 @@ class YuntingPluginTest(unittest.TestCase):
         self.assertEqual(len(catalog["stations"]), len(PROVINCES))
         self.assertEqual({item["station_ref"]["provider_station_id"] for item in catalog["stations"]},
                          {f"cid-{province}" for province in PROVINCES})
-        self.assertEqual(len(capabilities.calls), len(PROVINCES))
+        self.assertEqual(len(capabilities.calls), len(CATALOG_PROVINCES))
         first = catalog["stations"][0]
         self.assertEqual(first["playback_config"]["province_code"], first["metadata"]["province_code"])
         self.assertEqual(first["ttl_seconds"], 7200)
         self.assertTrue(all(call[2]["sign"] for call in capabilities.calls))
+
+    def test_catalog_fanout_matches_core_http_concurrency_boundary(self):
+        capabilities = _Capabilities(_records(), delay=0.01)
+        catalog = Provider().catalog({}, _context(capabilities))
+        self.assertEqual(len(catalog["stations"]), len(PROVINCES))
+        self.assertGreater(capabilities.max_active_calls, 1)
+        self.assertLessEqual(capabilities.max_active_calls, YUNTING_MAX_CONCURRENCY)
 
     def test_resolve_normalizes_legacy_url_and_keeps_direct_semantics(self):
         capabilities = _Capabilities(_records())
@@ -70,6 +92,7 @@ class YuntingPluginTest(unittest.TestCase):
         self.assertEqual(descriptor.ttl_seconds, 3600)
         self.assertTrue(descriptor.volatile_url)
         self.assertFalse(descriptor.requires_proxy)
+
     def test_resolve_keeps_audio_transport_for_non_hls_stream(self):
         records = _records()
         records["340000"][0]["playUrlLow"] = "http://audio.example/340000.mp3"

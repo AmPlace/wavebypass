@@ -53,6 +53,9 @@ OFFICIAL_PLUGIN_ROLLOUT_SETTING = "official_plugin_rollout_v1"
 PLUGIN_STORE_BINDING_SETTING = "plugin_store_binding_v1"
 PLUGIN_STORE_MARKER = ".waveflow-plugin-store.json"
 PLUGIN_DEVELOPER_MODE_SETTING = "plugin_developer_mode_v1"
+RADIO_CATALOG_REQUEST_TIMEOUT_SECONDS = 30.0
+RADIO_CATALOG_MAX_ATTEMPTS = 2
+RADIO_CATALOG_RETRY_DELAY_SECONDS = 0.25
 
 
 class ProductionTrustPolicy:
@@ -226,6 +229,46 @@ class ProductionPluginSubsystem:
             lock = asyncio.Lock()
             self._radio_catalog_locks[identity] = lock
         return lock
+
+    async def _wait_radio_catalog_retry(self) -> None:
+        if self._shutting_down:
+            raise asyncio.CancelledError
+        shutdown_event = getattr(self.service, "_shutdown_event", None)
+        if shutdown_event is not None and shutdown_event.is_set():
+            raise asyncio.CancelledError
+        if shutdown_event is None:
+            await asyncio.sleep(RADIO_CATALOG_RETRY_DELAY_SECONDS)
+            return
+        try:
+            await asyncio.wait_for(
+                shutdown_event.wait(), timeout=RADIO_CATALOG_RETRY_DELAY_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            return
+        raise asyncio.CancelledError
+
+    async def _request_radio_catalog_with_retry(self, instance, *, timeout: float) -> dict[str, Any]:
+        for attempt in range(RADIO_CATALOG_MAX_ATTEMPTS):
+            try:
+                return await self.service.runtime.request(
+                    instance, "radio.catalog", {}, timeout=timeout,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                retryable = bool(getattr(exc, "retryable", False)) or isinstance(exc, (TimeoutError, OSError))
+                if not retryable or attempt + 1 >= RADIO_CATALOG_MAX_ATTEMPTS:
+                    raise
+                await self._wait_radio_catalog_retry()
+        raise RuntimeError("Radio catalog retry loop did not return")
+
+    @staticmethod
+    def _radio_error_text(error: BaseException) -> str:
+        code = str(getattr(error, "code", "") or "").strip()
+        category = str(getattr(error, "category", "") or "").strip()
+        message = str(getattr(error, "message", "") or str(error)).replace("\r", " ").replace("\n", " ").strip()
+        prefix = ": ".join(value for value in (code, category) if value)
+        return (f"{prefix}: {message}" if prefix else message)[:2048]
 
     @asynccontextmanager
     async def _runtime_activation_context(self, operation: str, instance):
@@ -964,7 +1007,8 @@ class ProductionPluginSubsystem:
         )
 
     async def refresh_radio_catalog(
-        self, identity: str, *, timeout: float = 15.0, now: float | None = None,
+        self, identity: str, *, timeout: float = RADIO_CATALOG_REQUEST_TIMEOUT_SECONDS,
+        now: float | None = None,
     ) -> dict[str, Any]:
         """Refresh the optional Radio catalog into durable Radio tables.
 
@@ -990,9 +1034,7 @@ class ProductionPluginSubsystem:
                 await self.radio_catalog.record_failure(identity, error, generation=generation)
                 return {"status": "failed", "error": error.as_contract()}
             try:
-                catalog = await self.service.runtime.request(
-                    instance, "radio.catalog", {}, timeout=timeout,
-                )
+                catalog = await self._request_radio_catalog_with_retry(instance, timeout=timeout)
                 result = await self.radio_catalog.refresh(
                     identity, catalog, owned_schemes=owned_schemes, now=now,
                     generation=generation,
@@ -1000,7 +1042,7 @@ class ProductionPluginSubsystem:
                 return {"status": result.get("status", "success"), **result}
             except Exception as exc:
                 await self.radio_catalog.record_failure(identity, exc, generation=generation)
-                return {"status": "failed", "error": str(exc)[:2048]}
+                return {"status": "failed", "error": self._radio_error_text(exc)}
 
     async def refresh_radio_programmes(
         self, identity: str, *, timeout: float = 15.0, now: float | None = None,

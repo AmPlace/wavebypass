@@ -35,6 +35,20 @@ def _identity_from_task_id(task_id: str) -> str | None:
     return identity or None
 
 
+def _result_error(result: dict) -> tuple[str, tuple[str, ...]]:
+    raw_error = result.get("error")
+    if isinstance(raw_error, dict):
+        code = str(raw_error.get("code") or "").strip()
+        category = str(raw_error.get("category") or "").strip()
+        message = str(raw_error.get("message") or "").strip()
+        error = ": ".join(value for value in (code, category, message) if value)
+    else:
+        error = str(raw_error or "").strip()
+    raw_errors = result.get("errors") or ()
+    errors = tuple(str(item).strip() for item in raw_errors if str(item).strip())
+    return error, errors
+
+
 def create_radio_task_definition(identity: str, kind: str, subsystem) -> AutomationTaskDefinition:
     if kind not in {RADIO_CATALOG_TASK_TYPE, RADIO_PROGRAMME_TASK_TYPE}:
         raise ValueError("unsupported Radio task kind")
@@ -53,12 +67,17 @@ def create_radio_task_definition(identity: str, kind: str, subsystem) -> Automat
         else:
             result = await subsystem.refresh_radio_programmes(identity)
         status = str(result.get("status") or "failed")
+        error, errors = _result_error(result)
+        failed_count = int(result.get("failed") or 0)
+        if status == "failed" and failed_count == 0:
+            failed_count = 1
         return AutomationHandlerResult(
             status=status if status in {"success", "partial", "failed", "cancelled"} else "failed",
             checked_count=int(result.get("checked") or result.get("published") or 0),
             updated_count=int(result.get("updated") or result.get("published") or 0),
-            failed_count=int(result.get("failed") or 0),
-            error="; ".join(str(item) for item in (result.get("errors") or [])[:8]),
+            failed_count=failed_count,
+            error=error,
+            errors=errors[:8],
         )
 
     return AutomationTaskDefinition(
