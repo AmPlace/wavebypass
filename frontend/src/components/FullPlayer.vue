@@ -2511,6 +2511,14 @@ function sourceTypeFromProxyRedirect(url) {
   return ''
 }
 
+function isKnownRtspProxyPlaylist(url, usingProxy, sourceType) {
+  return Boolean(
+    usingProxy
+    && isChannelProxyPlaylistUrl(url)
+    && String(sourceType || '').trim().toLowerCase() === 'rtsp',
+  )
+}
+
 async function preflightProxyPlaylistTransport(url, usingProxy, signal = null) {
   if (!usingProxy || !isChannelProxyPlaylistUrl(url)) return null
   return await new Promise((resolve) => {
@@ -3345,7 +3353,8 @@ async function tryPlayIptv(url, usingProxy = false, customUa = '', attemptId = 0
     effectiveUrl,
   )
   let proxyTransport = suppliedTransport
-  if (!suppliedTransport) {
+  const knownRtspProxy = isKnownRtspProxyPlaylist(url, usingProxy, playbackSourceType)
+  if (!suppliedTransport && !knownRtspProxy) {
     try {
       proxyTransport = await preflightProxyPlaylistTransport(url, usingProxy, preflightController.signal)
     } finally {
@@ -3573,9 +3582,13 @@ async function tryPlayIptv(url, usingProxy = false, customUa = '', attemptId = 0
       let fragFail = 0
       const threshold = usingProxy ? 2 : 3
 
-      const onFragLoaded = () => { fragFail = 0; safeResolve() }
-      hls.on(Hls.Events.FRAG_LOADED, onFragLoaded)
-      hlsEventFns.push([Hls.Events.FRAG_LOADED, onFragLoaded])
+      // Network completion is not playback readiness: wait until hls.js has
+      // appended the first fragment before calling video.play(). Calling it
+      // from FRAG_LOADED can start with an empty SourceBuffer and immediately
+      // enter a waiting/rebuffer cycle on live RTSP-backed HLS.
+      const onFragBuffered = () => { fragFail = 0; safeResolve() }
+      hls.on(Hls.Events.FRAG_BUFFERED, onFragBuffered)
+      hlsEventFns.push([Hls.Events.FRAG_BUFFERED, onFragBuffered])
 
       const onError = (_, d) => {
         console.log(`[ERR] ${d.details} fatal:${d.fatal}`)

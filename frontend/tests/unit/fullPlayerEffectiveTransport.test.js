@@ -45,6 +45,10 @@ class FakeHls {
     this.handlers.set(event, handler)
   }
 
+  emit(event, ...args) {
+    this.handlers.get(event)?.(...args)
+  }
+
   off(event, handler) {
     if (this.handlers.get(event) === handler) this.handlers.delete(event)
   }
@@ -162,14 +166,16 @@ function createRaceHarness() {
   return { calls, first, harness }
 }
 
-function createFormalPlaybackHarness() {
+function createFormalPlaybackHarness({ manualEvents = false } = {}) {
   const source = fs.readFileSync(fullPlayerPath, 'utf8')
   const helpers = [
     'function isHlsUrl(',
     'function isMpegTsUrl(',
     'function isHttpFlvUrl(',
     'function isMpegTsEngineType(',
+    'function isChannelProxyPlaylistUrl(',
     'function sourceTypeFromProxyRedirect(',
+    'function isKnownRtspProxyPlaylist(',
     'function mpegtsPlayerType(',
     'function playbackEngineType(',
   ].map((signature) => extractFunction(source, signature)).join('\n')
@@ -181,9 +187,11 @@ function createFormalPlaybackHarness() {
     let _softPauseReleased = false
     let _cancelCurrentStartup = null
     const { Hls, loadedUrls, playerStore, preflightProxyPlaylistTransport } = deps
+    let playCalls = 0
     const iptvVideoRef = { value: {
       currentTime: 0, volume: 1, canPlayType: () => '',
-      play: async () => {}, addEventListener() {}, removeEventListener() {},
+      play: async () => { playCalls += 1 },
+      addEventListener() {}, removeEventListener() {},
     } }
     const iptvHlsRef = { value: null }
     const iptvMpegtsRef = { value: null }
@@ -220,26 +228,44 @@ function createFormalPlaybackHarness() {
     const trackHlsSource = () => {}
     ${helpers}
     ${tryPlaySource}
-    return { tryPlayIptv }
+    return { tryPlayIptv, getPlayCalls: () => playCalls }
   `)
 
   const loadedUrls = []
   class FormalHls extends FakeHls {
+    constructor(...args) {
+      super(...args)
+      this.autoAttachEvents = !manualEvents
+      FormalHls.lastInstance = this
+    }
+
     loadSource(url) {
       loadedUrls.push(url)
     }
+
+    attachMedia() {
+      if (this.autoAttachEvents) super.attachMedia()
+    }
   }
-  return {
-    harness: factory({
-      Hls: FormalHls,
-      loadedUrls,
-      playerStore: { setLoading() {}, togglePlay() {} },
-      preflightProxyPlaylistTransport: async () => ({
+  const preflightCalls = []
+  const harness = factory({
+    Hls: FormalHls,
+    loadedUrls,
+    playerStore: { setLoading() {}, togglePlay() {} },
+    preflightProxyPlaylistTransport: async (...args) => {
+      preflightCalls.push(args)
+      return {
         url: '/api/media/proxy/rtsp/signed-handle',
         sourceType: 'rtsp',
-      }),
-    }),
+      }
+    },
+  })
+  return {
+    harness,
     loadedUrls,
+    preflightCalls,
+    getHls: () => FormalHls.lastInstance,
+    playCalls: () => harness.getPlayCalls(),
   }
 }
 
@@ -264,7 +290,7 @@ test('adapter proxy Race 以 HLS 胜出后正式起播继续使用同一 effecti
   assert.equal(h.calls[0][5], 'hls')
 })
 
-test('RTSP channel proxy 跳转到无 m3u8 后缀的 HLS endpoint 时使用 HLS 引擎', async () => {
+test('已知 RTSP channel proxy 跳过重复 preflight，并直接由 HLS 加载稳定入口', async () => {
   const h = createFormalPlaybackHarness()
   await h.harness.tryPlayIptv(
     '/api/media/channel/camera/playlist.m3u8?source_id=src_rtsp',
@@ -274,5 +300,68 @@ test('RTSP channel proxy 跳转到无 m3u8 后缀的 HLS endpoint 时使用 HLS 
     0,
     'rtsp',
   )
+  assert.deepEqual(h.loadedUrls, ['/api/media/channel/camera/playlist.m3u8?source_id=src_rtsp'])
+  assert.equal(h.preflightCalls.length, 0)
+})
+
+test('未知 proxy transport 仍保留 preflight，以便识别 HLS/MPEG-TS 并维持 fallback', async () => {
+  const h = createFormalPlaybackHarness()
+  await h.harness.tryPlayIptv(
+    '/api/media/channel/adapter/playlist.m3u8?source_id=src_adapter',
+    true,
+    '',
+    1,
+    0,
+    'adapter',
+  )
+  assert.equal(h.preflightCalls.length, 1)
   assert.deepEqual(h.loadedUrls, ['/api/media/proxy/rtsp/signed-handle'])
+})
+
+test('已知 RTSP 直接加载失败仍通过正式 HLS 错误路径 reject，交由上层 fallback', async () => {
+  const h = createFormalPlaybackHarness({ manualEvents: true })
+  const pending = h.harness.tryPlayIptv(
+    '/api/media/channel/camera/playlist.m3u8?source_id=src_rtsp',
+    true,
+    '',
+    1,
+    0,
+    'rtsp',
+  )
+
+  for (let index = 0; index < 5 && !h.getHls(); index += 1) await Promise.resolve()
+  assert.ok(h.getHls())
+  h.getHls().emit(FakeHls.Events.ERROR, null, {
+    fatal: true,
+    type: FakeHls.ErrorTypes.NETWORK_ERROR,
+    details: 'manifest-load-error',
+  })
+  await assert.rejects(pending, /manifest-load-error/)
+  assert.equal(h.preflightCalls.length, 0)
+})
+
+test('正式 HLS 起播必须等 FRAG_BUFFERED，不能在 FRAG_LOADED 时提前 play', async () => {
+  const h = createFormalPlaybackHarness({ manualEvents: true })
+  let settled = false
+  const pending = h.harness.tryPlayIptv(
+    '/api/media/channel/camera/playlist.m3u8?source_id=src_rtsp',
+    true,
+    '',
+    1,
+    0,
+    'rtsp',
+  ).then(() => { settled = true })
+
+  for (let index = 0; index < 5 && !h.getHls(); index += 1) await Promise.resolve()
+  assert.ok(h.getHls())
+
+  h.getHls().emit(FakeHls.Events.FRAG_LOADED)
+  await Promise.resolve()
+  assert.equal(h.playCalls(), 0)
+  assert.equal(settled, false)
+
+  h.getHls().emit(FakeHls.Events.FRAG_BUFFERED)
+  await pending
+  assert.equal(h.playCalls(), 1)
+  assert.equal(settled, true)
 })

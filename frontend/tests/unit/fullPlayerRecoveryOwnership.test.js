@@ -37,6 +37,10 @@ function extractBetween(source, startSignature, endSignature) {
 
 function createTryPlayPreflightHarness() {
   const source = fs.readFileSync(fullPlayerPath, 'utf8')
+  const helperSource = [
+    'function isChannelProxyPlaylistUrl(',
+    'function isKnownRtspProxyPlaylist(',
+  ].map((signature) => extractFunction(source, signature)).join('\n')
   const tryPlaySource = extractBetween(
     source,
     'async function tryPlayIptv(',
@@ -71,6 +75,7 @@ function createTryPlayPreflightHarness() {
     const isHlsUrl = () => true
     const isMpegTsEngineType = () => false
     const isMpegTsUrl = () => false
+    const window = { location: { origin: 'http://localhost' } }
     const canUseMpegTs = () => false
     const updateMediaAspectFromVideo = () => {}
     const attachRuntimeHlsErrorHandlers = () => {}
@@ -81,6 +86,7 @@ function createTryPlayPreflightHarness() {
     const trackHlsSource = () => {}
     const isIOS = false
     const volume = { value: 1 }
+    ${helperSource}
     ${tryPlaySource}
     return {
       cancelStartup: cancelCurrentStartup,
