@@ -4,6 +4,7 @@ import json
 import unittest
 
 from plugin_runtime import validate_manifest
+from plugin_runtime.validation import validate_radio_catalog
 from waveflow_plugin_sdk import PluginError, RadioReference, ResolveContext
 
 from bundled_plugins.hitfm.plugin import REFRESH_TTL_SECONDS, Provider
@@ -40,8 +41,13 @@ class HitFmPluginTest(unittest.TestCase):
         ids = [item["station_ref"]["provider_station_id"] for item in catalog["stations"]]
         self.assertEqual(ids, ["hitfm", "hitfm_taichung", "hitfm_tainan", "hitfm_yilan", "hitfm_huadong", "pop917"])
         self.assertTrue(all(item["station_ref"]["provider_key"] == "hitfm" for item in catalog["stations"]))
-        self.assertEqual(validate_manifest(json.load(open("backend/bundled_plugins/hitfm/manifest.json"))).identity,
-                         "org.waveflow/hitfm")
+        self.assertTrue(all(not item["logo_url"] or item["logo_url"].startswith("https://")
+                            for item in catalog["stations"]))
+        self.assertEqual(len(validate_radio_catalog(catalog, owned_schemes={"hitfm"})["stations"]), 6)
+        with open("backend/bundled_plugins/hitfm/manifest.json", encoding="utf-8") as manifest_file:
+            manifest = validate_manifest(json.load(manifest_file))
+        self.assertEqual(manifest.identity, "org.waveflow/hitfm")
+        self.assertEqual(manifest.version, "1.0.1")
 
     def test_dynamic_url_and_ttl_descriptor(self):
         capabilities = _Capabilities()

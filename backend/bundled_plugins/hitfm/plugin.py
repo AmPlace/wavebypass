@@ -11,12 +11,12 @@ UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like 
 REFRESH_TTL_SECONDS = 5 * 60 * 60
 
 STATIONS = {
-    "hitfm": {"name": "Hit FM 台北", "channel_id": "1", "logo": "/logos/hitfm.png", "frequency": "FM 107.7", "api": "https://www.hitoradio.com/newweb/hichannel.php", "referer": "https://www.hitoradio.com/newweb/onair_n_ajax.php", "origin": "https://www.hitoradio.com"},
-    "hitfm_taichung": {"name": "Hit FM 台中", "channel_id": "2", "logo": "/logos/hitfm.png", "frequency": "FM 91.5", "api": "https://www.hitoradio.com/newweb/hichannel.php", "referer": "https://www.hitoradio.com/newweb/onair_n_ajax.php", "origin": "https://www.hitoradio.com"},
-    "hitfm_tainan": {"name": "Hit FM 台南", "channel_id": "3", "logo": "/logos/hitfm.png", "frequency": "FM 90.1", "api": "https://www.hitoradio.com/newweb/hichannel.php", "referer": "https://www.hitoradio.com/newweb/onair_n_ajax.php", "origin": "https://www.hitoradio.com"},
-    "hitfm_yilan": {"name": "Hit FM 宜兰", "channel_id": "4", "logo": "/logos/hitfm.png", "frequency": "FM 97.1", "api": "https://www.hitoradio.com/newweb/hichannel.php", "referer": "https://www.hitoradio.com/newweb/onair_n_ajax.php", "origin": "https://www.hitoradio.com"},
-    "hitfm_huadong": {"name": "Hit FM 花东", "channel_id": "5", "logo": "/logos/hitfm.png", "frequency": "FM 107.7", "api": "https://www.hitoradio.com/newweb/hichannel.php", "referer": "https://www.hitoradio.com/newweb/onair_n_ajax.php", "origin": "https://www.hitoradio.com"},
-    "pop917": {"name": "POP Radio", "channel_id": "1", "logo": "/logos/pop917.jpg", "frequency": "FM 91.7", "api": "https://www.pop917.com/ajax.aspx", "referer": "https://www.pop917.com/liveStream.aspx?id=1", "origin": "https://www.pop917.com"},
+    "hitfm": {"name": "Hit FM 台北", "channel_id": "1", "logo": "", "frequency": "FM 107.7", "api": "https://www.hitoradio.com/newweb/hichannel.php", "referer": "https://www.hitoradio.com/newweb/onair_n_ajax.php", "origin": "https://www.hitoradio.com"},
+    "hitfm_taichung": {"name": "Hit FM 台中", "channel_id": "2", "logo": "", "frequency": "FM 91.5", "api": "https://www.hitoradio.com/newweb/hichannel.php", "referer": "https://www.hitoradio.com/newweb/onair_n_ajax.php", "origin": "https://www.hitoradio.com"},
+    "hitfm_tainan": {"name": "Hit FM 台南", "channel_id": "3", "logo": "", "frequency": "FM 90.1", "api": "https://www.hitoradio.com/newweb/hichannel.php", "referer": "https://www.hitoradio.com/newweb/onair_n_ajax.php", "origin": "https://www.hitoradio.com"},
+    "hitfm_yilan": {"name": "Hit FM 宜兰", "channel_id": "4", "logo": "", "frequency": "FM 97.1", "api": "https://www.hitoradio.com/newweb/hichannel.php", "referer": "https://www.hitoradio.com/newweb/onair_n_ajax.php", "origin": "https://www.hitoradio.com"},
+    "hitfm_huadong": {"name": "Hit FM 花东", "channel_id": "5", "logo": "", "frequency": "FM 107.7", "api": "https://www.hitoradio.com/newweb/hichannel.php", "referer": "https://www.hitoradio.com/newweb/onair_n_ajax.php", "origin": "https://www.hitoradio.com"},
+    "pop917": {"name": "POP Radio", "channel_id": "1", "logo": "", "frequency": "FM 91.7", "api": "https://www.pop917.com/ajax.aspx", "referer": "https://www.pop917.com/liveStream.aspx?id=1", "origin": "https://www.pop917.com"},
 }
 
 

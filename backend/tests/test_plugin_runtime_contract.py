@@ -9,6 +9,11 @@ from plugin_runtime import (
     PluginInstance, PluginRegistry, encode_frame, read_frame, validate_manifest,
     validate_descriptor_metadata, validate_stream_descriptor,
 )
+from plugin_runtime.validation import (
+    RADIO_CATALOG_MAX_BYTES,
+    RADIO_CATALOG_MAX_ITEMS,
+    validate_radio_catalog,
+)
 
 
 def manifest_data(*, scheme="synthetic", version="1.0.0", permissions=None, core_range=">=0.1.0 <1.0.0"):
@@ -97,6 +102,61 @@ class ProtocolCodecTest(unittest.IsolatedAsyncioTestCase):
 
 
 class ValidationPermissionRegistryTest(unittest.TestCase):
+    @staticmethod
+    def _radio_station(index: int, *, metadata_padding: int = 0):
+        return {
+            "station_ref": {"provider_key": "synthetic", "provider_station_id": f"station-{index}"},
+            "name": f"Synthetic Station {index}",
+            "logo_url": f"https://images.example.invalid/radio/{index}.png",
+            "group_name": "Synthetic Region",
+            "country": "CN",
+            "language": "zh-CN",
+            "frequency": "FM 100.0",
+            "metadata": {"region": "synthetic", "padding": "x" * metadata_padding},
+            "playback_config": {"region": "synthetic"},
+            "ttl_seconds": 7200,
+        }
+
+    def test_radio_catalog_accepts_realistic_catalog_larger_than_legacy_limits(self):
+        catalog = {"stations": [self._radio_station(index) for index in range(924)]}
+        serialized = json.dumps(catalog, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        self.assertGreater(len(serialized), 256 * 1024)
+
+        normalized = validate_radio_catalog(catalog, owned_schemes={"synthetic"})
+
+        self.assertEqual(len(normalized["stations"]), 924)
+        self.assertEqual(RADIO_CATALOG_MAX_ITEMS, 2048)
+        self.assertEqual(RADIO_CATALOG_MAX_BYTES, 512 * 1024)
+
+    def test_radio_catalog_rejects_item_and_serialized_size_overflow(self):
+        too_many = {"stations": [
+            {"station_ref": {"provider_key": "synthetic", "provider_station_id": str(index)}}
+            for index in range(RADIO_CATALOG_MAX_ITEMS + 1)
+        ]}
+        with self.assertRaises(PluginError) as item_error:
+            validate_radio_catalog(too_many, owned_schemes={"synthetic"})
+        self.assertIn("too many stations", str(item_error.exception))
+
+        too_large = {"stations": [self._radio_station(index, metadata_padding=256) for index in range(1500)]}
+        with self.assertRaises(PluginError) as size_error:
+            validate_radio_catalog(too_large, owned_schemes={"synthetic"})
+        self.assertIn("size limit", str(size_error.exception))
+
+    def test_radio_catalog_keeps_field_source_and_logo_boundaries(self):
+        oversized_name = self._radio_station(1)
+        oversized_name["name"] = "x" * 2049
+        duplicate = self._radio_station(2)
+        relative_logo = self._radio_station(3)
+        relative_logo["logo_url"] = "/logos/radio.png"
+        for catalog in (
+            {"stations": [oversized_name]},
+            {"stations": [duplicate, dict(duplicate)]},
+            {"stations": [relative_logo]},
+        ):
+            with self.subTest(catalog=catalog):
+                with self.assertRaises(PluginError):
+                    validate_radio_catalog(catalog, owned_schemes={"synthetic"})
+
     def test_all_stream_transports_and_secret_header_rejection(self):
         for transport in ("hls", "dash", "http_flv", "mpegts", "audio_http", "probe_only"):
             self.assertEqual(validate_stream_descriptor(descriptor(transport))["transport"], transport)
