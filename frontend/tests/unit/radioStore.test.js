@@ -39,3 +39,20 @@ test('successful empty Radio catalog removes old dynamic rows but keeps static r
   assert.equal(store.stationMap.radio_a, undefined)
   assert.deepEqual(store.stationList.map((item) => item.id), ['tf_909'])
 })
+
+test('Radio selection and explicit Play keep distinct playback intents', () => {
+  setActivePinia(createPinia())
+  const store = usePlayerStore()
+  store.addRadioStations([radio('radio_a', '电台', 'source_a')])
+
+  store.switchStation('radio_a')
+  assert.equal(store.consumeRadioPlaybackIntent(), 'station_click')
+  assert.equal(store.consumeRadioPlaybackIntent(), 'passive')
+
+  store.togglePlay(false)
+  store.togglePlay(true)
+  assert.equal(store.consumeRadioPlaybackIntent(), 'play_button')
+
+  store.selectRadioSource('radio_a', 'source_a')
+  assert.equal(store.consumeRadioPlaybackIntent(), 'source_switch')
+})

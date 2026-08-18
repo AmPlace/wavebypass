@@ -31,6 +31,7 @@ class FakeAudio {
     this.pauseCalls = 0
     this.loadCalls = 0
     this.nextPlay = null
+    this.error = null
   }
 
   set src(value) {
@@ -527,6 +528,7 @@ test('原生 audio error：当前 attempt 触发 fallback，旧 attempt 的 erro
   h.audio.emit('error')
   await flush()
   assert.match(h.audio.currentSrc, /\/api\/media\/channel\/B\/stream$/)
+  assert.equal(h.audio.playCalls.length, 2, 'fallback source must issue a fresh play request')
 
   // 现在切到 C，旧 B 的 audio error handler 应已失效
   h.state.currentStation.value = 'C'
@@ -611,6 +613,128 @@ test('persisted Radio source resolves by source_id and bypasses legacy URL racin
   assert.equal(h.audio.src, '/api/media/radio/radio_a/stream?source_id=source_a')
   assert.deepEqual(h.audio.playCalls, ['/api/media/radio/radio_a/stream?source_id=source_a'])
   assert.equal(h.probeAudios.length, 0)
+})
+
+test('persisted Radio resolve continues the same attempt and performs one play request', async () => {
+  const calls = []
+  const h = createHarness({
+    fetchImpl: async (url) => {
+      calls.push(String(url))
+      if (String(url).includes('/api/radio/stations/radio_a/resolve')) {
+        return responseJson({ source_type: 'audio_http' })
+      }
+      throw new Error(`unexpected Radio request ${url}`)
+    },
+  })
+  h.store.stationMap.RADIO = {
+    id: 'RADIO', name: 'Persisted Radio', radioStationId: 'radio_a', radioSourceId: 'source_a',
+  }
+  h.state.currentStation.value = 'RADIO'
+  const attempt = h.engine.loadStation('RADIO', { intent: 'station_click' })
+  await flush()
+
+  assert.deepEqual(calls, ['/api/radio/stations/radio_a/resolve?source_id=source_a'])
+  assert.equal(h.engine.activeAttemptInfo().id, attempt.id)
+  assert.equal(h.engine.activeAttemptInfo().intent, 'station_click')
+  assert.deepEqual(h.audio.playCalls, ['/api/media/radio/radio_a/stream?source_id=source_a'])
+})
+
+test('failed Radio resolve releases the attempt so a later Play can retry', async () => {
+  let resolveCalls = 0
+  const h = createHarness({
+    fetchImpl: async () => {
+      resolveCalls += 1
+      return { ok: false, json: async () => ({}) }
+    },
+  })
+  h.store.stationMap.RADIO = {
+    id: 'RADIO', name: 'Persisted Radio', radioStationId: 'radio_a', radioSourceId: 'source_a',
+  }
+  h.state.currentStation.value = 'RADIO'
+  h.engine.loadStation('RADIO', { intent: 'station_click' })
+  await flush()
+
+  assert.equal(resolveCalls, 1)
+  assert.equal(h.engine.activeAttemptInfo(), null)
+  assert.equal(h.store.playbackError, '电台播放源解析失败，请稍后重试。')
+
+  h.store.playbackError = ''
+  h.store.isPlaying = true
+  h.engine.loadStation('RADIO', { intent: 'play_button' })
+  await flush()
+  assert.equal(resolveCalls, 2)
+})
+
+test('play rejection classification only uses autoplay text for NotAllowedError', async (t) => {
+  const cases = [
+    ['NotAllowedError', '浏览器阻止自动播放，请手动点击播放。'],
+    ['NotSupportedError', '当前浏览器不支持此音频格式，请尝试其他源。'],
+    ['NetworkError', '音频网络连接失败，请稍后重试。'],
+    ['OperationError', '音频播放失败，请稍后重试。'],
+  ]
+
+  for (const [name, expected] of cases) {
+    await t.test(name, async () => {
+      const h = createHarness({ fetchImpl: async () => { throw new Error('no fetch') } })
+      h.state.currentStation.value = 'B'
+      h.audio.nextPlay = { promise: Promise.reject({ name }) }
+      h.engine.loadStation('B', { intent: 'play_button' })
+      await flush()
+      assert.equal(h.store.playbackError, expected)
+      assert.equal(h.store.isPlaying, false)
+    })
+  }
+})
+
+test('AbortError is silent and a paused pending play cannot resurrect Radio playback', async () => {
+  const h = createHarness({ fetchImpl: async () => { throw new Error('no fetch') } })
+  h.state.currentStation.value = 'B'
+  h.audio.nextPlay = { promise: Promise.reject({ name: 'AbortError' }) }
+  h.engine.loadStation('B', { intent: 'station_click' })
+  await flush()
+  assert.equal(h.store.playbackError, '')
+  assert.equal(h.store.isPlaying, false)
+
+  const pending = deferred()
+  h.audio.nextPlay = pending
+  h.store.playbackError = ''
+  h.engine.loadStation('B', { intent: 'station_click' })
+  await flush()
+  h.engine.pauseCurrentAudio()
+  pending.resolve()
+  await flush()
+  assert.equal(h.store.playbackError, '')
+  assert.equal(h.store.isPlaying, false)
+})
+
+test('explicit Play can retry a source after an autoplay rejection', async () => {
+  const h = createHarness({ fetchImpl: async () => { throw new Error('no fetch') } })
+  h.state.currentStation.value = 'B'
+  h.audio.nextPlay = { promise: Promise.reject({ name: 'NotAllowedError' }) }
+  h.engine.loadStation('B', { intent: 'station_click' })
+  await flush()
+  assert.equal(h.store.playbackError, '浏览器阻止自动播放，请手动点击播放。')
+
+  h.audio.nextPlay = null
+  h.store.playbackError = ''
+  h.store.isPlaying = true
+  const played = await h.engine.playAudioSafely(undefined, { intent: 'play_button', request: true })
+  assert.equal(played, true)
+  assert.equal(h.store.playbackError, '')
+  assert.equal(h.store.isPlaying, true)
+})
+
+test('playUrl uses the same non-autoplay error classification', async () => {
+  const h = createHarness({ fetchImpl: async () => { throw new Error('no fetch') } })
+  h.state.currentStation.value = 'B'
+  h.engine.loadStation('B')
+  await flush()
+
+  h.audio.nextPlay = { promise: Promise.reject({ name: 'NotSupportedError' }) }
+  const played = await h.engine.playUrl('https://b.example/recovery.mp3', 'B', 'direct')
+
+  assert.equal(played, false)
+  assert.equal(h.store.playbackError, '当前浏览器不支持此音频格式，请尝试其他源。')
 })
 
 test('进入 auth 时 Radio 停止 HLS/audio/probe 并清理 MediaSession，旧回调不能复活', async () => {

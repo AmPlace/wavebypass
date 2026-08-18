@@ -30,6 +30,17 @@ const radioEngine = createRadioAudioEngine({
   publicAsset,
 })
 
+function consumeRadioPlaybackIntent(fallback = 'passive') {
+  return typeof playerStore.consumeRadioPlaybackIntent === 'function'
+    ? playerStore.consumeRadioPlaybackIntent(fallback)
+    : fallback
+}
+
+function hasActiveRadioAttempt(stationId) {
+  const attempt = radioEngine.activeAttemptInfo()
+  return Boolean(attempt?.active && attempt.stationId === stationId)
+}
+
 // 电台 EPG 更新时自动刷新 MediaSession 显示
 watch(
   () => {
@@ -47,7 +58,9 @@ onMounted(() => {
     audioRef.value.muted = isMuted.value
   }
   if (playerStore.isPlaying) {
-    radioEngine.loadStation(currentStation.value)
+    radioEngine.loadStation(currentStation.value, {
+      intent: consumeRadioPlaybackIntent('passive'),
+    })
   }
 })
 
@@ -56,19 +69,29 @@ watch(currentStation, (stationId) => {
     radioEngine.stopRadioAttempt()
     return
   }
-  if (playerStore.isPlaying) {
-    radioEngine.loadStation(stationId)
+  if (playerStore.isPlaying && !hasActiveRadioAttempt(stationId)) {
+    radioEngine.loadStation(stationId, {
+      intent: consumeRadioPlaybackIntent('passive'),
+    })
   }
 })
 
 watch(
   () => {
+    const stationId = currentStation.value || ''
     const station = currentStation.value ? playerStore.stationMap[currentStation.value] : null
-    return station?.radioSourceId || ''
+    return `${stationId}\u0000${station?.radioSourceId || ''}`
   },
-  (sourceId, previousSourceId) => {
+  (sourceKey, previousSourceKey) => {
+    const [stationId, sourceId] = String(sourceKey || '').split('\u0000')
+    const [previousStationId, previousSourceId] = String(previousSourceKey || '').split('\u0000')
+    // A new station changes both pieces of the key.  Its station watcher owns
+    // that load; this watcher is only for an in-place source selection.
+    if (!stationId || stationId !== previousStationId) return
     if (!sourceId || sourceId === previousSourceId || !playerStore.isPlaying) return
-    radioEngine.loadStation(currentStation.value)
+    radioEngine.loadStation(currentStation.value, {
+      intent: consumeRadioPlaybackIntent('source_switch'),
+    })
   },
 )
 
@@ -80,12 +103,23 @@ watch(isPlaying, (nextIsPlaying) => {
   if (!audioRef.value) return
   if (nextIsPlaying) {
     if (playerStore.currentIptvChannel) return // IPTV 模式下 AudioEngine 不播
-    // 首次播放时音源尚未加载，通过 loadStation 加载并播放
-    if (!audioRef.value.src && !hlsRef.value && !directStreamMode.value) {
-      radioEngine.loadStation(currentStation.value)
+    const stationId = currentStation.value
+    if (!stationId) return
+
+    const intent = consumeRadioPlaybackIntent('passive')
+    const hasActiveAttemptForStation = hasActiveRadioAttempt(stationId)
+    const hasLoadedSource = Boolean(audioRef.value.src || hlsRef.value || directStreamMode.value)
+
+    // The station watcher owns a selection-triggered load.  During a dynamic
+    // Radio resolve it is normal for no media source to exist yet; an active
+    // attempt is enough to prove that this watcher must not start another one
+    // or call play() against an empty audio element.
+    if (!hasLoadedSource) {
+      if (!hasActiveAttemptForStation) radioEngine.loadStation(stationId, { intent })
       return
     }
-    radioEngine.playAudioSafely()
+
+    radioEngine.playAudioSafely(undefined, { intent, request: true })
     return
   }
   radioEngine.pauseCurrentAudio()

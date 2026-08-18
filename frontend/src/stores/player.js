@@ -22,6 +22,19 @@ function normalizeChannelContextChannels(channels) {
 // the user has already moved to another channel.
 const activeIptvResolveControllers = new Set()
 
+const RADIO_PLAYBACK_INTENTS = new Set([
+  'station_click',
+  'play_button',
+  'source_switch',
+  'passive',
+  'recovery',
+])
+
+function normalizeRadioPlaybackIntent(intent, fallback = 'passive') {
+  const value = String(intent || '').trim()
+  return RADIO_PLAYBACK_INTENTS.has(value) ? value : fallback
+}
+
 function abortActiveIptvResolves() {
   for (const controller of activeIptvResolveControllers) {
     try { controller.abort() } catch {}
@@ -36,6 +49,7 @@ export const usePlayerStore = defineStore('player', {
     isMuted: false,
     isMutedInitialized: false,
     currentStation: '',
+    radioPlaybackIntent: 'passive',
     volume: 1,
     playbackError: '',
     stationList: [],
@@ -60,6 +74,7 @@ export const usePlayerStore = defineStore('player', {
       abortActiveIptvResolves()
       ++this.iptvSelectionToken
       this.currentStation = ''
+      this.radioPlaybackIntent = 'passive'
       this.currentIptvChannel = null
       this.pendingIptvChannel = null
       this.iptvUrls = []
@@ -90,6 +105,7 @@ export const usePlayerStore = defineStore('player', {
       this.iptvUrls = []
       this.iptvUrlIndex = 0
       this.currentStation = stationId
+      this.radioPlaybackIntent = 'station_click'
 
       this.playbackError = ''
 
@@ -99,10 +115,23 @@ export const usePlayerStore = defineStore('player', {
     },
 
 
-    togglePlay(forcePlaying) {
+    togglePlay(forcePlaying, options = {}) {
       const hasForcedValue = typeof forcePlaying === 'boolean'
+      const nextPlaying = hasForcedValue ? forcePlaying : !this.isPlaying
 
-      this.isPlaying = hasForcedValue ? forcePlaying : !this.isPlaying
+      if (nextPlaying && this.currentStation && !this.currentIptvChannel) {
+        this.radioPlaybackIntent = normalizeRadioPlaybackIntent(options?.intent, 'play_button')
+      } else if (options?.intent) {
+        this.radioPlaybackIntent = normalizeRadioPlaybackIntent(options.intent)
+      }
+
+      this.isPlaying = nextPlaying
+    },
+
+    consumeRadioPlaybackIntent(fallback = 'passive') {
+      const intent = normalizeRadioPlaybackIntent(this.radioPlaybackIntent, fallback)
+      this.radioPlaybackIntent = normalizeRadioPlaybackIntent(fallback)
+      return intent
     },
 
     setLoading(nextLoading) {
@@ -219,6 +248,7 @@ export const usePlayerStore = defineStore('player', {
       if (listItem) listItem.radioSourceId = wanted
       if (this.currentStation === stationId && this.isPlaying) {
         this.isLoading = true
+        this.radioPlaybackIntent = 'source_switch'
       }
       return true
     },
