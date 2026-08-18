@@ -922,14 +922,14 @@ test('FullPlayer 主区域显示 current、时间进度和轻量 next', async ()
   await flushPromises()
   await wrapper.vm.$nextTick()
 
-  assert.equal(domElement('.now-program-title').textContent.trim(), current.title)
-  assert.match(domElement('.now-program-next').textContent, /下一节目 · 下一档新闻 \d{2}:\d{2}/)
+  assert.equal(domElement('.mobile-now-playing__current').textContent.trim(), current.title)
+  assert.match(domElement('.mobile-now-playing__next').textContent, /下一节目 · 下一档新闻 \d{2}:\d{2}/)
   assert.equal(domElements('.desktop-video-overlay .progress-times').length, 1)
   assert.equal(domElements('.mobile-video-overlay .progress-times').length, 1)
   assert.equal(domElements('.desktop-video-overlay [role="progressbar"]').length, 1)
   assert.equal(domElements('.desktop-video-overlay .progress-knob').length, 0)
   assert.notEqual(domElement('.progress-fill').style.width, '0%')
-  assert.match(domElement('.mobile-now-program-remaining').textContent, /剩余 \d+ 分钟/)
+  assert.match(domElement('.mobile-now-playing__remaining').textContent, /剩余 \d+ 分钟/)
   assert.match(domElement('.mobile-video-overlay-status').textContent, /直播中|正在连接|已暂停/)
   assert.equal(store.currentEpgProgram?.title, current.title)
 })
@@ -949,8 +949,59 @@ test('FullPlayer 无 next 时不占位', async () => {
   store.currentIptvChannel = channels[1]
   await flushPromises()
   await wrapper.vm.$nextTick()
-  assert.equal(domElement('.now-program-title').textContent.trim(), '只有当前节目')
-  assert.equal(domElements('.now-program-next').length, 0)
+  assert.equal(domElement('.mobile-now-playing__current').textContent.trim(), '只有当前节目')
+  assert.equal(domElements('.mobile-now-playing__next').length, 0)
+})
+
+test('IPTV Mobile 使用 compact Now Playing 和统一 sticky panel header', async () => {
+  const { store } = await mountPlayer()
+  await flushPromises()
+
+  const root = domElement('.full-player')
+  assert.equal(root.classList.contains('full-player--mobile-iptv'), true)
+  assert.equal(domElements('.mobile-now-playing').length, 1)
+  assert.equal(domElements('.now-metadata').length, 0)
+  assert.equal(domElements('.mobile-now-playing__logo').length, 1)
+  assert.equal(domElements('.mobile-now-playing button').length, 0)
+  assert.equal(domElements('.mobile-panel-header').length, 1)
+  assert.equal(domElements('.mobile-panel-header .panel-tabs button').length, 2)
+  assert.equal(domElements('.mobile-panel-header .sort-btn').length, 1)
+  assert.equal(domElements('.mobile-panel .channel-sort-bar').length, 0)
+  assert.match(domElement('.mobile-panel-header .sort-btn').textContent, /默认排序/)
+  assert.equal(domElement('.mobile-panel-header .panel-tabs button').getAttribute('type'), 'button')
+  assert.equal(domElement('.mobile-panel-header .sort-btn').getAttribute('type'), 'button')
+  assert.equal(store.currentIptvChannel.name, 'Alpha')
+})
+
+test('IPTV Mobile 无 EPG 时 schedule shell 不保留空白，Radio 保留既有 metadata shell', async () => {
+  fetchOverride = async (url) => {
+    if (!url.includes('/api/iptv/epg/programs/')) return null
+    return response({ current: null, next: null, programs: [], date: '2026-08-09', available_dates: [] })
+  }
+  await mountPlayer()
+  await clickDom('.mobile-panel-header .panel-tabs button', 1)
+  await flushPromises()
+  assert.equal(domElements('.schedule-panel.schedule-panel--empty').length, 1)
+  assert.equal(domElements('.schedule-panel--empty .schedule-content').length, 0)
+
+  for (const wrapper of mountedWrappers.splice(0)) {
+    if (wrapper.exists()) wrapper.unmount()
+  }
+  document.body.innerHTML = '<div id="app"></div>'
+  setActivePinia(createPinia())
+  const store = usePlayerStore()
+  store.activeMode = 'radio'
+  store.currentStation = 'radio-a'
+  store.stationMap = { 'radio-a': { id: 'radio-a', name: '测试电台', subtitle: '音乐' } }
+  store.isPlayerExpanded = true
+  const wrapper = mount(FullPlayer, { attachTo: document.body })
+  mountedWrappers.push(wrapper)
+  await flushPromises()
+  await wrapper.vm.$nextTick()
+  assert.equal(domElements('.full-player--mobile-iptv').length, 0)
+  assert.equal(domElements('.mobile-now-playing').length, 0)
+  assert.equal(domElements('.now-metadata').length, 1)
+  assert.equal(domElements('.mobile-panel-header').length, 0)
 })
 
 test('FullPlayer 非 IPTV 节目单继续保留电台名 fallback', async () => {

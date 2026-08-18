@@ -6,7 +6,7 @@
         ref="playerRootRef"
         tabindex="-1"
         class="full-player fixed inset-0 z-50 overflow-y-auto"
-        :class="{ 'theme-dark': isFullPlayerDark, 'safari-chrome-refresh': isSafariChromeRefreshing, 'full-player--mobile-layout': isMobileLayout, 'full-player--theater': isTheaterLayout }"
+        :class="{ 'theme-dark': isFullPlayerDark, 'safari-chrome-refresh': isSafariChromeRefreshing, 'full-player--mobile-layout': isMobileLayout, 'full-player--mobile-iptv': isMobileLayout && isIptvMode, 'full-player--theater': isTheaterLayout }"
         @pointerenter="handleOverlayActivity"
         @pointermove="handleOverlayActivity"
         @mousemove="handleOverlayActivity"
@@ -371,7 +371,24 @@
             </section>
 
             <section ref="nowPanelRef" class="now-panel">
-              <div class="now-metadata" :class="{ 'now-metadata--without-programme': !hasProgrammeMetadata }">
+              <div v-if="isMobileLayout && isIptvMode" class="mobile-now-playing">
+                <span class="mobile-now-playing__logo">
+                  <img v-if="currentArtworkUrl" :src="currentArtworkUrl" :alt="currentStationName" @error="useDefaultLogo" />
+                  <span v-else>{{ currentStationName.slice(0, 2) }}</span>
+                </span>
+                <div class="mobile-now-playing__copy">
+                  <div class="mobile-now-playing__identity">
+                    <h1>{{ currentStationName }}</h1>
+                    <span class="mobile-now-playing__state">{{ currentChannelSubtitle }}</span>
+                  </div>
+                  <p v-if="hasProgrammeMetadata" class="mobile-now-playing__programme" aria-live="polite">
+                    <span class="mobile-now-playing__current">{{ epgViewingText }}</span>
+                    <span v-if="nextProgramSummary" class="mobile-now-playing__next">下一节目 · {{ nextProgramSummary }}</span>
+                    <span v-if="showProgramRemaining" class="mobile-now-playing__remaining">剩余 {{ currentProgram.remaining }} 分钟</span>
+                  </p>
+                </div>
+              </div>
+              <div v-else class="now-metadata" :class="{ 'now-metadata--without-programme': !hasProgrammeMetadata }">
                 <div class="now-identity">
                   <h1>{{ currentStationName }}</h1>
                   <p class="channel-subtitle">{{ currentChannelSubtitle }}</p>
@@ -402,7 +419,39 @@
             </section>
 
             <section class="mobile-panel">
-              <div class="panel-tabs" ref="mobileTabsRef">
+              <div v-if="isMobileLayout && isIptvMode" class="mobile-panel-header">
+                <div class="panel-tabs" ref="mobileTabsRef">
+                  <button
+                    type="button"
+                    :class="{ active: activePlayerPanel === 'channels' }"
+                    @click="activePlayerPanel = 'channels'"
+                  >
+                    频道列表
+                  </button>
+                  <button
+                    type="button"
+                    :class="{ active: activePlayerPanel === 'schedule' }"
+                    @click="activePlayerPanel = 'schedule'"
+                  >
+                    节目单
+                  </button>
+                  <span class="tab-indicator" :style="mobileTabIndicatorStyle"></span>
+                </div>
+                <div class="mobile-panel-sort">
+                  <button
+                    type="button"
+                    class="sort-btn"
+                    :class="{ active: channelSortMode !== 'original' }"
+                    @click="nextSortMode"
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="14" height="14" aria-hidden="true">
+                      <line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="16" y2="12"/><line x1="4" y1="18" x2="12" y2="18"/>
+                    </svg>
+                    {{ currentSortLabel }}
+                  </button>
+                </div>
+              </div>
+              <div v-else class="panel-tabs" ref="mobileTabsRef">
                 <button
                   type="button"
                   :class="{ active: activePlayerPanel === 'channels' }"
@@ -422,7 +471,7 @@
 
               <Transition name="panel-slide" mode="out-in">
                 <div v-if="activePlayerPanel === 'channels'" key="channels" class="channel-panel">
-                  <div class="channel-sort-bar">
+                  <div v-if="!(isMobileLayout && isIptvMode)" class="channel-sort-bar">
                     <button
                       type="button"
                       class="sort-btn"
@@ -469,7 +518,7 @@
                   </button>
                 </div>
 
-                <div v-else key="schedule" class="schedule-panel">
+                <div v-else key="schedule" class="schedule-panel" :class="{ 'schedule-panel--empty': !hasScheduleData }">
                   <div v-if="hasScheduleData" class="schedule-content">
                     <div v-if="epgDateOptions.length" class="schedule-date-list">
                       <button
@@ -7354,6 +7403,303 @@ onBeforeUnmount(() => {
   .full-player--mobile-layout .live-tag {
     min-height: 26px;
     font-size: 13px;
+  }
+
+  /* IPTV Mobile keeps the video surface, metadata, and list header as separate layers. */
+  .full-player--mobile-iptv .now-panel {
+    width: 100%;
+    max-width: none;
+    margin: 0;
+    padding: 12px 16px 14px;
+    text-align: left;
+  }
+
+  .full-player--mobile-iptv .mobile-now-playing {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .full-player--mobile-iptv .mobile-now-playing__logo {
+    display: grid;
+    flex: 0 0 44px;
+    place-items: center;
+    width: 44px;
+    height: 44px;
+    overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    background: var(--surface-bg);
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 650;
+  }
+
+  .full-player--mobile-iptv .mobile-now-playing__logo img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+  }
+
+  .full-player--mobile-iptv .mobile-now-playing__copy {
+    min-width: 0;
+    flex: 1 1 auto;
+  }
+
+  .full-player--mobile-iptv .mobile-now-playing__identity {
+    display: flex;
+    min-width: 0;
+    align-items: baseline;
+    gap: 8px;
+  }
+
+  .full-player--mobile-iptv .mobile-now-playing__identity h1 {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--text-primary);
+    font-size: 17px;
+    font-weight: 650;
+    line-height: 1.2;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .full-player--mobile-iptv .mobile-now-playing__state {
+    flex: 0 0 auto;
+    overflow: hidden;
+    color: var(--text-tertiary);
+    font-size: 11px;
+    line-height: 1.2;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .full-player--mobile-iptv .mobile-now-playing__programme {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 3px 8px;
+    margin: 4px 0 0;
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.25;
+  }
+
+  .full-player--mobile-iptv .mobile-now-playing__current {
+    grid-column: 1 / -1;
+    overflow: hidden;
+    color: var(--text-primary);
+    font-weight: 550;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .full-player--mobile-iptv .mobile-now-playing__next {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--text-tertiary);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .full-player--mobile-iptv .mobile-now-playing__remaining {
+    color: var(--text-tertiary);
+    white-space: nowrap;
+  }
+
+  .full-player--mobile-iptv .mobile-panel {
+    display: block;
+    padding: 0;
+  }
+
+  .full-player--mobile-iptv .mobile-panel-header {
+    position: sticky;
+    top: env(safe-area-inset-top, 0px);
+    z-index: 8;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    min-height: 52px;
+    padding: 0 16px;
+    border-top: 1px solid var(--line);
+    border-bottom: 1px solid var(--line);
+    background: var(--page-bg);
+  }
+
+  .full-player--mobile-iptv .mobile-panel-header .panel-tabs {
+    min-width: 0;
+    gap: 0;
+    padding: 0;
+    border-bottom: 0;
+  }
+
+  .full-player--mobile-iptv .mobile-panel-header .panel-tabs button {
+    min-width: 0;
+    min-height: 44px;
+    padding: 0 8px;
+    color: var(--text-tertiary);
+    font-size: 13px;
+    font-weight: 550;
+    text-align: center;
+  }
+
+  .full-player--mobile-iptv .mobile-panel-header .panel-tabs button.active {
+    color: var(--text-primary);
+    font-weight: 650;
+  }
+
+  .full-player--mobile-iptv .mobile-panel-header .panel-tabs button:focus-visible,
+  .full-player--mobile-iptv .mobile-panel-header .sort-btn:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
+
+  .full-player--mobile-iptv .mobile-panel-header .tab-indicator {
+    bottom: 0;
+    height: 2px;
+  }
+
+  .full-player--mobile-iptv .mobile-panel-sort {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+  }
+
+  .full-player--mobile-iptv .mobile-panel-sort .sort-btn {
+    min-height: 44px;
+    max-width: 100px;
+    padding: 0 4px 0 8px;
+    border: 0;
+    border-radius: 8px;
+    color: var(--text-tertiary);
+    font-size: 11px;
+    font-weight: 550;
+    white-space: nowrap;
+  }
+
+  .full-player--mobile-iptv .mobile-panel-sort .sort-btn:hover,
+  .full-player--mobile-iptv .mobile-panel-sort .sort-btn.active {
+    border-color: transparent;
+    background: transparent;
+    color: var(--text-primary);
+  }
+
+  .full-player--mobile-iptv .mobile-panel-sort .sort-btn.active {
+    color: var(--accent);
+  }
+
+  .full-player--mobile-iptv .channel-panel {
+    padding: 6px 0 10px;
+  }
+
+  .full-player--mobile-iptv .channel-row {
+    min-height: 68px;
+    border-bottom: 1px solid var(--row-separator);
+    border-radius: 0;
+  }
+
+  .full-player--mobile-iptv .channel-row.active {
+    background: var(--row-active-bg);
+    box-shadow: inset 2px 0 0 var(--accent);
+  }
+
+  .full-player--mobile-iptv .channel-logo {
+    width: 44px;
+    height: 44px;
+    border-radius: 9px;
+    box-shadow: 0 3px 10px rgba(15, 23, 42, 0.08);
+  }
+
+  .full-player--mobile-iptv .schedule-panel {
+    padding: 16px 16px 0;
+  }
+
+  .full-player--mobile-iptv .schedule-panel--empty {
+    min-height: 0;
+    padding: 0;
+  }
+
+  /* Mobile IPTV overlay controls share the existing MiniPlayer glass language. */
+  .full-player--mobile-iptv {
+    --mobile-overlay-glass-source: rgba(15, 23, 42, 0.42);
+    --mobile-overlay-glass-surface: color-mix(in srgb, var(--mobile-overlay-glass-source) 72%, transparent);
+    --mobile-overlay-glass-surface-soft: color-mix(in srgb, var(--mobile-overlay-glass-source) 56%, transparent);
+    --mobile-overlay-glass-border: rgba(255, 255, 255, 0.16);
+    --mobile-overlay-glass-highlight: rgba(255, 255, 255, 0.12);
+    --mobile-overlay-glass-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+  }
+
+  .full-player--mobile-iptv .overlay-btn,
+  .full-player--mobile-iptv .mobile-video-overlay-button--main,
+  .full-player--mobile-iptv .mobile-video-overlay-button--utility {
+    border: 1px solid var(--mobile-overlay-glass-border);
+    background: var(--mobile-overlay-glass-surface);
+    box-shadow: var(--mobile-overlay-glass-shadow), inset 0 0 0 1px var(--mobile-overlay-glass-highlight);
+    backdrop-filter: blur(12px) saturate(110%);
+    -webkit-backdrop-filter: blur(12px) saturate(110%);
+  }
+
+  .full-player--mobile-iptv .overlay-btn,
+  .full-player--mobile-iptv .mobile-video-overlay-button--main {
+    color: rgba(255, 255, 255, 0.94);
+  }
+
+  .full-player--mobile-iptv .overlay-btn:hover {
+    background: var(--mobile-overlay-glass-surface);
+    border-color: var(--mobile-overlay-glass-border);
+    box-shadow: var(--mobile-overlay-glass-shadow), inset 0 0 0 1px var(--mobile-overlay-glass-highlight);
+    transform: none;
+  }
+
+  .full-player--mobile-iptv .mobile-video-overlay-button--main {
+    background: var(--mobile-overlay-glass-source);
+    color: rgba(255, 255, 255, 0.94);
+  }
+
+  .full-player--mobile-iptv .mobile-video-overlay-button--main:hover,
+  .full-player--mobile-iptv .mobile-video-overlay-button--main:focus-visible {
+    background: var(--mobile-overlay-glass-source);
+    color: #fff;
+  }
+
+  .full-player--mobile-iptv .mobile-video-overlay-button--utility {
+    background: var(--mobile-overlay-glass-surface-soft);
+    color: rgba(255, 255, 255, 0.9);
+  }
+
+  .full-player--mobile-iptv .mobile-video-overlay-button--utility:hover,
+  .full-player--mobile-iptv .mobile-video-overlay-button--utility:focus-visible {
+    background: var(--mobile-overlay-glass-surface);
+    border-color: var(--mobile-overlay-glass-border);
+    box-shadow: var(--mobile-overlay-glass-shadow), inset 0 0 0 1px var(--mobile-overlay-glass-highlight);
+  }
+
+  .full-player--mobile-iptv .mobile-video-overlay-button--side {
+    border-color: transparent;
+    background: transparent;
+    box-shadow: none;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.38));
+  }
+
+  .full-player--mobile-iptv .mobile-video-overlay-button--side:hover,
+  .full-player--mobile-iptv .mobile-video-overlay-button--side:focus-visible {
+    border-color: transparent;
+    background: transparent;
+    box-shadow: none;
+  }
+
+  .full-player--mobile-iptv .mobile-video-overlay-button:active,
+  .full-player--mobile-iptv .overlay-btn:active {
+    transform: scale(0.96);
+  }
+
+  .full-player--mobile-iptv .overlay-btn:focus-visible,
+  .full-player--mobile-iptv .mobile-video-overlay-button:focus-visible {
+    outline: 2px solid rgba(255, 255, 255, 0.86);
+    outline-offset: 2px;
   }
 
 </style>

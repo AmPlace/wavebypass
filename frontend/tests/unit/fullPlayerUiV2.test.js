@@ -81,6 +81,32 @@ test('Mobile FullPlayer overlay keeps transport centered and utility controls tr
   assert.match(mobileStyles, /\.full-player--mobile-layout \.mobile-video-overlay\.is-loading \.mobile-video-overlay-transport,[\s\S]*?opacity: 0;[\s\S]*?pointer-events: none;/)
 })
 
+test('Mobile IPTV overlay controls use one restrained glass family', () => {
+  const glassStyles = fullPlayer.match(/\/\* Mobile IPTV overlay controls share the existing MiniPlayer glass language\. \*\/[\s\S]*?<\/style>/)?.[0] || ''
+  assert.match(glassStyles, /--mobile-overlay-glass-source: rgba\(15, 23, 42, 0\.42\)/)
+  assert.match(glassStyles, /backdrop-filter: blur\(12px\) saturate\(110%\)/)
+  assert.match(glassStyles, /\.full-player--mobile-iptv \.overlay-btn,[\s\S]*?border: 1px solid var\(--mobile-overlay-glass-border\)/)
+  assert.match(glassStyles, /\.full-player--mobile-iptv \.mobile-video-overlay-button--main \{[\s\S]*?background: var\(--mobile-overlay-glass-source\)/)
+  assert.match(glassStyles, /\.full-player--mobile-iptv \.mobile-video-overlay-button--utility \{[\s\S]*?background: var\(--mobile-overlay-glass-surface-soft\)/)
+  assert.match(glassStyles, /\.full-player--mobile-iptv \.mobile-video-overlay-button--side \{[\s\S]*?background: transparent;[\s\S]*?box-shadow: none;/)
+  assert.match(glassStyles, /\.full-player--mobile-iptv \.overlay-btn:focus-visible,[\s\S]*?outline: 2px solid rgba\(255, 255, 255, 0\.86\)/)
+  assert.doesNotMatch(glassStyles, /background: rgba\(255, 255, 255, 0\.94\)/)
+})
+
+test('Mobile IPTV uses a compact now-playing row and a sticky unified panel header', () => {
+  assert.match(template, /'full-player--mobile-iptv': isMobileLayout && isIptvMode/)
+  assert.match(template, /v-if="isMobileLayout && isIptvMode" class="mobile-now-playing"/)
+  assert.match(template, /class="mobile-now-playing__logo"[\s\S]*?currentArtworkUrl/)
+  assert.match(template, /class="mobile-now-playing__programme" aria-live="polite"/)
+  assert.match(template, /class="mobile-panel-header"[\s\S]*?class="mobile-panel-sort"/)
+  assert.match(template, /class="mobile-panel-header"[\s\S]*?currentSortLabel/)
+  assert.match(template, /class="schedule-panel" :class="\{ 'schedule-panel--empty': !hasScheduleData \}"/)
+  assert.match(fullPlayer, /\.full-player--mobile-iptv \.mobile-panel-header \{[\s\S]*?position: sticky;[\s\S]*?top: env\(safe-area-inset-top, 0px\)/)
+  assert.match(fullPlayer, /\.full-player--mobile-iptv \.mobile-panel-header \.panel-tabs button \{[\s\S]*?min-height: 44px;/)
+  assert.match(fullPlayer, /\.full-player--mobile-iptv \.mobile-panel-sort \.sort-btn \{[\s\S]*?min-height: 44px;/)
+  assert.match(fullPlayer, /\.full-player--mobile-iptv \.schedule-panel--empty \{[\s\S]*?padding: 0;/)
+})
+
 test('FullPlayer 1.5 desktop metadata uses structured next-programme fields', () => {
   assert.match(template, /:class="\{ 'now-metadata--without-programme': !hasProgrammeMetadata \}"/)
   assert.match(template, /v-if="hasProgrammeMetadata" class="now-programme"/)
