@@ -30,6 +30,7 @@
               @mousemove="handleOverlayActivity"
               @pointerdown="handlePlayerPointerDown"
               @touchstart="handlePlayerTouchStart"
+              @click.capture="handlePlayerControlClick"
               @pointerleave="scheduleOverlayHide"
             >
               <div class="mobile-live-pill" aria-hidden="true">
@@ -865,6 +866,8 @@ let finePointerCapabilityQuery = null
 let overlayHideTimer = null
 let lastOverlayInputModality = 'pointer'
 let pendingPointerFullscreenTrigger = null
+let pendingPointerCommandControl = null
+let pointerCommandFocusCleanupTimer = null
 
 const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
   (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
@@ -1262,6 +1265,13 @@ function isMediaPlayerControlTarget(target) {
   return Boolean(target?.closest?.('button, input, select, textarea, [role="slider"]'))
 }
 
+function getPlayerCommandControl(target) {
+  const control = target?.closest?.('button')
+  if (!control || !isMediaSurfaceTarget(control)) return null
+  if (control.getAttribute('aria-controls')?.endsWith('-source-menu')) return null
+  return control
+}
+
 function getFullscreenTrigger(target) {
   return target?.closest?.('button[aria-label="全屏"]') || null
 }
@@ -1274,9 +1284,36 @@ function shouldShowOverlayForKeyboard(event, code, isInteractiveTarget) {
   return ['Space', 'KeyK', 'KeyM', 'KeyF', 'PageUp', 'PageDown'].includes(code)
 }
 
-function handlePlayerPointerDown(event) {
+function clearPointerCommandFocusCleanup() {
+  if (pointerCommandFocusCleanupTimer === null) return
+  clearTimeout(pointerCommandFocusCleanupTimer)
+  pointerCommandFocusCleanupTimer = null
+}
+
+function movePointerCommandFocus(control) {
+  if (!isPlayerExpanded.value || !document.contains(control)) return
+  if (document.activeElement !== control) return
+  if (isDesktopLayout.value) playerRootRef.value?.focus?.({ preventScroll: true })
+  else control.blur?.()
+}
+
+function schedulePointerCommandFocusCleanup(control) {
+  clearPointerCommandFocusCleanup()
+  movePointerCommandFocus(control)
+  pointerCommandFocusCleanupTimer = setTimeout(() => {
+    pointerCommandFocusCleanupTimer = null
+    movePointerCommandFocus(control)
+  }, 0)
+}
+
+function trackPointerInteraction(event) {
   lastOverlayInputModality = 'pointer'
   pendingPointerFullscreenTrigger = getFullscreenTrigger(event?.target)
+  pendingPointerCommandControl = getPlayerCommandControl(event?.target)
+}
+
+function handlePlayerPointerDown(event) {
+  trackPointerInteraction(event)
   overlayControlsFocused.value = false
   handleOverlayActivity()
   if (!isDesktopLayout.value || isInteractiveKeyboardTarget(event?.target)) return
@@ -1284,16 +1321,24 @@ function handlePlayerPointerDown(event) {
 }
 
 function handlePlayerTouchStart(event) {
-  lastOverlayInputModality = 'pointer'
-  pendingPointerFullscreenTrigger = getFullscreenTrigger(event?.target)
+  trackPointerInteraction(event)
   overlayControlsFocused.value = false
   handleOverlayActivity()
+}
+
+function handlePlayerControlClick(event) {
+  const control = getPlayerCommandControl(event?.target)
+  if (!control || control !== pendingPointerCommandControl) return
+  pendingPointerCommandControl = null
+  schedulePointerCommandFocusCleanup(control)
 }
 
 function handlePlayerKeyboard(event) {
   // Keep this in the existing FullPlayer capture path so shortcuts do not
   // become a second global listener with a separate cleanup/lifecycle.
   lastOverlayInputModality = 'keyboard'
+  pendingPointerCommandControl = null
+  clearPointerCommandFocusCleanup()
   if (
     !isPlayerExpanded.value
     || !isDesktopLayout.value
@@ -5057,6 +5102,8 @@ onBeforeUnmount(() => {
   clearOverlayHideTimer()
   stopObservingPointerCapabilities()
   pendingPointerFullscreenTrigger = null
+  pendingPointerCommandControl = null
+  clearPointerCommandFocusCleanup()
   themeObserver?.disconnect()
   themeObserver = null
   window.removeEventListener('waveflow-theme-chrome-sync', handleThemeChromeSync)

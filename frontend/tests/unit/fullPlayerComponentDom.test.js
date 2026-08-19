@@ -730,6 +730,172 @@ test('FullPlayer desktop keyboard shortcuts reuse the overlay capture path', asy
   }
 })
 
+test('FullPlayer pointer command controls return focus to the player root before shortcuts', async () => {
+  channels = [channel('Alpha', 'alpha'), channel('Bravo', 'bravo')]
+  installFetch()
+  const originalWidth = window.innerWidth
+  const originalMatchMedia = window.matchMedia
+  Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1440 })
+  window.matchMedia = (query) => ({
+    matches: query.includes('hover: hover') || query.includes('pointer: fine'),
+    addListener() {},
+    removeListener() {},
+    addEventListener() {},
+    removeEventListener() {},
+  })
+
+  try {
+    const { store } = await mountPlayer({ current: channels[0] })
+    const root = domElement('.full-player')
+    const muteButton = domElement('.desktop-video-overlay [aria-label="静音"]')
+
+    dispatchUiEvent(muteButton, 'pointerdown')
+    muteButton.focus()
+    muteButton.click()
+    await flushPromises()
+    await new Promise(resolve => setTimeout(resolve, 0))
+
+    assert.equal(store.isMuted, true)
+    assert.equal(document.activeElement, root)
+
+    const event = new window.KeyboardEvent('keydown', {
+      key: ' ',
+      code: 'Space',
+      bubbles: true,
+      cancelable: true,
+    })
+    root.dispatchEvent(event)
+    assert.equal(event.defaultPrevented, true)
+    assert.equal(store.isPlaying, false)
+  } finally {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth })
+    window.matchMedia = originalMatchMedia
+  }
+})
+
+test('FullPlayer pointer command controls keep global M/PageDown/F shortcuts available', async () => {
+  channels = [channel('Alpha', 'alpha'), channel('Bravo', 'bravo'), channel('Charlie', 'charlie')]
+  installFetch()
+  const originalWidth = window.innerWidth
+  const originalMatchMedia = window.matchMedia
+  Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1440 })
+  window.matchMedia = (query) => ({
+    matches: query.includes('hover: hover') || query.includes('pointer: fine'),
+    addListener() {},
+    removeListener() {},
+    addEventListener() {},
+    removeEventListener() {},
+  })
+  const fullscreen = installFullscreenMock()
+
+  try {
+    const { store } = await mountPlayer({ current: channels[0] })
+    const root = domElement('.full-player')
+    const media = domElement('.media-card')
+    const railButton = domElement('.desktop-video-overlay button[aria-label*="频道列表"]')
+    fullscreen.attach(media)
+
+    dispatchUiEvent(railButton, 'pointerdown')
+    railButton.focus()
+    railButton.click()
+    await flushPromises()
+    await new Promise(resolve => setTimeout(resolve, 0))
+    assert.equal(document.activeElement, root)
+
+    const mute = new window.KeyboardEvent('keydown', {
+      key: 'm',
+      code: 'KeyM',
+      bubbles: true,
+      cancelable: true,
+    })
+    root.dispatchEvent(mute)
+    assert.equal(mute.defaultPrevented, true)
+    assert.equal(store.isMuted, true)
+
+    const next = new window.KeyboardEvent('keydown', {
+      key: 'PageDown',
+      code: 'PageDown',
+      bubbles: true,
+      cancelable: true,
+    })
+    root.dispatchEvent(next)
+    await flushPromises()
+    assert.equal(next.defaultPrevented, true)
+    assert.equal(store.currentIptvChannel.name, 'Bravo')
+
+    const fullscreenKey = new window.KeyboardEvent('keydown', {
+      key: 'f',
+      code: 'KeyF',
+      bubbles: true,
+      cancelable: true,
+    })
+    root.dispatchEvent(fullscreenKey)
+    await flushPromises()
+    assert.equal(fullscreenKey.defaultPrevented, true)
+    assert.equal(document.fullscreenElement, media)
+  } finally {
+    fullscreen.restore()
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth })
+    window.matchMedia = originalMatchMedia
+  }
+})
+
+test('FullPlayer keyboard-focused command, source trigger, and volume slider keep their native focus semantics', async () => {
+  const current = channel('Alpha', 'alpha', {
+    urls: [
+      ...channel('Alpha', 'alpha').urls,
+      { url: 'https://media.example/alpha-backup.m3u8', source_id: 'alpha-backup', source_type: 'hls', probe_status: 'online', is_working: 1 },
+    ],
+  })
+  installFetch()
+  const originalWidth = window.innerWidth
+  const originalMatchMedia = window.matchMedia
+  Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1440 })
+  window.matchMedia = (query) => ({
+    matches: query.includes('hover: hover') || query.includes('pointer: fine'),
+    addListener() {},
+    removeListener() {},
+    addEventListener() {},
+    removeEventListener() {},
+  })
+
+  try {
+    const { store } = await mountPlayer({ current })
+    const root = domElement('.full-player')
+    const muteButton = domElement('.desktop-video-overlay [aria-label="静音"]')
+    muteButton.focus()
+    const keyboardEvent = new window.KeyboardEvent('keydown', {
+      key: ' ',
+      code: 'Space',
+      bubbles: true,
+      cancelable: true,
+    })
+    muteButton.dispatchEvent(keyboardEvent)
+    assert.equal(keyboardEvent.defaultPrevented, false)
+    assert.equal(store.isPlaying, true)
+
+    const sourceButton = domElement('.desktop-video-overlay [aria-label="切换播放源"]')
+    dispatchUiEvent(sourceButton, 'pointerdown')
+    sourceButton.focus()
+    sourceButton.click()
+    await flushPromises()
+    await new Promise(resolve => setTimeout(resolve, 0))
+    assert.equal(document.activeElement, sourceButton)
+    assert.equal(domElement('#iptv-source-menu').getAttribute('style').includes('display: none'), false)
+
+    const slider = domElement('.desktop-video-overlay .video-overlay-volume-panel input[type="range"]')
+    dispatchUiEvent(slider, 'pointerdown')
+    slider.focus()
+    await new Promise(resolve => setTimeout(resolve, 0))
+    assert.equal(document.activeElement, slider)
+
+    root.focus()
+  } finally {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth })
+    window.matchMedia = originalMatchMedia
+  }
+})
+
 test('FullPlayer pointer fullscreen entry moves residual trigger focus to the player root', async () => {
   channels = [channel('Alpha', 'alpha'), channel('Bravo', 'bravo')]
   installFetch()
