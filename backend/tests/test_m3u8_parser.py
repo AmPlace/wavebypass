@@ -25,6 +25,11 @@ class YoutubeParsingTest(unittest.TestCase):
         self.assertEqual(parse_youtube_channel_id(f"youtube://{channel_id}/live"), channel_id)
         self.assertEqual(detect_source_type(f"youtube://channel/{channel_id}/live"), "youtube")
 
+    def test_untrusted_youtube_subdomain_is_not_a_youtube_source(self):
+        url = "https://evil.youtube.com/watch?v=abcDEF123_4"
+        self.assertEqual(parse_youtube_video_id(url), "")
+        self.assertNotEqual(detect_source_type(url), "youtube")
+
     def test_ytsl_scheme_is_not_supported(self):
         self.assertEqual(adapter_provider("ytsl://abcDEF123_4"), "")
         self.assertEqual(detect_source_type("ytsl://abcDEF123_4"), "hls")

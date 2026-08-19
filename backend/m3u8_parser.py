@@ -38,6 +38,15 @@ _EXTVLCOPT_RE = re.compile(r'#EXTVLCOPT:\s*([\w\-]+)\s*=\s*(.*)')
 _KODIPROP_RE = re.compile(r'#KODIPROP:\s*([\w.\-]+)\s*=\s*(.*)')
 _WAVEFLOW_RE = re.compile(r'#WAVEFLOW:\s*(.+)')
 _EPG_HEADER_KEYS = ('url-tvg', 'x-tvg-url', 'tvg-url')
+_YOUTUBE_URL_HOSTS = frozenset({
+    'youtube.com',
+    'www.youtube.com',
+    'm.youtube.com',
+    'youtu.be',
+    'www.youtu.be',
+    'youtube-nocookie.com',
+    'www.youtube-nocookie.com',
+})
 
 
 @dataclass(frozen=True)
@@ -473,13 +482,7 @@ def parse_m3u_document(text: str) -> M3uDocument:
 
 
 def _is_youtube_host(host: str) -> bool:
-    return (
-        host in {'youtu.be', 'www.youtu.be'}
-        or host == 'youtube.com'
-        or host.endswith('.youtube.com')
-        or host == 'youtube-nocookie.com'
-        or host.endswith('.youtube-nocookie.com')
-    )
+    return host in _YOUTUBE_URL_HOSTS
 
 
 def _youtube_scheme_parts(parsed) -> list[str]:

@@ -43,6 +43,9 @@ function createYoutubeHarness({ videoId = 'video-1', liveEmbedUrl = '' } = {}) {
   const clearTimerSource = extractFunction(source, 'function clearYoutubeStartupTimer()')
   const destroySource = extractFunction(source, 'function destroyYoutubePlayer(')
   const syncAudioSource = extractFunction(source, 'function syncYoutubeAudioState()')
+  const autoplayErrorSource = extractFunction(source, 'function isAutoplayBlockedError(')
+  const youtubeErrorSource = extractFunction(source, 'function youtubePlaybackErrorMessage(')
+  const youtubeEmbedSource = extractFunction(source, 'function isAllowedYoutubeEmbedUrl(')
   const youtubeSource = extractBetween(
     source,
     'async function handleActiveYoutubeFailure(',
@@ -93,9 +96,15 @@ function createYoutubeHarness({ videoId = 'video-1', liveEmbedUrl = '' } = {}) {
     ${clearTimerSource}
     ${destroySource}
     ${syncAudioSource}
+    ${autoplayErrorSource}
+    ${youtubeErrorSource}
+    ${youtubeEmbedSource}
     ${youtubeSource}
     return {
       startYoutubeCandidate,
+      isAllowedYoutubeEmbedUrl,
+      isAutoplayBlockedError,
+      youtubePlaybackErrorMessage,
       setAttempt: (value) => { _playAttemptId = value },
     }
   `)
@@ -210,6 +219,59 @@ test('当前 YouTube error 会销毁当前实例并进入下一备用源', async
   assert.ok(h.calls.includes('youtube.destroy'))
   assert.ok(h.calls.includes('fallback'))
   assert.ok(h.calls.includes('play-next'))
+})
+
+test('YouTube BUFFERING 不得提前确认播放，PLAYING 才完成起播', async () => {
+  const h = createYoutubeHarness()
+  const pending = h.harness.startYoutubeCandidate({ url: 'youtube://video-1' }, 1, 0)
+  await Promise.resolve()
+  await Promise.resolve()
+  const events = h.events()
+  events.onReady()
+  events.onStateChange({ data: 3 })
+
+  assert.equal(h.calls.includes('playing:true'), false)
+  assert.equal(h.calls.includes('loading:false'), false)
+  assert.equal(h.timers.size, 1)
+
+  events.onStateChange({ data: 1 })
+  await pending
+  assert.equal(h.calls.includes('playing:true'), true)
+  assert.equal(h.timers.size, 0)
+})
+
+test('YouTube error code 映射为可解释的播放失败类别', () => {
+  const h = createYoutubeHarness()
+  assert.equal(h.harness.youtubePlaybackErrorMessage(2), 'YouTube 视频参数无效')
+  assert.equal(h.harness.youtubePlaybackErrorMessage(100), 'YouTube 视频不可用')
+  assert.equal(h.harness.youtubePlaybackErrorMessage(101), 'YouTube 视频不允许嵌入')
+  assert.equal(h.harness.youtubePlaybackErrorMessage(150), 'YouTube 视频不允许嵌入')
+  assert.equal(h.harness.youtubePlaybackErrorMessage(5), 'YouTube 播放器不支持此视频')
+  assert.equal(h.harness.youtubePlaybackErrorMessage(999), 'YouTube 播放失败')
+})
+
+test('外部 live embed URL 必须是 HTTPS YouTube embed authority', async () => {
+  const h = createYoutubeHarness({
+    videoId: '',
+    liveEmbedUrl: 'https://evil.example/embed/live_stream?channel=UC12345678901234567890',
+  })
+  assert.equal(h.harness.isAllowedYoutubeEmbedUrl('https://www.youtube.com/embed/live_stream'), true)
+  assert.equal(h.harness.isAllowedYoutubeEmbedUrl('http://www.youtube.com/embed/live_stream'), false)
+  assert.equal(h.harness.isAllowedYoutubeEmbedUrl('https://www.youtube.com/watch?v=abcDEF123_4'), false)
+  assert.equal(h.harness.isAllowedYoutubeEmbedUrl('https://evil.youtube.com/embed/live_stream'), false)
+  await assert.rejects(
+    h.harness.startYoutubeCandidate({ url: 'youtube://channel/UC12345678901234567890/live' }, 1, 0),
+    /YouTube embed URL 不受支持/,
+  )
+  assert.equal(h.eventSets.length, 0)
+})
+
+test('自动播放错误只识别 NotAllowedError', () => {
+  const h = createYoutubeHarness()
+  assert.equal(h.harness.isAutoplayBlockedError({ name: 'NotAllowedError' }), true)
+  assert.equal(h.harness.isAutoplayBlockedError({ name: 'AbortError', message: 'play() failed' }), false)
+  assert.equal(h.harness.isAutoplayBlockedError({ name: 'NotSupportedError' }), false)
+  assert.equal(h.harness.isAutoplayBlockedError(new Error('notallowed')), false)
 })
 
 test('应用播放状态切换会控制当前 YouTube Player 暂停和恢复', () => {

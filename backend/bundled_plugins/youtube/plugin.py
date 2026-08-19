@@ -55,6 +55,15 @@ _COMMAND_VIDEO_RE = re.compile(
     r"window\[[\'\"]ytCommand[\'\"]\]\s*=\s*\{.*?\"watchEndpoint\"\s*:\s*\{.*?\"videoId\"\s*:\s*\"([A-Za-z0-9_-]{11})\"",
     re.S,
 )
+_YOUTUBE_INPUT_HOSTS = frozenset({
+    "youtube.com",
+    "www.youtube.com",
+    "m.youtube.com",
+    "youtu.be",
+    "www.youtu.be",
+    "youtube-nocookie.com",
+    "www.youtube-nocookie.com",
+})
 
 
 def _truthy(value: str | None) -> bool:
@@ -71,22 +80,68 @@ def _explicit_channel_id(value: str) -> str:
     return ""
 
 
+def _validated_youtube_url(value: str) -> str:
+    try:
+        parsed = urlparse(value)
+        host = (parsed.hostname or "").lower()
+        port = parsed.port
+    except ValueError:
+        raise InvalidResource("YouTube URL is malformed") from None
+    if (
+        parsed.scheme.lower() != "https"
+        or host not in _YOUTUBE_INPUT_HOSTS
+        or parsed.username
+        or parsed.password
+        or (port and port != 443)
+    ):
+        raise InvalidResource("YouTube URL host is not supported")
+
+    path_parts = [part for part in parsed.path.split("/") if part]
+    if host in {"youtu.be", "www.youtu.be"}:
+        valid = bool(path_parts and _VIDEO_ID_RE.fullmatch(path_parts[0]))
+    elif path_parts and path_parts[0].lower() == "watch":
+        valid = bool(_VIDEO_ID_RE.fullmatch((parse_qs(parsed.query).get("v") or [""])[0]))
+    elif len(path_parts) >= 2 and path_parts[0].lower() in {"live", "embed", "shorts"}:
+        valid = bool(_VIDEO_ID_RE.fullmatch(path_parts[1]))
+    elif len(path_parts) >= 2 and path_parts[0].lower() == "channel":
+        valid = bool(_CHANNEL_ID_RE.fullmatch(path_parts[1]))
+    elif path_parts and path_parts[0].startswith("@"):
+        valid = len(path_parts[0]) > 1
+    elif len(path_parts) >= 2 and path_parts[0].lower() in {"c", "user"}:
+        valid = bool(path_parts[1])
+    else:
+        valid = False
+    if not valid:
+        raise InvalidResource("YouTube URL does not identify a supported video or channel")
+    return value
+
+
 def _build_youtube_url(reference: TVReference) -> str:
     query_url = (reference.query.get("url") or [""])[0].strip()
     if query_url:
-        return query_url
+        return _validated_youtube_url(query_url)
     raw = unquote((reference.resource_id or "").strip().strip("/"))
     if not raw:
         raise InvalidResource("YouTube URL or reference is empty")
     if raw.startswith(("http://", "https://")):
-        return raw
+        return _validated_youtube_url(raw)
     if _VIDEO_ID_RE.fullmatch(raw):
         return f"https://www.youtube.com/watch?v={raw}"
-    if raw.startswith(("live/", "embed/", "shorts/", "@", "channel/", "c/", "user/")):
+    if raw.startswith(("live/", "embed/", "shorts/")):
+        parts = raw.split("/", 1)
+        if len(parts) == 2 and _VIDEO_ID_RE.fullmatch(parts[1]):
+            return f"https://www.youtube.com/{raw}"
+        raise InvalidResource("YouTube video reference is invalid")
+    if raw.startswith("channel/"):
+        parts = raw.split("/", 1)
+        if len(parts) == 2 and _CHANNEL_ID_RE.fullmatch(parts[1]):
+            return f"https://www.youtube.com/{raw}"
+        raise InvalidResource("YouTube channel reference is invalid")
+    if raw.startswith(("@", "c/", "user/")):
         return f"https://www.youtube.com/{raw}"
-    if raw.startswith("UC"):
+    if _CHANNEL_ID_RE.fullmatch(raw):
         return f"https://www.youtube.com/channel/{raw}"
-    return f"https://www.youtube.com/{raw}"
+    raise InvalidResource("YouTube reference is unsupported")
 
 
 def _video_id(url: str) -> str:

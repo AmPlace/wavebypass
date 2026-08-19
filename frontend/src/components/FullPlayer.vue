@@ -2326,6 +2326,16 @@ async function resumeSoftPausedIptv(reason = 'resume') {
       console.warn('[IPTV] soft pause resumed', { reason, sourceIndex })
       return true
     } catch (e) {
+      if (!isAttemptActive(attemptId)) return false
+      if (isAutoplayBlockedError(e)) {
+        _softPausedAt = 0
+        _softPauseReleased = true
+        playerStore.setPlaybackError('浏览器阻止自动播放，请点击播放按钮继续。')
+        playerStore.setLoading(false)
+        playerStore.togglePlay(false)
+        syncIptvMediaSession('paused')
+        return false
+      }
       console.warn('[IPTV] soft pause resume failed:', e?.message || e)
       _softPausedAt = 0
       _softPauseReleased = true
@@ -2441,11 +2451,58 @@ async function handleActiveYoutubeFailure(reason, attemptId, sourceIndex) {
   markAllIptvSourcesUnavailable(nextAttemptId)
 }
 
+const YOUTUBE_URL_HOSTS = new Set([
+  'youtube.com',
+  'www.youtube.com',
+  'm.youtube.com',
+  'youtu.be',
+  'www.youtu.be',
+  'youtube-nocookie.com',
+  'www.youtube-nocookie.com',
+])
+
+const YOUTUBE_EMBED_HOSTS = new Set([
+  'youtube.com',
+  'www.youtube.com',
+  'youtube-nocookie.com',
+  'www.youtube-nocookie.com',
+])
+
+function isYoutubeInputHost(host) {
+  return YOUTUBE_URL_HOSTS.has(host)
+}
+
+function isAllowedYoutubeEmbedUrl(value) {
+  try {
+    const parsed = new URL(String(value || '').trim())
+    return parsed.protocol === 'https:'
+      && YOUTUBE_EMBED_HOSTS.has(parsed.hostname.toLowerCase())
+      && parsed.pathname.toLowerCase().startsWith('/embed/')
+      && !parsed.username
+      && !parsed.password
+      && (!parsed.port || parsed.port === '443')
+  } catch {
+    return false
+  }
+}
+
+function youtubePlaybackErrorMessage(code) {
+  const numericCode = Number(code)
+  if (numericCode === 2) return 'YouTube 视频参数无效'
+  if (numericCode === 5) return 'YouTube 播放器不支持此视频'
+  if (numericCode === 100) return 'YouTube 视频不可用'
+  if ([101, 150, 153].includes(numericCode)) return 'YouTube 视频不允许嵌入'
+  return 'YouTube 播放失败'
+}
+
 async function startYoutubeCandidate(entry, attemptId = 0, sourceIndex = -1) {
   if (!isAttemptActive(attemptId)) throw cancelledError()
   const videoId = youtubeVideoId(entry)
   const liveEmbedUrl = youtubeLiveEmbedUrl(entry)
   if (!videoId && !liveEmbedUrl) throw new Error('YouTube video_id 缺失')
+  if (liveEmbedUrl && !isAllowedYoutubeEmbedUrl(liveEmbedUrl)) {
+    throw new Error('YouTube embed URL 不受支持')
+  }
 
   const setRuntimeStatus = (status) => {
     if (sourceIndex >= 0) setSourceRuntimeStatus(sourceIndex, status)
@@ -2555,8 +2612,12 @@ async function startYoutubeCandidate(entry, attemptId = 0, sourceIndex = -1) {
         onStateChange: (event) => {
           if (!isAttemptActive(attemptId)) return
           const state = event?.data
-          if (state === window.YT.PlayerState.PLAYING || state === window.YT.PlayerState.BUFFERING) {
+          if (state === window.YT.PlayerState.PLAYING) {
             safeResolve()
+            return
+          }
+          if (state === window.YT.PlayerState.BUFFERING) {
+            if (!confirmed) playerStore.setLoading(true)
             return
           }
           if (state === window.YT.PlayerState.PAUSED) {
@@ -2571,7 +2632,9 @@ async function startYoutubeCandidate(entry, attemptId = 0, sourceIndex = -1) {
           }
         },
         onError: (event) => {
-          const err = new Error(`YouTube 错误:${event?.data ?? ''}`)
+          const code = Number(event?.data)
+          const err = new Error(youtubePlaybackErrorMessage(code))
+          err.youtubeCode = Number.isFinite(code) ? code : null
           if (!confirmed) {
             safeReject(err)
             return
@@ -2733,7 +2796,7 @@ function parseYoutubeVideoId(url) {
       else if (parts.length >= 2 && ['live', 'embed', 'shorts'].includes(parts[0])) id = parts[1]
     } else if (host === 'youtu.be' || host === 'www.youtu.be') {
       id = parts[0] || ''
-    } else if (host === 'youtube.com' || host.endsWith('.youtube.com') || host === 'youtube-nocookie.com' || host.endsWith('.youtube-nocookie.com')) {
+    } else if (isYoutubeInputHost(host) && !['youtu.be', 'www.youtu.be'].includes(host)) {
       id = parsed.searchParams.get('v') || ''
       if (!id && parts.length >= 2 && ['live', 'embed', 'shorts'].includes(parts[0])) {
         id = parts[1]
@@ -2754,7 +2817,7 @@ function parseYoutubeChannelId(url) {
     if (parsed.protocol === 'youtube:') {
       if (/^UC[a-zA-Z0-9_-]{20,}$/.test(parts[0] || '')) id = parts[0]
       else if (parts.length >= 2 && parts[0] === 'channel') id = parts[1]
-    } else if (host === 'youtube.com' || host.endsWith('.youtube.com') || host === 'youtube-nocookie.com' || host.endsWith('.youtube-nocookie.com')) {
+    } else if (isYoutubeInputHost(host) && !['youtu.be', 'www.youtu.be'].includes(host)) {
       if (parts.length >= 2 && parts[0] === 'channel') id = parts[1]
     }
     return /^UC[a-zA-Z0-9_-]{20,}$/.test(id) ? id : ''
@@ -2779,7 +2842,7 @@ function isYoutubeUrl(url) {
     const parsed = new URL(url)
     if (parsed.protocol === 'youtube:') return true
     const host = parsed.hostname.toLowerCase()
-    return host === 'youtu.be' || host === 'www.youtu.be' || host === 'youtube.com' || host.endsWith('.youtube.com') || host === 'youtube-nocookie.com' || host.endsWith('.youtube-nocookie.com')
+    return isYoutubeInputHost(host)
   } catch {
     return false
   }
@@ -2886,11 +2949,7 @@ function cancelledError() {
 
 function isAutoplayBlockedError(error) {
   const name = String(error?.name || '')
-  const message = String(error?.message || error || '')
   return name === 'NotAllowedError'
-    || /user didn't interact/i.test(message)
-    || /play\(\) failed/i.test(message)
-    || /notallowed/i.test(message)
 }
 
 function wait(ms) {

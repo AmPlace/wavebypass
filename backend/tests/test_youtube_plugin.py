@@ -99,6 +99,23 @@ class YouTubePluginContractTest(unittest.TestCase):
             "https://youtu.be/abcDEF123_4",
         )
 
+    def test_reference_rejects_untrusted_host_malformed_and_playlist_only_input(self):
+        values = (
+            "https://evil.example/watch?v=abcDEF123_4",
+            "https://evil.youtube.com/watch?v=abcDEF123_4",
+            "not a URL",
+            "https://www.youtube.com/playlist?list=PLfixture",
+        )
+        for value in values:
+            with self.subTest(value=value):
+                with self.assertRaises(self.module.InvalidResource):
+                    self.module._build_youtube_url(TVReference("youtube", "resolve", {"url": [value]}))
+
+        for resource in ("invalid-id", "live/not-a-video-id", "channel/not-a-channel-id"):
+            with self.subTest(resource=resource):
+                with self.assertRaises(self.module.InvalidResource):
+                    self.module._build_youtube_url(TVReference("youtube", resource))
+
     def test_streamlink_descriptor_and_generic_metadata_match_legacy_semantics(self):
         fake = FakeStreamlink
         fake.result = {"best": FakeStream(PLAY_URL), "720p": FakeStream("https://video.googlevideo.com/720.m3u8")}

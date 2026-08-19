@@ -329,6 +329,16 @@ export const usePlayerStore = defineStore('player', {
           ? [parsed.hostname, ...parsed.pathname.split('/')].filter(Boolean)
           : parsed.pathname.split('/').filter(Boolean)
       }
+      const youtubeHosts = new Set([
+        'youtube.com',
+        'www.youtube.com',
+        'm.youtube.com',
+        'youtu.be',
+        'www.youtu.be',
+        'youtube-nocookie.com',
+        'www.youtube-nocookie.com',
+      ])
+      const isYoutubeHost = (host) => youtubeHosts.has(host)
       const parseYoutubeVideoId = (url) => {
         try {
           const parsed = new URL(url)
@@ -340,7 +350,7 @@ export const usePlayerStore = defineStore('player', {
             else if (parts.length >= 2 && ['live', 'embed', 'shorts'].includes(parts[0])) id = parts[1]
           } else if (host === 'youtu.be' || host === 'www.youtu.be') {
             id = parts[0] || ''
-          } else if (host === 'youtube.com' || host.endsWith('.youtube.com') || host === 'youtube-nocookie.com' || host.endsWith('.youtube-nocookie.com')) {
+          } else if (isYoutubeHost(host) && !['youtu.be', 'www.youtu.be'].includes(host)) {
             id = parsed.searchParams.get('v') || ''
             if (!id && parts.length >= 2 && ['live', 'embed', 'shorts'].includes(parts[0])) {
               id = parts[1]
@@ -360,7 +370,7 @@ export const usePlayerStore = defineStore('player', {
           if (parsed.protocol === 'youtube:') {
             if (/^UC[a-zA-Z0-9_-]{20,}$/.test(parts[0] || '')) id = parts[0]
             else if (parts.length >= 2 && parts[0] === 'channel') id = parts[1]
-          } else if (host === 'youtube.com' || host.endsWith('.youtube.com') || host === 'youtube-nocookie.com' || host.endsWith('.youtube-nocookie.com')) {
+          } else if (isYoutubeHost(host) && !['youtu.be', 'www.youtu.be'].includes(host)) {
             if (parts.length >= 2 && parts[0] === 'channel') id = parts[1]
           }
           return /^UC[a-zA-Z0-9_-]{20,}$/.test(id) ? id : ''
@@ -383,7 +393,7 @@ export const usePlayerStore = defineStore('player', {
           const parsed = new URL(url)
           if (parsed.protocol === 'youtube:') return true
           const host = parsed.hostname.toLowerCase()
-          return host === 'youtu.be' || host === 'www.youtu.be' || host === 'youtube.com' || host.endsWith('.youtube.com') || host === 'youtube-nocookie.com' || host.endsWith('.youtube-nocookie.com')
+          return isYoutubeHost(host)
         } catch {
           return false
         }
