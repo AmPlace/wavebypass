@@ -864,6 +864,7 @@ let hoverCapabilityQuery = null
 let finePointerCapabilityQuery = null
 let overlayHideTimer = null
 let lastOverlayInputModality = 'pointer'
+let pendingPointerFullscreenTrigger = null
 
 const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
   (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
@@ -953,6 +954,7 @@ function toggleOverlayMute() {
 
 async function toggleFullscreen() {
   if (document.fullscreenElement) {
+    pendingPointerFullscreenTrigger = null
     await document.exitFullscreen?.().catch?.(() => {})
     return
   }
@@ -962,11 +964,14 @@ async function toggleFullscreen() {
     try {
       await target.requestFullscreen()
       return
-    } catch {}
+    } catch {
+      pendingPointerFullscreenTrigger = null
+    }
   }
 
   // iOS versions without Element.requestFullscreen only expose the native
   // video fullscreen API. Keep this as a feature-detected fallback.
+  pendingPointerFullscreenTrigger = null
   const video = iptvVideoRef.value
   if (video?.webkitEnterFullscreen) {
     video.webkitEnterFullscreen()
@@ -981,8 +986,14 @@ function handleFullscreenChange() {
     && (fullscreenElement === mediaSurfaceRef.value || mediaSurfaceRef.value.contains(fullscreenElement)),
   )
   if (isFullscreen.value) {
+    const trigger = pendingPointerFullscreenTrigger
+    pendingPointerFullscreenTrigger = null
+    if (lastOverlayInputModality === 'pointer' && trigger && document.activeElement === trigger) {
+      playerRootRef.value?.focus?.({ preventScroll: true })
+    }
     handleOverlayActivity()
   } else {
+    pendingPointerFullscreenTrigger = null
     scheduleOverlayHide()
   }
   if (sourceMenuOpen.value) nextTick(() => updateSourceMenuPosition())
@@ -1251,6 +1262,10 @@ function isMediaPlayerControlTarget(target) {
   return Boolean(target?.closest?.('button, input, select, textarea, [role="slider"]'))
 }
 
+function getFullscreenTrigger(target) {
+  return target?.closest?.('button[aria-label="全屏"]') || null
+}
+
 function shouldShowOverlayForKeyboard(event, code, isInteractiveTarget) {
   const target = event?.target
   if (isMediaPlayerControlTarget(target)) return true
@@ -1261,14 +1276,16 @@ function shouldShowOverlayForKeyboard(event, code, isInteractiveTarget) {
 
 function handlePlayerPointerDown(event) {
   lastOverlayInputModality = 'pointer'
+  pendingPointerFullscreenTrigger = getFullscreenTrigger(event?.target)
   overlayControlsFocused.value = false
   handleOverlayActivity()
   if (!isDesktopLayout.value || isInteractiveKeyboardTarget(event?.target)) return
   playerRootRef.value?.focus?.({ preventScroll: true })
 }
 
-function handlePlayerTouchStart() {
+function handlePlayerTouchStart(event) {
   lastOverlayInputModality = 'pointer'
+  pendingPointerFullscreenTrigger = getFullscreenTrigger(event?.target)
   overlayControlsFocused.value = false
   handleOverlayActivity()
 }
@@ -5039,6 +5056,7 @@ onBeforeUnmount(() => {
   document.removeEventListener('fullscreenchange', handleFullscreenChange)
   clearOverlayHideTimer()
   stopObservingPointerCapabilities()
+  pendingPointerFullscreenTrigger = null
   themeObserver?.disconnect()
   themeObserver = null
   window.removeEventListener('waveflow-theme-chrome-sync', handleThemeChromeSync)

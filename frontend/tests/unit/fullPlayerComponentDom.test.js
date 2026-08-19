@@ -403,6 +403,34 @@ function dispatchUiEvent(element, type) {
   element.dispatchEvent(new window.Event(type, { bubbles: true, cancelable: true }))
 }
 
+function installFullscreenMock() {
+  let fullscreenElement = null
+  const previousFullscreenElement = Object.getOwnPropertyDescriptor(document, 'fullscreenElement')
+  const previousExitFullscreen = Object.getOwnPropertyDescriptor(document, 'exitFullscreen')
+  Object.defineProperty(document, 'fullscreenElement', {
+    configurable: true,
+    get: () => fullscreenElement,
+  })
+  document.exitFullscreen = async () => {
+    fullscreenElement = null
+    document.dispatchEvent(new window.Event('fullscreenchange'))
+  }
+  return {
+    attach(element) {
+      element.requestFullscreen = async () => {
+        fullscreenElement = element
+        document.dispatchEvent(new window.Event('fullscreenchange'))
+      }
+    },
+    restore() {
+      if (previousFullscreenElement) Object.defineProperty(document, 'fullscreenElement', previousFullscreenElement)
+      else delete document.fullscreenElement
+      if (previousExitFullscreen) Object.defineProperty(document, 'exitFullscreen', previousExitFullscreen)
+      else delete document.exitFullscreen
+    },
+  }
+}
+
 async function advanceOverlayTimers(milliseconds) {
   mock.timers.tick(milliseconds)
   await flushPromises()
@@ -697,6 +725,150 @@ test('FullPlayer desktop keyboard shortcuts reuse the overlay capture path', asy
     assert.equal(ignored.defaultPrevented, false)
     assert.equal(store.isPlaying, true)
   } finally {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth })
+    window.matchMedia = originalMatchMedia
+  }
+})
+
+test('FullPlayer pointer fullscreen entry moves residual trigger focus to the player root', async () => {
+  channels = [channel('Alpha', 'alpha'), channel('Bravo', 'bravo')]
+  installFetch()
+  const originalWidth = window.innerWidth
+  const originalMatchMedia = window.matchMedia
+  Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1440 })
+  window.matchMedia = (query) => ({
+    matches: query.includes('hover: hover') || query.includes('pointer: fine'),
+    addListener() {},
+    removeListener() {},
+    addEventListener() {},
+    removeEventListener() {},
+  })
+  const fullscreen = installFullscreenMock()
+
+  try {
+    const { store } = await mountPlayer({ current: channels[0] })
+    const root = domElement('.full-player')
+    const media = domElement('.media-card')
+    const trigger = domElement('.desktop-video-overlay [aria-label="全屏"]')
+    fullscreen.attach(media)
+
+    trigger.dispatchEvent(new window.Event('pointerdown', { bubbles: true, cancelable: true }))
+    trigger.focus()
+    trigger.click()
+    await flushPromises()
+
+    assert.equal(document.fullscreenElement, media)
+    assert.equal(document.activeElement, root)
+
+    const dispatchKey = (key, code = key) => {
+      const event = new window.KeyboardEvent('keydown', {
+        key,
+        code,
+        bubbles: true,
+        cancelable: true,
+      })
+      root.dispatchEvent(event)
+      return event
+    }
+    assert.equal(dispatchKey('m', 'KeyM').defaultPrevented, true)
+    assert.equal(store.isMuted, true)
+    assert.equal(dispatchKey('ArrowUp', 'ArrowUp').defaultPrevented, true)
+    assert.equal(store.volume, 0.05)
+    assert.equal(dispatchKey('PageDown', 'PageDown').defaultPrevented, true)
+    await flushPromises()
+    assert.equal(store.currentIptvChannel.name, 'Bravo')
+  } finally {
+    fullscreen.restore()
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth })
+    window.matchMedia = originalMatchMedia
+  }
+})
+
+test('FullPlayer keyboard-focused fullscreen control keeps ordinary shortcuts behind the interactive guard', async () => {
+  installFetch()
+  const fullscreen = installFullscreenMock()
+  try {
+    const { store } = await mountPlayer()
+    const media = domElement('.media-card')
+    const trigger = domElement('.desktop-video-overlay [aria-label="全屏"]')
+    fullscreen.attach(media)
+    trigger.focus()
+
+    const activation = new window.KeyboardEvent('keydown', {
+      key: 'Enter',
+      code: 'Enter',
+      bubbles: true,
+      cancelable: true,
+    })
+    trigger.dispatchEvent(activation)
+    trigger.click()
+    await flushPromises()
+
+    assert.equal(activation.defaultPrevented, false)
+    assert.equal(document.fullscreenElement, media)
+    assert.equal(document.activeElement, trigger)
+
+    const event = new window.KeyboardEvent('keydown', {
+      key: 'm',
+      code: 'KeyM',
+      bubbles: true,
+      cancelable: true,
+    })
+    trigger.dispatchEvent(event)
+
+    assert.equal(event.defaultPrevented, false)
+    assert.equal(store.isMuted, false)
+  } finally {
+    fullscreen.restore()
+  }
+})
+
+test('FullPlayer F shortcut enters and exits fullscreen without pointer focus transfer', async () => {
+  installFetch()
+  const originalWidth = window.innerWidth
+  const originalMatchMedia = window.matchMedia
+  Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1440 })
+  window.matchMedia = (query) => ({
+    matches: query.includes('hover: hover') || query.includes('pointer: fine'),
+    addListener() {},
+    removeListener() {},
+    addEventListener() {},
+    removeEventListener() {},
+  })
+  const fullscreen = installFullscreenMock()
+  try {
+    const { store } = await mountPlayer()
+    const root = domElement('.full-player')
+    const media = domElement('.media-card')
+    fullscreen.attach(media)
+    root.focus()
+
+    const enter = new window.KeyboardEvent('keydown', {
+      key: 'f',
+      code: 'KeyF',
+      bubbles: true,
+      cancelable: true,
+    })
+    root.dispatchEvent(enter)
+    await flushPromises()
+    assert.equal(enter.defaultPrevented, true)
+    assert.equal(document.fullscreenElement, media)
+    assert.equal(document.activeElement, root)
+
+    const exit = new window.KeyboardEvent('keydown', {
+      key: 'f',
+      code: 'KeyF',
+      bubbles: true,
+      cancelable: true,
+    })
+    root.dispatchEvent(exit)
+    await flushPromises()
+    assert.equal(exit.defaultPrevented, true)
+    assert.equal(document.fullscreenElement, null)
+    assert.equal(document.activeElement, root)
+    assert.equal(store.isPlayerExpanded, true)
+  } finally {
+    fullscreen.restore()
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth })
     window.matchMedia = originalMatchMedia
   }
