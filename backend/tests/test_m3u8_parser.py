@@ -30,6 +30,16 @@ class YoutubeParsingTest(unittest.TestCase):
         self.assertEqual(parse_youtube_video_id(url), "")
         self.assertNotEqual(detect_source_type(url), "youtube")
 
+    def test_youtube_video_parser_rejects_non_video_path_and_non_https_authority(self):
+        invalid_urls = (
+            "https://www.youtube.com/playlist?v=abcDEF123_4",
+            "http://www.youtube.com/watch?v=abcDEF123_4",
+            "https://user@www.youtube.com/watch?v=abcDEF123_4",
+        )
+        for url in invalid_urls:
+            with self.subTest(url=url):
+                self.assertEqual(parse_youtube_video_id(url), "")
+
     def test_ytsl_scheme_is_not_supported(self):
         self.assertEqual(adapter_provider("ytsl://abcDEF123_4"), "")
         self.assertEqual(detect_source_type("ytsl://abcDEF123_4"), "hls")

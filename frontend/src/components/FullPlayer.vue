@@ -2472,6 +2472,13 @@ function isYoutubeInputHost(host) {
   return YOUTUBE_URL_HOSTS.has(host)
 }
 
+function isValidYoutubeHttpUrl(parsed) {
+  return parsed.protocol === 'https:'
+    && !parsed.username
+    && !parsed.password
+    && (!parsed.port || parsed.port === '443')
+}
+
 function isAllowedYoutubeEmbedUrl(value) {
   try {
     const parsed = new URL(String(value || '').trim())
@@ -2794,11 +2801,11 @@ function parseYoutubeVideoId(url) {
     if (parsed.protocol === 'youtube:') {
       if (parts.length === 1) id = parts[0] || ''
       else if (parts.length >= 2 && ['live', 'embed', 'shorts'].includes(parts[0])) id = parts[1]
-    } else if (host === 'youtu.be' || host === 'www.youtu.be') {
+    } else if ((host === 'youtu.be' || host === 'www.youtu.be') && isValidYoutubeHttpUrl(parsed)) {
       id = parts[0] || ''
-    } else if (isYoutubeInputHost(host) && !['youtu.be', 'www.youtu.be'].includes(host)) {
-      id = parsed.searchParams.get('v') || ''
-      if (!id && parts.length >= 2 && ['live', 'embed', 'shorts'].includes(parts[0])) {
+    } else if (isYoutubeInputHost(host) && isValidYoutubeHttpUrl(parsed) && !['youtu.be', 'www.youtu.be'].includes(host)) {
+      if (parts[0]?.toLowerCase() === 'watch') id = parsed.searchParams.get('v') || ''
+      if (!id && parts.length >= 2 && ['live', 'embed', 'shorts'].includes(parts[0]?.toLowerCase())) {
         id = parts[1]
       }
     }
@@ -2817,7 +2824,7 @@ function parseYoutubeChannelId(url) {
     if (parsed.protocol === 'youtube:') {
       if (/^UC[a-zA-Z0-9_-]{20,}$/.test(parts[0] || '')) id = parts[0]
       else if (parts.length >= 2 && parts[0] === 'channel') id = parts[1]
-    } else if (isYoutubeInputHost(host) && !['youtu.be', 'www.youtu.be'].includes(host)) {
+    } else if (isYoutubeInputHost(host) && isValidYoutubeHttpUrl(parsed) && !['youtu.be', 'www.youtu.be'].includes(host)) {
       if (parts.length >= 2 && parts[0] === 'channel') id = parts[1]
     }
     return /^UC[a-zA-Z0-9_-]{20,}$/.test(id) ? id : ''

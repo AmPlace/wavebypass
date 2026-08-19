@@ -485,6 +485,18 @@ def _is_youtube_host(host: str) -> bool:
     return host in _YOUTUBE_URL_HOSTS
 
 
+def _is_valid_youtube_http_url(parsed) -> bool:
+    try:
+        return (
+            parsed.scheme.lower() == 'https'
+            and not parsed.username
+            and not parsed.password
+            and (not parsed.port or parsed.port == 443)
+        )
+    except ValueError:
+        return False
+
+
 def _youtube_scheme_parts(parsed) -> list[str]:
     return [part for part in [parsed.netloc, *parsed.path.split('/')] if part]
 
@@ -509,13 +521,13 @@ def parse_youtube_video_id(url: str) -> str:
             candidate = scheme_parts[0]
         elif len(scheme_parts) >= 2 and scheme_parts[0] in {'live', 'embed', 'shorts'}:
             candidate = scheme_parts[1]
-    elif host in {'youtu.be', 'www.youtu.be'}:
+    elif host in {'youtu.be', 'www.youtu.be'} and _is_valid_youtube_http_url(parsed):
         candidate = path_parts[0] if path_parts else ''
-    elif _is_youtube_host(host):
-        query_video_id = parse_qs(parsed.query).get('v', [''])[0]
-        if query_video_id:
-            candidate = query_video_id
-        elif len(path_parts) >= 2 and path_parts[0] in {'live', 'embed', 'shorts'}:
+    elif _is_youtube_host(host) and _is_valid_youtube_http_url(parsed):
+        path_kind = path_parts[0].lower() if path_parts else ''
+        if path_kind == 'watch':
+            candidate = parse_qs(parsed.query).get('v', [''])[0]
+        elif len(path_parts) >= 2 and path_kind in {'live', 'embed', 'shorts'}:
             candidate = path_parts[1]
 
     if _YOUTUBE_VIDEO_ID_RE.fullmatch(candidate or ''):
@@ -543,7 +555,7 @@ def parse_youtube_channel_id(url: str) -> str:
             candidate = parts[0]
         elif len(parts) >= 2 and parts[0] == 'channel':
             candidate = parts[1]
-    elif _is_youtube_host(host):
+    elif _is_youtube_host(host) and _is_valid_youtube_http_url(parsed):
         if len(parts) >= 2 and parts[0] == 'channel':
             candidate = parts[1]
 
@@ -566,7 +578,7 @@ def is_youtube_live_channel_url(url: str) -> bool:
     parts = _youtube_scheme_parts(parsed) if scheme == 'youtube' else [part for part in parsed.path.split('/') if part]
     if scheme == 'youtube':
         return bool(parts and parts[-1].lower() == 'live')
-    if _is_youtube_host(host):
+    if _is_youtube_host(host) and _is_valid_youtube_http_url(parsed):
         return bool(parts and parts[-1].lower() == 'live')
     return False
 

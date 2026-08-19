@@ -46,6 +46,10 @@ function createYoutubeHarness({ videoId = 'video-1', liveEmbedUrl = '' } = {}) {
   const autoplayErrorSource = extractFunction(source, 'function isAutoplayBlockedError(')
   const youtubeErrorSource = extractFunction(source, 'function youtubePlaybackErrorMessage(')
   const youtubeEmbedSource = extractFunction(source, 'function isAllowedYoutubeEmbedUrl(')
+  const youtubeHostSource = extractFunction(source, 'function isYoutubeInputHost(')
+  const youtubeHttpSource = extractFunction(source, 'function isValidYoutubeHttpUrl(')
+  const youtubePartsSource = extractFunction(source, 'function youtubeUrlParts(')
+  const youtubeVideoIdSource = extractFunction(source, 'function parseYoutubeVideoId(')
   const youtubeSource = extractBetween(
     source,
     'async function handleActiveYoutubeFailure(',
@@ -99,12 +103,17 @@ function createYoutubeHarness({ videoId = 'video-1', liveEmbedUrl = '' } = {}) {
     ${autoplayErrorSource}
     ${youtubeErrorSource}
     ${youtubeEmbedSource}
+    ${youtubeHostSource}
+    ${youtubeHttpSource}
+    ${youtubePartsSource}
+    ${youtubeVideoIdSource}
     ${youtubeSource}
     return {
       startYoutubeCandidate,
       isAllowedYoutubeEmbedUrl,
       isAutoplayBlockedError,
       youtubePlaybackErrorMessage,
+      parseYoutubeVideoId,
       setAttempt: (value) => { _playAttemptId = value },
     }
   `)
@@ -272,6 +281,15 @@ test('自动播放错误只识别 NotAllowedError', () => {
   assert.equal(h.harness.isAutoplayBlockedError({ name: 'AbortError', message: 'play() failed' }), false)
   assert.equal(h.harness.isAutoplayBlockedError({ name: 'NotSupportedError' }), false)
   assert.equal(h.harness.isAutoplayBlockedError(new Error('notallowed')), false)
+})
+
+test('YouTube video parser rejects playlist, non-HTTPS, and credentialed URLs', () => {
+  const h = createYoutubeHarness()
+  assert.equal(h.harness.parseYoutubeVideoId('https://www.youtube.com/watch?v=abcDEF123_4'), 'abcDEF123_4')
+  assert.equal(h.harness.parseYoutubeVideoId('https://www.youtube.com/playlist?v=abcDEF123_4'), '')
+  assert.equal(h.harness.parseYoutubeVideoId('http://www.youtube.com/watch?v=abcDEF123_4'), '')
+  assert.equal(h.harness.parseYoutubeVideoId('https://user@www.youtube.com/watch?v=abcDEF123_4'), '')
+  assert.equal(h.harness.parseYoutubeVideoId('http://youtu.be/abcDEF123_4'), '')
 })
 
 test('应用播放状态切换会控制当前 YouTube Player 暂停和恢复', () => {
