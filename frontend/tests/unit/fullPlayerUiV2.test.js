@@ -117,8 +117,14 @@ test('FullPlayer 1.5 desktop metadata uses structured next-programme fields', ()
 })
 
 test('FullPlayer overlay activity hides only stable playback and restores on interaction', () => {
-  assert.match(template, /@pointerenter="handleOverlayActivity"/)
-  assert.match(template, /@pointermove="handleOverlayActivity"/)
+  const rootOpen = template.match(/<div\s+v-show="isPlayerExpanded"[\s\S]*?>/)?.[0] || ''
+  const mediaOpen = template.match(/<section\s+ref="mediaSurfaceRef"[\s\S]*?>/)?.[0] || ''
+  assert.doesNotMatch(rootOpen, /@pointerenter|@pointermove|@mousemove|@pointerdown|@touchstart/)
+  assert.match(mediaOpen, /@pointerenter="handleOverlayActivity"/)
+  assert.match(mediaOpen, /@pointermove="handleOverlayActivity"/)
+  assert.match(mediaOpen, /@mousemove="handleOverlayActivity"/)
+  assert.match(mediaOpen, /@pointerdown="handlePlayerPointerDown"/)
+  assert.match(mediaOpen, /@touchstart="handlePlayerTouchStart"/)
   assert.match(template, /@keydown\.capture="handlePlayerKeyboard"/)
   assert.match(template, /@focusin\.capture="handleOverlayFocusIn"/)
   assert.match(template, /:class="\{ 'is-hidden': isDesktopOverlayHidden \}"/)
@@ -127,6 +133,9 @@ test('FullPlayer overlay activity hides only stable playback and restores on int
   assert.match(fullPlayer, /overlayControlsFocused\.value/)
   assert.match(fullPlayer, /overlayVolumeInteracting\.value/)
   assert.match(fullPlayer, /sourceMenuOpen\.value/)
+  assert.match(fullPlayer, /lastOverlayInputModality/)
+  assert.match(fullPlayer, /isMediaPlayerControlTarget\(target\)/)
+  assert.match(fullPlayer, /overlayControlsFocused\.value = true/)
 })
 
 test('FullPlayer desktop shortcuts reuse the existing capture path without a second global keydown listener', () => {

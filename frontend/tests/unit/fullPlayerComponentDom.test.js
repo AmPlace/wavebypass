@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { after, afterEach, before, beforeEach, test } from 'node:test'
+import { after, afterEach, before, beforeEach, mock, test } from 'node:test'
 import fs from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
@@ -399,6 +399,15 @@ function activeMediaCount() {
   return document.querySelectorAll('.media-video, .youtube-player-host.active iframe').length
 }
 
+function dispatchUiEvent(element, type) {
+  element.dispatchEvent(new window.Event(type, { bubbles: true, cancelable: true }))
+}
+
+async function advanceOverlayTimers(milliseconds) {
+  mock.timers.tick(milliseconds)
+  await flushPromises()
+}
+
 async function settlePlayback() {
   await new Promise(resolve => setTimeout(resolve, 760))
   await flushPromises()
@@ -426,6 +435,7 @@ afterEach(() => {
   for (const wrapper of mountedWrappers.splice(0)) {
     if (wrapper.exists()) wrapper.unmount()
   }
+  mock.timers.reset()
   document.body.innerHTML = '<div id="app"></div>'
 })
 
@@ -690,6 +700,164 @@ test('FullPlayer desktop keyboard shortcuts reuse the overlay capture path', asy
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth })
     window.matchMedia = originalMatchMedia
   }
+})
+
+test('FullPlayer desktop activity is scoped to media surface and rail opening does not pin it', async () => {
+  const originalWidth = window.innerWidth
+  const originalMatchMedia = window.matchMedia
+  Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1440 })
+  window.matchMedia = (query) => ({
+    matches: query.includes('hover: hover') || query.includes('pointer: fine'),
+    addListener() {},
+    removeListener() {},
+    addEventListener() {},
+    removeEventListener() {},
+  })
+  mock.timers.enable({ apis: ['setTimeout'] })
+
+  try {
+    await mountPlayer()
+    await advanceOverlayTimers(0)
+
+    const root = domElement('.full-player')
+    const layout = domElement('.player-layout')
+    const media = domElement('.media-card')
+    const rail = domElement('.side-panel')
+    const overlay = domElement('.desktop-video-overlay')
+    const railControl = rail.querySelector('button')
+
+    await advanceOverlayTimers(2800)
+    assert.equal(overlay.classList.contains('is-hidden'), true)
+
+    root.dispatchEvent(new window.KeyboardEvent('keydown', {
+      key: 'Tab',
+      code: 'Tab',
+      bubbles: true,
+      cancelable: true,
+    }))
+    railControl.focus()
+    await flushPromises()
+    assert.equal(overlay.classList.contains('is-hidden'), true)
+
+    dispatchUiEvent(layout, 'pointermove')
+    dispatchUiEvent(root, 'pointermove')
+    dispatchUiEvent(rail, 'pointermove')
+    assert.equal(overlay.classList.contains('is-hidden'), true)
+
+    dispatchUiEvent(media, 'pointermove')
+    await flushPromises()
+    assert.equal(overlay.classList.contains('is-hidden'), false)
+
+    const railToggle = domElements('.desktop-video-overlay [aria-label="显示频道列表"], .desktop-video-overlay [aria-label="隐藏频道列表"]')[0]
+    assert.ok(railToggle)
+    railToggle.click()
+    await flushPromises()
+    assert.equal(overlay.classList.contains('is-hidden'), false)
+    await advanceOverlayTimers(2800)
+    assert.equal(overlay.classList.contains('is-hidden'), true)
+
+    dispatchUiEvent(media, 'pointermove')
+    dispatchUiEvent(media, 'pointerleave')
+    await advanceOverlayTimers(900)
+    assert.equal(overlay.classList.contains('is-hidden'), true)
+  } finally {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth })
+    window.matchMedia = originalMatchMedia
+  }
+})
+
+test('FullPlayer mobile panel pointer/touch/scroll does not wake a hidden overlay', async () => {
+  mock.timers.enable({ apis: ['setTimeout'] })
+  await mountPlayer()
+  await advanceOverlayTimers(0)
+
+  const overlay = domElement('.mobile-video-overlay')
+  const panel = domElement('.mobile-panel')
+  const media = domElement('.media-card')
+
+  await advanceOverlayTimers(2800)
+  assert.equal(overlay.classList.contains('is-hidden'), true)
+
+  dispatchUiEvent(panel, 'pointermove')
+  dispatchUiEvent(panel, 'touchstart')
+  dispatchUiEvent(panel, 'scroll')
+  assert.equal(overlay.classList.contains('is-hidden'), true)
+
+  dispatchUiEvent(media, 'pointermove')
+  await flushPromises()
+  assert.equal(overlay.classList.contains('is-hidden'), false)
+})
+
+test('FullPlayer keyboard focus pins media controls, panel focus does not, and pointer focus can auto-hide', async () => {
+  mock.timers.enable({ apis: ['setTimeout'] })
+  await mountPlayer()
+  await advanceOverlayTimers(0)
+
+  const root = domElement('.full-player')
+  const overlay = domElement('.mobile-video-overlay')
+  const panelTab = domElement('.mobile-panel-header .panel-tabs button')
+  const muteButton = domElement('.mobile-video-overlay [aria-label="静音"]')
+
+  await advanceOverlayTimers(2800)
+  assert.equal(overlay.classList.contains('is-hidden'), true)
+
+  root.dispatchEvent(new window.KeyboardEvent('keydown', {
+    key: 'Tab',
+    code: 'Tab',
+    bubbles: true,
+    cancelable: true,
+  }))
+  panelTab.focus()
+  await flushPromises()
+  assert.equal(overlay.classList.contains('is-hidden'), true)
+
+  root.dispatchEvent(new window.KeyboardEvent('keydown', {
+    key: 'Tab',
+    code: 'Tab',
+    bubbles: true,
+    cancelable: true,
+  }))
+  muteButton.focus()
+  await flushPromises()
+  assert.equal(overlay.classList.contains('is-hidden'), false)
+  await advanceOverlayTimers(5000)
+  assert.equal(overlay.classList.contains('is-hidden'), false)
+
+  dispatchUiEvent(muteButton, 'pointerdown')
+  muteButton.focus()
+  muteButton.click()
+  await flushPromises()
+  await advanceOverlayTimers(2800)
+  assert.equal(overlay.classList.contains('is-hidden'), true)
+})
+
+test('FullPlayer source popup stays pinned and resumes hide timing after close', async () => {
+  const current = channel('Alpha', 'alpha', {
+    urls: [
+      ...channel('Alpha', 'alpha').urls,
+      { url: 'https://media.example/alpha-backup.m3u8', source_id: 'alpha-backup', source_type: 'hls', probe_status: 'online', is_working: 1 },
+    ],
+  })
+  mock.timers.enable({ apis: ['setTimeout'] })
+  await mountPlayer({ current })
+  await advanceOverlayTimers(0)
+
+  const overlay = domElement('.mobile-video-overlay')
+  const sourceButton = domElement('.mobile-video-overlay [aria-label="切换播放源"]')
+
+  await advanceOverlayTimers(2800)
+  assert.equal(overlay.classList.contains('is-hidden'), true)
+
+  sourceButton.click()
+  await flushPromises()
+  assert.equal(domElement('#iptv-source-menu').getAttribute('style').includes('display: none'), false)
+  await advanceOverlayTimers(5000)
+  assert.equal(overlay.classList.contains('is-hidden'), false)
+
+  sourceButton.click()
+  await flushPromises()
+  await advanceOverlayTimers(900)
+  assert.equal(overlay.classList.contains('is-hidden'), true)
 })
 
 test('FullPlayer loading indicator is delayed, follows loading state, and is hidden when paused', async () => {

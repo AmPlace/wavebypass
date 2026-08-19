@@ -7,11 +7,6 @@
         tabindex="-1"
         class="full-player fixed inset-0 z-50 overflow-y-auto"
         :class="{ 'theme-dark': isFullPlayerDark, 'safari-chrome-refresh': isSafariChromeRefreshing, 'full-player--mobile-layout': isMobileLayout, 'full-player--mobile-iptv': isMobileLayout && isIptvMode, 'full-player--theater': isTheaterLayout }"
-        @pointerenter="handleOverlayActivity"
-        @pointermove="handleOverlayActivity"
-        @mousemove="handleOverlayActivity"
-        @pointerdown="handlePlayerPointerDown"
-        @touchstart="handleOverlayActivity"
         @keydown.capture="handlePlayerKeyboard"
         @focusin.capture="handleOverlayFocusIn"
         @focusout.capture="handleOverlayFocusOut"
@@ -31,6 +26,10 @@
               class="media-card"
               :class="{ 'media-surface--overlay-hidden': isDesktopOverlayHidden }"
               @pointerenter="handleOverlayActivity"
+              @pointermove="handleOverlayActivity"
+              @mousemove="handleOverlayActivity"
+              @pointerdown="handlePlayerPointerDown"
+              @touchstart="handlePlayerTouchStart"
               @pointerleave="scheduleOverlayHide"
             >
               <div class="mobile-live-pill" aria-hidden="true">
@@ -140,8 +139,6 @@
                 class="video-overlay desktop-video-overlay"
                 :class="{ 'is-hidden': isDesktopOverlayHidden }"
                 aria-label="播放控制"
-                @pointerenter="handleOverlayActivity"
-                @pointerleave="scheduleOverlayHide"
               >
                 <div
                   v-if="isIptvMode"
@@ -280,8 +277,6 @@
                 class="video-overlay mobile-video-overlay"
                 :class="{ 'is-hidden': isMobileOverlayHidden, 'is-loading': isLoading, 'is-switching': isSourceSwitching }"
                 aria-label="移动端播放控制"
-                @pointerenter="handleOverlayActivity"
-                @pointerleave="scheduleOverlayHide"
               >
                 <div
                   v-if="isIptvMode && hasCurrentEpgProgram"
@@ -868,6 +863,7 @@ let mediaLayoutRaf = 0
 let hoverCapabilityQuery = null
 let finePointerCapabilityQuery = null
 let overlayHideTimer = null
+let lastOverlayInputModality = 'pointer'
 
 const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
   (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
@@ -1246,16 +1242,41 @@ function isKeyboardTextEntryTarget(target) {
   ))
 }
 
+function isMediaSurfaceTarget(target) {
+  return Boolean(target && mediaSurfaceRef.value?.contains?.(target))
+}
+
+function isMediaPlayerControlTarget(target) {
+  if (!isMediaSurfaceTarget(target)) return false
+  return Boolean(target?.closest?.('button, input, select, textarea, [role="slider"]'))
+}
+
+function shouldShowOverlayForKeyboard(event, code, isInteractiveTarget) {
+  const target = event?.target
+  if (isMediaPlayerControlTarget(target)) return true
+  if (!isMediaSurfaceTarget(target) && target !== playerRootRef.value) return false
+  if (isInteractiveTarget) return false
+  return ['Space', 'KeyK', 'KeyM', 'KeyF', 'PageUp', 'PageDown'].includes(code)
+}
+
 function handlePlayerPointerDown(event) {
+  lastOverlayInputModality = 'pointer'
+  overlayControlsFocused.value = false
   handleOverlayActivity()
   if (!isDesktopLayout.value || isInteractiveKeyboardTarget(event?.target)) return
   playerRootRef.value?.focus?.({ preventScroll: true })
 }
 
+function handlePlayerTouchStart() {
+  lastOverlayInputModality = 'pointer'
+  overlayControlsFocused.value = false
+  handleOverlayActivity()
+}
+
 function handlePlayerKeyboard(event) {
   // Keep this in the existing FullPlayer capture path so shortcuts do not
   // become a second global listener with a separate cleanup/lifecycle.
-  handleOverlayActivity()
+  lastOverlayInputModality = 'keyboard'
   if (
     !isPlayerExpanded.value
     || !isDesktopLayout.value
@@ -1272,6 +1293,15 @@ function handlePlayerKeyboard(event) {
   const isMuteShortcut = code === 'KeyM'
   const isFullscreenShortcut = code === 'KeyF'
   const isChannelShortcut = code === 'PageUp' || code === 'PageDown'
+  const isInteractiveTarget = isInteractiveKeyboardTarget(event?.target)
+  const isMediaControlTarget = isMediaPlayerControlTarget(event?.target)
+
+  if (isMediaControlTarget) {
+    overlayControlsFocused.value = true
+  }
+  if (shouldShowOverlayForKeyboard(event, code, isInteractiveTarget)) {
+    handleOverlayActivity()
+  }
 
   if (key === 'escape') {
     // Escape should close the open source surface even when focus is on one
@@ -1282,7 +1312,7 @@ function handlePlayerKeyboard(event) {
     return
   }
 
-  if (isInteractiveKeyboardTarget(event?.target)) return
+  if (isInteractiveTarget) return
 
   if (!isVolumeShortcut && !isPlaybackShortcut && !isMuteShortcut && !isFullscreenShortcut && !isChannelShortcut) return
 
@@ -1323,15 +1353,17 @@ function endOverlayPinnedInteraction() {
 }
 
 function handleOverlayFocusIn(event) {
-  overlayControlsFocused.value = event?.target !== playerRootRef.value
-  handleOverlayActivity()
+  const target = event?.target
+  overlayControlsFocused.value = lastOverlayInputModality === 'keyboard' && isMediaPlayerControlTarget(target)
+  if (target === playerRootRef.value || isMediaSurfaceTarget(target) || overlayControlsFocused.value) {
+    handleOverlayActivity()
+  }
 }
 
 function handleOverlayFocusOut() {
   nextTick(() => {
-    overlayControlsFocused.value = Boolean(
-      mediaSurfaceRef.value?.contains(document.activeElement),
-    )
+    overlayControlsFocused.value = lastOverlayInputModality === 'keyboard' &&
+      isMediaPlayerControlTarget(document.activeElement)
     scheduleOverlayHide()
   })
 }
