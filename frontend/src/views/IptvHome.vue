@@ -318,16 +318,12 @@ const catalogNotice = computed(() => {
 // second long-lived cache by canonical channel.
 const visualMetadata = ref({})
 
-async function _fetchVisualForKey(key, signal) {
-  return fetchChannelVisual(key, { signal })
-}
-
 function triggerVisualForChannel(ch) {
   const key = ch?.canonical_key || ''
   if (!key) return
   if (visualMetadata.value[key]) return
   const seq = activeRequestSeq
-  loadVisual(key, _fetchVisualForKey).then(entry => {
+  loadVisual(key, (signal) => fetchChannelVisual(key, { signal })).then(entry => {
     // A lazy visual request may outlive a search/group refresh.  It must not
     // project an old source result into the new list, even if the browser
     // fetch implementation does not honor AbortController immediately.

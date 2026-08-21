@@ -99,3 +99,9 @@ test('Huya generic visual candidates prefer stable art and gate offline screensh
     is_live: true,
   }), ['package-logo', 'stable', 'avatar', 'live-screenshot'])
 })
+
+test('IPTV visual loader preserves the channel key while passing AbortSignal', () => {
+  const home = fs.readFileSync(path.join(frontendRoot, 'src/views/IptvHome.vue'), 'utf8')
+  assert.match(home, /loadVisual\(key, \(signal\) => fetchChannelVisual\(key, \{ signal \}\)\)/)
+  assert.doesNotMatch(home, /loadVisual\(key, _fetchVisualForKey\)/)
+})
