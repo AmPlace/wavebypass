@@ -1,13 +1,11 @@
 import asyncio
 import hashlib
-import ipaddress
 import json
 import logging
 import os
 import re
 import secrets
 import shutil
-import socket
 import time
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -26,6 +24,7 @@ from m3u8_parser import (
     parse_youtube_video_id,
 )
 from plugin_runtime.manifest import RANGE_PART_RE, SUPPORTED_CONTRACTS
+from ssrf_guard import UnsafeTargetError, assert_safe_target_url
 
 
 SCHEMA_VERSION = 1
@@ -116,54 +115,28 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _is_private_hostname(host: str) -> bool:
-    value = (host or "").strip().lower().strip("[]")
-    return value in {"localhost", "localhost.localdomain"} or value.endswith(".localhost")
-
-
-def _is_private_ip(value: str) -> bool:
-    try:
-        ip = ipaddress.ip_address(value)
-    except ValueError:
-        return False
-    return (
-        ip.is_private
-        or ip.is_loopback
-        or ip.is_link_local
-        or ip.is_multicast
-        or ip.is_reserved
-        or ip.is_unspecified
-    )
-
-
-async def _resolve_host(host: str) -> list[str]:
-    def _resolve() -> list[str]:
-        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
-        return list({info[4][0] for info in infos})
-
-    return await asyncio.to_thread(_resolve)
-
-
 async def _validate_fetch_url(url: str, *, allow_private: bool = False) -> str:
-    parsed = urlparse((url or "").strip())
-    if parsed.scheme not in {"http", "https"}:
+    normalized = (url or "").strip()
+    parsed = urlparse(normalized)
+    if parsed.scheme.lower() not in {"http", "https"}:
         raise MarketError("只允许 http/https 远程资源", 400)
     if not parsed.hostname:
         raise MarketError("远程资源 URL 缺少 hostname", 400)
 
-    host = parsed.hostname
-    if not allow_private and (_is_private_hostname(host) or _is_private_ip(host)):
-        raise MarketError("安全策略已阻止访问内网或本机地址", 400)
-
-    if not allow_private:
-        try:
-            ips = await _resolve_host(host)
-        except OSError as exc:
-            raise MarketError(f"域名解析失败: {exc}", 502) from exc
-        if not ips:
-            raise MarketError("域名没有可用解析结果", 502)
-        if any(_is_private_ip(ip) for ip in ips):
-            raise MarketError("安全策略已阻止解析到内网或本机地址", 400)
+    try:
+        # Market has one persisted private-network opt-in. Preserve its
+        # historical loopback behavior while keeping hard-block and fake-IP
+        # policy in the shared guard.
+        await assert_safe_target_url(
+            normalized,
+            allow_private=allow_private,
+            allow_loopback=allow_private,
+            allowed_schemes={"http", "https"},
+        )
+    except UnsafeTargetError as exc:
+        message = str(exc)
+        status_code = 502 if message.startswith("域名解析失败:") or message == "域名没有可用解析结果" else 400
+        raise MarketError(message, status_code) from exc
     return parsed.geturl()
 
 
