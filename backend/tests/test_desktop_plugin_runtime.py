@@ -41,7 +41,7 @@ def _write_runtime_metadata(runtime_root: Path, *, abi: str = "cp314") -> None:
 
 class DesktopPluginRuntimeTest(unittest.IsolatedAsyncioTestCase):
     async def test_frozen_backend_uses_sibling_controlled_runtime(self):
-        with tempfile.TemporaryDirectory() as temp:
+        with tempfile.TemporaryDirectory(prefix="waveflow runtime ") as temp:
             root = Path(temp)
             backend = root / "backend"
             python = backend / "python-runtime" / "bin" / "python3.14"
@@ -217,3 +217,90 @@ class DesktopPluginRuntimeTest(unittest.IsolatedAsyncioTestCase):
                     )},
                 ):
             self.assertFalse(_python_backed_rollout_enabled())
+
+
+class DesktopPluginStoreBindingTest(unittest.IsolatedAsyncioTestCase):
+    async def test_same_database_binding_survives_restart(self):
+        from plugin_production import _bind_plugin_store
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "plugins"
+            root.mkdir()
+            (root / ".waveflow-plugin-store.json").write_text(
+                json.dumps({"binding_id": "database-a", "schema_version": 1}),
+                encoding="utf-8",
+            )
+            with mock.patch(
+                "plugin_production.db.get_setting",
+                new=mock.AsyncMock(return_value="database-a"),
+            ), mock.patch(
+                "plugin_production.db.get_or_create_setting",
+                new=mock.AsyncMock(return_value="database-a"),
+            ):
+                await _bind_plugin_store(root)
+                await _bind_plugin_store(root)
+
+    async def test_new_database_cannot_claim_existing_store(self):
+        from plugin_production import _bind_plugin_store
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "plugins"
+            root.mkdir()
+            (root / ".waveflow-plugin-store.json").write_text(
+                json.dumps({"binding_id": "database-a", "schema_version": 1}),
+                encoding="utf-8",
+            )
+            with mock.patch(
+                "plugin_production.db.get_setting",
+                new=mock.AsyncMock(return_value=""),
+            ), mock.patch(
+                "plugin_production.db.get_or_create_setting",
+                new=mock.AsyncMock(),
+            ) as get_or_create:
+                with self.assertRaises(PluginError) as raised:
+                    await _bind_plugin_store(root)
+                self.assertEqual(raised.exception.code, "ARTIFACT_INVALID")
+                get_or_create.assert_not_awaited()
+
+    async def test_different_database_cannot_reuse_existing_store(self):
+        from plugin_production import _bind_plugin_store
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "plugins"
+            root.mkdir()
+            (root / ".waveflow-plugin-store.json").write_text(
+                json.dumps({"binding_id": "database-a", "schema_version": 1}),
+                encoding="utf-8",
+            )
+            with mock.patch(
+                "plugin_production.db.get_setting",
+                new=mock.AsyncMock(return_value="database-b"),
+            ), mock.patch(
+                "plugin_production.db.get_or_create_setting",
+                new=mock.AsyncMock(return_value="database-b"),
+            ):
+                with self.assertRaises(PluginError) as raised:
+                    await _bind_plugin_store(root)
+                self.assertEqual(raised.exception.code, "ARTIFACT_INVALID")
+
+    async def test_empty_store_gets_one_durable_binding(self):
+        from plugin_production import _bind_plugin_store
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "plugins"
+            root.mkdir()
+            with mock.patch(
+                "plugin_production.db.get_setting",
+                new=mock.AsyncMock(return_value=""),
+            ), mock.patch(
+                "plugin_production.db.get_or_create_setting",
+                new=mock.AsyncMock(return_value="database-new"),
+            ), mock.patch(
+                "plugin_production.db.list_plugin_artifact_references",
+                new=mock.AsyncMock(return_value=[]),
+            ):
+                await _bind_plugin_store(root)
+            self.assertEqual(
+                json.loads((root / ".waveflow-plugin-store.json").read_text(encoding="utf-8")),
+                {"binding_id": "database-new", "schema_version": 1},
+            )

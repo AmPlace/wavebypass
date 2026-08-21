@@ -30,7 +30,28 @@ function getBackendPath() {
     return path.join(process.resourcesPath, 'backend', executableName)
   }
 
-  return path.join(process.cwd(), 'backend_dist', executableName)
+  return path.join(app.getAppPath(), 'backend_dist', executableName)
+}
+
+function assertBundledPluginRuntime(backendPath) {
+  // The frozen backend currently supports the macOS arm64 sidecar contract.
+  // Validate the bundle before spawning a backend that would otherwise report
+  // healthy while silently disabling the Plugin subsystem.
+  if (process.platform !== 'darwin' || process.arch !== 'arm64') return
+
+  const runtimeRoot = path.join(path.dirname(backendPath), 'python-runtime')
+  const metadataPath = path.join(runtimeRoot, 'runtime.json')
+  const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'))
+  if (metadata.executable !== 'bin/python3.14') {
+    throw new Error('Desktop Python runtime metadata has an unsupported executable')
+  }
+
+  const executable = path.resolve(runtimeRoot, metadata.executable)
+  if (executable !== path.join(runtimeRoot, 'bin', 'python3.14') ||
+      !fs.existsSync(executable) || !fs.statSync(executable).isFile() ||
+      (fs.statSync(executable).mode & 0o111) === 0) {
+    throw new Error('Desktop Python runtime is missing or not executable')
+  }
 }
 
 function getFrontendIndexPath() {
@@ -97,6 +118,7 @@ function startBackendInDebugTerminal(backendPath, backendArgs) {
 
 function startBackend() {
   const backendPath = getBackendPath()
+  assertBundledPluginRuntime(backendPath)
   const backendArgs = getBackendArgs()
 
   if (DESKTOP_DEBUG) {

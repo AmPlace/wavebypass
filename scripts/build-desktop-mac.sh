@@ -36,10 +36,25 @@ fi
 cd "$ROOT_DIR"
 
 echo "== Copy backend binary =="
-rm -rf backend_dist
-mkdir -p backend_dist
-cp -a backend/dist/waveflow-backend/. backend_dist/
-chmod +x backend_dist/waveflow-backend
+BACKEND_DIST="$ROOT_DIR/backend_dist"
+BACKEND_DIST_STAGING="$(mktemp -d "$ROOT_DIR/.backend_dist.staging.XXXXXX")"
+BACKEND_DIST_PREVIOUS=""
+PUBLISHED_BACKEND_DIST=0
+
+restore_backend_dist() {
+  local exit_code=$?
+  if [[ "$PUBLISHED_BACKEND_DIST" != "1" ]]; then
+    rm -rf -- "$BACKEND_DIST_STAGING"
+    if [[ -n "$BACKEND_DIST_PREVIOUS" && ! -e "$BACKEND_DIST" && -e "$BACKEND_DIST_PREVIOUS" ]]; then
+      mv "$BACKEND_DIST_PREVIOUS" "$BACKEND_DIST"
+    fi
+  fi
+  exit "$exit_code"
+}
+trap restore_backend_dist EXIT
+
+cp -a backend/dist/waveflow-backend/. "$BACKEND_DIST_STAGING/"
+chmod +x "$BACKEND_DIST_STAGING/waveflow-backend"
 
 echo "== Bundle controlled Python runtime =="
 if [ -z "${WAVEFLOW_DESKTOP_PYTHON_RUNTIME_PKG:-}" ]; then
@@ -52,9 +67,10 @@ if [ -z "${WAVEFLOW_DESKTOP_CA_BUNDLE_WHEEL:-}" ]; then
 fi
 bash "$ROOT_DIR/scripts/build-desktop-python-runtime.sh" \
   "$WAVEFLOW_DESKTOP_PYTHON_RUNTIME_PKG" \
-  "$ROOT_DIR/backend_dist/python-runtime" \
+  "$BACKEND_DIST_STAGING/python-runtime" \
   "${WAVEFLOW_DESKTOP_PYTHON_RUNTIME_LOCK:-$ROOT_DIR/desktop_runtime/cpython-3.14.7-macos11-arm64.json}" \
   "${WAVEFLOW_DESKTOP_CA_BUNDLE_WHEEL:-}"
+bash "$ROOT_DIR/scripts/verify-desktop-python-runtime.sh" "$BACKEND_DIST_STAGING/python-runtime"
 
 echo "== Bundle ffmpeg =="
 FFMPEG_SRC=$(ls "$ROOT_DIR/ffmpeg/macos-arm64/ffmpeg" 2>/dev/null)
@@ -64,11 +80,25 @@ if [ -z "$FFMPEG_SRC" ]; then
   FFMPEG_SRC="$ROOT_DIR/ffmpeg/macos-arm64/ffmpeg"
 fi
 if [ -f "$FFMPEG_SRC" ]; then
-  cp "$FFMPEG_SRC" "$ROOT_DIR/backend_dist/ffmpeg"
-  chmod +x "$ROOT_DIR/backend_dist/ffmpeg"
-  echo "  Bundled: $(file "$ROOT_DIR/backend_dist/ffmpeg" | cut -d: -f2-)"
+  cp "$FFMPEG_SRC" "$BACKEND_DIST_STAGING/ffmpeg"
+  chmod +x "$BACKEND_DIST_STAGING/ffmpeg"
+  echo "  Bundled: $(file "$BACKEND_DIST_STAGING/ffmpeg" | cut -d: -f2-)"
 else
   echo "  WARNING: ffmpeg not found, RTSP/HLS will NOT work"
+fi
+
+echo "== Publish complete backend bundle =="
+if [[ -e "$BACKEND_DIST" || -L "$BACKEND_DIST" ]]; then
+  BACKEND_DIST_PREVIOUS="$(mktemp -d "${TMPDIR:-/tmp}/waveflow-backend-dist.previous.XXXXXX")"
+  rmdir "$BACKEND_DIST_PREVIOUS"
+  mv "$BACKEND_DIST" "$BACKEND_DIST_PREVIOUS"
+fi
+mv "$BACKEND_DIST_STAGING" "$BACKEND_DIST"
+BACKEND_DIST_STAGING=""
+PUBLISHED_BACKEND_DIST=1
+if [[ -n "$BACKEND_DIST_PREVIOUS" ]]; then
+  rm -rf -- "$BACKEND_DIST_PREVIOUS"
+  BACKEND_DIST_PREVIOUS=""
 fi
 
 echo "== Install desktop deps =="
