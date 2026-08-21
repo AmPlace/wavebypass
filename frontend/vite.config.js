@@ -11,12 +11,13 @@ export default defineConfig(({ mode }) => {
     plugins: [
       vue(),
       !isDesktop && VitePWA({
-        registerType: 'autoUpdate',
+        registerType: 'prompt',
         includeAssets: ['logos/*.png'],
         manifest: {
           name: 'WaveFlow Radio',
           short_name: 'WaveFlow',
           description: '极简电台聚合播放器',
+          lang: 'zh-CN',
           theme_color: '#f8f8f7',
           background_color: '#f8f8f7',
           display: 'standalone',
@@ -33,22 +34,19 @@ export default defineConfig(({ mode }) => {
         workbox: {
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
           navigateFallback: 'index.html',
-          navigateFallbackDenylist: [/^\/api/],
+          navigateFallbackDenylist: [/^\/api(?:\/|$)/],
           runtimeCaching: [
             {
-              // /api/stations 和 /api/config：stale-while-revalidate
-              urlPattern: /^\/api\/(stations|config)$/,
-              handler: 'StaleWhileRevalidate',
-              options: {
-                cacheName: 'api-config',
-                expiration: { maxEntries: 10, maxAgeSeconds: 3600 },
-              },
+              urlPattern: /^\/api(?:\/|$)/,
+              handler: 'NetworkOnly',
             },
             {
-              urlPattern: /\/logos\/.*\.(png|jpg|svg)$/,
-              handler: 'CacheFirst',
+              urlPattern: /^\/logos\/.*\.(png|jpe?g|svg)$/i,
+              handler: 'NetworkFirst',
               options: {
-                cacheName: 'station-logos',
+                cacheName: 'waveflow-logo-assets-v1',
+                networkTimeoutSeconds: 3,
+                cacheableResponse: { statuses: [200] },
                 expiration: { maxEntries: 100, maxAgeSeconds: 30 * 24 * 3600 },
               },
             },
