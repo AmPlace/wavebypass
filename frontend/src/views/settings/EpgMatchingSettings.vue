@@ -401,6 +401,8 @@ const sourceHealthLabel = epgSourceHealthLabel
 
 const overview = ref(null)
 const sourceOptions = ref([])
+let overviewController = null
+let sourceOptionsController = null
 const items = ref([])
 const page = ref(1)
 const total = ref(0)
@@ -433,6 +435,8 @@ let catalogController = null
 
 const actionBusy = ref('')
 const confirmation = ref('')
+let actionRequestId = 0
+let componentDisposed = false
 
 const actionPending = computed(() => Boolean(actionBusy.value))
 const pageCount = computed(() => Math.max(1, Math.ceil(total.value / PAGE_SIZE)))
@@ -469,19 +473,26 @@ function targetLabel(item) {
 }
 
 async function loadOverview() {
+  overviewController?.abort()
+  const controller = new AbortController()
+  overviewController = controller
   try {
-    overview.value = await fetchEpgMatchingOverview()
+    const result = await fetchEpgMatchingOverview({ signal: controller.signal })
+    if (!controller.signal.aborted && !componentDisposed) overview.value = result
   } catch {
-    overview.value = null
+    if (!controller.signal.aborted && !componentDisposed) overview.value = null
   }
 }
 
 async function loadSourceOptions() {
+  sourceOptionsController?.abort()
+  const controller = new AbortController()
+  sourceOptionsController = controller
   try {
-    const rows = await fetchEpgSources()
-    sourceOptions.value = Array.isArray(rows) ? rows : []
+    const rows = await fetchEpgSources({ signal: controller.signal })
+    if (!controller.signal.aborted && !componentDisposed) sourceOptions.value = Array.isArray(rows) ? rows : []
   } catch {
-    sourceOptions.value = []
+    if (!controller.signal.aborted && !componentDisposed) sourceOptions.value = []
   }
 }
 
@@ -500,7 +511,7 @@ async function loadList() {
       query: searchQuery.value,
       signal: controller.signal,
     })
-    if (controller.signal.aborted) return
+    if (controller.signal.aborted || componentDisposed) return
     items.value = Array.isArray(result?.items) ? result.items : []
     total.value = Number(result?.total || 0)
     const maxPage = Math.max(1, Math.ceil(total.value / PAGE_SIZE))
@@ -509,13 +520,13 @@ async function loadList() {
       await loadList()
     }
   } catch (error) {
-    if (!controller.signal.aborted) {
+    if (!controller.signal.aborted && !componentDisposed) {
       listError.value = epgMatchingErrorMessage(error, '无法加载频道匹配，请稍后重试')
       items.value = []
       total.value = 0
     }
   } finally {
-    if (listController === controller) listLoading.value = false
+    if (listController === controller && !componentDisposed) listLoading.value = false
   }
 }
 
@@ -580,11 +591,11 @@ async function loadDetail(logicalChannelId) {
       candidateLimit: 10,
       signal: controller.signal,
     })
-    if (!controller.signal.aborted) detail.value = result
+    if (!controller.signal.aborted && !componentDisposed) detail.value = result
   } catch (error) {
-    if (!controller.signal.aborted) detailError.value = epgMatchingErrorMessage(error, '无法加载频道详情，请稍后重试')
+    if (!controller.signal.aborted && !componentDisposed) detailError.value = epgMatchingErrorMessage(error, '无法加载频道详情，请稍后重试')
   } finally {
-    if (detailController === controller) detailLoading.value = false
+    if (detailController === controller && !componentDisposed) detailLoading.value = false
   }
 }
 
@@ -640,17 +651,17 @@ async function loadCatalog() {
       availability: 'all',
       signal: controller.signal,
     })
-    if (controller.signal.aborted) return
+    if (controller.signal.aborted || componentDisposed) return
     catalogItems.value = Array.isArray(result?.items) ? result.items : []
     catalogTotal.value = Number(result?.total || 0)
   } catch (error) {
-    if (!controller.signal.aborted) {
+    if (!controller.signal.aborted && !componentDisposed) {
       catalogError.value = epgMatchingErrorMessage(error, '无法搜索节目单频道，请稍后重试')
       catalogItems.value = []
       catalogTotal.value = 0
     }
   } finally {
-    if (catalogController === controller) catalogLoading.value = false
+    if (catalogController === controller && !componentDisposed) catalogLoading.value = false
   }
 }
 
@@ -691,39 +702,45 @@ async function bindSelectedCatalogTarget() {
   if (!selectedCatalogTarget.value || !selectedLogicalId.value || actionBusy.value) return
   const identity = epgCatalogTarget(selectedCatalogTarget.value)
   if (!Number.isInteger(identity.epg_source_id) || identity.epg_source_id <= 0 || !identity.epg_channel_id) return
+  const requestId = ++actionRequestId
   actionBusy.value = 'binding'
   try {
     await setManualEpgBinding(selectedLogicalId.value, identity)
+    if (requestId !== actionRequestId || componentDisposed) return
     toastStore.success('节目单已绑定并锁定')
     closeCatalog()
     await refreshCurrentState()
   } catch (error) {
-    toastStore.error(epgMatchingErrorMessage(error, '节目单绑定失败，请稍后重试'))
+    if (requestId === actionRequestId && !componentDisposed) toastStore.error(epgMatchingErrorMessage(error, '节目单绑定失败，请稍后重试'))
   } finally {
-    actionBusy.value = ''
+    if (requestId === actionRequestId && !componentDisposed) actionBusy.value = ''
   }
 }
 
 async function setBindingLock(locked) {
   if (!selectedLogicalId.value || actionBusy.value) return
+  const requestId = ++actionRequestId
   actionBusy.value = 'lock'
   try {
     if (locked) await lockEpgBinding(selectedLogicalId.value)
     else await unlockEpgBinding(selectedLogicalId.value)
+    if (requestId !== actionRequestId || componentDisposed) return
     toastStore.success(locked ? '节目单绑定已锁定' : '已解锁，当前节目单仍保留')
     await refreshCurrentState()
   } catch (error) {
-    toastStore.error(epgMatchingErrorMessage(error, locked ? '锁定失败，请稍后重试' : '解锁失败，请稍后重试'))
+    if (requestId === actionRequestId && !componentDisposed) toastStore.error(epgMatchingErrorMessage(error, locked ? '锁定失败，请稍后重试' : '解锁失败，请稍后重试'))
   } finally {
-    actionBusy.value = ''
+    if (requestId === actionRequestId && !componentDisposed) actionBusy.value = ''
   }
 }
 
 async function restoreAutomatic() {
   if (!selectedLogicalId.value || actionBusy.value) return
+  const requestId = ++actionRequestId
   actionBusy.value = 'restore'
   try {
     const result = await restoreAutomaticEpgBinding(selectedLogicalId.value)
+    if (requestId !== actionRequestId || componentDisposed) return
     confirmation.value = ''
     if (result?.warning?.code === 'maintenance_degraded') {
       toastStore.warning('已恢复自动匹配，自动维护暂时未完成，稍后会重试')
@@ -732,24 +749,26 @@ async function restoreAutomatic() {
     }
     await refreshCurrentState()
   } catch (error) {
-    toastStore.error(epgMatchingErrorMessage(error, '恢复自动匹配失败，请稍后重试'))
+    if (requestId === actionRequestId && !componentDisposed) toastStore.error(epgMatchingErrorMessage(error, '恢复自动匹配失败，请稍后重试'))
   } finally {
-    actionBusy.value = ''
+    if (requestId === actionRequestId && !componentDisposed) actionBusy.value = ''
   }
 }
 
 async function disableEpg() {
   if (!selectedLogicalId.value || actionBusy.value) return
+  const requestId = ++actionRequestId
   actionBusy.value = 'no_epg'
   try {
     await disableLogicalChannelEpg(selectedLogicalId.value)
+    if (requestId !== actionRequestId || componentDisposed) return
     confirmation.value = ''
     toastStore.success('这个频道已设置为不使用节目单')
     await refreshCurrentState()
   } catch (error) {
-    toastStore.error(epgMatchingErrorMessage(error, '节目单设置失败，请稍后重试'))
+    if (requestId === actionRequestId && !componentDisposed) toastStore.error(epgMatchingErrorMessage(error, '节目单设置失败，请稍后重试'))
   } finally {
-    actionBusy.value = ''
+    if (requestId === actionRequestId && !componentDisposed) actionBusy.value = ''
   }
 }
 
@@ -760,6 +779,10 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  componentDisposed = true
+  actionRequestId += 1
+  overviewController?.abort()
+  sourceOptionsController?.abort()
   listController?.abort()
   detailController?.abort()
   catalogController?.abort()

@@ -51,6 +51,8 @@
                   </template>
                   <span v-if="source.automation?.running" class="text-[var(--text-primary)]">正在更新</span>
                 </div>
+                <p v-if="source.refresh?.failure" class="mt-2 text-xs leading-5 text-red-600 dark:text-red-300">{{ safeAdminDiagnostic(source.refresh.failure) }}</p>
+                <p v-if="source.automation?.last_run_status === 'partial'" class="mt-2 text-xs leading-5 text-amber-700 dark:text-amber-300">节目单数据可用，后续绑定维护未完全完成</p>
               </div>
             </div>
 
@@ -220,7 +222,7 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import {
   createEpgSource,
   deleteEpgSource,
@@ -231,6 +233,7 @@ import {
   updateEpgSource,
 } from '../../api/epgManagement'
 import { useToastStore } from '../../stores/toast'
+import { safeAdminDiagnostic } from '../../api/adminUi.js'
 import {
   buildEpgSourceCreatePayload,
   buildEpgSourceUpdatePayload,
@@ -265,6 +268,9 @@ const deleteImpact = ref(null)
 const deleteImpactLoading = ref(false)
 const deleteAcknowledged = ref(false)
 const deleteSaving = ref(false)
+let loadController = null
+let deleteImpactController = null
+let componentDisposed = false
 
 const customSources = computed(() => sources.value.filter((source) => source.source_origin === 'custom'))
 const editorTitleId = computed(() => editorMode.value === 'create' ? 'create-epg-source-title' : 'edit-epg-source-title')
@@ -300,20 +306,26 @@ function isUpdating(sourceId) {
 }
 
 async function loadSources(options = {}) {
+  if (componentDisposed) return
+  loadController?.abort()
+  const controller = new AbortController()
+  loadController = controller
   const background = options?.background === true
   if (!background) {
     loading.value = true
     loadError.value = ''
   }
   try {
-    const result = await fetchEpgSources()
+    const result = await fetchEpgSources({ signal: controller.signal })
+    if (controller.signal.aborted || componentDisposed) return
     sources.value = Array.isArray(result) ? result : []
   } catch (error) {
+    if (controller.signal.aborted || componentDisposed) return
     const message = epgSourceErrorMessage(error, '无法加载节目单来源，请稍后重试')
     if (background) toastStore.warning('操作已完成，但来源状态暂时无法重新加载')
     else loadError.value = message
   } finally {
-    if (!background) loading.value = false
+    if (loadController === controller && !componentDisposed && !background) loading.value = false
   }
 }
 
@@ -322,9 +334,12 @@ async function toggleSource(source, enabled) {
   setBusy(updatingIds, source.id, true)
   try {
     await updateEpgSource(source.id, { enabled })
+    if (componentDisposed) return
     await loadSources({ background: true })
+    if (componentDisposed) return
     toastStore.success(enabled ? '节目单来源已启用' : '节目单来源已停用')
   } catch (error) {
+    if (componentDisposed) return
     toastStore.error(epgSourceErrorMessage(error, '启用状态更新失败'))
     await loadSources({ background: true })
   } finally {
@@ -337,11 +352,13 @@ async function runRefresh(source) {
   setBusy(refreshingIds, source.id, true)
   try {
     const result = await refreshEpgSource(source.id)
+    if (componentDisposed) return
     if (result?.status === 'success') toastStore.success('节目单已更新')
     else if (result?.status === 'partial') toastStore.warning(result?.message || '节目单已更新，但部分维护任务未完成')
     else toastStore.error(result?.message || '节目单更新失败，当前继续使用已有数据')
     await loadSources({ background: true })
   } catch (error) {
+    if (componentDisposed) return
     toastStore.error(epgSourceErrorMessage(error, '节目单刷新失败，请稍后重试'))
   } finally {
     setBusy(refreshingIds, source.id, false)
@@ -388,9 +405,11 @@ async function saveEditor() {
   try {
     if (editorMode.value === 'create') {
       await createEpgSource(buildEpgSourceCreatePayload(editorDraft))
+      if (componentDisposed) return
       toastStore.success('节目单来源已添加')
     } else {
       await updateEpgSource(editingSource.value.id, buildEpgSourceUpdatePayload(editorDraft))
+      if (componentDisposed) return
       toastStore.success('节目单来源已保存')
     }
     editorOpen.value = false
@@ -398,6 +417,7 @@ async function saveEditor() {
     resetEditorDraft()
     await loadSources({ background: true })
   } catch (error) {
+    if (componentDisposed) return
     editorError.value = epgSourceErrorMessage(error, editorMode.value === 'create' ? '节目单来源添加失败' : '节目单来源保存失败')
   } finally {
     editorSaving.value = false
@@ -406,23 +426,30 @@ async function saveEditor() {
 
 async function openDeleteDialog(source) {
   if (!source?.capabilities?.can_delete) return
+  deleteImpactController?.abort()
+  const controller = new AbortController()
+  deleteImpactController = controller
   deleteSource.value = source
   deleteImpact.value = null
   deleteAcknowledged.value = false
   deleteDialogOpen.value = true
   deleteImpactLoading.value = true
   try {
-    deleteImpact.value = await fetchEpgSourceDeleteImpact(source.id)
+    const impact = await fetchEpgSourceDeleteImpact(source.id, { signal: controller.signal })
+    if (controller.signal.aborted || componentDisposed || deleteSource.value?.id !== source.id) return
+    deleteImpact.value = impact
   } catch (error) {
+    if (controller.signal.aborted || componentDisposed) return
     closeDeleteDialog()
     toastStore.error(epgSourceErrorMessage(error, '无法检查删除影响，请稍后重试'))
   } finally {
-    deleteImpactLoading.value = false
+    if (deleteImpactController === controller && !componentDisposed) deleteImpactLoading.value = false
   }
 }
 
 function closeDeleteDialog() {
   if (deleteSaving.value) return
+  deleteImpactController?.abort()
   deleteDialogOpen.value = false
   deleteSource.value = null
   deleteImpact.value = null
@@ -435,6 +462,7 @@ async function confirmDelete() {
   deleteSaving.value = true
   try {
     await deleteEpgSource(deleteSource.value.id, { confirm: deleteRequiresAck.value })
+    if (componentDisposed) return
     const deletedName = sourceName(deleteSource.value)
     deleteDialogOpen.value = false
     deleteSource.value = null
@@ -443,6 +471,7 @@ async function confirmDelete() {
     await loadSources({ background: true })
     toastStore.success(`已删除“${deletedName}”`)
   } catch (error) {
+    if (componentDisposed) return
     toastStore.error(epgSourceErrorMessage(error, '节目单来源删除失败'))
   } finally {
     deleteSaving.value = false
@@ -450,6 +479,11 @@ async function confirmDelete() {
 }
 
 onMounted(loadSources)
+onBeforeUnmount(() => {
+  componentDisposed = true
+  loadController?.abort()
+  deleteImpactController?.abort()
+})
 </script>
 
 <style scoped>

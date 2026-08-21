@@ -122,7 +122,7 @@
           type="button"
           class="market-action-icon market-action-overflowable"
           :class="{ 'is-spinning': refreshing }"
-          :disabled="refreshing"
+          :disabled="refreshing || importLoading || updating"
           aria-label="刷新"
           :title="refreshing ? '刷新中…' : '刷新'"
           @click="handleRefresh"
@@ -137,7 +137,7 @@
           v-if="hasUpdatableInstalled"
           type="button"
           class="market-action-pill market-action-update market-action-overflowable"
-          :disabled="updating"
+          :disabled="updating || importLoading"
           @click="handleUpdateAllInstalled"
         >
           {{ updating ? '更新中…' : `更新 ${updatableInstalledCount}` }}
@@ -159,17 +159,23 @@
           </button>
           <div v-if="overflowMenuOpen" class="market-more-menu market-overflow-menu" @click.stop>
             <button type="button" class="market-menu-item" @click="closeOverflowMenuAnd(openSourceDialog)">Market 源管理</button>
-            <button type="button" class="market-menu-item" :disabled="refreshing" @click="closeOverflowMenuAnd(handleRefresh)">{{ refreshing ? '刷新中…' : '刷新全部' }}</button>
-            <button v-if="hasUpdatableInstalled" type="button" class="market-menu-item" :disabled="updating" @click="closeOverflowMenuAnd(handleUpdateAllInstalled)">更新全部 · {{ updatableInstalledCount }}</button>
+            <button type="button" class="market-menu-item" :disabled="refreshing || importLoading || updating" @click="closeOverflowMenuAnd(handleRefresh)">{{ refreshing ? '刷新中…' : '刷新全部' }}</button>
+            <button v-if="hasUpdatableInstalled" type="button" class="market-menu-item" :disabled="updating || importLoading" @click="closeOverflowMenuAnd(handleUpdateAllInstalled)">更新全部 · {{ updatableInstalledCount }}</button>
           </div>
         </div>
       </div>
     </section>
 
-    <p v-if="error" class="mb-4 rounded-[14px] border border-red-200/60 bg-red-50/80 px-4 py-3 text-sm text-red-600 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-300">{{ error }}</p>
+    <p v-if="error && packages.length" class="mb-4 rounded-[14px] border border-red-200/60 bg-red-50/80 px-4 py-3 text-sm text-red-600 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-300">{{ error }}</p>
 
     <section v-if="loading" class="market-grid">
       <div v-for="i in 6" :key="i" class="market-card-skeleton"></div>
+    </section>
+
+    <section v-else-if="error && !packages.length" class="rounded-[14px] border border-red-200/60 bg-red-50/80 px-6 py-14 text-center dark:border-red-900/40 dark:bg-red-950/30" role="alert">
+      <p class="text-[15px] font-medium text-red-600 dark:text-red-300">Market 加载失败</p>
+      <p class="mt-2 text-[13px] text-[var(--text-secondary)]">{{ error }}</p>
+      <button type="button" class="mx-auto mt-4 market-btn-ghost" @click="loadPackages">重试</button>
     </section>
 
     <section v-else-if="filteredPackages.length" class="market-grid">
@@ -227,7 +233,7 @@
             v-else-if="installState(pkg) === 'installed'"
             type="button"
             class="market-btn-status"
-            :disabled="importLoading"
+            :disabled="refreshing || importLoading || updating"
             @click.stop="openDetail(pkg)"
           >
             已安装
@@ -237,7 +243,7 @@
             <button
               type="button"
               class="market-btn-primary"
-              :disabled="importLoading || !packageInstallable(pkg)"
+              :disabled="refreshing || importLoading || updating || !packageInstallable(pkg)"
               @click.stop="handleReinstall(pkg)"
             >
               {{ importLoading && actingId === pkg.id ? packageActionLabel(pkg, 'updating') : packageActionLabel(pkg, 'update') }}
@@ -247,7 +253,7 @@
             v-else
             type="button"
             class="market-btn-primary"
-            :disabled="importLoading || !packageInstallable(pkg)"
+            :disabled="refreshing || importLoading || updating || !packageInstallable(pkg)"
             @click.stop="handleImport(pkg)"
           >
             {{ importLoading && actingId === pkg.id ? packageActionLabel(pkg, 'installing') : packageActionLabel(pkg, 'install') }}
@@ -268,8 +274,8 @@
             </button>
             <div v-if="menuOpenId === pkg.id" class="market-more-menu" @click.stop>
               <button v-if="pkg.previewable && !isPluginPackage(pkg)" type="button" class="market-menu-item" @click="closeMenuAnd(() => openDetail(pkg, { showAllChannels: true }))">查看频道列表</button>
-              <button v-if="pkg.installed" type="button" class="market-menu-item" :disabled="importLoading" @click="closeMenuAnd(() => handleUninstall(pkg))">{{ packageActionLabel(pkg, 'uninstall') }}</button>
-              <button v-if="pkg.installed && pkg.update_available" type="button" class="market-menu-item" :disabled="importLoading" @click="closeMenuAnd(() => handleReinstall(pkg))">立即更新</button>
+              <button v-if="pkg.installed" type="button" class="market-menu-item" :disabled="refreshing || importLoading || updating" @click="closeMenuAnd(() => handleUninstall(pkg))">{{ packageActionLabel(pkg, 'uninstall') }}</button>
+              <button v-if="pkg.installed && pkg.update_available" type="button" class="market-menu-item" :disabled="refreshing || importLoading || updating" @click="closeMenuAnd(() => handleReinstall(pkg))">立即更新</button>
             </div>
           </div>
         </div>
@@ -415,7 +421,7 @@
                   :checked="selectedPackage.auto_update"
                   type="checkbox"
                   class="mt-1 size-4 shrink-0 rounded accent-neutral-950 dark:accent-white"
-                  :disabled="installConfigLoading"
+                  :disabled="refreshing || installConfigLoading || importLoading || updating"
                   @change="handleAutoUpdateChange(selectedPackage, $event)"
                 />
               </label>
@@ -445,7 +451,7 @@
               v-else-if="installState(selectedPackage || {}) === 'update'"
               type="button"
               class="market-btn-primary"
-              :disabled="importLoading || !packageInstallable(selectedPackage)"
+              :disabled="refreshing || importLoading || updating || !packageInstallable(selectedPackage)"
               @click="handleReinstall(selectedPackage)"
             >
               {{ importLoading ? packageActionLabel(selectedPackage, 'updating') : packageActionLabel(selectedPackage, 'update') }}
@@ -454,7 +460,7 @@
               v-else-if="installState(selectedPackage || {}) === 'installed'"
               type="button"
               class="market-btn-ghost"
-              :disabled="refreshing"
+              :disabled="refreshing || importLoading || updating"
               @click="handleCheckUpdate"
             >
               检查更新
@@ -463,7 +469,7 @@
               v-else
               type="button"
               class="market-btn-primary"
-              :disabled="importLoading || !packageInstallable(selectedPackage)"
+              :disabled="refreshing || importLoading || updating || !packageInstallable(selectedPackage)"
               @click="handleImport(selectedPackage)"
             >
               {{ importLoading ? packageActionLabel(selectedPackage, 'installing') : packageActionLabel(selectedPackage, 'install') }}
@@ -482,7 +488,7 @@
                 </svg>
               </button>
               <div v-if="menuOpenId === `detail-${selectedPackage.id}`" class="market-more-menu market-detail-menu" @click.stop>
-                <button type="button" class="market-menu-item" :disabled="importLoading" @click="closeMenuAnd(() => handleUninstall(selectedPackage))">{{ packageActionLabel(selectedPackage, 'uninstall') }}</button>
+                <button type="button" class="market-menu-item" :disabled="refreshing || importLoading || updating" @click="closeMenuAnd(() => handleUninstall(selectedPackage))">{{ packageActionLabel(selectedPackage, 'uninstall') }}</button>
               </div>
             </div>
           </footer>
@@ -555,9 +561,16 @@
 
         <div class="mb-5 space-y-3">
           <div v-for="source in marketSources" :key="source.id" class="rounded-[14px] border border-[var(--border)] bg-[var(--surface)] p-3">
-            <div class="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center">
+            <div class="mb-3 flex flex-col gap-2">
               <input v-model="source.name" class="market-input sm:w-44" placeholder="名称" />
-              <input v-model="source.url" class="market-input min-w-0 flex-1" placeholder="market.json URL" :disabled="source.is_builtin" />
+              <div class="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center">
+                <span class="min-w-0 flex-1 truncate text-[12px] text-[var(--text-secondary)]" :title="safeAdminUrl(source.url)">{{ safeAdminUrl(source.url) || '未提供可展示地址' }}</span>
+                <label v-if="!source.is_builtin" class="flex shrink-0 items-center gap-1.5 text-[12px] text-[var(--text-secondary)]">
+                  <input v-model="source.replace_url" type="checkbox" class="size-3.5 rounded accent-neutral-950 dark:accent-white" />
+                  更换地址
+                </label>
+              </div>
+              <input v-if="source.replace_url" v-model="source.replacement_url" type="url" autocomplete="off" spellcheck="false" class="market-input min-w-0" placeholder="重新输入完整 market.json URL" />
             </div>
             <div class="flex flex-wrap items-center gap-3 text-[12px] text-[var(--text-secondary)]">
               <label class="flex items-center gap-1.5">
@@ -571,11 +584,11 @@
               <span :class="source.last_status === 'error' ? 'text-red-500' : source.last_status === 'ok' ? 'text-emerald-500' : ''">
                 {{ sourceStatusLabel(source) }}
               </span>
-              <span v-if="source.last_error" class="min-w-0 flex-1 truncate text-red-500">{{ source.last_error }}</span>
+              <span v-if="source.last_error" class="min-w-0 flex-1 truncate text-red-500">{{ safeAdminDiagnostic(source.last_error) }}</span>
               <div class="ml-auto flex gap-2">
-                <button type="button" class="market-btn-ghost" :disabled="refreshing" @click="handleRefreshSource(source)">刷新</button>
-                <button type="button" class="market-btn-ghost" @click="handleUpdateSource(source)">保存</button>
-                <button type="button" class="market-btn-ghost" :disabled="source.is_builtin" @click="handleDeleteSource(source)">删除</button>
+                <button type="button" class="market-btn-ghost" :disabled="refreshing || sourceActionBusy(source.id)" @click="handleRefreshSource(source)">刷新</button>
+                <button type="button" class="market-btn-ghost" :disabled="sourceActionBusy(source.id)" @click="handleUpdateSource(source)">保存</button>
+                <button type="button" class="market-btn-ghost" :disabled="source.is_builtin || sourceActionBusy(source.id)" @click="handleDeleteSource(source)">删除</button>
               </div>
             </div>
           </div>
@@ -592,7 +605,7 @@
               <input v-model="sourceDraft.allow_private" type="checkbox" class="size-3.5 rounded accent-neutral-950 dark:accent-white" />
               允许本机/内网 URL
             </label>
-            <button type="button" class="market-btn-primary" @click="handleCreateSource">添加源</button>
+            <button type="button" class="market-btn-primary" :disabled="sourceCreating" @click="handleCreateSource">{{ sourceCreating ? '添加中…' : '添加源' }}</button>
           </div>
         </div>
       </section>
@@ -621,6 +634,7 @@ import {
   updateMarketSource,
 } from '../api/market'
 import { approvePluginPermission, pluginErrorCode, pluginErrorDetails, pluginErrorMessage } from '../api/plugins'
+import { adminRequestErrorMessage, safeAdminDiagnostic, safeAdminUrl } from '../api/adminUi.js'
 import { useToastStore } from '../stores/toast'
 import MarketFilterDropdown from '../components/MarketFilterDropdown.vue'
 import AdaptiveTagList from '../components/AdaptiveTagList.vue'
@@ -639,6 +653,8 @@ const previewLoading = ref(false)
 const previewError = ref('')
 const importLoading = ref(false)
 const installConfigLoading = ref(false)
+const sourceCreating = ref(false)
+const sourceActionIds = ref(new Set())
 const error = ref('')
 const drawerOpen = ref(false)
 const sourceDialogOpen = ref(false)
@@ -667,6 +683,10 @@ const drawerTitleId = 'market-drawer-title'
 let searchDebounceTimer = null
 let loadPackagesRequestId = 0
 let previewRequestId = 0
+let loadSummaryRequestId = 0
+let loadSourcesRequestId = 0
+let packageOperationId = 0
+let componentDisposed = false
 const sourceDraft = reactive({
   name: '',
   url: '',
@@ -1688,67 +1708,117 @@ const hasUpdatableInstalled = computed(() => updatableInstalledCount.value > 0)
 // ── 数据加载 ────────────────────────────────────────────────
 
 async function loadSummary() {
-  summary.value = await fetchMarketSummary()
-  marketSources.value = (summary.value.sources || []).map(source => ({ ...source }))
+  const requestId = ++loadSummaryRequestId
+  const result = await fetchMarketSummary()
+  if (requestId !== loadSummaryRequestId || componentDisposed) return
+  summary.value = result
+  marketSources.value = (result.sources || []).map(marketSourceDraft)
 }
 
 async function loadSources() {
+  const requestId = ++loadSourcesRequestId
   const data = await fetchMarketSources()
-  marketSources.value = (data.sources || []).map(source => ({ ...source }))
+  if (requestId !== loadSourcesRequestId || componentDisposed) return
+  marketSources.value = (data.sources || []).map(marketSourceDraft)
 }
 
-async function loadPackages() {
+async function loadPackages({ preserveError = false } = {}) {
   const requestId = ++loadPackagesRequestId
   const showSkeleton = packages.value.length === 0
   if (showSkeleton) loading.value = true
-  error.value = ''
+  if (!preserveError) error.value = ''
   try {
     // 仅 search 透传后端，剩余筛选完全前端化（用户可任意多选组合）。
     const data = await fetchMarketPackages({ search: filters.search.trim() })
-    if (requestId !== loadPackagesRequestId) return
+    if (requestId !== loadPackagesRequestId || componentDisposed) return
     packages.value = data.packages || []
   } catch (e) {
-    if (requestId !== loadPackagesRequestId) return
-    error.value = e.message || String(e)
+    if (requestId !== loadPackagesRequestId || componentDisposed) return
+    error.value = adminRequestErrorMessage(e, 'Market Package 加载失败，请稍后重试')
     toastStore.error(error.value)
   } finally {
-    if (requestId === loadPackagesRequestId) loading.value = false
+    if (requestId === loadPackagesRequestId && !componentDisposed) loading.value = false
   }
 }
 
+function setSourceAction(sourceId, busy) {
+  const next = new Set(sourceActionIds.value)
+  if (busy) next.add(sourceId)
+  else next.delete(sourceId)
+  sourceActionIds.value = next
+}
+
+function marketSourceDraft(source) {
+  return {
+    ...source,
+    replace_url: false,
+    replacement_url: '',
+    persisted: {
+      name: source?.name || '',
+      enabled: Boolean(source?.enabled),
+      allow_private: Boolean(source?.allow_private),
+    },
+  }
+}
+
+function restoreMarketSourceDraft(source) {
+  if (!source?.persisted) return
+  source.name = source.persisted.name
+  source.enabled = source.persisted.enabled
+  source.allow_private = source.persisted.allow_private
+  source.replace_url = false
+  source.replacement_url = ''
+}
+
+function sourceActionBusy(sourceId) {
+  return sourceActionIds.value.has(sourceId)
+}
+
+function packageOperationCurrent(operationId) {
+  return !componentDisposed && operationId === packageOperationId
+}
+
 async function handleRefresh() {
+  if (refreshing.value || importLoading.value || updating.value || componentDisposed) return
   refreshing.value = true
   error.value = ''
   try {
-    summary.value = await refreshMarket()
-    marketSources.value = (summary.value.sources || []).map(source => ({ ...source }))
+    const result = await refreshMarket()
+    if (componentDisposed) return
+    summary.value = result
+    marketSources.value = (result.sources || []).map(marketSourceDraft)
     await loadPackages()
     toastStore.success('频道市场已刷新')
   } catch (e) {
-    error.value = e.message || String(e)
+    if (componentDisposed) return
+    error.value = adminRequestErrorMessage(e, 'Market 刷新失败，请稍后重试')
     toastStore.error(error.value)
   } finally {
-    refreshing.value = false
+    if (!componentDisposed) refreshing.value = false
   }
 }
 
 async function handleCheckUpdate() {
-  if (!selectedPackage.value) return
+  if (!selectedPackage.value || refreshing.value || importLoading.value || updating.value || componentDisposed) return
   refreshing.value = true
   try {
-    summary.value = await refreshMarket()
-    marketSources.value = (summary.value.sources || []).map(source => ({ ...source }))
+    const result = await refreshMarket()
+    if (componentDisposed) return
+    summary.value = result
+    marketSources.value = (result.sources || []).map(marketSourceDraft)
     await loadPackages()
     syncSelectedPackageFromList()
     toastStore.info(selectedPackage.value?.update_available ? '发现新版本' : '当前已是最新')
   } catch (e) {
-    toastStore.error(e.message || String(e))
+    if (!componentDisposed) toastStore.error(adminRequestErrorMessage(e, '更新检查失败，请稍后重试'))
   } finally {
-    refreshing.value = false
+    if (!componentDisposed) refreshing.value = false
   }
 }
 
 async function handleUpdateAllInstalled() {
+  if (updating.value || importLoading.value || componentDisposed) return
+  const operationId = ++packageOperationId
   updating.value = true
   error.value = ''
   try {
@@ -1756,28 +1826,38 @@ async function handleUpdateAllInstalled() {
       let updatedCount = 0
       let failedCount = 0
       for (const pkg of updatableInstalledPackages.value) {
+        if (!packageOperationCurrent(operationId)) return
         try {
           await updateMarketPackage(pkg.id)
+          if (!packageOperationCurrent(operationId)) return
           updatedCount += 1
         } catch (caught) {
+          if (!packageOperationCurrent(operationId)) return
           failedCount += 1
           if (pluginErrorCode(caught) === 'PERMISSION_APPROVAL_REQUIRED') {
             await confirmPermissionAndRetry(pkg, caught, async () => {
+              if (!packageOperationCurrent(operationId)) return
               await updateMarketPackage(pkg.id)
+              if (!packageOperationCurrent(operationId)) return
               updatedCount += 1
               failedCount -= 1
             })
           }
         }
       }
+      if (!packageOperationCurrent(operationId)) return
       await loadPackages()
+      if (!packageOperationCurrent(operationId)) return
       if (failedCount) toastStore.warning(`已更新 ${updatedCount} 个 Plugin，${failedCount} 个失败`)
       else toastStore.success(`已更新 ${updatedCount} 个 Plugin`)
       return
     }
     const result = await runMarketUpdates()
+    if (!packageOperationCurrent(operationId)) return
     await loadSummary()
+    if (!packageOperationCurrent(operationId)) return
     await loadPackages()
+    if (!packageOperationCurrent(operationId)) return
     syncSelectedPackageFromList()
     if (result.failed) {
       toastStore.warning(`已更新 ${result.updated || 0} 个包，${result.failed} 个失败`)
@@ -1785,16 +1865,17 @@ async function handleUpdateAllInstalled() {
       toastStore.success(`已更新 ${result.updated || 0} 个包`)
     }
   } catch (e) {
-    error.value = e.message || String(e)
+    if (!packageOperationCurrent(operationId)) return
+    error.value = adminRequestErrorMessage(e, '批量更新失败，请稍后重试')
     toastStore.error(error.value)
   } finally {
-    updating.value = false
+    if (packageOperationCurrent(operationId)) updating.value = false
   }
 }
 
 function openSourceDialog() {
   sourceDialogOpen.value = true
-  loadSources().catch((e) => { toastStore.error(e.message || String(e)) })
+  loadSources().catch((e) => { if (!componentDisposed) toastStore.error(adminRequestErrorMessage(e, 'Market 源加载失败，请稍后重试')) })
 }
 
 function closeSourceDialog() {
@@ -1802,10 +1883,12 @@ function closeSourceDialog() {
 }
 
 async function handleCreateSource() {
+  if (sourceCreating.value || componentDisposed) return
   if (!sourceDraft.url.trim()) {
     toastStore.error('Market 源 URL 不能为空')
     return
   }
+  sourceCreating.value = true
   try {
     await createMarketSource({
       name: sourceDraft.name.trim() || '第三方 Market',
@@ -1813,56 +1896,82 @@ async function handleCreateSource() {
       enabled: true,
       allow_private: sourceDraft.allow_private,
     })
+    if (componentDisposed) return
     sourceDraft.name = ''
     sourceDraft.url = ''
     sourceDraft.allow_private = false
     await loadSources()
     toastStore.success('已添加')
   } catch (e) {
-    toastStore.error(e.message || String(e))
+    if (!componentDisposed) toastStore.error(adminRequestErrorMessage(e, 'Market 源添加失败，请稍后重试'))
+  } finally {
+    if (!componentDisposed) sourceCreating.value = false
   }
 }
 
 async function handleUpdateSource(source) {
+  if (!source?.id || sourceActionBusy(source.id) || componentDisposed) return
+  if (source.replace_url && !source.replacement_url?.trim()) {
+    toastStore.error('请输入新的 Market 源 URL')
+    return
+  }
+  setSourceAction(source.id, true)
   try {
     await updateMarketSource(source.id, {
       name: source.name,
-      url: source.url,
       enabled: source.enabled,
       allow_private: source.allow_private,
+      ...(source.replace_url ? { url: source.replacement_url.trim() } : {}),
     })
+    if (componentDisposed) return
     await loadSources()
     toastStore.success('已保存')
   } catch (e) {
-    toastStore.error(e.message || String(e))
+    if (!componentDisposed) {
+      restoreMarketSourceDraft(source)
+      toastStore.error(adminRequestErrorMessage(e, 'Market 源保存失败，请稍后重试'))
+    }
+  } finally {
+    if (!componentDisposed) setSourceAction(source.id, false)
   }
 }
 
 async function handleDeleteSource(source) {
-  if (!source?.id || source.is_builtin) return
-  const ok = await toastStore.askConfirm({ message: `确认删除 Market 源「${source.name || source.url}」？`, confirmText: '删除', danger: true })
-  if (!ok) return
+  if (!source?.id || source.is_builtin || sourceActionBusy(source.id) || componentDisposed) return
+  setSourceAction(source.id, true)
+  const ok = await toastStore.askConfirm({ message: `确认删除 Market 源「${source.name || safeAdminUrl(source.url)}」？`, confirmText: '删除', danger: true })
+  if (componentDisposed) return
+  if (!ok) { setSourceAction(source.id, false); return }
   try {
     await deleteMarketSource(source.id)
+    if (componentDisposed) return
     await loadSources()
     toastStore.success('已删除')
   } catch (e) {
-    toastStore.error(e.message || String(e))
+    if (!componentDisposed) toastStore.error(adminRequestErrorMessage(e, 'Market 源删除失败，请稍后重试'))
+  } finally {
+    if (!componentDisposed) setSourceAction(source.id, false)
   }
 }
 
 async function handleRefreshSource(source) {
-  if (!source?.id) return
+  if (!source?.id || refreshing.value || sourceActionBusy(source.id) || componentDisposed) return
+  setSourceAction(source.id, true)
   refreshing.value = true
   try {
-    summary.value = await refreshMarketSource(source.id)
-    marketSources.value = (summary.value.sources || []).map(item => ({ ...item }))
+    const result = await refreshMarketSource(source.id)
+    if (componentDisposed) return
+    summary.value = result
+    marketSources.value = (result.sources || []).map(marketSourceDraft)
     await loadPackages()
     toastStore.success('已刷新')
   } catch (e) {
-    toastStore.error(e.message || String(e))
+    if (!componentDisposed) toastStore.error(adminRequestErrorMessage(e, 'Market 源刷新失败，请稍后重试'))
   } finally {
-    refreshing.value = false
+    if (!componentDisposed) {
+      refreshing.value = false
+      setSourceAction(source.id, false)
+    }
   }
 }
 
@@ -1908,13 +2017,13 @@ async function loadPluginPackageDetail(pkg) {
   previewLoading.value = true
   try {
     const detail = await fetchMarketPackage(pkg.id)
-    if (requestId !== previewRequestId || selectedPackage.value?.id !== pkg.id) return
+    if (requestId !== previewRequestId || selectedPackage.value?.id !== pkg.id || componentDisposed) return
     selectedPackage.value = { ...selectedPackage.value, ...detail }
   } catch (error) {
-    if (requestId !== previewRequestId || selectedPackage.value?.id !== pkg.id) return
+    if (requestId !== previewRequestId || selectedPackage.value?.id !== pkg.id || componentDisposed) return
     previewError.value = pluginErrorMessage(error, 'Plugin Package 详情加载失败')
   } finally {
-    if (requestId === previewRequestId) previewLoading.value = false
+    if (requestId === previewRequestId && !componentDisposed) previewLoading.value = false
   }
 }
 
@@ -2015,7 +2124,7 @@ async function loadFullPreview() {
   previewLoading.value = true
   try {
     const data = await previewMarketPackage(pkg.id)
-    if (requestId !== previewRequestId || selectedPackage.value?.id !== pkg.id) return
+    if (requestId !== previewRequestId || selectedPackage.value?.id !== pkg.id || componentDisposed) return
     preview.value = data
     // preview 成功后再应用 pending —— 这样模板从 v-if="previewLoading" 直接切到
     // v-else-if="visibleChannelItems.length"，且 visibleChannelItems 已是完整列表，
@@ -2027,12 +2136,12 @@ async function loadFullPreview() {
       scrollChannelSectionIntoView()
     }
   } catch (e) {
-    if (requestId !== previewRequestId || selectedPackage.value?.id !== pkg.id) return
-    previewError.value = e.message || String(e)
+    if (requestId !== previewRequestId || selectedPackage.value?.id !== pkg.id || componentDisposed) return
+    previewError.value = adminRequestErrorMessage(e, 'Package 预览加载失败，请稍后重试')
     pendingShowAllChannels.value = false
-    toastStore.error(e.message || String(e))
+    toastStore.error(previewError.value)
   } finally {
-    if (requestId === previewRequestId) previewLoading.value = false
+    if (requestId === previewRequestId && !componentDisposed) previewLoading.value = false
   }
 }
 
@@ -2092,71 +2201,90 @@ function onWindowKey(e) {
 }
 
 async function handleImport(pkg) {
-  if (!pkg?.id) return
+  if (importLoading.value) return
+  if (!pkg?.id || refreshing.value || updating.value || componentDisposed) return
+  const operationId = ++packageOperationId
   importLoading.value = true
   actingId.value = pkg.id
   try {
-    const result = await importMarketPackage(pkg.id, preview.value?.preview_id || '')
-    markPackageInstalled(pkg.id, result.subscription_id, result.active_version)
-    if (isPluginPackage(pkg)) {
-      toastStore.success('Plugin 已安装，scheme ownership 保持 Legacy')
-    } else if (Array.isArray(result.warnings) && result.warnings.length) {
-      toastStore.warning(`已导入 ${result.channel_count || 0} 个频道（含 ${result.warnings.length} 条警告）`)
-    } else {
-      toastStore.success(`已导入 ${result.channel_count || 0} 个频道`)
-    }
-    if (drawerOpen.value && selectedPackage.value?.id !== pkg.id) {
-      // ignore
-    }
+    await importPackageOnce(pkg, operationId)
   } catch (e) {
     if (pluginErrorCode(e) === 'PERMISSION_APPROVAL_REQUIRED') {
-      await confirmPermissionAndRetry(pkg, e, () => handleImport(pkg))
-    } else {
-      toastStore.error(isPluginPackage(pkg) ? pluginErrorMessage(e, 'Plugin 安装失败') : `导入失败：${e.message || String(e)}`)
+      await confirmPermissionAndRetry(pkg, e, () => importPackageOnce(pkg, operationId))
+    } else if (!componentDisposed && operationId === packageOperationId) {
+      toastStore.error(isPluginPackage(pkg) ? pluginErrorMessage(e, 'Plugin 安装失败') : adminRequestErrorMessage(e, '频道包导入失败，请稍后重试'))
     }
   } finally {
-    importLoading.value = false
-    actingId.value = null
+    if (!componentDisposed && operationId === packageOperationId) {
+      importLoading.value = false
+      actingId.value = null
+    }
   }
 }
 
 async function handleReinstall(pkg) {
-  if (!pkg?.id) return
+  if (!pkg?.id || refreshing.value || importLoading.value || updating.value || componentDisposed) return
+  const operationId = ++packageOperationId
   importLoading.value = true
   actingId.value = pkg.id
   try {
-    const result = await updateMarketPackage(pkg.id)
-    markPackageInstalled(pkg.id, result.subscription_id, result.active_version)
-    toastStore.success(isPluginPackage(pkg) ? 'Plugin 已更新' : `已更新 ${result.channel_count || 0} 个频道`)
+    await reinstallPackageOnce(pkg, operationId)
   } catch (e) {
     if (pluginErrorCode(e) === 'PERMISSION_APPROVAL_REQUIRED') {
-      await confirmPermissionAndRetry(pkg, e, () => handleReinstall(pkg))
-    } else {
-      toastStore.error(isPluginPackage(pkg) ? pluginErrorMessage(e, 'Plugin 更新失败') : `更新失败：${e.message || String(e)}`)
+      await confirmPermissionAndRetry(pkg, e, () => reinstallPackageOnce(pkg, operationId))
+    } else if (!componentDisposed && operationId === packageOperationId) {
+      toastStore.error(isPluginPackage(pkg) ? pluginErrorMessage(e, 'Plugin 更新失败') : adminRequestErrorMessage(e, '频道包更新失败，请稍后重试'))
     }
   } finally {
-    importLoading.value = false
-    actingId.value = null
+    if (!componentDisposed && operationId === packageOperationId) {
+      importLoading.value = false
+      actingId.value = null
+    }
   }
 }
 
+async function importPackageOnce(pkg, operationId) {
+  const result = await importMarketPackage(pkg.id, preview.value?.preview_id || '')
+  if (componentDisposed || operationId !== packageOperationId) return
+  markPackageInstalled(pkg.id, result.subscription_id, result.active_version)
+  if (isPluginPackage(pkg)) {
+    toastStore.success('Plugin 已安装，scheme ownership 保持 Legacy')
+  } else if (Array.isArray(result.warnings) && result.warnings.length) {
+    toastStore.warning(`已导入 ${result.channel_count || 0} 个频道（含 ${result.warnings.length} 条警告）`)
+  } else {
+    toastStore.success(`已导入 ${result.channel_count || 0} 个频道`)
+  }
+}
+
+async function reinstallPackageOnce(pkg, operationId) {
+  const result = await updateMarketPackage(pkg.id)
+  if (componentDisposed || operationId !== packageOperationId) return
+  markPackageInstalled(pkg.id, result.subscription_id, result.active_version)
+  toastStore.success(isPluginPackage(pkg) ? 'Plugin 已更新' : `已更新 ${result.channel_count || 0} 个频道`)
+}
+
 async function handleAutoUpdateChange(pkg, event) {
-  if (!pkg?.id) return
+  if (!pkg?.id || refreshing.value || installConfigLoading.value || importLoading.value || updating.value || componentDisposed) return
   const enabled = Boolean(event?.target?.checked)
   installConfigLoading.value = true
   try {
     const result = await updateMarketInstall(pkg.id, { auto_update: enabled })
+    if (componentDisposed) return
     setPackageAutoUpdate(pkg.id, result.auto_update)
   } catch (e) {
-    toastStore.error(e.message || String(e))
+    if (componentDisposed) return
+    toastStore.error(adminRequestErrorMessage(e, '自动更新设置保存失败，请稍后重试'))
     if (event?.target) event.target.checked = !enabled
   } finally {
-    installConfigLoading.value = false
+    if (!componentDisposed) installConfigLoading.value = false
   }
 }
 
 async function handleUninstall(pkg) {
-  if (!pkg?.id) return
+  if (!pkg?.id || refreshing.value || importLoading.value || updating.value || componentDisposed) return
+  const operationId = ++packageOperationId
+  importLoading.value = true
+  actingId.value = pkg.id
   // 先关闭任意残留的"更多"菜单（卡片菜单 / 详情 footer 菜单），
   // 避免确认弹窗出现在菜单背后或被 Drawer backdrop blur 影响层级。
   menuOpenId.value = null
@@ -2166,11 +2294,16 @@ async function handleUninstall(pkg) {
       : `确认卸载「${pkg.name}」？`,
     confirmText: packageActionLabel(pkg, 'uninstall'), danger: true,
   })
-  if (!ok) return
-  importLoading.value = true
-  actingId.value = pkg.id
+  if (!ok || componentDisposed || operationId !== packageOperationId) {
+    if (!componentDisposed && operationId === packageOperationId) {
+      importLoading.value = false
+      actingId.value = null
+    }
+    return
+  }
   try {
     await uninstallMarketPackage(pkg.id)
+    if (componentDisposed || operationId !== packageOperationId) return
     packages.value = packages.value.map(item => item.id === pkg.id
       ? { ...item, installed: false, installed_subscription_id: null, installed_version: '', auto_update: false }
       : item)
@@ -2179,10 +2312,12 @@ async function handleUninstall(pkg) {
     }
     toastStore.success(isPluginPackage(pkg) ? 'Plugin 已卸载' : '已卸载')
   } catch (e) {
-    toastStore.error(isPluginPackage(pkg) ? pluginErrorMessage(e, 'Plugin 卸载失败') : (e.message || String(e)))
+    if (!componentDisposed && operationId === packageOperationId) toastStore.error(isPluginPackage(pkg) ? pluginErrorMessage(e, 'Plugin 卸载失败') : adminRequestErrorMessage(e, '频道包卸载失败，请稍后重试'))
   } finally {
-    importLoading.value = false
-    actingId.value = null
+    if (!componentDisposed && operationId === packageOperationId) {
+      importLoading.value = false
+      actingId.value = null
+    }
   }
 }
 
@@ -2201,7 +2336,7 @@ async function confirmPermissionAndRetry(pkg, error, retry) {
   const identity = isPluginPackage(pkg)
     ? pluginIdentity(pkg)
     : String(pluginErrorDetails(error).plugin || '')
-  if (!identity || !permission) {
+  if (!identity || !permission || componentDisposed) {
     toastStore.error(pluginErrorMessage(error))
     return
   }
@@ -2212,12 +2347,13 @@ async function confirmPermissionAndRetry(pkg, error, retry) {
       : `安装所需扩展「${identity}」需要 ${permissionLabel(permission)}。`,
     confirmText: '允许并继续', danger: true,
   })
-  if (!ok) return
+  if (!ok || componentDisposed) return
   try {
     await approvePluginPermission(identity, permission, isPluginPackage(pkg) ? pkg.id : '')
+    if (componentDisposed) return
     await retry()
   } catch (caught) {
-    toastStore.error(pluginErrorMessage(caught))
+    if (!componentDisposed) toastStore.error(pluginErrorMessage(caught))
   }
 }
 
@@ -2262,17 +2398,22 @@ watch(() => filters.search, () => {
 })
 
 onMounted(async () => {
-  await loadSummary().catch((e) => { error.value = e.message || String(e) })
-  await loadPackages()
+  await loadSummary().catch((e) => { if (!componentDisposed) error.value = adminRequestErrorMessage(e, 'Market 概览加载失败，请稍后重试') })
+  await loadPackages({ preserveError: Boolean(error.value) })
+  if (componentDisposed) return
   openQueriedPackage()
   window.addEventListener('click', onWindowClick)
   window.addEventListener('keydown', onWindowKey)
 })
 
 onBeforeUnmount(() => {
+  componentDisposed = true
   if (searchDebounceTimer) clearTimeout(searchDebounceTimer)
   loadPackagesRequestId += 1
   previewRequestId += 1
+  loadSummaryRequestId += 1
+  loadSourcesRequestId += 1
+  packageOperationId += 1
   window.removeEventListener('click', onWindowClick)
   window.removeEventListener('keydown', onWindowKey)
   // 即便组件卸载时 Drawer 仍处于打开状态，也要恢复 body overflow，避免页面永久无法滚动。

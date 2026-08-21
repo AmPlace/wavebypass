@@ -22,7 +22,7 @@ function source(relativePath) {
 
 test('来源读取和写入使用 EPG-5B-a 稳定 endpoint', () => {
   const api = source('src/api/epgManagement.js')
-  assert.match(api, /apiRequest\('\/api\/admin\/epg\/sources'\)/)
+  assert.match(api, /apiRequest\('\/api\/admin\/epg\/sources', \{ signal \}\)/)
   assert.match(api, /apiRequest\('\/api\/admin\/epg\/sources', \{[\s\S]*method: 'POST'/)
   assert.match(api, /sources\/\$\{encodeURIComponent\(sourceId\)\}`,[\s\S]*method: 'PATCH'/)
   assert.match(api, /sources\/\$\{encodeURIComponent\(sourceId\)\}\/refresh`/)
@@ -119,7 +119,14 @@ test('初次加载有 skeleton，启停与刷新只做后台状态重载', () =>
   assert.match(view, /v-if="loading"[\s\S]*aria-busy="true"/)
   assert.match(view, /updateEpgSource\(source\.id, \{ enabled \}\)/)
   assert.match(view, /loadSources\(\{ background: true \}\)/)
-  assert.match(view, /if \(!background\) loading\.value = false/)
+  assert.match(view, /loadController === controller[\s\S]*!background[\s\S]*loading\.value = false/)
+})
+
+test('来源状态保留 last-known-good，并单独展示失败诊断和部分维护状态', () => {
+  const view = source('src/views/settings/EpgSourcesSettings.vue')
+  assert.match(view, /source\.refresh\?\.failure[\s\S]*safeAdminDiagnostic\(source\.refresh\.failure\)/)
+  assert.match(view, /source\.automation\?\.last_run_status === 'partial'/)
+  assert.match(view, /节目单数据可用，后续绑定维护未完全完成/)
 })
 
 test('删除先读取影响，manual/locked binding 需要明确确认', () => {
@@ -128,7 +135,7 @@ test('删除先读取影响，manual/locked binding 需要明确确认', () => {
   assert.equal(deleteNeedsAcknowledgement({ locked_bindings_count: 1 }), true)
 
   const view = source('src/views/settings/EpgSourcesSettings.vue')
-  assert.match(view, /fetchEpgSourceDeleteImpact\(source\.id\)/)
+  assert.match(view, /fetchEpgSourceDeleteImpact\(source\.id, \{ signal: controller\.signal \}\)/)
   assert.match(view, /deleteAcknowledged/)
   assert.match(view, /手动或锁定绑定会保留为待修复状态/)
   assert.match(view, /deleteEpgSource\(deleteSource\.value\.id, \{ confirm: deleteRequiresAck\.value \}\)/)

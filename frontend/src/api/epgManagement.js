@@ -1,9 +1,10 @@
 import { apiRequest } from './client'
+import { adminRequestErrorMessage } from './adminUi.js'
 
 const JSON_HEADERS = { 'Content-Type': 'application/json' }
 
-export async function fetchEpgSources() {
-  const response = await apiRequest('/api/admin/epg/sources')
+export async function fetchEpgSources({ signal } = {}) {
+  const response = await apiRequest('/api/admin/epg/sources', { signal })
   return response.json()
 }
 
@@ -33,8 +34,8 @@ export async function refreshEpgSource(sourceId) {
   return response.json()
 }
 
-export async function fetchEpgSourceDeleteImpact(sourceId) {
-  const response = await apiRequest(`/api/admin/epg/sources/${encodeURIComponent(sourceId)}/delete-impact`)
+export async function fetchEpgSourceDeleteImpact(sourceId, { signal } = {}) {
+  const response = await apiRequest(`/api/admin/epg/sources/${encodeURIComponent(sourceId)}/delete-impact`, { signal })
   return response.json()
 }
 
@@ -68,5 +69,5 @@ export function epgSourceErrorMessage(error, fallback = '操作失败，请稍�
     empty_update: '没有需要保存的修改',
     invalid_request: '提交内容无效，请检查后重试',
   }
-  return messages[epgSourceErrorCode(error)] || fallback
+  return messages[epgSourceErrorCode(error)] || adminRequestErrorMessage(error, fallback)
 }

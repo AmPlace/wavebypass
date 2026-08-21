@@ -114,7 +114,7 @@
                   <dt>Environment</dt><dd>{{ environmentLabel(selected.runtime?.environment_status) }}</dd>
                   <dt>Trust</dt><dd>{{ trustLabel(selected.trust_state) }}</dd>
                 </dl>
-                <p v-if="selected.last_error" class="mt-3 rounded-xl border border-red-500/20 bg-red-500/5 px-3 py-2 text-xs leading-5 text-red-600 dark:text-red-300">{{ selected.last_error }}</p>
+                <p v-if="selected.last_error" class="mt-3 rounded-xl border border-red-500/20 bg-red-500/5 px-3 py-2 text-xs leading-5 text-red-600 dark:text-red-300">{{ safeAdminDiagnostic(selected.last_error) }}</p>
                 <div class="mt-4 flex flex-wrap gap-2">
                   <button type="button" class="plugin-btn" :disabled="acting" @click="toggleEnabled(selected)">{{ selected.enabled ? '停用插件' : '启用插件' }}</button>
                   <button v-if="selected.quarantined" type="button" class="plugin-btn plugin-btn-primary" :disabled="acting" @click="recoverSelected">恢复插件</button>
@@ -163,9 +163,10 @@
 </template>
 
 <script setup>
-import { computed, defineComponent, h, onMounted, ref } from 'vue'
+import { computed, defineComponent, h, onBeforeUnmount, onMounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 import { approvePluginPermission, disablePlugin, enablePlugin, fetchDeveloperMode, fetchPlugin, fetchPlugins, installDeveloperPlugin, pluginErrorMessage, recoverPlugin, revokePluginPermission, setDeveloperMode, setPluginOwnership } from '../../api/plugins'
+import { safeAdminDiagnostic } from '../../api/adminUi.js'
 import { useToastStore } from '../../stores/toast'
 
 const DetailSection = defineComponent({
@@ -186,33 +187,121 @@ const developerMode = ref(false)
 const developerPath = ref('')
 const developerActing = ref(false)
 const selectedIdentity = computed(() => selected.value?.plugin || '')
+let listController = null
+let detailController = null
+let developerModeController = null
+let componentDisposed = false
 
-async function loadPlugins({ background = false } = {}) { if (!background) loading.value = true; loadError.value = ''; try { plugins.value = (await fetchPlugins()).plugins || [] } catch (error) { loadError.value = pluginErrorMessage(error, '插件列表加载失败') } finally { if (!background) loading.value = false } }
+async function loadPlugins({ background = false } = {}) {
+  if (componentDisposed) return
+  listController?.abort()
+  const controller = new AbortController()
+  listController = controller
+  if (!background) loading.value = true
+  loadError.value = ''
+  try {
+    const result = await fetchPlugins({ signal: controller.signal })
+    if (!controller.signal.aborted && !componentDisposed) plugins.value = result.plugins || []
+  } catch (error) {
+    if (!controller.signal.aborted && !componentDisposed) loadError.value = pluginErrorMessage(error, '插件列表加载失败')
+  } finally {
+    if (listController === controller && !componentDisposed && !background) loading.value = false
+  }
+}
 async function openDetail(plugin) { drawerOpen.value = true; selected.value = plugin; detailError.value = ''; await loadDetail(plugin.plugin) }
-async function loadDetail(identity) { detailLoading.value = true; detailError.value = ''; try { selected.value = await fetchPlugin(identity) } catch (error) { detailError.value = pluginErrorMessage(error, '插件详情加载失败') } finally { detailLoading.value = false } }
+async function loadDetail(identity) {
+  detailController?.abort()
+  const controller = new AbortController()
+  detailController = controller
+  detailLoading.value = true
+  detailError.value = ''
+  try {
+    const result = await fetchPlugin(identity, { signal: controller.signal })
+    if (controller.signal.aborted || componentDisposed || selected.value?.plugin !== identity) return
+    selected.value = result
+  } catch (error) {
+    if (!controller.signal.aborted && !componentDisposed && selected.value?.plugin === identity) detailError.value = pluginErrorMessage(error, '插件详情加载失败')
+  } finally {
+    if (detailController === controller && !componentDisposed) detailLoading.value = false
+  }
+}
 async function reloadDetail() { if (selectedIdentity.value) await loadDetail(selectedIdentity.value) }
-function closeDetail() { drawerOpen.value = false; selected.value = null; detailError.value = '' }
+function closeDetail() { detailController?.abort(); drawerOpen.value = false; selected.value = null; detailError.value = '' }
 async function refreshAfterAction(identity = selectedIdentity.value) { await loadPlugins({ background: true }); if (drawerOpen.value && identity) await loadDetail(identity) }
-async function loadDeveloperMode() { try { developerMode.value = Boolean((await fetchDeveloperMode()).enabled) } catch (error) { toastStore.error(pluginErrorMessage(error, 'Developer Mode 状态加载失败')) } }
-async function toggleDeveloperMode() { developerActing.value = true; try { developerMode.value = Boolean((await setDeveloperMode(!developerMode.value)).enabled); toastStore.success(developerMode.value ? 'Developer Mode 已启用' : 'Developer Mode 已关闭') } catch (error) { toastStore.error(pluginErrorMessage(error)) } finally { developerActing.value = false } }
+async function loadDeveloperMode() {
+  developerModeController?.abort()
+  const controller = new AbortController()
+  developerModeController = controller
+  try {
+    const result = await fetchDeveloperMode({ signal: controller.signal })
+    if (!controller.signal.aborted && !componentDisposed) developerMode.value = Boolean(result.enabled)
+  } catch (error) {
+    if (!controller.signal.aborted && !componentDisposed) toastStore.error(pluginErrorMessage(error, 'Developer Mode 状态加载失败'))
+  }
+}
+async function toggleDeveloperMode() {
+  if (developerActing.value || componentDisposed) return
+  developerActing.value = true
+  try {
+    const result = await setDeveloperMode(!developerMode.value)
+    if (componentDisposed) return
+    developerMode.value = Boolean(result.enabled)
+    toastStore.success(developerMode.value ? 'Developer Mode 已启用' : 'Developer Mode 已关闭')
+  } catch (error) {
+    if (!componentDisposed) toastStore.error(pluginErrorMessage(error))
+  } finally {
+    if (!componentDisposed) developerActing.value = false
+  }
+}
 function selectDeveloperFile(event) { const file = event.target?.files?.[0]; if (file?.path) developerPath.value = file.path; else if (file?.name) developerPath.value = file.name }
-async function installLocalPlugin() { developerActing.value = true; try { await installDeveloperPlugin(developerPath.value.trim()); toastStore.success('本地 Developer Plugin 已安装'); await loadPlugins() } catch (error) { toastStore.error(pluginErrorMessage(error, '本地 Plugin 安装失败')) } finally { developerActing.value = false } }
+async function installLocalPlugin() {
+  if (developerActing.value || !developerPath.value.trim() || componentDisposed) return
+  developerActing.value = true
+  try {
+    await installDeveloperPlugin(developerPath.value.trim())
+    if (componentDisposed) return
+    toastStore.success('本地 Developer Plugin 已安装')
+    await loadPlugins()
+  } catch (error) {
+    if (!componentDisposed) toastStore.error(pluginErrorMessage(error, '本地 Plugin 安装失败'))
+  } finally {
+    if (!componentDisposed) developerActing.value = false
+  }
+}
 
 async function toggleEnabled(plugin) {
   const action = plugin.enabled ? '停用' : '启用'
-  const ok = await toastStore.askConfirm({ title: `${action}插件`, message: plugin.enabled ? '停用不会自动切换 scheme ownership。若插件仍拥有 scheme，后端会拒绝此操作。' : '启用后插件恢复运行，但不会自动接管任何 scheme。', confirmText: action, danger: plugin.enabled })
-  if (!ok) return
-  acting.value = true
-  try { plugin.enabled ? await disablePlugin(plugin.plugin) : await enablePlugin(plugin.plugin); toastStore.success(`插件已${action}`); await refreshAfterAction(plugin.plugin) } catch (error) { toastStore.error(pluginErrorMessage(error)) } finally { acting.value = false }
+  await runConfirmedAction(
+    { title: `${action}插件`, message: plugin.enabled ? '停用不会自动切换 scheme ownership。若插件仍拥有 scheme，后端会拒绝此操作。' : '启用后插件恢复运行，但不会自动接管任何 scheme。', confirmText: action, danger: plugin.enabled },
+    () => plugin.enabled ? disablePlugin(plugin.plugin) : enablePlugin(plugin.plugin),
+    `插件已${action}`,
+    plugin.plugin,
+  )
 }
-async function recoverSelected() { const ok = await toastStore.askConfirm({ title: '恢复插件', message: 'WaveFlow 将清除 quarantine 状态。恢复后仍需显式启用或重新检查运行状态。', confirmText: '恢复' }); if (!ok) return; await runAction(() => recoverPlugin(selectedIdentity.value), '插件已恢复') }
-async function approvePermission(permission) { const ok = await toastStore.askConfirm({ title: '允许高风险权限', message: permission === 'network.direct' ? '此插件需要直接访问网络。该能力不经过 Core managed HTTP，并非强安全沙箱。' : permission === 'network.managed_http' ? '此插件需要通过 Core managed HTTP 访问明文 HTTP。目标、DNS、重定向和 SSRF 检查仍然有效。' : `允许 ${permission}？`, confirmText: '允许并继续', danger: true }); if (!ok) return; await runAction(() => approvePluginPermission(selectedIdentity.value, permission, selected.value?.market?.package_id || ''), '权限已允许') }
-async function revokePermission(permission) { const ok = await toastStore.askConfirm({ title: '撤销权限', message: '撤销会停止插件运行。若 scheme 仍由此插件拥有，后端会拒绝并要求先切回 Legacy。', confirmText: '撤销', danger: true }); if (!ok) return; await runAction(() => revokePluginPermission(selectedIdentity.value, permission), '权限已撤销') }
-async function switchOwnership(item) { const toPlugin = item.mode !== 'plugin'; const message = toPlugin ? `切换后，${item.scheme}:// 来源将由 ${selected.value.display_name} 解析。Legacy Adapter 将保留，可随时回滚。` : `切换后，${item.scheme}:// 来源将重新由内置 Legacy Adapter 解析。`; const ok = await toastStore.askConfirm({ title: toPlugin ? '切换到 Plugin' : '切换回 Legacy', message, confirmText: toPlugin ? '切换到 Plugin' : '切换回 Legacy', danger: toPlugin }); if (!ok) return; await runAction(() => setPluginOwnership(item.scheme, toPlugin ? 'plugin' : 'legacy', toPlugin ? selectedIdentity.value : ''), `已切换到 ${toPlugin ? 'Plugin' : 'Legacy'}`) }
-async function runAction(action, success) { acting.value = true; try { await action(); toastStore.success(success); await refreshAfterAction() } catch (error) { toastStore.error(pluginErrorMessage(error)) } finally { acting.value = false } }
+async function recoverSelected() { const identity = selectedIdentity.value; await runConfirmedAction({ title: '恢复插件', message: 'WaveFlow 将清除 quarantine 状态。恢复后仍需显式启用或重新检查运行状态。', confirmText: '恢复' }, () => recoverPlugin(identity), '插件已恢复', identity) }
+async function approvePermission(permission) { const identity = selectedIdentity.value; const packageId = selected.value?.market?.package_id || ''; await runConfirmedAction({ title: '允许高风险权限', message: permission === 'network.direct' ? '此插件需要直接访问网络。该能力不经过 Core managed HTTP，并非强安全沙箱。' : permission === 'network.managed_http' ? '此插件需要通过 Core managed HTTP 访问明文 HTTP。目标、DNS、重定向和 SSRF 检查仍然有效。' : `允许 ${permission}？`, confirmText: '允许并继续', danger: true }, () => approvePluginPermission(identity, permission, packageId), '权限已允许', identity) }
+async function revokePermission(permission) { const identity = selectedIdentity.value; await runConfirmedAction({ title: '撤销权限', message: '撤销会停止插件运行。若 scheme 仍由此插件拥有，后端会拒绝并要求先切回 Legacy。', confirmText: '撤销', danger: true }, () => revokePluginPermission(identity, permission), '权限已撤销', identity) }
+async function switchOwnership(item) { const identity = selectedIdentity.value; const toPlugin = item.mode !== 'plugin'; const message = toPlugin ? `切换后，${item.scheme}:// 来源将由 ${selected.value.display_name} 解析。Legacy Adapter 将保留，可随时回滚。` : `切换后，${item.scheme}:// 来源将重新由内置 Legacy Adapter 解析。`; await runConfirmedAction({ title: toPlugin ? '切换到 Plugin' : '切换回 Legacy', message, confirmText: toPlugin ? '切换到 Plugin' : '切换回 Legacy', danger: toPlugin }, () => setPluginOwnership(item.scheme, toPlugin ? 'plugin' : 'legacy', toPlugin ? identity : ''), `已切换到 ${toPlugin ? 'Plugin' : 'Legacy'}`, identity) }
+async function runConfirmedAction(confirmOptions, action, success, identity) {
+  if (acting.value || componentDisposed) return
+  acting.value = true
+  try {
+    const ok = await toastStore.askConfirm(confirmOptions)
+    if (!ok || componentDisposed) return
+    await action()
+    if (componentDisposed) return
+    toastStore.success(success)
+    await refreshAfterAction(identity)
+  } catch (error) {
+    if (!componentDisposed) toastStore.error(pluginErrorMessage(error))
+  } finally {
+    if (!componentDisposed) acting.value = false
+  }
+}
 
-function statusLabel(plugin) { if (plugin.quarantined) return 'Quarantined'; if (!plugin.enabled) return '已停用'; if (plugin.runtime_available) return 'Running'; return 'Unavailable' }
+function statusLabel(plugin) { if (plugin.quarantined) return 'Quarantined'; if (!plugin.enabled) return '已停用'; if (isPluginCrashed(plugin)) return 'Crashed'; if (plugin.runtime_available) return 'Running'; return 'Unavailable' }
 function statusClass(plugin) { if (plugin.quarantined || !plugin.runtime_available && plugin.enabled) return 'is-danger'; if (!plugin.enabled) return 'is-muted'; return 'is-healthy' }
+function isPluginCrashed(plugin) { return plugin?.lifecycle_state === 'unavailable' && /\bPLUGIN_CRASHED\b/.test(String(plugin?.last_error || '')) }
 function runtimeLabel(runtime) { if (runtime?.type === 'python') return runtime.python_version_range ? `Python ${runtime.python_version_range}` : 'Python'; if (runtime?.type === 'subprocess') return 'Binary / subprocess'; return runtime?.type || 'Unknown runtime' }
 function environmentLabel(status) { return ({ ready: 'Healthy', unavailable: 'Unavailable', not_applicable: 'Not applicable' })[status] || status || 'Unknown' }
 function trustLabel(value) { return ({ official: 'Official publisher', third_party: 'Trusted third party', developer_local: 'Developer Local（未经过 Official 签名）' })[value] || value || 'Unknown' }
@@ -224,6 +313,12 @@ function isRevocable(name) { return (name === 'network.direct' || name === 'netw
 function marketLink(plugin) { const params = new URLSearchParams({ type: 'plugins' }); if (plugin?.market?.package_id) params.set('package', plugin.market.package_id); return `/market?${params}` }
 
 onMounted(() => { loadPlugins(); loadDeveloperMode() })
+onBeforeUnmount(() => {
+  componentDisposed = true
+  listController?.abort()
+  detailController?.abort()
+  developerModeController?.abort()
+})
 </script>
 
 <style scoped>

@@ -1,4 +1,5 @@
 import { apiRequest } from './client.js'
+import { adminRequestErrorMessage } from './adminUi.js'
 
 const JSON_HEADERS = { 'Content-Type': 'application/json' }
 
@@ -136,5 +137,5 @@ export function epgMatchingErrorMessage(error, fallback = '操作失败，请稍
     binding_write_failed: '节目单设置暂时无法保存，请稍后重试',
     invalid_request: '提交内容无效，请刷新后重试',
   }
-  return messages[epgMatchingErrorCode(error)] || fallback
+  return messages[epgMatchingErrorCode(error)] || adminRequestErrorMessage(error, fallback)
 }

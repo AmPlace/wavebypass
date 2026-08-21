@@ -1,4 +1,5 @@
 import { apiRequest } from './client.js'
+import { adminRequestErrorMessage } from './adminUi.js'
 
 const JSON_HEADERS = { 'Content-Type': 'application/json' }
 
@@ -7,13 +8,13 @@ function pluginPath(identity) {
   return `${encodeURIComponent(publisher || '')}/${encodeURIComponent(plugin || '')}`
 }
 
-export async function fetchPlugins() {
-  const response = await apiRequest('/api/admin/plugins')
+export async function fetchPlugins({ signal } = {}) {
+  const response = await apiRequest('/api/admin/plugins', { signal })
   return response.json()
 }
 
-export async function fetchDeveloperMode() {
-  const response = await apiRequest('/api/admin/plugins/developer/mode')
+export async function fetchDeveloperMode({ signal } = {}) {
+  const response = await apiRequest('/api/admin/plugins/developer/mode', { signal })
   return response.json()
 }
 
@@ -31,8 +32,8 @@ export async function installDeveloperPlugin(path) {
   return response.json()
 }
 
-export async function fetchPlugin(identity) {
-  const response = await apiRequest(`/api/admin/plugins/${pluginPath(identity)}`)
+export async function fetchPlugin(identity, { signal } = {}) {
+  const response = await apiRequest(`/api/admin/plugins/${pluginPath(identity)}`, { signal })
   return response.json()
 }
 
@@ -96,5 +97,5 @@ export function pluginErrorMessage(error, fallback = '插件操作失败，请�
     DEVELOPER_MODE_REQUIRED: '请先在 Developer Mode 中启用本地插件安装',
     ARTIFACT_INTEGRITY_FAILED: '插件本地包完整性校验失败',
   }
-  return messages[pluginErrorCode(error)] || fallback
+  return messages[pluginErrorCode(error)] || adminRequestErrorMessage(error, fallback)
 }
