@@ -639,6 +639,7 @@ import { useToastStore } from '../stores/toast'
 import MarketFilterDropdown from '../components/MarketFilterDropdown.vue'
 import AdaptiveTagList from '../components/AdaptiveTagList.vue'
 import { isLogoPackage, isPluginPackage, packageActionLabel, packageInstallable, permissionLabel, pluginDependencies, pluginIdentity, pluginRuntimeLabel, pluginSchemeLabels, providerContractLabels, requestedPermissions } from './marketPackageUi'
+import { createLatestMarketSourceProjection, marketSourceDraft } from './marketSourceUi.js'
 
 const toastStore = useToastStore()
 const route = useRoute()
@@ -662,6 +663,9 @@ const filterSheetOpen = ref(false)
 const selectedPackage = ref(null)
 const preview = ref(null)
 const marketSources = ref([])
+const marketSourceProjection = createLatestMarketSourceProjection((sources) => {
+  marketSources.value = sources
+})
 const menuOpenId = ref(null)
 const actingId = ref(null)
 const searchOpen = ref(false)
@@ -1709,17 +1713,19 @@ const hasUpdatableInstalled = computed(() => updatableInstalledCount.value > 0)
 
 async function loadSummary() {
   const requestId = ++loadSummaryRequestId
+  const projectionRevision = marketSourceProjection.begin()
   const result = await fetchMarketSummary()
   if (requestId !== loadSummaryRequestId || componentDisposed) return
   summary.value = result
-  marketSources.value = (result.sources || []).map(marketSourceDraft)
+  marketSourceProjection.publish(projectionRevision, result.sources)
 }
 
 async function loadSources() {
   const requestId = ++loadSourcesRequestId
+  const projectionRevision = marketSourceProjection.begin()
   const data = await fetchMarketSources()
   if (requestId !== loadSourcesRequestId || componentDisposed) return
-  marketSources.value = (data.sources || []).map(marketSourceDraft)
+  marketSourceProjection.publish(projectionRevision, data.sources)
 }
 
 async function loadPackages({ preserveError = false } = {}) {
@@ -1748,19 +1754,6 @@ function setSourceAction(sourceId, busy) {
   sourceActionIds.value = next
 }
 
-function marketSourceDraft(source) {
-  return {
-    ...source,
-    replace_url: false,
-    replacement_url: '',
-    persisted: {
-      name: source?.name || '',
-      enabled: Boolean(source?.enabled),
-      allow_private: Boolean(source?.allow_private),
-    },
-  }
-}
-
 function restoreMarketSourceDraft(source) {
   if (!source?.persisted) return
   source.name = source.persisted.name
@@ -1768,6 +1761,16 @@ function restoreMarketSourceDraft(source) {
   source.allow_private = source.persisted.allow_private
   source.replace_url = false
   source.replacement_url = ''
+}
+
+function applyConfirmedMarketSource(result) {
+  if (!result || result.id === undefined || result.id === null) return
+  const index = marketSources.value.findIndex(source => source.id === result.id)
+  if (index < 0) return
+  marketSources.value[index] = marketSourceDraft({
+    ...marketSources.value[index],
+    ...result,
+  })
 }
 
 function sourceActionBusy(sourceId) {
@@ -1780,13 +1783,14 @@ function packageOperationCurrent(operationId) {
 
 async function handleRefresh() {
   if (refreshing.value || importLoading.value || updating.value || componentDisposed) return
+  const projectionRevision = marketSourceProjection.begin()
   refreshing.value = true
   error.value = ''
   try {
     const result = await refreshMarket()
     if (componentDisposed) return
     summary.value = result
-    marketSources.value = (result.sources || []).map(marketSourceDraft)
+    if (!marketSourceProjection.publish(projectionRevision, result.sources)) return
     await loadPackages()
     toastStore.success('频道市场已刷新')
   } catch (e) {
@@ -1800,12 +1804,13 @@ async function handleRefresh() {
 
 async function handleCheckUpdate() {
   if (!selectedPackage.value || refreshing.value || importLoading.value || updating.value || componentDisposed) return
+  const projectionRevision = marketSourceProjection.begin()
   refreshing.value = true
   try {
     const result = await refreshMarket()
     if (componentDisposed) return
     summary.value = result
-    marketSources.value = (result.sources || []).map(marketSourceDraft)
+    if (!marketSourceProjection.publish(projectionRevision, result.sources)) return
     await loadPackages()
     syncSelectedPackageFromList()
     toastStore.info(selectedPackage.value?.update_available ? '发现新版本' : '当前已是最新')
@@ -1917,14 +1922,22 @@ async function handleUpdateSource(source) {
   }
   setSourceAction(source.id, true)
   try {
-    await updateMarketSource(source.id, {
+    const result = await updateMarketSource(source.id, {
       name: source.name,
       enabled: source.enabled,
       allow_private: source.allow_private,
       ...(source.replace_url ? { url: source.replacement_url.trim() } : {}),
     })
     if (componentDisposed) return
-    await loadSources()
+    // The PUT response is the first server-confirmed projection. A later GET
+    // failure must not roll it back to the pre-save draft value.
+    applyConfirmedMarketSource(result)
+    try {
+      await loadSources()
+    } catch (e) {
+      if (!componentDisposed) toastStore.error(adminRequestErrorMessage(e, '已保存，但 Market 源状态刷新失败，请稍后重试'))
+      return
+    }
     toastStore.success('已保存')
   } catch (e) {
     if (!componentDisposed) {
@@ -1956,13 +1969,14 @@ async function handleDeleteSource(source) {
 
 async function handleRefreshSource(source) {
   if (!source?.id || refreshing.value || sourceActionBusy(source.id) || componentDisposed) return
+  const projectionRevision = marketSourceProjection.begin()
   setSourceAction(source.id, true)
   refreshing.value = true
   try {
     const result = await refreshMarketSource(source.id)
     if (componentDisposed) return
     summary.value = result
-    marketSources.value = (result.sources || []).map(marketSourceDraft)
+    if (!marketSourceProjection.publish(projectionRevision, result.sources)) return
     await loadPackages()
     toastStore.success('已刷新')
   } catch (e) {
