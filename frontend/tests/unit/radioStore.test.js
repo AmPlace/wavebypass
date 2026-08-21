@@ -56,3 +56,24 @@ test('Radio selection and explicit Play keep distinct playback intents', () => {
   store.selectRadioSource('radio_a', 'source_a')
   assert.equal(store.consumeRadioPlaybackIntent(), 'source_switch')
 })
+
+test('catalog refresh keeps the selected station as a stale playback projection', () => {
+  setActivePinia(createPinia())
+  const store = usePlayerStore()
+  store.addRadioStations([
+    radio('radio_a', '正在播放', 'source_a'),
+    radio('radio_b', '仍在目录', 'source_b'),
+  ])
+  store.switchStation('radio_a')
+
+  store.addRadioStations([radio('radio_b', '仍在目录', 'source_b')])
+
+  assert.equal(store.stationMap.radio_a.name, '正在播放')
+  assert.equal(store.stationMap.radio_a.catalogRemoved, true)
+  assert.equal(store.stationList.some((item) => item.id === 'radio_a'), true)
+  assert.equal(store.stationMap.radio_b.catalogRemoved, false)
+
+  store.addRadioStations([radio('radio_a', '恢复目录', 'source_a')])
+  assert.equal(store.stationMap.radio_a.catalogRemoved, false)
+  assert.equal(store.stationMap.radio_a.name, '恢复目录')
+})

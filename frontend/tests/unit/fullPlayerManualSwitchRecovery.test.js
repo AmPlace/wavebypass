@@ -19,7 +19,7 @@ function extractFunction(source, signature) {
 
 function createSwitchHarness() {
   const source = fs.readFileSync(fullPlayerPath, 'utf8')
-  const switchSource = extractFunction(source, 'async function switchIptvSource(index)')
+  const switchSource = extractFunction(source, 'async function switchIptvSource(sourceKey)')
   const factory = new Function('deps', `
     let _playAttemptId = deps.playAttemptId
     let _recoverySeq = deps.recoverySeq
@@ -27,6 +27,7 @@ function createSwitchHarness() {
     const {
       isIptvMode, playerStore, iptvSourceOptions, sourceMenuOpen, isSourceSwitching,
       getSourceRuntimeStatus, setSourceRuntimeStatus, clearRaceLoser,
+      sourceRaceKey,
       setIptvUrlIndexForAttempt, isProxyLikeEntry, tryPlayIptv,
       isAttemptActive, sourceType, markRaceLoser, fallbackToNextIptvUrl,
       playCurrentIptvUrl, markAllIptvSourcesUnavailable,
@@ -57,11 +58,12 @@ function createSwitchHarness() {
     recoveryInFlight: true,
     isIptvMode: { value: true },
     playerStore,
-    iptvSourceOptions: { value: [{ index: 1, disabled: false }] },
+    iptvSourceOptions: { value: [{ identityKey: 'new:direct', index: 1, disabled: false }] },
     sourceMenuOpen: { value: true },
     isSourceSwitching: { value: false },
     getSourceRuntimeStatus: (index) => statuses.get(index) || 'idle',
     setSourceRuntimeStatus: (index, status) => statuses.set(index, status),
+    sourceRaceKey: (entry) => `${entry.source_id}:${entry.type === 'proxy' ? 'proxy' : 'direct'}`,
     clearRaceLoser() {},
     setIptvUrlIndexForAttempt: async (index) => {
       playerStore.iptvUrlIndex = index
@@ -85,7 +87,7 @@ function createSwitchHarness() {
 test('手动切源使旧 recovery 立即失效', async () => {
   const { harness, statuses, stallTimerClearCount } = createSwitchHarness()
 
-  await harness.switchIptvSource(1)
+  await harness.switchIptvSource('new:direct')
 
   const state = harness.snapshot()
   assert.equal(state._recoverySeq, 8, '手动切源必须使正在运行的 recovery seq 失效')

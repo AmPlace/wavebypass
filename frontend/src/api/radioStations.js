@@ -44,6 +44,7 @@ function mapRadioStation(station) {
     radioSourceId: String(source.source_id),
     radioSources: safeSources,
     radioDomain: 'radio',
+    catalogStatus: String(station?.catalog_status || '').trim(),
     livePath: true,
     directPlay: false,
     tags: [station?.country, station?.group_name, station?.language, metadata.tag || inferType(station)]
@@ -52,20 +53,79 @@ function mapRadioStation(station) {
   }
 }
 
-export async function fetchRadioStations({ fetchImpl = fetch } = {}) {
+function normalizeCatalogStates(states) {
+  return (Array.isArray(states) ? states : [])
+    .filter((state) => state && typeof state === 'object')
+    .map((state) => ({
+      owner_identity: String(state.owner_identity || '').trim(),
+      status: String(state.status || '').trim().toLowerCase(),
+      station_count: Number.isFinite(Number(state.station_count))
+        ? Number(state.station_count)
+        : 0,
+    }))
+    .filter((state) => state.status)
+}
+
+export function summarizeRadioCatalogState(stations, catalogStates = []) {
+  const rows = Array.isArray(stations) ? stations : []
+  const states = normalizeCatalogStates(catalogStates)
+  const rowStatuses = rows
+    .map((station) => String(station?.catalogStatus || '').trim().toLowerCase())
+    .filter(Boolean)
+  const statuses = [...states.map((state) => state.status), ...rowStatuses]
+
+  if (statuses.includes('stale')) return 'stale'
+  if (statuses.includes('degraded')) return 'degraded'
+  if (statuses.includes('failed') || statuses.includes('expired')) {
+    return rows.length > 0 ? 'degraded' : 'error'
+  }
+  if (rows.length === 0) return 'empty'
+  return 'success'
+}
+
+export async function fetchRadioCatalog({ fetchImpl = fetch, signal } = {}) {
+  const controller = new AbortController()
+  let timer = null
+  let timedOut = false
+  let removeAbortListener = null
+  if (signal) {
+    if (signal.aborted) return { status: 'cancelled' }
+    const abort = () => controller.abort()
+    signal.addEventListener('abort', abort, { once: true })
+    removeAbortListener = () => signal.removeEventListener('abort', abort)
+  }
+
   try {
-    const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), 15_000)
+    timer = setTimeout(() => {
+      timedOut = true
+      controller.abort()
+    }, 15_000)
     const response = await fetchImpl(`${API_BASE}/api/radio/stations`, { signal: controller.signal })
-    clearTimeout(timer)
-    if (!response.ok) return null
+    if (!response.ok) return { status: 'error', errorKind: 'http' }
     const body = await response.json()
     const rows = Array.isArray(body) ? body : body?.stations
-    if (!Array.isArray(rows)) return []
-    return rows.map(mapRadioStation).filter(Boolean)
-  } catch {
-    return null
+    if (!Array.isArray(rows)) return { status: 'error', errorKind: 'invalid_response' }
+    return {
+      status: 'success',
+      stations: rows.map(mapRadioStation).filter(Boolean),
+      catalogStates: normalizeCatalogStates(body?.catalog_states),
+    }
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      return timedOut
+        ? { status: 'error', errorKind: 'timeout' }
+        : { status: 'cancelled' }
+    }
+    return { status: 'error', errorKind: 'network' }
+  } finally {
+    if (timer) clearTimeout(timer)
+    removeAbortListener?.()
   }
+}
+
+export async function fetchRadioStations(options = {}) {
+  const result = await fetchRadioCatalog(options)
+  return result.status === 'success' ? result.stations : null
 }
 
 export async function fetchRadioProgramme(station, { fetchImpl = fetch } = {}) {

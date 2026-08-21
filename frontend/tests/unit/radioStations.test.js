@@ -1,7 +1,14 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { mock } from 'node:test'
 
-import { fetchRadioStations, fetchRadioProgramme, mapRadioStationForTest } from '../../src/api/radioStations.js'
+import {
+  fetchRadioCatalog,
+  fetchRadioProgramme,
+  fetchRadioStations,
+  mapRadioStationForTest,
+  summarizeRadioCatalogState,
+} from '../../src/api/radioStations.js'
 
 test('Radio catalog maps explicit station/source identity without upstream URLs', async () => {
   const station = mapRadioStationForTest({
@@ -43,6 +50,83 @@ test('Radio catalog fetch uses the bounded domain endpoint and preserves duplica
 
   assert.deepEqual(calls, ['/api/radio/stations'])
   assert.deepEqual(stations.map((station) => station.id), ['radio_a', 'radio_b'])
+})
+
+test('Radio catalog keeps provider state separate from the station projection', async () => {
+  const result = await fetchRadioCatalog({
+    fetchImpl: async () => ({
+      ok: true,
+      json: async () => ({
+        stations: [{
+          station_id: 'radio_a',
+          name: '旧目录电台',
+          catalog_status: 'stale',
+          sources: [{ source_id: 'source_a', lifecycle_state: 'stale' }],
+        }],
+        catalog_states: [{
+          owner_identity: 'org.waveflow/yunting',
+          status: 'stale',
+          station_count: 1,
+          last_error: 'must not be needed by the frontend',
+        }],
+      }),
+    }),
+  })
+
+  assert.equal(result.status, 'success')
+  assert.equal(result.stations.length, 1)
+  assert.deepEqual(result.catalogStates, [{
+    owner_identity: 'org.waveflow/yunting',
+    status: 'stale',
+    station_count: 1,
+  }])
+  assert.equal(summarizeRadioCatalogState(result.stations, result.catalogStates), 'stale')
+})
+
+test('Radio catalog maps transport failures to an error without clearing compatibility API semantics', async () => {
+  const result = await fetchRadioCatalog({
+    fetchImpl: async () => ({ ok: false, status: 503 }),
+  })
+  assert.deepEqual(result, { status: 'error', errorKind: 'http' })
+
+  const stations = await fetchRadioStations({
+    fetchImpl: async () => { throw new Error('network unavailable') },
+  })
+  assert.equal(stations, null)
+})
+
+test('Radio catalog timeout is an error while external cancellation remains silent', async () => {
+  mock.timers.enable({ apis: ['setTimeout'] })
+  try {
+    const timeoutPromise = fetchRadioCatalog({
+      fetchImpl: async (_url, { signal }) => new Promise((resolve, reject) => {
+        signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })), { once: true })
+      }),
+    })
+    mock.timers.tick(15_000)
+    assert.deepEqual(await timeoutPromise, { status: 'error', errorKind: 'timeout' })
+  } finally {
+    mock.timers.reset()
+  }
+
+  const controller = new AbortController()
+  const cancelledPromise = fetchRadioCatalog({
+    signal: controller.signal,
+    fetchImpl: async (_url, { signal }) => new Promise((resolve, reject) => {
+      signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })), { once: true })
+    }),
+  })
+  controller.abort()
+  assert.deepEqual(await cancelledPromise, { status: 'cancelled' })
+})
+
+test('Radio catalog state treats a valid empty snapshot differently from a failed snapshot', () => {
+  assert.equal(summarizeRadioCatalogState([], [{ status: 'success', station_count: 0 }]), 'empty')
+  assert.equal(summarizeRadioCatalogState([], [{ status: 'failed', station_count: 0 }]), 'error')
+  assert.equal(
+    summarizeRadioCatalogState([{ catalogStatus: 'degraded' }], []),
+    'degraded',
+  )
 })
 
 test('Radio programme fetch submits only the persisted source_id', async () => {

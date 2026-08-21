@@ -58,12 +58,14 @@ export function sourceRaceKey(entry) {
   return fallback ? `${fallback}:${sourceTransport(entry)}` : ''
 }
 
-export function buildChannelProxyUrl({ apiBase, channelKey, sourceId = '', accessToken = '' }) {
+export function buildChannelProxyUrl({ apiBase, channelKey, sourceId = '', expectedSourceRevision = '', accessToken = '' }) {
   const key = String(channelKey || '').trim()
   if (!key) return ''
   const params = new URLSearchParams()
   const sid = String(sourceId || '').trim()
   if (sid) params.set('source_id', sid)
+  const revision = String(expectedSourceRevision || '').trim()
+  if (revision) params.set('expected_source_revision', revision)
   if (accessToken) params.set('access_token', accessToken)
   const suffix = params.toString() ? `?${params.toString()}` : ''
   return `${apiBase}/api/media/channel/${encodeURIComponent(key)}/playlist.m3u8${suffix}`

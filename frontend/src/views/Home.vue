@@ -37,11 +37,62 @@
       </div>
     </header>
 
+    <div
+      v-if="radioCatalogNotice"
+      class="mb-5 flex min-h-10 items-center justify-between gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] px-4 py-2.5 text-sm text-[var(--text-secondary)]"
+      role="status"
+      aria-live="polite"
+    >
+      <span class="min-w-0 truncate">{{ radioCatalogNotice }}</span>
+      <button
+        v-if="!radioLoading"
+        type="button"
+        class="shrink-0 rounded-lg px-2.5 py-1 text-xs font-medium text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-hover)]"
+        @click="loadRadioCatalog"
+      >
+        重试
+      </button>
+    </div>
+
     <section
       ref="gridRef"
-      class="relative w-full"
+      class="relative min-h-[240px] w-full"
       :style="{ height: `${totalHeight}px` }"
+      :aria-busy="radioLoading ? 'true' : 'false'"
     >
+      <div v-if="filteredStations.length === 0" class="flex min-h-[240px] items-center justify-center px-4 py-12">
+        <div class="flex max-w-md flex-col items-center gap-3 text-center" role="status" aria-live="polite">
+          <span class="flex size-11 items-center justify-center rounded-xl border border-[var(--border)] bg-[var(--surface)] text-[var(--text-secondary)]">
+            <svg v-if="radioLoading && allStations.length === 0" class="size-5 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="8" stroke="currentColor" stroke-width="1.8" stroke-opacity=".25"/><path d="M20 12a8 8 0 0 0-8-8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+            <svg v-else-if="radioCatalogState === 'error' && allStations.length === 0" class="size-5" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 4 21 20H3L12 4Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M12 9v5M12 17h.01" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+            <svg v-else class="size-5" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="8" stroke="currentColor" stroke-width="1.7"/><path d="M8.5 12h7" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+          </span>
+          <p v-if="radioLoading && allStations.length === 0" class="text-sm text-[var(--text-secondary)]">正在加载电台目录...</p>
+          <template v-else-if="radioCatalogState === 'error' && allStations.length === 0">
+            <p class="text-sm text-[var(--text-secondary)]">电台目录暂时无法加载</p>
+            <button
+              type="button"
+              class="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-1.5 text-xs font-medium text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-hover)]"
+              @click="loadRadioCatalog"
+            >
+              重试加载
+            </button>
+          </template>
+          <p v-else-if="radioCatalogState === 'empty' && allStations.length === 0" class="text-sm text-[var(--text-secondary)]">暂无可用电台</p>
+          <template v-else>
+            <p class="text-sm text-[var(--text-secondary)]">没有匹配的电台</p>
+            <button
+              type="button"
+              class="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-1.5 text-xs font-medium text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-hover)]"
+              @click="clearRadioFilters"
+            >
+              清除筛选
+            </button>
+          </template>
+        </div>
+      </div>
+
+      <template v-else>
       <div
         v-for="row in virtualRows"
         :key="row.startIndex"
@@ -57,9 +108,16 @@
             :key="item.station.id"
             type="button"
             :aria-label="`切换到 ${item.station.name}`"
+            :aria-current="isCurrentStationSelected(item.station.id) ? 'true' : undefined"
             :style="{ height: `${cardHeight}px` }"
             class="channel-card group relative overflow-hidden rounded-[18px] border border-[var(--border)] bg-[var(--card-bg)] text-left outline-none transition duration-200 ease-out hover:-translate-y-0.5 hover:border-[var(--border-strong)]"
-            :class="['channel-card--logo-card', { 'channel-card-current': isCurrentStationPlaying(item.station.id) }]"
+            :class="[
+              'channel-card--logo-card',
+              {
+                'channel-card-selected': isCurrentStationSelected(item.station.id),
+                'channel-card-current': isCurrentStationPlaying(item.station.id),
+              },
+            ]"
             @click="playerStore.switchStation(item.station.id)"
           >
             <span class="channel-card__logo-card-visual" aria-hidden="true">
@@ -105,6 +163,7 @@
           </button>
         </div>
       </div>
+      </template>
     </section>
   </main>
 </template>
@@ -112,7 +171,11 @@
 <script setup>
 import { storeToRefs } from 'pinia'
 import { usePlayerStore } from '../stores/player'
-import { fetchRadioProgramme, fetchRadioStations } from '../api/radioStations'
+import {
+  fetchRadioCatalog,
+  fetchRadioProgramme,
+  summarizeRadioCatalogState,
+} from '../api/radioStations'
 import { computed, inject, onBeforeUnmount, onMounted, ref, watch, watchEffect } from 'vue'
 import { useScroll, useThrottleFn } from '@vueuse/core'
 import { API_BASE } from '../apiBase'
@@ -120,9 +183,13 @@ import { useLogoVisual } from '../composables/useLogoVisual'
 import TagFilterRow from '../components/TagFilterRow.vue'
 
 const playerStore = usePlayerStore()
-const { currentStation, isPlaying, isLoading, stationList } = storeToRefs(playerStore)
+const { currentStation, isPlaying, isLoading, playbackError, stationList } = storeToRefs(playerStore)
 
 const radioLoading = ref(false)
+const radioCatalogState = ref('loading')
+let radioCatalogRequestSeq = 0
+let radioCatalogController = null
+let disposed = false
 const {
   displayName: stationDisplayName,
   shouldShowLogo: shouldShowStationLogo,
@@ -141,7 +208,9 @@ const {
 const allStations = computed(() => {
   // RadioStation/RadioStationSource identities are explicit.  Never merge
   // providers by display name, frequency, or an upstream URL.
-  return stationList.value
+  return stationList.value.filter((station) => (
+    !station?.catalogRemoved || station.id === currentStation.value
+  ))
 })
 
 const regionLabels = {
@@ -203,7 +272,27 @@ const typeItems = computed(() => [
   ...types.value.map((t) => ({ value: t, label: typeLabels[t] || t })),
 ])
 
+watch(regions, (availableRegions) => {
+  if (selectedRegion.value && !availableRegions.includes(selectedRegion.value)) {
+    selectedRegion.value = ''
+  }
+})
+
+watch(types, (availableTypes) => {
+  if (selectedType.value && !availableTypes.includes(selectedType.value)) {
+    selectedType.value = ''
+  }
+})
+
 const filteredStations = ref([])
+
+const radioCatalogNotice = computed(() => {
+  if (radioLoading.value && allStations.value.length > 0) return '正在更新电台目录，当前频道仍可使用'
+  if (radioCatalogState.value === 'stale') return '电台目录更新失败，已保留上次频道'
+  if (radioCatalogState.value === 'degraded') return '部分电台目录暂时不可用，已保留可用频道'
+  if (radioCatalogState.value === 'error' && allStations.value.length > 0) return '电台目录暂时无法更新，已保留现有频道'
+  return ''
+})
 
 watchEffect(() => {
   const region = selectedRegion.value
@@ -223,7 +312,14 @@ watchEffect(() => {
 })
 
 function isCurrentStationPlaying(stationId) {
-  return currentStation.value === stationId && isPlaying.value
+  return currentStation.value === stationId
+    && isPlaying.value
+    && !isLoading.value
+    && !playbackError.value
+}
+
+function isCurrentStationSelected(stationId) {
+  return currentStation.value === stationId
 }
 
 function isCurrentStationLoading(stationId) {
@@ -247,14 +343,25 @@ function stationLogoIdentityKey(station) {
 }
 
 function stationStatusDotClass(station) {
+  if (currentStation.value === station.id && playbackError.value) return 'channel-play-state-dot--danger'
   if (isCurrentStationLoading(station.id)) return 'channel-play-state-dot--warn'
-  return 'channel-play-state-dot--live'
+  if (isCurrentStationPlaying(station.id)) return 'channel-play-state-dot--live'
+  return 'channel-play-state-dot--neutral'
 }
 
 function stationStatusLabel(station) {
-  if (isCurrentStationPlaying(station.id)) return '播放中'
   if (isCurrentStationLoading(station.id)) return '加载中'
-  return '可播放'
+  if (currentStation.value === station.id && playbackError.value) return '播放失败'
+  if (isCurrentStationPlaying(station.id)) return '播放中'
+  if (station.catalogRemoved) return '目录已更新'
+  if (currentStation.value === station.id) return '已暂停'
+  return '待播放'
+}
+
+function clearRadioFilters() {
+  selectedRegion.value = ''
+  selectedType.value = ''
+  if (searchQuery?.value !== undefined) searchQuery.value = ''
 }
 
 const scrollRef = inject('scrollRef')
@@ -275,6 +382,8 @@ async function refreshCurrentRadioProgramme(
   const requestStation = { ...station, radioSourceId: sourceId }
   const result = await fetchRadioProgramme(requestStation)
   if (
+    disposed
+    ||
     requestSeq !== programmeRequestSeq
     || currentStation.value !== stationId
     || playerStore.stationMap[stationId]?.radioSourceId !== sourceId
@@ -346,7 +455,47 @@ const virtualRows = computed(() => {
 
 const totalHeight = computed(() => rows.value.length * (rowHeight.value + gap.value))
 
+async function loadStaticStations() {
+  try {
+    const response = await fetch(`${API_BASE}/api/stations`)
+    if (!response.ok) return
+    const stations = await response.json()
+    if (disposed || !Array.isArray(stations)) return
+
+    const dynamicStations = playerStore.stationList.filter((station) => station?.radioDomain)
+    const seen = new Set()
+    playerStore.loadStations([...stations, ...dynamicStations].filter((station) => {
+      if (!station?.id || seen.has(station.id)) return false
+      seen.add(station.id)
+      return true
+    }))
+  } catch {}
+}
+
+async function loadRadioCatalog() {
+  const requestSeq = ++radioCatalogRequestSeq
+  radioCatalogController?.abort()
+  const controller = new AbortController()
+  radioCatalogController = controller
+  radioLoading.value = true
+
+  const result = await fetchRadioCatalog({ signal: controller.signal })
+  if (disposed || requestSeq !== radioCatalogRequestSeq || result.status === 'cancelled') return
+  if (radioCatalogController === controller) radioCatalogController = null
+
+  radioLoading.value = false
+  if (result.status !== 'success') {
+    radioCatalogState.value = 'error'
+    return
+  }
+
+  playerStore.addRadioStations(result.stations)
+  radioCatalogState.value = summarizeRadioCatalogState(result.stations, result.catalogStates)
+  if (currentStation.value) refreshCurrentRadioProgramme(currentStation.value)
+}
+
 onMounted(() => {
+  disposed = false
   resizeObserver = new ResizeObserver((entries) => {
     for (const entry of entries) {
       containerWidth.value = entry.contentRect.width
@@ -355,23 +504,8 @@ onMounted(() => {
   })
   if (gridRef.value) resizeObserver.observe(gridRef.value)
 
-  ;(async () => {
-    try {
-      const stRes = await fetch(`${API_BASE}/api/stations`)
-      if (stRes.ok) {
-        const stations = await stRes.json()
-        playerStore.loadStations(stations)
-      }
-    } catch {}
-  })()
-
-  ;(async () => {
-    radioLoading.value = true
-    const list = await fetchRadioStations()
-    if (Array.isArray(list)) playerStore.addRadioStations(list)
-    radioLoading.value = false
-    if (currentStation.value) refreshCurrentRadioProgramme(currentStation.value)
-  })()
+  void loadStaticStations()
+  void loadRadioCatalog()
 
   programmeTimer = setInterval(() => {
     if (currentStation.value) refreshCurrentRadioProgramme(currentStation.value)
@@ -379,6 +513,11 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  disposed = true
+  ++radioCatalogRequestSeq
+  ++programmeRequestSeq
+  radioCatalogController?.abort()
+  radioCatalogController = null
   if (resizeObserver) resizeObserver.disconnect()
   if (programmeTimer) clearInterval(programmeTimer)
 })

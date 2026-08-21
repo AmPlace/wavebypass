@@ -11,6 +11,7 @@
     >
       <section class="mobile-player-info flex min-w-0 basis-[40%] cursor-pointer items-center gap-2 lg:basis-[42%] lg:gap-2" @click.stop="openFullPlayer">
         <img
+          :key="displayIptvChannel?.canonical_key || currentStation || 'empty'"
           class="mobile-player-logo size-11 shrink-0 rounded-[10px] border border-[var(--border)] bg-[var(--surface)] object-contain p-1 lg:size-10 lg:rounded-[10px]"
           :src="currentLogoUrl"
           :alt="currentStationName"

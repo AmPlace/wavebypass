@@ -63,11 +63,65 @@
       </div>
     </header>
 
+    <div
+      v-if="catalogNotice"
+      class="iptv-catalog-notice mb-5 flex min-h-10 items-center justify-between gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] px-4 py-2.5 text-sm text-[var(--text-secondary)]"
+      role="status"
+      aria-live="polite"
+    >
+      <span class="min-w-0 truncate">{{ catalogNotice }}</span>
+      <button
+        v-if="!loading"
+        type="button"
+        class="shrink-0 rounded-lg px-2.5 py-1 text-xs font-medium text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-hover)]"
+        data-iptv-catalog-retry
+        @click="loadChannels"
+      >
+        重试
+      </button>
+    </div>
+
     <section
       ref="gridRef"
-      class="relative w-full"
+      class="relative min-h-[240px] w-full"
       :style="{ height: `${totalHeight}px` }"
+      :aria-busy="loading ? 'true' : 'false'"
+      data-iptv-catalog-grid
     >
+      <div v-if="filteredChannels.length === 0" class="flex min-h-[240px] items-center justify-center px-4 py-12">
+        <div class="flex max-w-md flex-col items-center gap-3 text-center" role="status" aria-live="polite" data-iptv-catalog-empty-state>
+          <span class="flex size-11 items-center justify-center rounded-xl border border-[var(--border)] bg-[var(--surface)] text-[var(--text-secondary)]">
+            <svg v-if="loading && allChannels.length === 0" class="size-5 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="8" stroke="currentColor" stroke-width="1.8" stroke-opacity=".25"/><path d="M20 12a8 8 0 0 0-8-8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+            <svg v-else-if="catalogState === 'error' && allChannels.length === 0" class="size-5" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 4 21 20H3L12 4Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M12 9v5M12 17h.01" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+            <svg v-else class="size-5" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="8" stroke="currentColor" stroke-width="1.7"/><path d="M8.5 12h7" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+          </span>
+          <p v-if="loading && allChannels.length === 0" class="text-sm text-[var(--text-secondary)]">正在加载频道目录...</p>
+          <template v-else-if="catalogState === 'error' && allChannels.length === 0">
+            <p class="text-sm text-[var(--text-secondary)]">频道目录暂时无法加载</p>
+            <button
+              type="button"
+              class="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-1.5 text-xs font-medium text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-hover)]"
+              data-iptv-catalog-retry
+              @click="loadChannels"
+            >
+              重试加载
+            </button>
+          </template>
+          <p v-else-if="catalogState === 'empty' && !hasActiveFilter" class="text-sm text-[var(--text-secondary)]">暂无可用频道</p>
+          <template v-else>
+            <p class="text-sm text-[var(--text-secondary)]">没有匹配的频道</p>
+            <button
+              type="button"
+              class="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-1.5 text-xs font-medium text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-hover)]"
+              @click="clearCatalogFilters"
+            >
+              清除筛选
+            </button>
+          </template>
+        </div>
+      </div>
+
+      <template v-else>
       <div
         v-for="row in virtualRows"
         :key="row.startIndex"
@@ -141,6 +195,7 @@
           </button>
         </div>
       </div>
+      </template>
     </section>
   </main>
 </template>
@@ -178,6 +233,7 @@ const allChannels = ref([])
 const allGroups = ref([])
 const selectedGroup = ref('')
 const loading = ref(false)
+const catalogState = ref('loading')
 const epgMap = ref({})
 const { batchCurrent } = useEpg()
 
@@ -249,6 +305,13 @@ async function _refreshBatchCurrent(listSeq, keys) {
 const logoCandidateIndexes = ref({})
 const channelSortMode = computed(() => playerStore.iptvChannelSortMode)
 const categoryTabs = computed(() => ['全部', ...allGroups.value])
+const hasActiveFilter = computed(() => Boolean(selectedGroup.value || searchQuery.value.trim()))
+const catalogNotice = computed(() => {
+  if (loading.value && allChannels.value.length > 0) return '正在更新频道目录，当前频道仍可使用'
+  if (catalogState.value === 'stale') return '频道目录更新失败，已保留上次频道'
+  if (catalogState.value === 'error' && allChannels.value.length > 0) return '频道目录暂时无法更新，已保留现有频道'
+  return ''
+})
 
 // Core owns source-scoped visual metadata TTL/cache.  The Home keeps only
 // the current projection needed to render each card; it does not key a
@@ -307,6 +370,13 @@ function selectCategoryTab(tab) {
   loadChannels()
 }
 
+function clearCatalogFilters() {
+  const hadSearch = Boolean(searchQuery.value.trim())
+  selectedGroup.value = ''
+  searchQuery.value = ''
+  if (!hadSearch) loadChannels()
+}
+
 function isSelectedCategory(tab) {
   return tab === '全部' ? !selectedGroup.value : selectedGroup.value === tab
 }
@@ -326,7 +396,10 @@ async function loadChannels() {
     const search = searchQuery.value.trim()
     const data = await fetchAggregatedChannels({ group, search, signal: ctrl.signal })
     if (!_isCurrentListRequest(seq)) return { applied: false }
-    allChannels.value = data.channels || []
+    if (!data || typeof data !== 'object' || !Array.isArray(data.channels)) {
+      throw new Error('频道目录响应无效')
+    }
+    allChannels.value = data.channels
     visualMetadata.value = {}
     if (_visualObserver) _visualObserver.disconnect()
     _visualObservedKeys.clear()
@@ -336,21 +409,25 @@ async function loadChannels() {
       channels: allChannels.value,
     })
     if (!group && !search) {
-      allGroups.value = data.groups || []
+      allGroups.value = Array.isArray(data.groups) ? data.groups : []
     }
-    const keys = (data.channels || []).map(c => c.canonical_key).filter(Boolean)
+    catalogState.value = allChannels.value.length ? 'success' : 'empty'
+    const keys = allChannels.value.map(c => c.canonical_key).filter(Boolean)
     if (keys.length && _isCurrentListRequest(seq)) {
       void _refreshBatchCurrent(seq, keys)
     }
     // 延迟触发视觉元数据加载：等 DOM 更新后，IntersectionObserver 开始观察可见卡片
     await nextTick()
+    if (!_isCurrentListRequest(seq)) return { applied: false }
     _observeVisibleCards()
     return { applied: true }
   } catch (e) {
     if (!_isCurrentListRequest(seq)) return { applied: false }
-    if (e?.name === 'AbortError' || e?.status === 0) return { applied: false }
-    console.error('加载频道失败:', e)
-    return { applied: false }
+    const cancelled = e?.name === 'AbortError' || e?.message === '请求已取消'
+    if (cancelled) return { applied: false }
+    console.error('加载频道失败:', e?.status ? `HTTP ${e.status}` : e?.name || 'request_failed')
+    catalogState.value = allChannels.value.length ? 'stale' : 'error'
+    return { applied: false, error: e }
   } finally {
     if (_isCurrentListRequest(seq)) loading.value = false
   }

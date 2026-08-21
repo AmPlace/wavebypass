@@ -684,7 +684,7 @@
               'cursor-not-allowed opacity-45 hover:bg-transparent dark:hover:bg-transparent': source.disabled,
             }"
             :disabled="source.disabled"
-            @click="switchIptvSource(source.index)"
+            @click="switchIptvSource(source.identityKey)"
           >
             <span
               class="size-2.5 shrink-0 rounded-full"
@@ -3230,9 +3230,13 @@ async function setIptvUrlIndexForAttempt(index, attemptId) {
   return isAttemptActive(attemptId)
 }
 
-async function switchIptvSource(index) {
-  if (!isIptvMode.value || index < 0 || index >= playerStore.iptvUrls.length) return
-  const option = iptvSourceOptions.value.find((item) => item.index === index)
+async function switchIptvSource(sourceKey) {
+  if (!isIptvMode.value || !sourceKey) return
+  const option = iptvSourceOptions.value.find((item) => item.identityKey === sourceKey)
+  const index = option
+    ? playerStore.iptvUrls.findIndex((entry) => sourceRaceKey(entry) === sourceKey)
+    : -1
+  if (index < 0) return
   if (option?.disabled) {
     playerStore.setPlaybackError('播放源已禁用或不受支持')
     sourceMenuOpen.value = false

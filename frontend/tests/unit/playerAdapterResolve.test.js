@@ -174,6 +174,36 @@ test('adapter source resolves to direct plus source_id proxy fallback by default
   assert.equal(store.iptvUrls[1].url.includes('token=secret'), false)
 })
 
+test('provider resolve revision mismatch never publishes a stale candidate', async () => {
+  setActivePinia(createPinia())
+  const calls = installFetchStub([{
+    ok: true,
+    body: {
+      ok: true,
+      source_id: 'src_stale',
+      source_revision: 'revision-2',
+      url: 'https://cdn.example/old-revision.m3u8',
+      source_type: 'hls',
+      direct_playable: true,
+    },
+  }])
+  const store = usePlayerStore()
+
+  await store.playIptvChannel({
+    canonical_key: 'revision-channel',
+    urls: [{
+      url: 'huya://31421',
+      source_id: 'src_stale',
+      source_type: 'adapter',
+      source_revision: 'revision-1',
+    }],
+  })
+
+  assert.match(calls[0], /expected_source_revision=revision-1/)
+  assert.equal(store.iptvUrls.length, 0)
+  assert.equal(store.playbackError, '没有可播放的源')
+})
+
 test('probe proxy_required_hint does not suppress adapter direct when adapter allows it', async () => {
   setActivePinia(createPinia())
   installFetchStub([{

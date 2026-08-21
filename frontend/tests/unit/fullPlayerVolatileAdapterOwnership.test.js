@@ -22,7 +22,7 @@ function extractBetween(source, startSignature, endSignature) {
   return source.slice(start, end).trim()
 }
 
-function createVolatileHarness(resolves) {
+function createVolatileHarness(resolves, failureMessage = 'expired') {
   const source = fs.readFileSync(fullPlayerPath, 'utf8')
   const playSource = extractBetween(
     source,
@@ -83,7 +83,8 @@ function createVolatileHarness(resolves) {
     calls,
     tryPlayIptv: async (url) => {
       if (url === 'https://fresh-2/live.m3u8') return
-      throw new Error('expired')
+      if (url === 'https://fresh/live.m3u8') return
+      throw new Error(failureMessage)
     },
   })
   return { calls, entry, harness }
@@ -109,4 +110,19 @@ test('旧 Adapter resolve 晚成功不能覆盖新 attempt 已写入的 URL 和 
   assert.equal(h.entry.url, 'https://fresh-2/live.m3u8')
   assert.equal(h.entry.source_type, 'hls')
   assert.equal(h.harness.currentAttempt(), 3)
+})
+
+test('adapter child playlist 过期时先重新 resolve 当前源再继续播放', async () => {
+  const refresh = deferred()
+  const h = createVolatileHarness([refresh], 'child playlist HTTP 401')
+
+  const play = h.harness.playCurrentIptvUrl(1, { allowStartupRace: false })
+  await Promise.resolve()
+  refresh.resolve({ url: 'https://fresh/live.m3u8', source_type: 'hls' })
+  await play
+
+  assert.equal(h.entry.url, 'https://fresh/live.m3u8')
+  assert.equal(h.entry.source_type, 'hls')
+  assert.equal(h.entry._volatileRetryCount, 1)
+  assert.ok(h.calls.includes('error:直连失败，正在获取新地址...'))
 })

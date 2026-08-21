@@ -473,6 +473,18 @@
     outline-offset: 2px;
   }
 
+  .radio-main .channel-card-selected {
+    border-color: var(--border-strong);
+    outline: 2px solid var(--border-strong);
+    outline-offset: 2px;
+  }
+
+  .radio-main .channel-card-current {
+    border-color: var(--border-strong);
+    outline: 2px solid var(--text-primary);
+    outline-offset: 2px;
+  }
+
   .channel-card-scrim {
     position: absolute;
     inset: 0;

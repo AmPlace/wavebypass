@@ -368,6 +368,24 @@ async function mountHome({ store = null, search = '' } = {}) {
   return { wrapper, store, searchQuery }
 }
 
+async function mountHomePending({ store = null, search = '' } = {}) {
+  if (!store) {
+    setActivePinia(createPinia())
+    store = usePlayerStore()
+  }
+  const searchQuery = vueRef(search)
+  const scrollRef = vueRef(document.documentElement)
+  const wrapper = mount(IptvHome, {
+    attachTo: document.body,
+    global: {
+      provide: { searchQuery, scrollRef },
+    },
+  })
+  mountedWrappers.push(wrapper)
+  await wrapper.vm.$nextTick()
+  return { wrapper, store, searchQuery }
+}
+
 function buttonByText(selector, text) {
   const buttons = domElements(selector)
   const button = buttons.find((item) => item.textContent.trim().includes(text))
@@ -564,6 +582,159 @@ test('IptvHome 搜索以及分组加搜索的结果集合被 FullPlayer 原样�
   assert.equal(second.store.iptvChannelContext.search, '新闻')
   await mountFullPlayerForStore(second.store)
   assert.deepEqual(desktopChannelNames(), ['福建新闻', '泉州新闻'])
+})
+
+test('IptvHome 将初始 loading 和成功目录投影为明确状态', async () => {
+  channels = [channel('Alpha', 'alpha')]
+  let resolveCatalog
+  fetchOverride = async (url) => {
+    if (!url.includes('/api/iptv/channels')) return null
+    return new Promise((resolve) => { resolveCatalog = resolve })
+  }
+  installFetch()
+  const home = await mountHomePending()
+
+  assert.equal(domElement('[data-iptv-catalog-grid]').getAttribute('aria-busy'), 'true')
+  assert.match(domElement('[data-iptv-catalog-empty-state]').textContent, /正在加载频道目录/)
+
+  resolveCatalog(response({ channels, groups: ['测试'] }))
+  await flushPromises()
+  await home.wrapper.vm.$nextTick()
+
+  assert.equal(domElement('[data-iptv-catalog-grid]').getAttribute('aria-busy'), 'false')
+  assert.deepEqual(homeChannelNames(), ['Alpha'])
+  assert.equal(domElements('[data-iptv-catalog-empty-state]').length, 0)
+})
+
+test('IptvHome 区分合法空目录与筛选无结果', async () => {
+  channels = []
+  installFetch()
+  const empty = await mountHome()
+  assert.match(domElement('[data-iptv-catalog-empty-state]').textContent, /暂无可用频道/)
+  assert.equal(domElements('[data-iptv-catalog-retry]').length, 0)
+
+  empty.searchQuery.value = '不存在'
+  await flushPromises()
+  await empty.wrapper.vm.$nextTick()
+  assert.match(domElement('[data-iptv-catalog-empty-state]').textContent, /没有匹配的频道/)
+  assert.equal(domElements('[data-iptv-catalog-empty-state] button').length, 1)
+})
+
+test('IptvHome 清除仅分组筛选会重新加载全量目录', async () => {
+  channels = [channel('Alpha', 'alpha', { group_name: 'A' })]
+  fetchOverride = async (url) => {
+    if (!url.includes('/api/iptv/channels')) return null
+    const group = new URL(url, window.location.origin).searchParams.get('group') || ''
+    if (group === '空组') return response({ channels: [], groups: ['A', '空组'] })
+    return response({ channels, groups: ['A', '空组'] })
+  }
+  installFetch()
+  const home = await mountHome()
+
+  await clickButtonByText('.tag-filter-row button', '空组')
+  assert.match(domElement('[data-iptv-catalog-empty-state]').textContent, /没有匹配的频道/)
+  const requestsBeforeClear = fetchCalls.filter((url) => url.includes('/api/iptv/channels')).length
+
+  await clickDom('[data-iptv-catalog-empty-state] button')
+  await home.wrapper.vm.$nextTick()
+  assert.deepEqual(homeChannelNames(), ['Alpha'])
+  assert.equal(fetchCalls.filter((url) => url.includes('/api/iptv/channels')).length, requestsBeforeClear + 1)
+})
+
+test('IptvHome API 失败显示错误状态，重试成功后恢复目录', async () => {
+  channels = [channel('Alpha', 'alpha')]
+  let failed = true
+  fetchOverride = async (url) => {
+    if (!url.includes('/api/iptv/channels')) return null
+    if (failed) return response({}, { ok: false, status: 503, json: async () => ({ detail: 'upstream unavailable' }) })
+    return response({ channels, groups: ['测试'] })
+  }
+  installFetch()
+  const home = await mountHome()
+
+  assert.match(domElement('[data-iptv-catalog-empty-state]').textContent, /频道目录暂时无法加载/)
+  assert.equal(domElements('[data-iptv-catalog-retry]').length, 1)
+
+  failed = false
+  await clickDom('[data-iptv-catalog-retry]')
+  await flushPromises()
+  await home.wrapper.vm.$nextTick()
+  assert.deepEqual(homeChannelNames(), ['Alpha'])
+  assert.equal(domElements('[data-iptv-catalog-empty-state]').length, 0)
+})
+
+test('IptvHome 请求超时进入错误状态，不被误投影为取消或空目录', async () => {
+  fetchOverride = async (url) => {
+    if (!url.includes('/api/iptv/channels')) return null
+    throw Object.assign(new Error('请求超时'), { status: 0 })
+  }
+  installFetch()
+  await mountHome()
+
+  assert.match(domElement('[data-iptv-catalog-empty-state]').textContent, /频道目录暂时无法加载/)
+  assert.equal(domElements('[data-iptv-catalog-retry]').length, 1)
+})
+
+test('IptvHome 刷新失败保留 last-known-good 目录并标记 stale', async () => {
+  channels = [channel('Alpha', 'alpha')]
+  installFetch()
+  const home = await mountHome()
+  assert.deepEqual(homeChannelNames(), ['Alpha'])
+
+  fetchOverride = async (url) => {
+    if (!url.includes('/api/iptv/channels')) return null
+    return response({}, { ok: false, status: 504, json: async () => ({ detail: 'timeout' }) })
+  }
+  home.searchQuery.value = 'Alpha'
+  await flushPromises()
+  await home.wrapper.vm.$nextTick()
+
+  assert.deepEqual(homeChannelNames(), ['Alpha'])
+  assert.match(domElement('.iptv-catalog-notice').textContent, /已保留上次频道/)
+  assert.equal(domElement('[data-iptv-catalog-grid]').getAttribute('aria-busy'), 'false')
+})
+
+test('IptvHome A/B 目录请求按 latest-wins 投影', async () => {
+  const replies = []
+  fetchOverride = async (url) => {
+    if (!url.includes('/api/iptv/channels')) return null
+    return new Promise((resolve) => replies.push(resolve))
+  }
+  installFetch()
+  const home = await mountHomePending()
+  home.searchQuery.value = 'B'
+  await home.wrapper.vm.$nextTick()
+  await flushPromises()
+  assert.equal(replies.length, 2)
+
+  replies[1](response({ channels: [channel('Bravo', 'bravo')], groups: ['测试'] }))
+  await flushPromises()
+  await home.wrapper.vm.$nextTick()
+  replies[0](response({ channels: [channel('Alpha', 'alpha')], groups: ['测试'] }))
+  await flushPromises()
+  await home.wrapper.vm.$nextTick()
+
+  assert.deepEqual(homeChannelNames(), ['Bravo'])
+  assert.equal(domElement('[data-iptv-catalog-grid]').getAttribute('aria-busy'), 'false')
+})
+
+test('IptvHome 同名频道按 stable canonical identity 选中，不串台', async () => {
+  channels = [
+    channel('同名频道', 'same-a', { canonical_key: 'same-a' }),
+    channel('同名频道', 'same-b', { canonical_key: 'same-b' }),
+  ]
+  installFetch()
+  const { store } = await mountHome()
+  const cards = domElements('.channel-card')
+  assert.equal(cards.length, 2)
+  assert.equal(cards[0].getAttribute('data-canonical-key'), 'same-a')
+  assert.equal(cards[1].getAttribute('data-canonical-key'), 'same-b')
+
+  cards[1].click()
+  await flushPromises()
+  assert.equal(store.currentIptvChannel.canonical_key, 'same-b')
+  assert.equal(domElements('.channel-card.channel-card-current').length, 1)
+  assert.equal(domElement('.channel-card.channel-card-current').getAttribute('data-canonical-key'), 'same-b')
 })
 
 test('首页和 FullPlayer 共用排序状态，默认基础顺序与双向切换保持一致', async () => {

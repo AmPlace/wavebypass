@@ -195,10 +195,11 @@ export const usePlayerStore = defineStore('player', {
           ? {
               ...existing,
               ...station,
+              catalogRemoved: false,
               radioSourceId: sourceStillAvailable ? selectedSource : station.radioSourceId,
               radioProgrammes: existing.radioProgrammes,
             }
-          : station
+          : { ...station, catalogRemoved: false }
         merged[station.id] = updated
         const index = next.findIndex((item) => item.id === station.id)
         if (index >= 0) next[index] = updated
@@ -207,9 +208,21 @@ export const usePlayerStore = defineStore('player', {
       // Only dynamic Radio rows are removed on a successful catalog refresh;
       // retained static/legacy rows remain untouched.
       for (const [stationId, station] of Object.entries(merged)) {
-        if (station?.radioDomain && !incomingIds.has(stationId)) delete merged[stationId]
+        if (station?.radioDomain && !incomingIds.has(stationId)) {
+          if (stationId === this.currentStation) {
+            merged[stationId] = { ...station, catalogRemoved: true }
+            const index = next.findIndex((item) => item.id === stationId)
+            if (index >= 0) next[index] = merged[stationId]
+          } else {
+            delete merged[stationId]
+          }
+        }
       }
-      this.stationList = next.filter((station) => !station.radioDomain || incomingIds.has(station.id))
+      this.stationList = next.filter((station) => (
+        !station.radioDomain
+        || incomingIds.has(station.id)
+        || station.id === this.currentStation
+      ))
       this.stationMap = merged
       return true
     },
@@ -426,6 +439,7 @@ export const usePlayerStore = defineStore('player', {
           apiBase: API_BASE,
           channelKey: u._canonical_key || '',
           sourceId: options.sourceId || u.source_id || '',
+          expectedSourceRevision: options.expectedSourceRevision || u.source_revision || '',
           accessToken: u._access_token || '',
         })
       }
@@ -434,6 +448,8 @@ export const usePlayerStore = defineStore('player', {
         const sourceId = String(u?.source_id || '').trim()
         if (!key || !sourceId) return ''
         const params = new URLSearchParams({ source_id: sourceId })
+        const sourceRevision = String(u?.source_revision || '').trim()
+        if (sourceRevision) params.set('expected_source_revision', sourceRevision)
         if (u._access_token) params.set('access_token', u._access_token)
         return `${API_BASE}/api/media/channel/${encodeURIComponent(key)}/resolve?${params.toString()}`
       }
@@ -452,6 +468,18 @@ export const usePlayerStore = defineStore('player', {
           const data = await res.json().catch(() => ({}))
           if (!res.ok || data.ok === false) {
             throw new Error(data.message || data.detail?.message || data.detail || `HTTP ${res.status}`)
+          }
+          const expectedSourceId = String(u?.source_id || '').trim()
+          const expectedRevision = String(u?.source_revision || '').trim()
+          const returnedSourceId = String(data.source_id || '').trim()
+          const returnedRevision = String(data.source_revision || '').trim()
+          if (
+            (expectedSourceId && returnedSourceId && expectedSourceId !== returnedSourceId)
+            || (expectedRevision && returnedRevision && expectedRevision !== returnedRevision)
+          ) {
+            const stale = new Error('播放源已更新，请重新选择')
+            stale.code = 'SOURCE_REVISION_STALE'
+            throw stale
           }
           return { ...data, _resolve_url: resolveUrl }
         } finally {
@@ -676,6 +704,7 @@ export const usePlayerStore = defineStore('player', {
         const originalUrl = u.original_url || url
         const fallbackProxyUrl = proxyUrlFor(u)
         if (selectionToken !== this.iptvSelectionToken) return
+        if (error?.code === 'SOURCE_REVISION_STALE') return
         if (error?.name !== 'AbortError') console.warn('[IPTV] adapter resolve failed:', error?.message || error)
         if (!sourceForcesProxy(u)) {
           directUrls.push({
@@ -812,6 +841,7 @@ export const usePlayerStore = defineStore('player', {
             continue
           } catch (e) {
             if (selectionToken !== this.iptvSelectionToken) return
+            if (e?.code === 'SOURCE_REVISION_STALE') continue
             console.warn('[IPTV] adapter resolve failed:', e?.message || e)
             // 非强制代理：resolve 失败只是本次未取到流地址，不得把 source 改写为 proxy-only，
             // 也不得从菜单删除。保留原始 adapter identity 作为直连 entry（FullPlayer 的
@@ -899,6 +929,17 @@ export const usePlayerStore = defineStore('player', {
         const data = await res.json().catch(() => ({}))
         if (!res.ok || data.ok === false) {
           throw new Error(data.message || data.detail?.message || data.detail || `HTTP ${res.status}`)
+        }
+        const parsed = new URL(url, API_BASE || window.location.origin)
+        const expectedSourceId = parsed.searchParams.get('source_id') || ''
+        const expectedRevision = parsed.searchParams.get('expected_source_revision') || ''
+        if (
+          (expectedSourceId && data.source_id && expectedSourceId !== String(data.source_id))
+          || (expectedRevision && data.source_revision && expectedRevision !== String(data.source_revision))
+        ) {
+          const stale = new Error('播放源已更新，请重新选择')
+          stale.code = 'SOURCE_REVISION_STALE'
+          throw stale
         }
         return data
       } finally {
