@@ -896,7 +896,7 @@ test('FullPlayer keyboard-focused command, source trigger, and volume slider kee
   }
 })
 
-test('FullPlayer pointer fullscreen entry moves residual trigger focus to the player root', async () => {
+test('FullPlayer pointer fullscreen entry moves residual trigger focus inside the fullscreen shortcut scope', async () => {
   channels = [channel('Alpha', 'alpha'), channel('Bravo', 'bravo')]
   installFetch()
   const originalWidth = window.innerWidth
@@ -913,9 +913,9 @@ test('FullPlayer pointer fullscreen entry moves residual trigger focus to the pl
 
   try {
     const { store } = await mountPlayer({ current: channels[0] })
-    const root = domElement('.full-player')
     const media = domElement('.media-card')
     const trigger = domElement('.desktop-video-overlay [aria-label="全屏"]')
+    const playButton = domElement('.desktop-video-overlay [aria-label="暂停"]')
     fullscreen.attach(media)
 
     trigger.dispatchEvent(new window.Event('pointerdown', { bubbles: true, cancelable: true }))
@@ -924,7 +924,16 @@ test('FullPlayer pointer fullscreen entry moves residual trigger focus to the pl
     await flushPromises()
 
     assert.equal(document.fullscreenElement, media)
-    assert.equal(document.activeElement, root)
+    assert.equal(trigger.getAttribute('aria-pressed'), 'true')
+    assert.equal(document.activeElement, media)
+
+    dispatchUiEvent(playButton, 'pointerdown')
+    playButton.focus()
+    playButton.click()
+    await flushPromises()
+    await new Promise(resolve => setTimeout(resolve, 0))
+    assert.equal(store.isPlaying, false)
+    assert.equal(document.activeElement, media)
 
     const dispatchKey = (key, code = key) => {
       const event = new window.KeyboardEvent('keydown', {
@@ -933,9 +942,11 @@ test('FullPlayer pointer fullscreen entry moves residual trigger focus to the pl
         bubbles: true,
         cancelable: true,
       })
-      root.dispatchEvent(event)
+      document.activeElement.dispatchEvent(event)
       return event
     }
+    assert.equal(dispatchKey(' ', 'Space').defaultPrevented, true)
+    assert.equal(store.isPlaying, true)
     assert.equal(dispatchKey('m', 'KeyM').defaultPrevented, true)
     assert.equal(store.isMuted, true)
     assert.equal(dispatchKey('ArrowUp', 'ArrowUp').defaultPrevented, true)
@@ -1019,7 +1030,7 @@ test('FullPlayer F shortcut enters and exits fullscreen without pointer focus tr
     await flushPromises()
     assert.equal(enter.defaultPrevented, true)
     assert.equal(document.fullscreenElement, media)
-    assert.equal(document.activeElement, root)
+    assert.equal(document.activeElement, media)
 
     const exit = new window.KeyboardEvent('keydown', {
       key: 'f',
@@ -1027,7 +1038,7 @@ test('FullPlayer F shortcut enters and exits fullscreen without pointer focus tr
       bubbles: true,
       cancelable: true,
     })
-    root.dispatchEvent(exit)
+    media.dispatchEvent(exit)
     await flushPromises()
     assert.equal(exit.defaultPrevented, true)
     assert.equal(document.fullscreenElement, null)

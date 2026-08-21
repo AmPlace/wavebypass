@@ -23,6 +23,7 @@
           <main ref="playerMainRef" class="player-main">
             <section
               ref="mediaSurfaceRef"
+              tabindex="-1"
               class="media-card"
               :class="{ 'media-surface--overlay-hidden': isDesktopOverlayHidden }"
               @pointerenter="handleOverlayActivity"
@@ -992,11 +993,16 @@ function handleFullscreenChange() {
     const trigger = pendingPointerFullscreenTrigger
     pendingPointerFullscreenTrigger = null
     if (lastOverlayInputModality === 'pointer' && trigger && document.activeElement === trigger) {
-      playerRootRef.value?.focus?.({ preventScroll: true })
+      focusPlayerShortcutScope()
+    } else if (!mediaSurfaceRef.value?.contains?.(document.activeElement)) {
+      focusPlayerShortcutScope()
     }
     handleOverlayActivity()
   } else {
     pendingPointerFullscreenTrigger = null
+    if (document.activeElement === mediaSurfaceRef.value) {
+      focusPlayerShortcutScope()
+    }
     scheduleOverlayHide()
   }
   if (sourceMenuOpen.value) nextTick(() => updateSourceMenuPosition())
@@ -1290,10 +1296,15 @@ function clearPointerCommandFocusCleanup() {
   pointerCommandFocusCleanupTimer = null
 }
 
+function focusPlayerShortcutScope() {
+  const target = isFullscreen.value ? mediaSurfaceRef.value : playerRootRef.value
+  target?.focus?.({ preventScroll: true })
+}
+
 function movePointerCommandFocus(control) {
   if (!isPlayerExpanded.value || !document.contains(control)) return
   if (document.activeElement !== control) return
-  if (isDesktopLayout.value) playerRootRef.value?.focus?.({ preventScroll: true })
+  if (isDesktopLayout.value) focusPlayerShortcutScope()
   else control.blur?.()
 }
 
@@ -1317,7 +1328,7 @@ function handlePlayerPointerDown(event) {
   overlayControlsFocused.value = false
   handleOverlayActivity()
   if (!isDesktopLayout.value || isInteractiveKeyboardTarget(event?.target)) return
-  playerRootRef.value?.focus?.({ preventScroll: true })
+  focusPlayerShortcutScope()
 }
 
 function handlePlayerTouchStart(event) {
