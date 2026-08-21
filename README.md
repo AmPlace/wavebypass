@@ -46,18 +46,21 @@ WaveFlow 是一个流媒体聚合平台，它通过后端的智能测速与代�
 
 项目已提供 `docker-compose.yml` 示例配置。
 
-进入项目目录后，直接启动：
+进入项目目录后，先选择一个由同一提交构建的不可变镜像标签，再启动：
 
 ```bash
+export WAVEFLOW_RELEASE_VERSION=sha-<git-commit>
+docker compose config
 docker compose up -d
 ```
 
 服务启动后：
 
-- 前端默认运行在 `127.0.0.1:80` 端口
-- 后端 API 默认运行在 `8000` 端口
+- 前端默认发布在 `8080` 端口
+- 后端只在 Compose 网络中暴露给前端，不直接发布到宿主机
+- backend 与 frontend 使用同一个 `WAVEFLOW_RELEASE_VERSION`
 
-如需修改地域限制、Cookie 等配置，请编辑项目根目录下的 `.env.example` 文件并修改为 `.env`
+将 `.env.example` 复制为 `.env` 后填写部署模式、Cookie 和必要的环境配置；不要把真实 secret 写入镜像或提交到仓库。
 
 ---
 
@@ -80,10 +83,10 @@ docker network create waveflow-net
 docker run -d \
   --name waveflow-backend \
   --network waveflow-net \
-  -p 8000:8000 \
+  -v waveflow-data:/app/data \
   -e HITFM_COOKIE="" \
   --restart unless-stopped \
-  ghcr.io/amplace/waveflow-backend:latest
+  ghcr.io/amplace/waveflow-backend:${WAVEFLOW_RELEASE_VERSION:?set WAVEFLOW_RELEASE_VERSION}
 ```
 
 #### 3. 启动前端
@@ -94,7 +97,7 @@ docker run -d \
   --network waveflow-net \
   -p 80:80 \
   --restart unless-stopped \
-  ghcr.io/amplace/waveflow-frontend:latest
+  ghcr.io/amplace/waveflow-frontend:${WAVEFLOW_RELEASE_VERSION:?set WAVEFLOW_RELEASE_VERSION}
 ```
 
 </details>
