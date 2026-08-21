@@ -32,6 +32,31 @@ class _ExplodingStream(httpx.AsyncByteStream):
         yield b''
 
 
+class _AlreadyDecodedResponse:
+    status_code = 200
+    headers = httpx.Headers({'content-encoding': 'gzip', 'content-type': 'application/gzip'})
+
+    def __init__(self, payload: bytes):
+        self.payload = payload
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        return None
+
+    async def aiter_bytes(self, _chunk_size):
+        yield self.payload
+
+
+class _AlreadyDecodedClient:
+    def __init__(self, payload: bytes):
+        self.payload = payload
+
+    def stream(self, *_args, **_kwargs):
+        return _AlreadyDecodedResponse(self.payload)
+
+
 class EpgParserTest(unittest.IsolatedAsyncioTestCase):
     def test_standard_xmltv_returns_structured_statistics(self):
         result = epg.parse_xmltv(xmltv(
@@ -116,6 +141,122 @@ class EpgParserTest(unittest.IsolatedAsyncioTestCase):
                 finally:
                     download.cleanup()
                 self.assertEqual(os.listdir(tmpdir), [])
+
+    async def test_gzip_metadata_does_not_force_decompression_of_plain_xml(self):
+        xml_bytes = xmltv(CHANNELS, '').encode()
+        transport = httpx.MockTransport(lambda request: httpx.Response(
+            200,
+            headers={'content-type': 'application/gzip'},
+            content=xml_bytes,
+        ))
+        with tempfile.TemporaryDirectory() as tmpdir:
+            async with httpx.AsyncClient(transport=transport) as client:
+                download = await epg.download_xmltv(client, 'https://example.test/epg.xml.gz', temp_dir=tmpdir)
+                try:
+                    with open(download.path, 'rb') as fh:
+                        self.assertEqual(fh.read(), xml_bytes)
+                finally:
+                    download.cleanup()
+
+    async def test_gzip_mime_does_not_force_decompression_of_plain_xml(self):
+        xml_bytes = xmltv(CHANNELS, '').encode()
+        transport = httpx.MockTransport(lambda request: httpx.Response(
+            200,
+            headers={'content-type': 'application/gzip'},
+            content=xml_bytes,
+        ))
+        with tempfile.TemporaryDirectory() as tmpdir:
+            async with httpx.AsyncClient(transport=transport) as client:
+                download = await epg.download_xmltv(client, 'https://example.test/epg.xml', temp_dir=tmpdir)
+                try:
+                    self.assertEqual(download.decompressed_bytes, len(xml_bytes))
+                finally:
+                    download.cleanup()
+
+    async def test_plain_xml_download_succeeds(self):
+        xml_bytes = xmltv(CHANNELS, '').encode()
+        transport = httpx.MockTransport(lambda request: httpx.Response(200, content=xml_bytes))
+        with tempfile.TemporaryDirectory() as tmpdir:
+            async with httpx.AsyncClient(transport=transport) as client:
+                download = await epg.download_xmltv(client, 'https://example.test/epg.xml', temp_dir=tmpdir)
+                try:
+                    self.assertEqual(download.downloaded_bytes, len(xml_bytes))
+                finally:
+                    download.cleanup()
+
+    async def test_corrupted_gzip_fails_closed(self):
+        transport = httpx.MockTransport(lambda request: httpx.Response(
+            200,
+            content=b'\x1f\x8b\x08\x00corrupted',
+        ))
+        with tempfile.TemporaryDirectory() as tmpdir:
+            async with httpx.AsyncClient(transport=transport) as client:
+                with self.assertRaisesRegex(epg.EpgRefreshError, 'gzip 数据无效'):
+                    await epg.download_xmltv(client, 'https://example.test/epg.xml', temp_dir=tmpdir)
+            self.assertEqual(os.listdir(tmpdir), [])
+
+    async def test_html_error_page_fails_before_xmltv_parse(self):
+        transport = httpx.MockTransport(lambda request: httpx.Response(
+            200,
+            headers={'content-type': 'application/gzip'},
+            content=b'<html><body>upstream error</body></html>',
+        ))
+        with tempfile.TemporaryDirectory() as tmpdir:
+            async with httpx.AsyncClient(transport=transport) as client:
+                with self.assertRaisesRegex(epg.EpgRefreshError, '不是有效 XMLTV'):
+                    await epg.download_xmltv(client, 'https://example.test/epg.xml.gz', temp_dir=tmpdir)
+            self.assertEqual(os.listdir(tmpdir), [])
+
+    async def test_garbage_payload_fails_closed(self):
+        transport = httpx.MockTransport(lambda request: httpx.Response(200, content=b'not xml or gzip'))
+        with tempfile.TemporaryDirectory() as tmpdir:
+            async with httpx.AsyncClient(transport=transport) as client:
+                with self.assertRaisesRegex(epg.EpgRefreshError, '不是有效 XMLTV'):
+                    await epg.download_xmltv(client, 'https://example.test/epg.xml', temp_dir=tmpdir)
+            self.assertEqual(os.listdir(tmpdir), [])
+
+    async def test_xmltv_bom_and_leading_whitespace_are_supported(self):
+        xml_bytes = b'\xef\xbb\xbf \r\n\t<tv>' + CHANNELS.encode() + b'</tv>'
+        transport = httpx.MockTransport(lambda request: httpx.Response(200, content=xml_bytes))
+        with tempfile.TemporaryDirectory() as tmpdir:
+            async with httpx.AsyncClient(transport=transport) as client:
+                download = await epg.download_xmltv(client, 'https://example.test/epg.xml', temp_dir=tmpdir)
+                try:
+                    self.assertEqual(download.decompressed_bytes, len(xml_bytes))
+                    parsed = epg.parse_xmltv_file(download.path)
+                    self.assertEqual(parsed.parsed_channel_count, 1)
+                finally:
+                    download.cleanup()
+
+    async def test_already_decoded_xml_is_not_decompressed_again(self):
+        xml_bytes = xmltv(CHANNELS, '').encode()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            download = await epg.download_xmltv(
+                _AlreadyDecodedClient(xml_bytes),
+                'https://example.test/epg.xml.gz',
+                temp_dir=tmpdir,
+            )
+            try:
+                with open(download.path, 'rb') as fh:
+                    self.assertEqual(fh.read(), xml_bytes)
+            finally:
+                download.cleanup()
+
+    async def test_httpx_content_encoding_decode_is_not_repeated(self):
+        xml_bytes = xmltv(CHANNELS, '').encode()
+        transport = httpx.MockTransport(lambda request: httpx.Response(
+            200,
+            headers={'content-encoding': 'gzip'},
+            content=gzip.compress(xml_bytes),
+        ))
+        with tempfile.TemporaryDirectory() as tmpdir:
+            async with httpx.AsyncClient(transport=transport) as client:
+                download = await epg.download_xmltv(client, 'https://example.test/epg.xml.gz', temp_dir=tmpdir)
+                try:
+                    with open(download.path, 'rb') as fh:
+                        self.assertEqual(fh.read(), xml_bytes)
+                finally:
+                    download.cleanup()
 
     async def test_compressed_download_limit_rejects_and_cleans_temp_files(self):
         payload = b'x' * 64

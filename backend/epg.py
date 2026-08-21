@@ -7,10 +7,10 @@ import logging
 import os
 import re
 import tempfile
+import zlib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from io import StringIO
-from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 from xml.etree import ElementTree as ET
 
@@ -31,6 +31,7 @@ EPG_DOWNLOAD_TIMEOUT_SECONDS = 30.0
 EPG_MAX_DOWNLOAD_BYTES = 32 * 1024 * 1024
 EPG_MAX_DECOMPRESSED_BYTES = 128 * 1024 * 1024
 EPG_IO_CHUNK_SIZE = 64 * 1024
+EPG_XML_SNIFF_BYTES = 8 * 1024
 EPG_ERROR_MAX_LENGTH = 1024
 
 _epg_source_refresh_locks: dict[int, asyncio.Lock] = {}
@@ -258,6 +259,25 @@ def parse_xmltv_file(path: str) -> EpgParseResult:
         return _parse_xmltv_stream(stream)
 
 
+def _is_xmltv_payload_prefix(prefix: bytes) -> bool:
+    """Recognize an XMLTV root without trusting URL or response metadata."""
+    candidate = prefix
+    if candidate.startswith(b'\xef\xbb\xbf'):
+        candidate = candidate[3:]
+    candidate = candidate.lstrip(b' \t\r\n')
+    if not candidate:
+        return False
+
+    parser = ET.XMLPullParser(events=('start',))
+    try:
+        parser.feed(candidate)
+        for _, element in parser.read_events():
+            return _local_tag(element) == 'tv'
+    except (ET.ParseError, UnicodeError):
+        return False
+    return False
+
+
 async def download_xmltv(
     client: httpx.AsyncClient,
     url: str,
@@ -279,11 +299,9 @@ async def download_xmltv(
         os.close(raw_fd)
         temp_paths.append(raw_path)
         downloaded_bytes = 0
-        content_type = ''
         async with client.stream('GET', url, follow_redirects=True, timeout=timeout) as response:
             if response.status_code >= 400:
                 raise EpgRefreshError(f'EPG 下载失败: HTTP {response.status_code}')
-            content_type = response.headers.get('content-type', '').lower()
             content_length = response.headers.get('content-length')
             if content_length:
                 try:
@@ -300,9 +318,12 @@ async def download_xmltv(
                     output.write(chunk)
         _raise_if_stopped(stop_event)
         with open(raw_path, 'rb') as stream:
-            magic = stream.read(2)
-        path_is_gzip = Path(urlsplit(url).path).suffix.lower() == '.gz'
-        is_gzip = path_is_gzip or 'gzip' in content_type or magic == b'\x1f\x8b'
+            prefix = stream.read(EPG_XML_SNIFF_BYTES)
+        # httpx's aiter_bytes() may already decode Content-Encoding. Classify
+        # the bytes we received instead of trusting URL or header metadata.
+        is_gzip = prefix[:2] == b'\x1f\x8b'
+        if not is_gzip and not _is_xmltv_payload_prefix(prefix):
+            raise EpgRefreshError('EPG payload 不是有效 XMLTV')
         if not is_gzip:
             if downloaded_bytes > max_decompressed_bytes:
                 raise EpgRefreshError('EPG 解压大小超过限制')
@@ -323,7 +344,7 @@ async def download_xmltv(
                     if decompressed_bytes > max_decompressed_bytes:
                         raise EpgRefreshError('EPG 解压大小超过限制')
                     output.write(chunk)
-        except (gzip.BadGzipFile, EOFError, OSError) as error:
+        except (gzip.BadGzipFile, EOFError, OSError, zlib.error) as error:
             raise EpgRefreshError('EPG gzip 数据无效') from error
         return XmltvDownload(xml_path, downloaded_bytes, decompressed_bytes, tuple(temp_paths))
     except asyncio.CancelledError:
