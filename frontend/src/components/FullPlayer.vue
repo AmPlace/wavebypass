@@ -956,20 +956,38 @@ function toggleOverlayMute() {
   syncCurrentAudioMute()
 }
 
+function supportsCustomFullscreen(target = mediaSurfaceRef.value) {
+  return document.fullscreenEnabled === true
+    && typeof target?.requestFullscreen === 'function'
+    && typeof document.exitFullscreen === 'function'
+}
+
 async function toggleFullscreen() {
   if (document.fullscreenElement) {
     pendingPointerFullscreenTrigger = null
-    await document.exitFullscreen?.().catch?.(() => {})
+    if (typeof document.exitFullscreen !== 'function') {
+      isFullscreen.value = false
+      return
+    }
+    try {
+      await document.exitFullscreen()
+    } catch {
+      // The platform remains authoritative after an exit failure.
+    }
+    handleFullscreenChange()
     return
   }
 
+  isFullscreen.value = false
   const target = mediaSurfaceRef.value
-  if (target?.requestFullscreen) {
+  if (supportsCustomFullscreen(target)) {
     try {
       await target.requestFullscreen()
+      handleFullscreenChange()
       return
     } catch {
       pendingPointerFullscreenTrigger = null
+      isFullscreen.value = false
     }
   }
 
@@ -977,15 +995,21 @@ async function toggleFullscreen() {
   // video fullscreen API. Keep this as a feature-detected fallback.
   pendingPointerFullscreenTrigger = null
   const video = iptvVideoRef.value
-  if (video?.webkitEnterFullscreen) {
-    video.webkitEnterFullscreen()
+  if (typeof video?.webkitEnterFullscreen === 'function') {
+    try {
+      video.webkitEnterFullscreen()
+    } catch {
+      // Native fullscreen support is optional and may reject independently.
+    }
   }
+  handleFullscreenChange()
 } // 跟踪当前播放的 URL，防止重复设置
 
 function handleFullscreenChange() {
   const fullscreenElement = document.fullscreenElement
   isFullscreen.value = Boolean(
-    fullscreenElement
+    supportsCustomFullscreen()
+    && fullscreenElement
     && mediaSurfaceRef.value
     && (fullscreenElement === mediaSurfaceRef.value || mediaSurfaceRef.value.contains(fullscreenElement)),
   )
@@ -5888,6 +5912,7 @@ onBeforeUnmount(() => {
   display: block;
   width: 100%;
   height: 100%;
+  pointer-events: none;
   object-fit: contain;
   background: var(--media-placeholder-bg);
 }

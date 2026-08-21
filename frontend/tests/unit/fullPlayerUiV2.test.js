@@ -154,12 +154,22 @@ test('FullPlayer desktop shortcuts reuse the existing capture path without a sec
 
 test('FullPlayer custom fullscreen targets the media wrapper and tracks fullscreenchange', () => {
   assert.match(template, /ref="mediaSurfaceRef"[\s\S]*?class="media-card"/)
-  assert.match(fullPlayer, /target\.requestFullscreen/)
+  assert.match(template, /ref="mediaSurfaceRef"[\s\S]*?tabindex="-1"/)
+  assert.match(fullPlayer, /document\.fullscreenEnabled === true/)
+  assert.match(fullPlayer, /typeof target\?\.requestFullscreen === 'function'/)
+  assert.match(fullPlayer, /typeof video\?\.webkitEnterFullscreen === 'function'/)
   assert.match(fullPlayer, /document\.addEventListener\('fullscreenchange', handleFullscreenChange\)/)
   assert.match(fullPlayer, /document\.removeEventListener\('fullscreenchange', handleFullscreenChange\)/)
   assert.match(fullPlayer, /mediaSurfaceRef\.value\.contains\(fullscreenElement\)/)
+  assert.match(fullPlayer, /isFullscreen\.value \? mediaSurfaceRef\.value : playerRootRef\.value/)
+  assert.match(fullPlayer, /isFullscreen\.value = false/)
   const videoTag = template.match(/<video[\s\S]*?<\/video>/)?.[0] || ''
   assert.doesNotMatch(videoTag, /\bcontrols(?:=|\s)/)
+})
+
+test('FullPlayer media video stays out of pointer hit testing so surrounding controls remain interactive', () => {
+  assert.match(fullPlayer, /\.media-video \{[\s\S]*?pointer-events: none;/)
+  assert.match(template, /class="desktop-collapse-btn"[\s\S]*?@click="playerStore\.collapsePlayer\(\)"/)
 })
 
 test('FullPlayer separates source selector and Desktop channel rail controls', () => {

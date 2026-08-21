@@ -406,7 +406,13 @@ function dispatchUiEvent(element, type) {
 function installFullscreenMock() {
   let fullscreenElement = null
   const previousFullscreenElement = Object.getOwnPropertyDescriptor(document, 'fullscreenElement')
+  const previousFullscreenEnabled = Object.getOwnPropertyDescriptor(document, 'fullscreenEnabled')
   const previousExitFullscreen = Object.getOwnPropertyDescriptor(document, 'exitFullscreen')
+  const previousRequestFullscreen = Object.getOwnPropertyDescriptor(window.Element.prototype, 'requestFullscreen')
+  Object.defineProperty(document, 'fullscreenEnabled', {
+    configurable: true,
+    value: true,
+  })
   Object.defineProperty(document, 'fullscreenElement', {
     configurable: true,
     get: () => fullscreenElement,
@@ -415,18 +421,28 @@ function installFullscreenMock() {
     fullscreenElement = null
     document.dispatchEvent(new window.Event('fullscreenchange'))
   }
+  Object.defineProperty(window.Element.prototype, 'requestFullscreen', {
+    configurable: true,
+    writable: true,
+    async value() {
+      if (this.__rejectFullscreenRequest) throw new Error('fullscreen rejected')
+      fullscreenElement = this
+      document.dispatchEvent(new window.Event('fullscreenchange'))
+    },
+  })
   return {
-    attach(element) {
-      element.requestFullscreen = async () => {
-        fullscreenElement = element
-        document.dispatchEvent(new window.Event('fullscreenchange'))
-      }
+    attach(element, { reject = false } = {}) {
+      element.__rejectFullscreenRequest = reject
     },
     restore() {
       if (previousFullscreenElement) Object.defineProperty(document, 'fullscreenElement', previousFullscreenElement)
       else delete document.fullscreenElement
+      if (previousFullscreenEnabled) Object.defineProperty(document, 'fullscreenEnabled', previousFullscreenEnabled)
+      else delete document.fullscreenEnabled
       if (previousExitFullscreen) Object.defineProperty(document, 'exitFullscreen', previousExitFullscreen)
       else delete document.exitFullscreen
+      if (previousRequestFullscreen) Object.defineProperty(window.Element.prototype, 'requestFullscreen', previousRequestFullscreen)
+      else delete window.Element.prototype.requestFullscreen
     },
   }
 }
@@ -1048,6 +1064,68 @@ test('FullPlayer F shortcut enters and exits fullscreen without pointer focus tr
     fullscreen.restore()
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth })
     window.matchMedia = originalMatchMedia
+  }
+})
+
+test('FullPlayer unsupported fullscreen capability fails closed for pointer and F shortcut entry', async () => {
+  installFetch()
+  const originalWidth = window.innerWidth
+  const originalMatchMedia = window.matchMedia
+  Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1440 })
+  window.matchMedia = (query) => ({
+    matches: query.includes('hover: hover') || query.includes('pointer: fine'),
+    addListener() {},
+    removeListener() {},
+    addEventListener() {},
+    removeEventListener() {},
+  })
+  try {
+    const { store } = await mountPlayer()
+    const root = domElement('.full-player')
+    const trigger = domElement('.desktop-video-overlay [aria-label="全屏"]')
+
+    assert.equal(trigger.getAttribute('aria-pressed'), 'false')
+    trigger.click()
+    await flushPromises()
+    assert.equal(Boolean(document.fullscreenElement), false)
+    assert.equal(trigger.getAttribute('aria-pressed'), 'false')
+
+    root.focus()
+    const event = new window.KeyboardEvent('keydown', {
+      key: 'f',
+      code: 'KeyF',
+      bubbles: true,
+      cancelable: true,
+    })
+    root.dispatchEvent(event)
+    await flushPromises()
+    assert.equal(event.defaultPrevented, true)
+    assert.equal(Boolean(document.fullscreenElement), false)
+    assert.equal(trigger.getAttribute('aria-pressed'), 'false')
+    assert.equal(store.isPlayerExpanded, true)
+  } finally {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth })
+    window.matchMedia = originalMatchMedia
+  }
+})
+
+test('FullPlayer rejected fullscreen request leaves the platform state and aria state false', async () => {
+  installFetch()
+  const fullscreen = installFullscreenMock()
+  try {
+    const { store } = await mountPlayer()
+    const media = domElement('.media-card')
+    const trigger = domElement('.desktop-video-overlay [aria-label="全屏"]')
+    fullscreen.attach(media, { reject: true })
+
+    trigger.click()
+    await flushPromises()
+
+    assert.equal(document.fullscreenElement, null)
+    assert.equal(trigger.getAttribute('aria-pressed'), 'false')
+    assert.equal(store.isPlayerExpanded, true)
+  } finally {
+    fullscreen.restore()
   }
 })
 
