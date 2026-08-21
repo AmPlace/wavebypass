@@ -142,14 +142,14 @@ class IntegrationTestBase(unittest.IsolatedAsyncioTestCase):
 
     def _extract_chunk_paths(self, m3u8: str) -> list[str]:
         import re
-        return re.findall(r"(/api/media/proxy/chunk/[A-Za-z0-9_.-]+)", m3u8)
+        return re.findall(r"(/api/media/proxy/chunk/[A-Za-z0-9_.-]+(?:\?[^\s]+)?)", m3u8)
 
 
 # ── basic scenarios ───────────────────────────────────────────────────────
 
 
 class TestNormalLive(IntegrationTestBase):
-    """正常直播：sequence 推进、缓存命中、handle 不同、wf_seq 注入。"""
+    """正常直播：sequence 推进、缓存命中、handle 不同、内部 wf_seq。"""
 
     async def test_playlist_is_valid_m3u8(self):
         resp = await self._get_playlist()
@@ -170,11 +170,13 @@ class TestNormalLive(IntegrationTestBase):
         self.assertIn(".ts", payload["url"])
         self.assertIn(str(self.upstream.port), payload["url"])
 
-    async def test_wf_seq_in_handle_url(self):
+    async def test_wf_seq_stays_on_internal_proxy_url(self):
         resp = await self._get_playlist()
         paths = self._extract_chunk_paths(resp.text)
         payload = await self._decode_handle(paths[0])
-        self.assertIn("wf_seq=", payload["url"])
+        chunk_line = next(line for line in resp.text.splitlines() if line.startswith("/api/media/proxy/chunk/"))
+        self.assertIn("wf_seq=", chunk_line)
+        self.assertNotIn("wf_seq=", payload["url"])
 
     async def test_distinct_handles_per_segment(self):
         resp = await self._get_playlist()

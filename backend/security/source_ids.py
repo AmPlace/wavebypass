@@ -15,9 +15,6 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from security.secrets import SOURCE_ID_PURPOSE, derive_key
-
-
 _CONFIG_FIELDS = (
     "url",
     "source_type",
@@ -32,6 +29,12 @@ _CONFIG_FIELDS = (
     "adapter_source_url",
     "rtsp_timestamp_mode",
 )
+
+
+def _source_id_key() -> bytes:
+    from security.secrets import SOURCE_ID_PURPOSE, derive_key
+
+    return derive_key(SOURCE_ID_PURPOSE)
 
 _MARKET_FIELDS = (
     "market_package_id",
@@ -74,7 +77,7 @@ def media_source_id_for(identity: MediaSourceIdentity) -> str:
     """Return an opaque stable ID for any explicitly named media domain."""
 
     encoded = json.dumps(identity.material(), ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    digest = hmac.new(derive_key(SOURCE_ID_PURPOSE), encoded, hashlib.sha256).digest()
+    digest = hmac.new(_source_id_key(), encoded, hashlib.sha256).digest()
     token = base64.urlsafe_b64encode(digest[:18]).rstrip(b"=").decode("ascii")
     return f"src_{token}"
 
@@ -147,7 +150,7 @@ def source_id_for(source: dict[str, Any]) -> str:
 
     material = source_identity_material(source)
     encoded = json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    digest = hmac.new(derive_key(SOURCE_ID_PURPOSE), encoded, hashlib.sha256).digest()
+    digest = hmac.new(_source_id_key(), encoded, hashlib.sha256).digest()
     token = base64.urlsafe_b64encode(digest[:18]).rstrip(b"=").decode("ascii")
     return f"src_{token}"
 

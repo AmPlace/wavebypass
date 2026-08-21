@@ -186,7 +186,7 @@ class EpgRefreshTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_malformed_xml_preserves_cache_and_sanitizes_urls(self):
-        source = await self._source(url='https://example.test/epg.xml?token=secret')
+        source = await self._source(url='https://user:secret@example.test/epg.xml?token=secret')
         source = await self._seed_old(source)
         async with self._client(b'<tv><channel>') as client:
             result = await self.epg.refresh_epg_source(source, client)
@@ -194,6 +194,8 @@ class EpgRefreshTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['requested_url'], 'https://example.test/epg.xml')
         self.assertEqual(result['current_url'], 'https://example.test/epg.xml')
         self.assertNotIn('secret', result['error'])
+        self.assertNotIn('secret', result['requested_url'])
+        self.assertNotIn('secret', result['current_url'])
         self.assertNotIn(self.tmpdir.name, result['error'])
 
     async def test_source_results_are_independent_snapshots(self):
@@ -444,8 +446,9 @@ class EpgRefreshTest(unittest.IsolatedAsyncioTestCase):
                 side_effect=RuntimeError('maintenance failed'),
             ):
                 result = await self.epg.refresh_epg_sources(client)
-        self.assertEqual(result['refresh_status'], 'success')
+        self.assertEqual(result['refresh_status'], 'partial')
         self.assertEqual(result['binding_maintenance'], None)
+        self.assertIn('EPG binding maintenance', result['error'])
         self.assertEqual(len(await self.db.get_epg_programs(source['id'], 'cctv1')), 1)
 
     async def test_maintenance_failure_result_does_not_change_refresh_status(self):
@@ -461,10 +464,38 @@ class EpgRefreshTest(unittest.IsolatedAsyncioTestCase):
             ) as maintenance:
                 result = await self.epg.refresh_epg_sources(client)
 
-        self.assertEqual(result['refresh_status'], 'success')
+        self.assertEqual(result['refresh_status'], 'partial')
         self.assertEqual(result['binding_maintenance']['status'], 'failed')
+        self.assertIn('temporary maintenance failure', result['error'])
         self.assertEqual(len(await self.db.get_epg_programs(source['id'], 'cctv1')), 1)
         maintenance.assert_awaited_once_with(sync_logical=True, trigger='epg_refresh')
+
+    async def test_maintenance_failure_is_retried_on_next_refresh_cycle(self):
+        await self._disable_builtin()
+        source = await self._source()
+        maintenance_results = [
+            {'status': 'failed', 'error': 'temporary maintenance failure'},
+            {'status': 'success', 'error': ''},
+        ]
+        async with self._client(xml_payload()) as client:
+            with mock.patch(
+                'epg_maintenance.run_epg_binding_maintenance',
+                side_effect=maintenance_results,
+            ) as maintenance:
+                first = await self.epg.refresh_epg_sources(client)
+                second = await self.epg.refresh_epg_sources(client)
+
+        self.assertEqual(first['refresh_status'], 'partial')
+        self.assertEqual(second['refresh_status'], 'success')
+        self.assertEqual(maintenance.await_count, 2)
+        self.assertEqual(
+            (await self.db.get_epg_source(source['id']))['last_status'],
+            'success',
+        )
+        self.assertEqual(
+            len(await self.db.get_epg_programs(source['id'], 'cctv1')),
+            1,
+        )
 
     async def test_stop_event_cancels_before_next_source(self):
         await self._disable_builtin()

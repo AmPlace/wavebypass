@@ -1,8 +1,10 @@
+import asyncio
 import importlib
 import os
 import sqlite3
 import sys
 import tempfile
+import threading
 import unittest
 
 
@@ -275,6 +277,60 @@ class EpgDatabaseTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(source['programme_count'], 1)
         self.assertEqual(source['last_success_at'], '2026-08-07T00:05:00+00:00')
 
+    async def test_atomic_replace_drains_worker_before_propagating_cancellation(self):
+        entered = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+        original_connect = self.db._connect
+
+        def connect_with_commit_barrier():
+            connection = original_connect()
+
+            def trace(statement):
+                if 'UPDATE epg_sources' in statement and 'last_fetched_at' in statement:
+                    entered.set()
+                    release.wait(5)
+                    finished.set()
+
+            connection.set_trace_callback(trace)
+            return connection
+
+        self.db._connect = connect_with_commit_barrier
+        new_channel = {
+            'channel_id': 'new',
+            'display_names': '["New"]',
+            'normalized_names': '["new"]',
+        }
+        new_programme = {**PROGRAMMES_OLD[0], 'channel_id': 'new', 'title': 'New programme'}
+        task = asyncio.create_task(self.db.replace_epg_dataset_atomic(
+            self.source_id,
+            self.source['revision'],
+            [new_channel],
+            [new_programme],
+            stats=self._stats(1, 1),
+        ))
+        try:
+            await asyncio.wait_for(asyncio.to_thread(entered.wait, 5), 6)
+            task.cancel()
+            await asyncio.sleep(0)
+            self.assertFalse(task.done())
+            release.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            await asyncio.wait_for(asyncio.to_thread(finished.wait, 5), 6)
+        finally:
+            release.set()
+            self.db._connect = original_connect
+
+        self.assertEqual(
+            [row['channel_id'] for row in await self.db.get_epg_channels(self.source_id)],
+            ['new'],
+        )
+        self.assertEqual(
+            [row['title'] for row in await self.db.get_epg_programs(self.source_id, 'new')],
+            ['New programme'],
+        )
+
     async def test_duplicate_channel_insert_rolls_back_old_dataset(self):
         duplicate = {
             'channel_id': 'dup',
@@ -387,6 +443,38 @@ class EpgDatabaseTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(after['last_success_at'], before['last_success_at'])
         self.assertEqual(after['channel_count'], before['channel_count'])
         self.assertEqual(after['programme_count'], before['programme_count'])
+
+    async def test_programme_range_uses_half_open_stop_boundary(self):
+        programmes = [
+            {
+                'channel_id': 'old',
+                'start': '2026-08-05T00:00:00+00:00',
+                'stop': '2026-08-05T01:00:00+00:00',
+                'title': 'Before boundary',
+                'description': '',
+            },
+            {
+                'channel_id': 'old',
+                'start': '2026-08-05T01:00:00+00:00',
+                'stop': '2026-08-05T02:00:00+00:00',
+                'title': 'At boundary',
+                'description': '',
+            },
+        ]
+        await self.db.replace_epg_dataset_atomic(
+            self.source_id,
+            self.source['revision'],
+            CHANNELS_OLD,
+            programmes,
+            stats=self._stats(1, 2),
+        )
+
+        rows = await self.db.get_epg_programs(
+            self.source_id,
+            'old',
+            start_after='2026-08-05T01:00:00+00:00',
+        )
+        self.assertEqual([row['title'] for row in rows], ['At boundary'])
 
 
 if __name__ == '__main__':

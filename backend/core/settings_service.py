@@ -21,7 +21,7 @@ SETTING_SCHEMA: dict[str, dict[str, Any]] = {
     "allow_private": {"type": "bool"},
     "allow_loopback": {"type": "bool"},
     "enable_rtsp_proxy": {"type": "bool"},
-    "rtsp_max_sessions": {"type": "int", "min": 1, "max": 32, "restart_required": True},
+    "rtsp_max_sessions": {"type": "int", "min": 1, "max": 32},
     "media_credential_default_ttl_days": {"type": "int", "min": 1, "max": 3650},
     "session_max_age_days": {"type": "int", "min": 1, "max": 365},
     "public_base_url": {"type": "str", "max_len": 512},
@@ -44,21 +44,18 @@ def _coerce_value(key: str, value: Any) -> Any:
             raise SettingsValidationError(f"{key} 必须是布尔值")
         return value
     if kind == "int":
-        if isinstance(value, bool):
+        if isinstance(value, bool) or not isinstance(value, int):
             raise SettingsValidationError(f"{key} 必须是整数")
-        try:
-            number = int(value)
-        except (TypeError, ValueError) as exc:
-            raise SettingsValidationError(f"{key} 必须是整数") from exc
+        number = value
         minimum = int(schema.get("min", number))
         maximum = int(schema.get("max", number))
         if number < minimum or number > maximum:
             raise SettingsValidationError(f"{key} 必须在 {minimum} 至 {maximum} 之间")
         return number
     if kind == "str":
-        if value is None:
-            return ""
-        text = str(value).strip()
+        if not isinstance(value, str):
+            raise SettingsValidationError(f"{key} 必须是字符串")
+        text = value.strip()
         max_len = int(schema.get("max_len", 1024))
         if len(text) > max_len:
             raise SettingsValidationError(f"{key} 长度不能超过 {max_len}")
@@ -95,12 +92,11 @@ async def get_effective_settings() -> EffectiveSecurityConfig:
 
 def get_effective_settings_sync() -> EffectiveSecurityConfig:
     def _read_runtime() -> RuntimeSecuritySettings:
+        conn = db._connect()
         try:
-            conn = db._connect()
             rows = conn.execute("SELECT key, value_json FROM app_settings").fetchall()
+        finally:
             conn.close()
-        except Exception:
-            return RuntimeSecuritySettings()
         values = {}
         for row in rows:
             try:

@@ -61,7 +61,11 @@ from ssrf_guard import UnsafeTargetError, assert_safe_target_url, assert_safe_ho
 from core.config import get_settings
 from core.settings_service import get_effective_settings, get_effective_settings_sync
 from infrastructure.http_client import (
+    ResponseTooLargeError,
     RedirectTargetRejected,
+    StatelessAsyncClient,
+    default_policy,
+    fetch_bytes,
     request_with_safe_redirects,
     stream_with_safe_redirects,
 )
@@ -160,6 +164,14 @@ def _audio_proxy_content_type(upstream_url: str, upstream_content_type: str) -> 
     return _AUDIO_MIME_BY_EXTENSION.get(extension, "application/octet-stream")
 
 
+def _stream_error_summary(error: Exception) -> str:
+    if isinstance(error, httpx.HTTPStatusError):
+        return f"上游返回 HTTP {error.response.status_code}"
+    if isinstance(error, httpx.TimeoutException):
+        return "上游请求超时"
+    return f"上游请求失败 ({type(error).__name__})"
+
+
 # 直连而不走 HLS 处理的电台 ID 集合。空字符串元素是历史遗留，没有任何匹配语义，
 # 留着只会让代码读起来怪。这里替换成真正的空集合，需要新增直连电台时再 union。
 DIRECT_STREAM_STATIONS: set[str] = set()
@@ -235,7 +247,7 @@ async def refresh_station_stream_url(station_id: str) -> str:
 
 
 # 全局复用的异步 HTTP 客户端，维持与上游 CDN 的 Keep-Alive 长连接
-http_client = httpx.AsyncClient(
+http_client = StatelessAsyncClient(
     timeout=HTTP_TIMEOUT,
     verify=CDN_VERIFY_SSL,
     limits=httpx.Limits(max_keepalive_connections=50, max_connections=100)
@@ -1140,6 +1152,12 @@ async def lifespan(app: FastAPI):
     app.state.radio_resolver = RadioResolver(runtime=None)
     try:
         await database.initialize()
+        interrupted_subscriptions = await database.recover_interrupted_subscription_refreshes()
+        if interrupted_subscriptions:
+            logger.warning(
+                "Recovered %d interrupted subscription refresh(es)",
+                interrupted_subscriptions,
+            )
         # Ensure production channel reads have a durable logical projection
         # before any API/media request can observe the database.
         await _run_channel_binding_maintenance('startup')
@@ -1590,6 +1608,115 @@ import database as db
 import market as _market
 
 
+SUBSCRIPTION_MAX_RESPONSE_BYTES = 50 * 1024 * 1024
+SUBSCRIPTION_CONNECT_TIMEOUT_SECONDS = 10.0
+SUBSCRIPTION_READ_TIMEOUT_SECONDS = 15.0
+SUBSCRIPTION_TOTAL_TIMEOUT_SECONDS = 60.0
+SUBSCRIPTION_REFRESH_CONCURRENCY = 4
+
+
+class SubscriptionFetchError(Exception):
+    def __init__(self, code: str, detail: str):
+        self.code = code
+        self.detail = detail
+        super().__init__(detail)
+
+
+class SubscriptionRefreshHttpError(HTTPException):
+    def __init__(self, *, status_code: int, code: str, detail: str):
+        self.code = code
+        super().__init__(status_code=status_code, detail=detail)
+
+
+def _subscription_fetch_error(error: Exception) -> SubscriptionFetchError:
+    if isinstance(error, (RedirectTargetRejected, UnsafeTargetError)):
+        return SubscriptionFetchError(
+            "unsafe_target",
+            "订阅地址不符合当前网络访问策略",
+        )
+    if isinstance(error, ResponseTooLargeError):
+        return SubscriptionFetchError(
+            "response_too_large",
+            "订阅源内容超过允许大小",
+        )
+    if isinstance(error, httpx.TimeoutException):
+        return SubscriptionFetchError("timeout", "订阅源请求超时")
+    if isinstance(error, httpx.HTTPStatusError):
+        return SubscriptionFetchError(
+            "http_error",
+            f"订阅源返回 HTTP {error.response.status_code}",
+        )
+    if isinstance(error, httpx.TooManyRedirects):
+        return SubscriptionFetchError("redirect_failed", "订阅源重定向次数过多")
+    if isinstance(error, httpx.ConnectError):
+        return SubscriptionFetchError("connection_failed", "无法连接订阅源")
+    return SubscriptionFetchError("fetch_failed", "拉取订阅源失败")
+
+
+async def _fetch_subscription_document(url: str, *, custom_ua: str = ""):
+    try:
+        headers = {"User-Agent": custom_ua} if custom_ua else {}
+        _final_url, body, response_headers = await asyncio.wait_for(
+            fetch_bytes(
+                url,
+                headers=headers,
+                policy=default_policy(
+                    connect_timeout=SUBSCRIPTION_CONNECT_TIMEOUT_SECONDS,
+                    read_timeout=SUBSCRIPTION_READ_TIMEOUT_SECONDS,
+                    max_response_bytes=SUBSCRIPTION_MAX_RESPONSE_BYTES,
+                    verify_tls=True,
+                ),
+            ),
+            timeout=SUBSCRIPTION_TOTAL_TIMEOUT_SECONDS,
+        )
+    except asyncio.CancelledError:
+        raise
+    except asyncio.TimeoutError as error:
+        raise SubscriptionFetchError("timeout", "订阅源请求超时") from error
+    except (httpx.HTTPError, UnsafeTargetError) as error:
+        raise _subscription_fetch_error(error) from error
+
+    charset = "utf-8"
+    content_type = str(response_headers.get("content-type") or "")
+    charset_match = re.search(r"charset\s*=\s*['\"]?([^;\s'\"]+)", content_type, re.I)
+    if charset_match:
+        charset = charset_match.group(1)
+    try:
+        text = body.decode(charset, errors="replace")
+    except LookupError:
+        text = body.decode("utf-8", errors="replace")
+    try:
+        return parse_m3u_document(text)
+    except Exception as error:
+        raise SubscriptionFetchError(
+            "parse_failed",
+            "订阅源内容解析失败",
+        ) from error
+
+
+async def _record_subscription_refresh_failure(
+    subscription_id: int,
+    generation: int,
+    *,
+    status: str,
+    error: str,
+) -> None:
+    try:
+        await db.mark_subscription_invalid_if_current(
+            subscription_id,
+            generation,
+            status=status,
+            error=error,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as state_error:
+        logger.warning(
+            "Subscription refresh failure state write failed: %s",
+            type(state_error).__name__,
+        )
+
+
 async def _run_channel_binding_maintenance(trigger: str) -> None:
     """Refresh the logical projection after a committed channel update."""
     try:
@@ -1627,19 +1754,19 @@ async def add_subscription(request: Request):
     if existing:
         raise HTTPException(
             status_code=409,
-            detail=f"订阅源已存在: {existing.get('title') or url}",
+            detail="订阅源已存在",
         )
 
-    # 拉取 M3U8
-    headers = {'User-Agent': custom_ua} if custom_ua else {}
     try:
-        resp = await http_client.get(url, follow_redirects=True, timeout=15, headers=headers)
-        resp.raise_for_status()
-    except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"拉取订阅源失败: {exc}") from exc
+        document = await _fetch_subscription_document(url, custom_ua=custom_ua)
+    except SubscriptionFetchError as exc:
+        status_code = 400 if exc.code == "unsafe_target" else 502
+        raise SubscriptionRefreshHttpError(
+            status_code=status_code,
+            code=exc.code,
+            detail=exc.detail,
+        ) from exc
 
-    # 解析
-    document = parse_m3u_document(resp.text)
     channels = list(document.channels)
     if not channels:
         raise HTTPException(status_code=400, detail="未解析到任何频道")
@@ -1697,22 +1824,46 @@ async def delete_subscription(sub_id: int):
 
 async def _refresh_regular_subscription(sub: dict) -> dict:
     refresh_generation = await db.begin_subscription_refresh(sub['id'])
-    headers = {'User-Agent': sub['custom_ua']} if sub.get('custom_ua') else {}
     try:
-        resp = await http_client.get(sub['url'], follow_redirects=True, timeout=15, headers=headers)
-        resp.raise_for_status()
-    except httpx.HTTPError as exc:
-        await db.mark_subscription_invalid_if_current(sub['id'], refresh_generation)
-        raise HTTPException(status_code=502, detail=f"刷新失败: {exc}") from exc
+        document = await _fetch_subscription_document(
+            sub['url'],
+            custom_ua=sub.get('custom_ua') or '',
+        )
+    except asyncio.CancelledError:
+        await _record_subscription_refresh_failure(
+            sub['id'],
+            refresh_generation,
+            status='cancelled',
+            error='订阅刷新已取消',
+        )
+        raise
+    except SubscriptionFetchError as exc:
+        await _record_subscription_refresh_failure(
+            sub['id'],
+            refresh_generation,
+            status=exc.code,
+            error=exc.detail,
+        )
+        raise SubscriptionRefreshHttpError(
+            status_code=502,
+            code=exc.code,
+            detail=f"{exc.detail}，已保留旧数据",
+        ) from exc
 
-    document = parse_m3u_document(resp.text)
     channels = list(document.channels)
     channels = deduplicate_channels(channels)
     if not channels:
-        await db.mark_subscription_invalid_if_current(sub['id'], refresh_generation)
-        raise HTTPException(
+        error = "刷新结果未解析到任何频道，已保留旧数据"
+        await _record_subscription_refresh_failure(
+            sub['id'],
+            refresh_generation,
+            status='empty',
+            error=error,
+        )
+        raise SubscriptionRefreshHttpError(
             status_code=502,
-            detail="刷新结果未解析到任何频道，已保留旧数据",
+            code='empty',
+            detail=error,
         )
     try:
         await db.replace_subscription_channels_atomic(
@@ -1720,14 +1871,43 @@ async def _refresh_regular_subscription(sub: dict) -> dict:
             expected_generation=refresh_generation,
         )
     except db.SubscriptionRefreshSuperseded as exc:
-        raise HTTPException(status_code=409, detail="刷新结果已被更新的请求取代") from exc
+        raise SubscriptionRefreshHttpError(
+            status_code=409,
+            code='superseded',
+            detail="刷新结果已被更新的请求取代",
+        ) from exc
+    except asyncio.CancelledError:
+        await _record_subscription_refresh_failure(
+            sub['id'],
+            refresh_generation,
+            status='cancelled',
+            error='订阅刷新已取消',
+        )
+        raise
+    except Exception as exc:
+        error = "订阅数据保存失败，已保留旧数据"
+        await _record_subscription_refresh_failure(
+            sub['id'],
+            refresh_generation,
+            status='save_failed',
+            error=error,
+        )
+        logger.warning(
+            "Subscription dataset replacement failed: %s",
+            type(exc).__name__,
+        )
+        raise SubscriptionRefreshHttpError(
+            status_code=500,
+            code='save_failed',
+            detail=error,
+        ) from exc
     await _run_epg_preference_maintenance(sub['id'], document.epg_url_hints)
     await _run_channel_binding_maintenance('subscription_refresh')
     # 频道数据变更后失效 Cover 缓存
     from core.cover_cache import invalidate_all_covers
     invalidate_all_covers()
 
-    return {"channel_count": len(channels)}
+    return {"status": "success", "channel_count": len(channels)}
 
 
 async def _refresh_market_subscription(sub: dict) -> dict:
@@ -1757,35 +1937,59 @@ async def refresh_subscription(sub_id: int):
 @app.post("/api/admin/subscriptions/refresh-all", dependencies=[Depends(require_admin)])
 async def refresh_all_subscriptions():
     subs = await db.get_subscriptions()
-    results = []
-    updated = 0
-    failed = 0
-    for sub in subs:
+    regular_limit = asyncio.Semaphore(SUBSCRIPTION_REFRESH_CONCURRENCY)
+    market_lock = asyncio.Lock()
+
+    async def refresh_one(sub: dict) -> dict:
         try:
             if str(sub.get('url') or '').startswith('market://'):
-                result = await _refresh_market_subscription(sub)
+                async with market_lock:
+                    result = await _refresh_market_subscription(sub)
             else:
-                result = await _refresh_regular_subscription(sub)
-            updated += 1
-            results.append({
+                async with regular_limit:
+                    result = await _refresh_regular_subscription(sub)
+            return {
                 "subscription_id": sub.get("id"),
                 "title": sub.get("title"),
                 "status": "updated",
                 **(result or {}),
-            })
+            }
         except HTTPException as exc:
-            failed += 1
-            results.append({
+            return {
                 "subscription_id": sub.get("id"),
                 "title": sub.get("title"),
                 "status": "failed",
-                "error": exc.detail,
-            })
+                "error_code": getattr(exc, "code", "refresh_failed"),
+                "error": exc.detail if isinstance(exc.detail, str) else "订阅刷新失败",
+            }
+        except Exception as exc:
+            logger.warning(
+                "Subscription batch refresh item failed: %s",
+                type(exc).__name__,
+            )
+            return {
+                "subscription_id": sub.get("id"),
+                "title": sub.get("title"),
+                "status": "failed",
+                "error_code": "internal_error",
+                "error": "订阅刷新发生内部错误",
+            }
+
+    results = await asyncio.gather(*(refresh_one(sub) for sub in subs))
+    updated = sum(item["status"] == "updated" for item in results)
+    failed = len(results) - updated
     # 批量刷新后统一失效一次
     if updated > 0:
         from core.cover_cache import invalidate_all_covers
         invalidate_all_covers()
-    return {"ok": True, "updated": updated, "failed": failed, "results": results}
+    status = "success" if failed == 0 else ("partial" if updated else "failed")
+    return {
+        "ok": True,
+        "status": status,
+        "updated": updated,
+        "failed": failed,
+        "results": results,
+    }
 
 
 # ── 频道 ──
@@ -2043,7 +2247,7 @@ async def _market_package_with_private_artifacts(package_id: str) -> dict:
         None,
     )
     if not package:
-        raise _market.MarketError("Market 包不存在", 404)
+        package = await _market.get_package(package_id, include_internal=True)
     return package
 
 
@@ -2826,17 +3030,19 @@ async def _run_speed_test_sub(sub_id: int, channels: list[dict], cancel_event: a
     tasks: list[asyncio.Task] = []
 
     async def _limited_test(ch):
+        expected_source_revision = source_revision_for(ch)
         async with _speed_test_semaphore_for_channel(ch, semaphores, default_sem, adapter_limits):
             if cancel_event.is_set():
-                return ch, {"probe_status": "untested", "latency_ms": 0, "last_error": "cancelled"}
+                return ch, {"probe_status": "untested", "latency_ms": 0, "last_error": "cancelled"}, expected_source_revision
             try:
-                return ch, await asyncio.wait_for(probe_channel_source(
+                result = await asyncio.wait_for(probe_channel_source(
                     ch, http_client, provider_resolver=getattr(app.state, "provider_resolver", None)
                 ), timeout=24)
+                return ch, result, expected_source_revision
             except asyncio.TimeoutError:
-                return ch, {"probe_status": "timeout", "latency_ms": 0, "last_error": "timeout"}
-            except Exception as exc:
-                return ch, {"probe_status": "error", "latency_ms": 0, "last_error": str(exc)[:300]}
+                return ch, {"probe_status": "timeout", "latency_ms": 0, "last_error": "timeout"}, expected_source_revision
+            except Exception:
+                return ch, {"probe_status": "error", "latency_ms": 0, "last_error": "probe_internal_error"}, expected_source_revision
 
     try:
         tasks = [asyncio.create_task(_limited_test(ch)) for ch in channels]
@@ -2845,17 +3051,22 @@ async def _run_speed_test_sub(sub_id: int, channels: list[dict], cancel_event: a
                 break
             result = {"probe_status": "error", "latency_ms": 0, "last_error": "unknown"}
             ch = None
+            expected_source_revision = None
             try:
-                ch, result = await coro
+                ch, result, expected_source_revision = await coro
                 _test_progress[sub_id]["current"] = ch.get("name", "")
                 _test_progress[sub_id]["phase"] = result.get("probe_method", "")
                 _global_test_progress["current"] = ch.get("name", "")
                 _global_test_progress["phase"] = result.get("probe_method", "")
-                await db.update_channel_probe_result(ch['id'], result)
-            except Exception as e:
-                logger.warning("测速异常: %s", e)
+                await db.update_channel_probe_result(
+                    ch['id'], result, expected_source_revision=expected_source_revision
+                )
+            except Exception as exc:
+                logger.warning("测速异常: %s", type(exc).__name__)
                 if ch:
-                    await db.update_channel_probe_result(ch['id'], result)
+                    await db.update_channel_probe_result(
+                        ch['id'], result, expected_source_revision=expected_source_revision
+                    )
             bucket = _probe_status_to_bucket(str(result.get("probe_status") or "error"))
             _test_progress[sub_id]['tested'] += 1
             _global_test_progress['tested'] += 1
@@ -2892,18 +3103,20 @@ async def _run_speed_test_global(channels: list[dict], cancel_event: asyncio.Eve
     tasks: list[asyncio.Task] = []
 
     async def _limited_test(ch):
+        expected_source_revision = source_revision_for(ch)
         async with _speed_test_semaphore_for_channel(ch, semaphores, default_sem, adapter_limits):
             if cancel_event.is_set():
-                return ch, {"probe_status": "untested", "latency_ms": 0, "last_error": "cancelled"}
+                return ch, {"probe_status": "untested", "latency_ms": 0, "last_error": "cancelled"}, expected_source_revision
             try:
-                return ch, await asyncio.wait_for(probe_channel_source(
+                result = await asyncio.wait_for(probe_channel_source(
                     ch, http_client, provider_resolver=getattr(app.state, "provider_resolver", None)
                 ), timeout=24)
+                return ch, result, expected_source_revision
             except asyncio.TimeoutError:
                 logger.warning("测速超时: %s", ch.get('name', ch.get('url', ''))[:60])
-                return ch, {"probe_status": "timeout", "latency_ms": 0, "last_error": "timeout"}
-            except Exception as exc:
-                return ch, {"probe_status": "error", "latency_ms": 0, "last_error": str(exc)[:300]}
+                return ch, {"probe_status": "timeout", "latency_ms": 0, "last_error": "timeout"}, expected_source_revision
+            except Exception:
+                return ch, {"probe_status": "error", "latency_ms": 0, "last_error": "probe_internal_error"}, expected_source_revision
 
     try:
         tasks = [asyncio.create_task(_limited_test(ch)) for ch in channels]
@@ -2912,15 +3125,20 @@ async def _run_speed_test_global(channels: list[dict], cancel_event: asyncio.Eve
                 break
             result = {"probe_status": "error", "latency_ms": 0, "last_error": "unknown"}
             ch = None
+            expected_source_revision = None
             try:
-                ch, result = await coro
+                ch, result, expected_source_revision = await coro
                 _global_test_progress["current"] = ch.get("name", "")
                 _global_test_progress["phase"] = result.get("probe_method", "")
-                await db.update_channel_probe_result(ch['id'], result)
-            except Exception as e:
-                logger.warning("测速异常: %s", e)
+                await db.update_channel_probe_result(
+                    ch['id'], result, expected_source_revision=expected_source_revision
+                )
+            except Exception as exc:
+                logger.warning("测速异常: %s", type(exc).__name__)
                 if ch:
-                    await db.update_channel_probe_result(ch['id'], result)
+                    await db.update_channel_probe_result(
+                        ch['id'], result, expected_source_revision=expected_source_revision
+                    )
             bucket = _probe_status_to_bucket(str(result.get("probe_status") or "error"))
             _global_test_progress['tested'] += 1
             _global_test_progress[bucket] += 1
@@ -3528,6 +3746,7 @@ async def serve_iptv_proxy_stream_response(
     handle payload 已通过 SSRF 校验，reconnect 内部直接使用上游 URL。
     """
     parsed = urlparse(upstream_url)
+    stream_log_origin = f"{parsed.scheme}://{parsed.hostname}" if parsed.hostname else "[invalid-origin]"
     headers = {
         "User-Agent": upstream_headers.get("User-Agent", CDN_REQUEST_HEADERS["User-Agent"]),
         "Accept": "*/*",
@@ -3569,7 +3788,7 @@ async def serve_iptv_proxy_stream_response(
                 logger.warning(
                     "IPTV stream 上游 Content-Length 较小: %s bytes url=%s",
                     length,
-                    upstream_url,
+                    stream_log_origin,
                 )
         return response
 
@@ -3580,7 +3799,7 @@ async def serve_iptv_proxy_stream_response(
         raise HTTPException(status_code=403, detail=str(exc.cause)) from exc
     except httpx.HTTPError as exc:
         await stream_client.aclose()
-        raise HTTPException(status_code=502, detail=f"拉取直播流失败: {exc}") from exc
+        raise HTTPException(status_code=502, detail=f"拉取直播流失败: {_stream_error_summary(exc)}") from exc
 
     async def stream_bytes() -> AsyncIterator[bytes]:
         upstream: httpx.Response | None = initial_upstream
@@ -3620,7 +3839,7 @@ async def serve_iptv_proxy_stream_response(
                 except httpx.ReadTimeout:
                     close_reason = f"read timeout after {IPTV_STREAM_READ_TIMEOUT_SECONDS:.0f}s"
                 except httpx.HTTPError as exc:
-                    close_reason = f"{type(exc).__name__}: {exc}"
+                    close_reason = type(exc).__name__
                 finally:
                     if upstream is not None:
                         await upstream.aclose()
@@ -3636,7 +3855,7 @@ async def serve_iptv_proxy_stream_response(
                         close_reason,
                         bytes_this_connection,
                         elapsed,
-                        upstream_url,
+                        stream_log_origin,
                     )
                 else:
                     logger.info(
@@ -3654,7 +3873,7 @@ async def serve_iptv_proxy_stream_response(
                             "IPTV stream 上游连续无数据，结束代理流: retries=%s no_data_age=%.2fs url=%s",
                             no_data_retries,
                             no_data_age,
-                            upstream_url,
+                            stream_log_origin,
                         )
                         break
 
@@ -3684,8 +3903,8 @@ async def serve_iptv_proxy_stream_response(
                             "IPTV stream 上游重连失败: retries=%s no_data_age=%.2fs error=%s url=%s",
                             no_data_retries,
                             no_data_age,
-                            exc,
-                            upstream_url,
+                            type(exc).__name__,
+                            stream_log_origin,
                         )
                         if no_data_retries >= IPTV_STREAM_NO_DATA_RETRIES or no_data_age > IPTV_STREAM_NO_DATA_TIMEOUT_SECONDS:
                             return
@@ -4339,7 +4558,7 @@ async def get_epg_programs(canonical_key: str, date: str = '', tz: str = ''):
     current = None
     next_prog = None
     for p in now_programs:
-        if p['start'] <= now < p['stop']:
+        if current is None and p['start'] <= now < p['stop']:
             total = (datetime.fromisoformat(p['stop']) - datetime.fromisoformat(p['start'])).total_seconds()
             elapsed = (datetime.now(timezone.utc) - datetime.fromisoformat(p['start'])).total_seconds()
             current = {

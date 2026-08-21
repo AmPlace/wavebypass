@@ -17,6 +17,7 @@ from infrastructure.http_client import (
 from plugin_runtime import PluginError
 from m3u8_parser import adapter_provider, detect_source_type, is_youtube_url
 from media_tools import media_tool_bin
+from security.redact import redact_url
 from ssrf_guard import UnsafeTargetError, assert_safe_target_url
 
 
@@ -153,6 +154,22 @@ def _ffmpeg_probe_timeout(url: str) -> float:
     if _is_realtime_media_url(url):
         return RT_FFMPEG_TIMEOUT
     return FFMPEG_TIMEOUT
+
+
+def _safe_ffmpeg_reason(reason: Any) -> str:
+    value = str(reason or "").strip()
+    if value in {
+        "rt_stream",
+        "http_timeout",
+        "http_exception",
+        "http_segment",
+        "http_stream",
+        "weak_http_probe",
+    }:
+        return value
+    if re.fullmatch(r"(?:http|variant_http)_status_[0-9]{3}", value):
+        return value
+    return "probe_fallback"
 
 
 def _requires_headers(headers: dict[str, str]) -> bool:
@@ -394,12 +411,18 @@ async def _probe_media_info(url: str, headers: dict[str, str]) -> dict[str, Any]
         except asyncio.CancelledError:
             await _kill_process(proc)
             raise
-        except Exception as exc:
-            return {"meta": {"ffprobe": False, "ffprobe_error": str(exc)[:120]}}
+        except Exception:
+            error_code = "ffprobe_spawn_failed" if proc is None else "ffprobe_failed"
+            return {"meta": {"ffprobe": False, "ffprobe_error": error_code}}
 
     if proc.returncode != 0:
-        error = (stderr or b"").decode("utf-8", errors="ignore").strip()
-        return {"meta": {"ffprobe": False, "ffprobe_error": error[:180] or f"exit_{proc.returncode}"}}
+        return {
+            "meta": {
+                "ffprobe": False,
+                "ffprobe_error": "ffprobe_failed",
+                "ffprobe_exit_code": proc.returncode,
+            }
+        }
 
     try:
         data = json.loads(stdout.decode("utf-8", errors="ignore") or "{}")
@@ -451,7 +474,21 @@ def _meta_value(result: dict[str, Any], key: str, default: Any = None) -> Any:
     return meta.get(key, default)
 
 
+def _sanitize_probe_meta_json(value: str) -> str:
+    try:
+        meta = json.loads(value or "{}")
+    except Exception:
+        return "{}"
+    if not isinstance(meta, dict):
+        return "{}"
+    safe_final_url = meta.get("safe_final_url")
+    if isinstance(safe_final_url, str) and safe_final_url:
+        meta["safe_final_url"] = redact_url(safe_final_url)
+    return _safe_meta(meta)
+
+
 async def _probe_with_ffmpeg(url: str, headers: dict[str, str], *, reason: str) -> dict[str, Any]:
+    reason = _safe_ffmpeg_reason(reason)
     try:
         await _validate_external_probe_target(url)
     except UnsafeTargetError:
@@ -530,14 +567,20 @@ async def _probe_with_ffmpeg(url: str, headers: dict[str, str], *, reason: str) 
         except asyncio.CancelledError:
             await _kill_process(proc)
             raise
-        except Exception as exc:
+        except Exception:
+            error_code = "ffmpeg_spawn_failed" if proc is None else "ffmpeg_failed"
             return _empty_result(
                 probe_status="error",
                 live_status="error",
                 probe_method="ffmpeg",
                 latency_ms=round((time.monotonic() - started) * 1000, 1),
-                last_error=str(exc)[:180],
-                probe_meta_json=_safe_meta({"probe_quality": "failed", "ffmpeg": False, "ffmpeg_reason": reason}),
+                last_error=error_code,
+                probe_meta_json=_safe_meta({
+                    "probe_quality": "failed",
+                    "ffmpeg": False,
+                    "ffmpeg_reason": reason,
+                    "ffmpeg_error": error_code,
+                }),
             )
 
     output = b"\n".join(stderr_parts + stdout_parts).decode("utf-8", errors="ignore")
@@ -562,18 +605,18 @@ async def _probe_with_ffmpeg(url: str, headers: dict[str, str], *, reason: str) 
             }),
         )
 
-    error_tail = output[-240:].strip()
     return _empty_result(
         probe_status="offline",
         live_status="unknown",
         probe_method="ffmpeg",
         latency_ms=round((time.monotonic() - started) * 1000, 1),
-        last_error=error_tail or "ffmpeg_no_stream",
+        last_error="ffmpeg_no_stream",
         probe_meta_json=_safe_meta({
             "probe_quality": "failed",
             "ffmpeg": False,
             "ffmpeg_reason": reason,
             "ffmpeg_exit_code": proc.returncode if proc else None,
+            "ffmpeg_error": "ffmpeg_no_stream",
         }),
     )
 
@@ -917,22 +960,38 @@ async def probe_channel_source(ch: dict[str, Any], client: httpx.AsyncClient, *,
             "ffmpeg" if is_rt_stream else "http_segment" if source_type == "hls" else "http_stream"
         )
     except httpx.TimeoutException:
-        result = await _probe_with_ffmpeg(url, headers, reason="http_timeout")
-        if result.get("probe_status") != "online":
-            _merge_meta(result, {"http_error": "timeout"})
+        fallback_result = await _probe_with_ffmpeg(url, headers, reason="http_timeout")
+        fallback_error = str(fallback_result.get("last_error") or "")
+        if fallback_result.get("probe_status") == "online":
+            result = fallback_result
+            _merge_meta(result, {"http_error": "timeout", "media_fallback": "ffmpeg"})
+        else:
+            result = fallback_result
+            _merge_meta(result, {
+                "http_error": "timeout",
+                "media_fallback_error": fallback_error or "media_probe_failed",
+            })
             result.update(
                 probe_status="timeout",
                 probe_method="http_segment" if source_type == "hls" else "http_stream",
-                last_error=result.get("last_error") or "timeout",
+                last_error="timeout",
             )
-    except Exception as exc:
-        result = await _probe_with_ffmpeg(url, headers, reason="http_exception")
-        if result.get("probe_status") != "online":
-            _merge_meta(result, {"http_error": str(exc)[:180]})
+    except Exception:
+        fallback_result = await _probe_with_ffmpeg(url, headers, reason="http_exception")
+        fallback_error = str(fallback_result.get("last_error") or "")
+        if fallback_result.get("probe_status") == "online":
+            result = fallback_result
+            _merge_meta(result, {"http_error": "request_failed", "media_fallback": "ffmpeg"})
+        else:
+            result = fallback_result
+            _merge_meta(result, {
+                "http_error": "request_failed",
+                "media_fallback_error": fallback_error or "media_probe_failed",
+            })
             result.update(
                 probe_status="error",
                 probe_method="http_segment" if source_type == "hls" else "http_stream",
-                last_error=str(exc)[:300],
+                last_error="http_probe_failed",
             )
 
     if result.get("probe_status") == "online":
@@ -956,5 +1015,7 @@ async def probe_channel_source(ch: dict[str, Any], client: httpx.AsyncClient, *,
         existing_meta = json.loads(result.get("probe_meta_json") or "{}")
     except Exception:
         existing_meta = {}
-    result["probe_meta_json"] = _safe_meta({**existing_meta, **meta, "source_type": source_type})
+    result["probe_meta_json"] = _sanitize_probe_meta_json(
+        _safe_meta({**existing_meta, **meta, "source_type": source_type})
+    )
     return result

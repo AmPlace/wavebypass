@@ -898,6 +898,44 @@ class OfficialDistributionProductionTest(unittest.IsolatedAsyncioTestCase):
                 await subsystem.install("org.waveflow/fjtv", test_packages)
             self.assertEqual(wrong_key.exception.code, "PLUGIN_UNTRUSTED")
 
+    def test_official_catalog_rejects_incomplete_and_duplicate_identity_metadata(self):
+        from official_plugin_distribution import OFFICIAL_RELEASE_ROOT, load_bundled_official_market
+        from plugin_runtime import PluginError
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "distribution"
+            shutil.copytree(OFFICIAL_RELEASE_ROOT, root)
+            market_path = root / "market.json"
+            market = json.loads(market_path.read_text())
+            market["packages"][0]["artifact_references"] = []
+            market_path.write_text(json.dumps(market))
+            with self.assertRaises(PluginError) as incomplete:
+                load_bundled_official_market(root)
+            self.assertEqual(incomplete.exception.code, "ARTIFACT_INVALID")
+
+            shutil.rmtree(root)
+            shutil.copytree(OFFICIAL_RELEASE_ROOT, root)
+            market_path = root / "market.json"
+            market = json.loads(market_path.read_text())
+            market["packages"][1]["id"] = market["packages"][0]["id"]
+            market_path.write_text(json.dumps(market))
+            with self.assertRaises(PluginError) as duplicate:
+                load_bundled_official_market(root)
+            self.assertEqual(duplicate.exception.code, "ARTIFACT_INVALID")
+
+    def test_official_trust_metadata_rejects_duplicate_keys(self):
+        from official_plugin_distribution import load_official_trust_rows
+        from plugin_runtime import PluginError
+
+        with tempfile.TemporaryDirectory() as directory:
+            trust_path = Path(directory) / "trust.json"
+            trust = json.loads((Path(__file__).parents[1] / "official_plugins" / "publisher-trust.json").read_text())
+            trust["publishers"][0]["keys"].append(dict(trust["publishers"][0]["keys"][0]))
+            trust_path.write_text(json.dumps(trust))
+            with self.assertRaises(PluginError) as duplicate:
+                load_official_trust_rows(trust_path)
+            self.assertEqual(duplicate.exception.code, "PLUGIN_UNTRUSTED")
+
     async def test_signed_update_and_failed_provenance_keep_previous_active(self):
         from official_plugin_distribution import OFFICIAL_DISTRIBUTION_ROOT
         from plugin_capabilities import CapabilityGateway

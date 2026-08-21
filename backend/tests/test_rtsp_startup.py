@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
 import tempfile
 import unittest
@@ -9,6 +10,7 @@ from unittest import IsolatedAsyncioTestCase, mock
 
 from fastapi import HTTPException
 
+import database
 import main
 from rtsp_playback import resolve_rtsp_playback_options
 
@@ -73,7 +75,10 @@ class RtspStartupSingleFlightTest(IsolatedAsyncioTestCase):
         self._old_quota_lock = main._RTSP_HLS_QUOTA_LOCK
         self._old_shutting_down = main._RTSP_HLS_SHUTTING_DOWN
         self._old_root = main.RTSP_HLS_ROOT
+        self._old_db_path = os.environ.get("WAVEFLOW_DB_PATH")
         self._tmp = tempfile.TemporaryDirectory()
+        os.environ["WAVEFLOW_DB_PATH"] = str(Path(self._tmp.name) / "waveflow.db")
+        await database.initialize()
         main.RTSP_HLS_SESSIONS = {}
         main._RTSP_HLS_STARTUPS = {}
         main._RTSP_RESERVED_SESSIONS = set()
@@ -100,6 +105,10 @@ class RtspStartupSingleFlightTest(IsolatedAsyncioTestCase):
         main._RTSP_RESERVED_SESSIONS = self._old_reserved
         main._RTSP_HLS_QUOTA_LOCK = self._old_quota_lock
         main.RTSP_HLS_ROOT = self._old_root
+        if self._old_db_path is None:
+            os.environ.pop("WAVEFLOW_DB_PATH", None)
+        else:
+            os.environ["WAVEFLOW_DB_PATH"] = self._old_db_path
         self._tmp.cleanup()
 
     async def _wait_for_no_startup(self):

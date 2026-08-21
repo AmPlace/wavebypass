@@ -100,7 +100,14 @@ class ProviderResolver:
     def is_available(self, scheme: str) -> bool:
         return str(scheme).lower() not in self._unavailable
 
-    async def resolve(self, target_url: str, client: httpx.AsyncClient) -> dict[str, Any]:
+    async def resolve(
+        self,
+        target_url: str,
+        client: httpx.AsyncClient,
+        *,
+        source_id: str = "",
+        source_revision: str = "",
+    ) -> dict[str, Any]:
         reference = parse_tv_reference(target_url)
         if reference.scheme in self._unavailable:
             raise PluginError(
@@ -108,7 +115,8 @@ class ProviderResolver:
             )
         mode = self.mode(reference.scheme)
         if mode == "legacy":
-            return await self.legacy_resolver(target_url, client)
+            result = await self.legacy_resolver(target_url, client)
+            return self._bind_source_identity(result, source_id=source_id, source_revision=source_revision)
         if self.runtime is None:
             raise PluginError("PLUGIN_UNAVAILABLE", "Plugin subsystem is unavailable", category="lifecycle")
         instance = self.runtime.registry.route(reference.scheme)
@@ -121,8 +129,22 @@ class ProviderResolver:
             "resource_id": reference.resource_id,
             "query": reference.query,
             "raw_reference": reference.raw_url,
+            "source_id": source_id,
+            "source_revision": source_revision,
         })
-        return self._bridge_descriptor(reference.scheme, descriptor)
+        result = self._bridge_descriptor(reference.scheme, descriptor)
+        return self._bind_source_identity(result, source_id=source_id, source_revision=source_revision)
+
+    @staticmethod
+    def _bind_source_identity(
+        result: dict[str, Any], *, source_id: str = "", source_revision: str = "",
+    ) -> dict[str, Any]:
+        bound = dict(result)
+        if source_id:
+            bound["source_id"] = source_id
+        if source_revision:
+            bound["source_revision"] = source_revision
+        return bound
 
     def supports_visual_metadata(self, target_url: str) -> bool:
         """Return whether the active Plugin owns the optional visual feature.

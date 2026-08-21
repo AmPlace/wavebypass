@@ -1,8 +1,11 @@
+import os
+import tempfile
 import unittest
 from unittest import mock
 
 import httpx
 
+import database
 from plugin_capabilities import CapabilityGateway
 from plugin_runtime import PermissionGate, PermissionPolicy, PluginError, validate_manifest
 from plugin_permissions import MANAGED_HTTP_PERMISSION, requested_permissions
@@ -38,6 +41,19 @@ def _manifest(*, allow_http: bool = False, managed: bool = True) -> object:
 
 
 class ManagedHttpPermissionTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self._old_db_path = os.environ.get("WAVEFLOW_DB_PATH")
+        self._tmp = tempfile.TemporaryDirectory(prefix="waveflow-managed-http-")
+        os.environ["WAVEFLOW_DB_PATH"] = os.path.join(self._tmp.name, "waveflow.db")
+        await database.initialize()
+
+    async def asyncTearDown(self):
+        if self._old_db_path is None:
+            os.environ.pop("WAVEFLOW_DB_PATH", None)
+        else:
+            os.environ["WAVEFLOW_DB_PATH"] = self._old_db_path
+        self._tmp.cleanup()
+
     async def _fetch(self, url: str, *, allow_http: bool, transport: httpx.AsyncBaseTransport) -> dict:
         manifest = _manifest(allow_http=allow_http)
         gateway = CapabilityGateway(client=httpx.AsyncClient(transport=transport))

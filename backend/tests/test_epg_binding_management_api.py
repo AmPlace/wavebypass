@@ -339,6 +339,96 @@ class EpgBindingManagementApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(programme.json()["epg_source_id"], source_b)
         self.assertEqual(programme.json()["current"]["title"], "source-b programme")
 
+    async def test_programme_api_keeps_the_earliest_overlapping_current(self):
+        source = await self._source("overlap", "OVERLAP")
+        self._logical("logical-overlap")
+        self._binding("logical-overlap", source, "OVERLAP")
+        conn = self._connect()
+        try:
+            conn.execute(
+                """
+                INSERT INTO epg_programs(
+                    source_id, channel_id, start, stop, title, description
+                ) VALUES(?, ?, ?, ?, ?, '')
+                """,
+                (
+                    source,
+                    "OVERLAP",
+                    (self.now - timedelta(minutes=30)).isoformat(),
+                    (self.now + timedelta(hours=2)).isoformat(),
+                    "Later overlapping programme",
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        response = await self.main.get_epg_programs(
+            "key-logical-overlap",
+            tz="UTC",
+        )
+        self.assertEqual(response["current"]["title"], "overlap programme")
+
+    async def test_batch_current_does_not_repeat_programme_at_its_start_as_next(self):
+        source = await self._source("boundary", "BOUNDARY")
+        self._logical("logical-boundary")
+        self._binding("logical-boundary", source, "BOUNDARY")
+        fixed_now = self.now.replace(microsecond=0)
+        programmes = [
+            (
+                source,
+                "BOUNDARY",
+                (fixed_now - timedelta(hours=1)).isoformat(),
+                fixed_now.isoformat(),
+                "Previous programme",
+            ),
+            (
+                source,
+                "BOUNDARY",
+                fixed_now.isoformat(),
+                (fixed_now + timedelta(hours=1)).isoformat(),
+                "Programme at boundary",
+            ),
+            (
+                source,
+                "BOUNDARY",
+                (fixed_now + timedelta(hours=1)).isoformat(),
+                (fixed_now + timedelta(hours=2)).isoformat(),
+                "Next programme",
+            ),
+        ]
+        conn = self._connect()
+        try:
+            conn.execute("DELETE FROM epg_programs WHERE source_id=?", (source,))
+            conn.executemany(
+                """
+                INSERT INTO epg_programs(
+                    source_id, channel_id, start, stop, title, description
+                ) VALUES(?, ?, ?, ?, ?, '')
+                """,
+                programmes,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        class FixedDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return fixed_now if tz is None else fixed_now.astimezone(tz)
+
+        with mock.patch.object(self.db, "datetime", FixedDateTime):
+            result = await self.db.batch_get_current_programs(["key-logical-boundary"])
+
+        self.assertEqual(
+            result["key-logical-boundary"]["current"]["title"],
+            "Programme at boundary",
+        )
+        self.assertEqual(
+            result["key-logical-boundary"]["next"]["title"],
+            "Next programme",
+        )
+
     async def test_replace_all_origins_and_invalid_target_roll_back(self):
         source_a = await self._source("origin-a", "A")
         source_b = await self._source("origin-b", "B")

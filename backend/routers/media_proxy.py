@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import logging
 from pathlib import Path
 from urllib.parse import quote, urlparse
@@ -62,6 +63,7 @@ from security.proxy_handles import (
     decode_for_kind,
     issue_cached_handle,
 )
+from security.redact import redact_url
 from rtsp_playback import RtspPlaybackOptions, resolve_rtsp_playback_options
 from security.source_ids import source_id_for, source_revision_for
 from ssrf_guard import UnsafeTargetError, assert_safe_target_url
@@ -71,7 +73,7 @@ from core.visual_metadata import empty_visual, get_visual_metadata_cache
 logger = logging.getLogger("media.proxy")
 
 router = APIRouter(tags=["media"])
-_PACKAGE_ASSET_INTEGRITY_CACHE: dict[tuple[str, str], tuple[int, int, str]] = {}
+_PACKAGE_ASSET_INTEGRITY_CACHE: dict[tuple[str, str, str, str], tuple[int, int, str]] = {}
 
 
 @router.get("/api/media/package-assets/{package_id}/{asset_id}")
@@ -89,7 +91,12 @@ async def package_asset(
         raise HTTPException(status_code=404, detail="Package asset 不可用")
     try:
         stat = path.stat()
-        cache_key = (package_id, asset_id)
+        cache_key = (
+            package_id,
+            asset_id,
+            str(asset.get("package_version") or ""),
+            str(path),
+        )
         cached = _PACKAGE_ASSET_INTEGRITY_CACHE.get(cache_key)
         if cached and cached[:2] == (stat.st_mtime_ns, stat.st_size):
             digest = cached[2]
@@ -328,11 +335,109 @@ async def _find_iptv_channel_source(
     return channel, source
 
 
+def _source_revision_stale() -> HTTPException:
+    return HTTPException(
+        status_code=409,
+        detail={
+            "code": "SOURCE_REVISION_STALE",
+            "message": "播放源已更新，请重新选择",
+        },
+    )
+
+
+def _validate_expected_source_revision(source: dict, expected_source_revision: str = "") -> str:
+    current_revision = source_revision_for(source)
+    expected = str(expected_source_revision or "").strip()
+    if expected and expected != current_revision:
+        raise _source_revision_stale()
+    return current_revision
+
+
+async def _assert_current_iptv_source_revision(
+    canonical_key: str,
+    source_id: str,
+    expected_source_revision: str,
+) -> None:
+    """Re-read the source after an async boundary before publishing a result."""
+    import main as _m
+
+    if not source_id or not callable(getattr(_m, "_get_aggregated_iptv_channels", None)):
+        return
+    try:
+        _channel, current_source = await _find_iptv_channel_source(canonical_key, source_id)
+    except HTTPException as exc:
+        if exc.status_code in {403, 404}:
+            raise _source_revision_stale() from exc
+        raise
+    if source_revision_for(current_source) != expected_source_revision:
+        raise _source_revision_stale()
+
+
+async def _validate_iptv_proxy_context(ctx: ProxyContext | None) -> None:
+    """Reject new use of a revision-bound IPTV context after source mutation."""
+    if not ctx or not ctx.source_id or not ctx.source_revision or ctx.source_id.startswith("radio:"):
+        return
+    import main as _m
+
+    getter = getattr(_m, "_get_aggregated_iptv_channels", None)
+    if not callable(getter):
+        return
+    channels, _groups = await getter()
+    for channel in channels:
+        for source in list(channel.get("urls", []) or []):
+            current_source_id = str(source.get("source_id") or "").strip()
+            if not current_source_id:
+                current_source_id = source_id_for(source)
+            if current_source_id != ctx.source_id:
+                continue
+            if not _is_truthy(source.get("enabled", True)) or source.get("disabled") is True:
+                raise _source_revision_stale()
+            if source_revision_for(source) != ctx.source_revision:
+                raise _source_revision_stale()
+            return
+    raise _source_revision_stale()
+
+
+def _validate_resolved_source_identity(
+    resolved: dict, *, source_id: str, source_revision: str,
+) -> None:
+    returned_source_id = str(resolved.get("source_id") or "").strip()
+    returned_revision = str(resolved.get("source_revision") or "").strip()
+    if returned_source_id and returned_source_id != source_id:
+        raise _source_revision_stale()
+    if returned_revision and returned_revision != source_revision:
+        raise _source_revision_stale()
+
+
+async def _resolve_provider_source(
+    resolver,
+    target_url: str,
+    client,
+    *,
+    source_id: str,
+    source_revision: str,
+) -> dict:
+    """Pass identity metadata to the current resolver without breaking test/legacy doubles."""
+    resolve = resolver.resolve
+    kwargs = {}
+    try:
+        parameters = inspect.signature(resolve).parameters
+        accepts_kwargs = any(item.kind == inspect.Parameter.VAR_KEYWORD for item in parameters.values())
+        if accepts_kwargs or "source_id" in parameters:
+            kwargs["source_id"] = source_id
+        if accepts_kwargs or "source_revision" in parameters:
+            kwargs["source_revision"] = source_revision
+    except (TypeError, ValueError):
+        pass
+    return await resolve(target_url, client, **kwargs)
+
+
 @router.get("/api/media/channel/{channel_key}/resolve")
 async def media_channel_source_resolve(
     channel_key: str,
     request: Request,
     source_id: str = Query(..., description="Adapter source selector; must match a source in this channel"),
+    expected_source_revision: str = "",
     access: MediaAccessContext = Depends(resolve_media_access),
 ):
     """安全版 adapter resolve。
@@ -344,6 +449,8 @@ async def media_channel_source_resolve(
     import main as _m
 
     _channel, source = await _find_iptv_channel_source(channel_key, source_id)
+    source_ref = str(source.get("source_id") or source_id_for(source))
+    source_revision = _validate_expected_source_revision(source, expected_source_revision)
     source_type = _m._source_type(source)
     if source_type not in {"adapter", "youtube", "unsupported_youtube_url"}:
         raise HTTPException(status_code=404, detail="播放源不是 adapter")
@@ -355,7 +462,19 @@ async def media_channel_source_resolve(
 
     try:
         provider_resolver = _provider_resolver(_m, request)
-        resolved = await provider_resolver.resolve(adapter_url, _m.http_client)
+        resolved = await _resolve_provider_source(
+            provider_resolver,
+            adapter_url,
+            _m.http_client,
+            source_id=source_ref,
+            source_revision=source_revision,
+        )
+        _validate_resolved_source_identity(
+            resolved,
+            source_id=source_ref,
+            source_revision=source_revision,
+        )
+        await _assert_current_iptv_source_revision(channel_key, source_ref, source_revision)
     except _m.AdapterResolveError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.to_payload()) from exc
     except PluginError as exc:
@@ -369,15 +488,15 @@ async def media_channel_source_resolve(
             logger.info("adapter resolve SSRF reject: %s", exc)
             raise HTTPException(status_code=403, detail=str(exc)) from exc
 
-    source_ref = str(source.get("source_id") or source_id_for(source))
     proxy_path = f"/api/media/channel/{quote(channel_key, safe='')}/playlist.m3u8?source_id={quote(source_ref, safe='')}"
+    proxy_path += f"&expected_source_revision={quote(source_revision, safe='')}"
     if access.propagated_access_token:
         proxy_path += f"&access_token={quote(access.propagated_access_token, safe='')}"
 
     return {
         "ok": True,
         "source_id": source_ref,
-        "source_revision": source_revision_for(source),
+        "source_revision": source_revision,
         "adapter": resolved.get("adapter") or source.get("adapter") or "",
         "url": resolved_url,
         "source_type": str(resolved.get("source_type") or "hls").strip().lower(),
@@ -396,6 +515,7 @@ async def media_channel_playlist(
     channel_key: str,
     request: Request,
     source_id: str = Query("", description="IPTV source selector; must match a source in this channel"),
+    expected_source_revision: str = "",
     access: MediaAccessContext = Depends(resolve_media_access),
 ):
     """按稳定 ID 解析频道 → 选 best source → 签 handle → 返回主播放列表。
@@ -419,7 +539,13 @@ async def media_channel_playlist(
     channels, _groups = await _m._get_aggregated_iptv_channels()
     iptv_match = any(ch.get("canonical_key") == channel_key for ch in channels)
     if iptv_match:
-        return await _serve_iptv_channel_playlist(channel_key, request, access, source_id=source_id)
+        return await _serve_iptv_channel_playlist(
+            channel_key,
+            request,
+            access,
+            source_id=source_id,
+            expected_source_revision=expected_source_revision,
+        )
 
     # 2. 回落到电台 station_id。
     if _is_radio_station_id(_m, channel_key):
@@ -603,6 +729,7 @@ async def _serve_iptv_channel_playlist(
     request: Request,
     access: MediaAccessContext,
     source_id: str = "",
+    expected_source_revision: str = "",
 ) -> Response:
     import main as _m
 
@@ -614,6 +741,7 @@ async def _serve_iptv_channel_playlist(
     requested_source_id = str(source_id or "").strip()
     if requested_source_id:
         _channel, source = await _find_iptv_channel_source(canonical_key, requested_source_id)
+        _validate_expected_source_revision(source, expected_source_revision)
         return await _serve_iptv_source_playlist(source, canonical_key, access)
 
     all_sources = list(channel.get("urls", []) or [])
@@ -652,9 +780,13 @@ async def _serve_iptv_source_playlist(
     raw_url = str(source.get("url") or "").strip()
     source_id = str(source.get("source_id") or source_id_for(source))
     source_revision = source_revision_for(source)
+    has_source_snapshot_identity = bool(str(source.get("source_id") or "").strip())
     rtsp_playback_options = resolve_rtsp_playback_options(source)
     if not raw_url:
         raise HTTPException(status_code=502, detail="source url 为空")
+
+    if has_source_snapshot_identity:
+        await _assert_current_iptv_source_revision(canonical_key, source_id, source_revision)
 
     # adapter / YouTube：先 resolve 拿到真实 HTTP/RTSP URL + headers
     if source_type in {"adapter", "youtube", "unsupported_youtube_url"}:
@@ -663,7 +795,20 @@ async def _serve_iptv_source_playlist(
             adapter_url = raw_url if raw_url.lower().startswith("youtube://") else f"youtube://resolve?url={quote(raw_url, safe='')}"
         try:
             provider_resolver = _provider_resolver(_m)
-            resolved = await provider_resolver.resolve(adapter_url, _m.http_client)
+            resolved = await _resolve_provider_source(
+                provider_resolver,
+                adapter_url,
+                _m.http_client,
+                source_id=source_id,
+                source_revision=source_revision,
+            )
+            _validate_resolved_source_identity(
+                resolved,
+                source_id=source_id,
+                source_revision=source_revision,
+            )
+            if has_source_snapshot_identity:
+                await _assert_current_iptv_source_revision(canonical_key, source_id, source_revision)
         except _m.AdapterResolveError as exc:
             raise HTTPException(status_code=exc.status_code, detail=exc.to_payload()) from exc
         except PluginError as exc:
@@ -678,7 +823,7 @@ async def _serve_iptv_source_playlist(
         ad_ref = str(headers.get("Referer") or headers.get("referer") or referer)
         ad_cookie = str(headers.get("Cookie") or headers.get("cookie") or "")
         no_ua = bool(headers.get("no_ua") or headers.get("No-UA"))
-        return await _serve_resolved_source_playlist(
+        response = await _serve_resolved_source_playlist(
             resolved_url=resolved_url,
             resolved_st=resolved_st,
             custom_ua=ad_ua,
@@ -691,9 +836,12 @@ async def _serve_iptv_source_playlist(
             access=access,
             rtsp_playback_options=rtsp_playback_options,
         )
+        if has_source_snapshot_identity:
+            await _assert_current_iptv_source_revision(canonical_key, source_id, source_revision)
+        return response
 
     # 直接 source（非 adapter）
-    return await _serve_resolved_source_playlist(
+    response = await _serve_resolved_source_playlist(
         resolved_url=raw_url,
         resolved_st=source_type,
         custom_ua=custom_ua,
@@ -706,6 +854,9 @@ async def _serve_iptv_source_playlist(
         access=access,
         rtsp_playback_options=rtsp_playback_options,
     )
+    if has_source_snapshot_identity:
+        await _assert_current_iptv_source_revision(canonical_key, source_id, source_revision)
+    return response
 
 
 async def _serve_resolved_source_playlist(
@@ -739,7 +890,7 @@ async def _serve_resolved_source_playlist(
     # 是否需要建 ProxyContext（动态 header）
     ctx_id = ""
     has_dynamic_headers = bool(
-        custom_ua or referer or cookie or no_ua or resolved_st == "audio_http"
+        custom_ua or referer or cookie or no_ua or resolved_st == "audio_http" or source_revision
     )
     if has_dynamic_headers:
         ctx = ProxyContext(
@@ -992,6 +1143,7 @@ async def media_proxy_playlist(
     payload = _safe_decode(handle, expected_kind="playlist")
 
     ctx = get_proxy_context_registry().get(payload.ctx) if payload.ctx else None
+    await _validate_iptv_proxy_context(ctx)
     headers = _ctx_to_request_headers(ctx)
     headers.setdefault("Accept-Encoding", "identity")
 
@@ -1005,6 +1157,7 @@ async def media_proxy_playlist(
         cache_scope=cache_scope,
         omit_user_agent=bool(ctx and ctx.no_ua and not ctx.custom_ua),
     )
+    await _validate_iptv_proxy_context(ctx)
 
     rewrite_ctx = _build_rewrite_context(
         base_url=base_url,
@@ -1114,6 +1267,7 @@ async def media_proxy_stream(
     await _validate_handle_url_or_403(payload.url, allowed_schemes={"http", "https"})
 
     ctx = get_proxy_context_registry().get(payload.ctx) if payload.ctx else None
+    await _validate_iptv_proxy_context(ctx)
     parsed = urlparse(payload.url)
     upstream_headers = {
         "User-Agent": (ctx.custom_ua if ctx else "") or _m.CDN_REQUEST_HEADERS["User-Agent"],
@@ -1142,6 +1296,7 @@ async def media_proxy_rtsp(
 
     payload = _safe_decode(handle, expected_kind="rtsp")
     ctx = get_proxy_context_registry().get(payload.ctx) if payload.ctx else None
+    await _validate_iptv_proxy_context(ctx)
     custom_ua = ctx.custom_ua if ctx else ""
 
     playback_options = resolve_rtsp_playback_options(
@@ -1265,7 +1420,7 @@ async def admin_probe_url(
         return {
             "ok": True,
             "status": upstream.status_code,
-            "final_url": str(upstream.url),
+            "final_url": redact_url(str(upstream.url)),
             "content_type": upstream.headers.get("content-type", ""),
             "content_length": int(upstream.headers.get("content-length") or 0),
             "preview": text_preview,

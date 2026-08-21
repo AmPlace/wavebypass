@@ -8,13 +8,6 @@ os.environ.setdefault("WAVEFLOW_MODE", "nas")
 os.environ.setdefault("WAVEFLOW_DB_PATH", ":memory:")
 
 
-class _Response:
-    text = "#EXTM3U\n"
-
-    def raise_for_status(self):
-        return None
-
-
 class RegularSubscriptionEmptyRefreshTest(unittest.IsolatedAsyncioTestCase):
     async def test_empty_refresh_keeps_existing_channels_and_marks_subscription_invalid(self):
         import main
@@ -24,7 +17,8 @@ class RegularSubscriptionEmptyRefreshTest(unittest.IsolatedAsyncioTestCase):
             "url": "https://example.test/list.m3u",
             "custom_ua": "",
         }
-        with mock.patch.object(main.http_client, "get", return_value=_Response()), \
+        document = main.parse_m3u_document("#EXTM3U\n")
+        with mock.patch.object(main, "_fetch_subscription_document", return_value=document), \
                 mock.patch.object(main.db, "begin_subscription_refresh", return_value=1), \
                 mock.patch.object(main.db, "mark_subscription_invalid_if_current", return_value=True), \
                 mock.patch.object(main.db, "add_channels_bulk") as add_channels, \

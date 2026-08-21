@@ -107,11 +107,18 @@ def load_official_trust_rows(path: str | Path | None = None) -> list[dict[str, A
     if data.get("schema_version") != 1 or not isinstance(data.get("publishers"), list):
         raise PluginError("PLUGIN_UNTRUSTED", "Official publisher trust metadata is invalid", category="trust")
     rows: list[dict[str, Any]] = []
+    seen_publishers: set[str] = set()
+    seen_key_ids: set[str] = set()
+    seen_public_keys: set[bytes] = set()
     for publisher in data["publishers"]:
         if (not isinstance(publisher, dict)
                 or publisher.get("publisher_id") != OFFICIAL_PUBLISHER_ID
                 or not isinstance(publisher.get("keys"), list)):
             raise PluginError("PLUGIN_UNTRUSTED", "Official publisher trust metadata is invalid", category="trust")
+        publisher_id = str(publisher["publisher_id"])
+        if publisher_id in seen_publishers:
+            raise PluginError("PLUGIN_UNTRUSTED", "Official publisher trust metadata contains duplicates", category="trust")
+        seen_publishers.add(publisher_id)
         for item in publisher["keys"]:
             if not isinstance(item, dict):
                 raise PluginError("PLUGIN_UNTRUSTED", "Official publisher key metadata is invalid", category="trust")
@@ -123,6 +130,10 @@ def load_official_trust_rows(path: str | Path | None = None) -> list[dict[str, A
                 raise PluginError("PLUGIN_UNTRUSTED", "Official publisher key is invalid", category="trust") from exc
             if not key_id or len(raw) != 32:
                 raise PluginError("PLUGIN_UNTRUSTED", "Official publisher key is invalid", category="trust")
+            if key_id in seen_key_ids or raw in seen_public_keys:
+                raise PluginError("PLUGIN_UNTRUSTED", "Official publisher trust metadata contains duplicate keys", category="trust")
+            seen_key_ids.add(key_id)
+            seen_public_keys.add(raw)
             rows.append({
                 "publisher_id": OFFICIAL_PUBLISHER_ID,
                 "key_id": key_id,
@@ -165,27 +176,49 @@ def load_bundled_official_market(root: str | Path | None = None) -> tuple[dict[s
     if market.get("schema_version") != 1 or not isinstance(market.get("packages"), list):
         raise PluginError("ARTIFACT_INVALID", "Bundled official Market is invalid", category="distribution")
     packages: list[dict[str, Any]] = []
+    seen_package_ids: set[str] = set()
+    seen_identity_versions: set[tuple[str, str]] = set()
     for raw in market["packages"]:
         if not isinstance(raw, dict) or raw.get("package_type") != "plugin_package":
             raise PluginError("ARTIFACT_INVALID", "Bundled official package is invalid", category="distribution")
         package = deepcopy(raw)
+        package_id = package.get("id")
+        if not isinstance(package_id, str) or not package_id or package_id in seen_package_ids:
+            raise PluginError("ARTIFACT_INVALID", "Bundled official package identity is invalid or duplicated", category="distribution")
+        seen_package_ids.add(package_id)
         manifest = validate_manifest(package.get("plugin_manifest"))
         if manifest.publisher_id != OFFICIAL_PUBLISHER_ID:
             raise PluginError("PLUGIN_UNTRUSTED", "Bundled Plugin publisher is not official", category="trust")
         if package.get("version") != manifest.version:
             raise PluginError("PLUGIN_INCOMPATIBLE", "Bundled Plugin package version is inconsistent", category="distribution")
+        identity_version = (manifest.identity, manifest.version)
+        if identity_version in seen_identity_versions:
+            raise PluginError("PLUGIN_INCOMPATIBLE", "Bundled Plugin identity/version is duplicated", category="distribution")
+        seen_identity_versions.add(identity_version)
         rollout = validate_rollout_policy(package.get("rollout"))
         if rollout is not None:
             package["rollout"] = rollout
         references = package.get("artifact_references")
         if not isinstance(references, list):
             raise PluginError("ARTIFACT_INVALID", "Bundled official artifact references are invalid", category="artifact")
+        platforms = [(item["os"], item["arch"]) for item in manifest.artifacts]
+        if len(platforms) != len(set(platforms)):
+            raise PluginError("ARTIFACT_INVALID", "Bundled Plugin artifacts contain duplicate platforms", category="artifact")
+        manifest_digests = {item["sha256"] for item in manifest.artifacts}
         local_references = []
+        seen_reference_digests: set[str] = set()
+        seen_reference_urls: set[str] = set()
         for reference in references:
             if (not isinstance(reference, dict)
                     or set(reference) != {"sha256", "url"}
                     or not isinstance(reference.get("url"), str)):
                 raise PluginError("ARTIFACT_INVALID", "Bundled official artifact reference is invalid", category="artifact")
+            if reference["sha256"] in seen_reference_digests or reference["url"] in seen_reference_urls:
+                raise PluginError("ARTIFACT_INVALID", "Bundled official artifact references contain duplicates", category="artifact")
+            if reference["sha256"] not in manifest_digests:
+                raise PluginError("ARTIFACT_INVALID", "Bundled artifact reference is absent from the Plugin manifest", category="artifact")
+            seen_reference_digests.add(reference["sha256"])
+            seen_reference_urls.add(reference["url"])
             path = _release_artifact(release_root, reference["url"])
             digest = _sha256(path)
             if digest != reference.get("sha256"):
@@ -198,6 +231,18 @@ def load_bundled_official_market(root: str | Path | None = None) -> tuple[dict[s
                 "url": reference["url"],
                 "_bundled_path": str(path),
             })
+        if seen_reference_digests != manifest_digests:
+            raise PluginError("ARTIFACT_INVALID", "Bundled artifact references do not cover the Plugin manifest", category="artifact")
+        manifest_signature = package.get("manifest_signature")
+        artifact_key_ids = {item["signature"]["key_id"] for item in manifest.artifacts}
+        if (not isinstance(manifest_signature, dict)
+                or set(manifest_signature) != {"algorithm", "key_id", "value"}
+                or manifest_signature.get("algorithm") != "ed25519"
+                or not isinstance(manifest_signature.get("value"), str)
+                or not manifest_signature["value"]
+                or len(artifact_key_ids) != 1
+                or manifest_signature.get("key_id") != next(iter(artifact_key_ids))):
+            raise PluginError("PLUGIN_UNTRUSTED", "Bundled Plugin manifest signature is invalid", category="trust")
         package["artifact_references"] = local_references
         runtime = manifest.runtime
         if runtime.get("type") == "python":

@@ -76,7 +76,17 @@ def _utc_now() -> str:
 def _public_url(url: str) -> str:
     try:
         parts = urlsplit(url)
-        return urlunsplit((parts.scheme, parts.netloc, parts.path, '', ''))
+        hostname = parts.hostname or ''
+        if not hostname:
+            return ''
+        if ':' in hostname and not hostname.startswith('['):
+            hostname = f'[{hostname}]'
+        try:
+            port = parts.port
+        except ValueError:
+            port = None
+        netloc = hostname if port is None else f'{hostname}:{port}'
+        return urlunsplit((parts.scheme, netloc, parts.path, '', ''))
     except Exception:
         return ''
 
@@ -627,7 +637,9 @@ async def refresh_epg_sources(
             try:
                 maintenance_result = await run_epg_refresh_maintenance(trigger='epg_refresh')
                 if maintenance_result['status'] != 'success':
-                    maintenance_error = maintenance_result['error']
+                    maintenance_error = _sanitize_error(
+                        maintenance_result.get('error') or 'EPG binding maintenance degraded'
+                    )
             except asyncio.CancelledError:
                 raise
             except Exception as error:
@@ -647,6 +659,10 @@ async def refresh_epg_sources(
             refresh_status = 'failed'
 
         errors = [result['error'] for result in source_results if result['error']]
+        if maintenance_error:
+            errors.append(maintenance_error)
+            if refresh_status == 'success':
+                refresh_status = 'partial'
         if not source_results:
             errors.append('没有可刷新的 EPG 来源')
         return {

@@ -49,19 +49,6 @@ _SEGMENT_EXTENSIONS = (
 _MEDIA_SEQ_RE = re.compile(r"^\s*#EXT-X-MEDIA-SEQUENCE\s*:\s*(\d+)", re.IGNORECASE)
 
 
-def _inject_wf_seq(url: str, seq: int) -> str:
-    """在 url 的 query 末尾追加 ``wf_seq=<seq>``。
-
-    上游通常会忽略未知 query；我们用它打破文件名循环上游（如 fjtv qznews：
-    0.ts/1.ts/2.ts 循环复用）的 handle 去重。只在 segment URL（chunk kind）
-    上注入，KEY/MAP 等不动。
-    """
-    if seq < 0:
-        return url
-    sep = "&" if urlparse(url).query else "?"
-    return f"{url}{sep}wf_seq={seq}"
-
-
 @dataclass(frozen=True)
 class RewriteContext:
     """重写一段 m3u8 文本所需的全部信息。"""
@@ -90,6 +77,7 @@ def _make_handle_url(
     kind: str,
     upstream_url: str,
     ctx: RewriteContext,
+    internal_seq: int | None = None,
 ) -> str:
     ttl = None
     if kind == "playlist":
@@ -107,7 +95,11 @@ def _make_handle_url(
         src_id=ctx.src_id,
         compat=ctx.rtsp_compat if kind == "rtsp" else 0,
     )
-    return f"{ctx.proxy_path_prefix}/{kind}/{handle}{_qs_token(ctx.propagated_access_token)}"
+    proxy_url = f"{ctx.proxy_path_prefix}/{kind}/{handle}{_qs_token(ctx.propagated_access_token)}"
+    if internal_seq is not None and internal_seq >= 0:
+        separator = "&" if "?" in proxy_url else "?"
+        proxy_url = f"{proxy_url}{separator}wf_seq={internal_seq}"
+    return proxy_url
 
 
 def _classify_uri(uri: str) -> str | None:
@@ -189,10 +181,12 @@ def rewrite_m3u8(text: str, ctx: RewriteContext) -> str:
             out.append(_make_handle_url(kind="playlist", upstream_url=absolute, ctx=ctx))
         elif kind == "chunk":
             if ctx.proxy_segments:
-                # wf_seq 注入：避免上游文件名循环（fjtv qznews 等）→ handle URL
-                # 重复 → hls.js 把后续段当重复段去重的硬伤。
-                tagged = _inject_wf_seq(absolute, current_seq)
-                out.append(_make_handle_url(kind="chunk", upstream_url=tagged, ctx=ctx))
+                out.append(_make_handle_url(
+                    kind="chunk",
+                    upstream_url=absolute,
+                    ctx=ctx,
+                    internal_seq=current_seq,
+                ))
                 current_seq += 1
             else:
                 out.append(absolute)
@@ -200,8 +194,12 @@ def rewrite_m3u8(text: str, ctx: RewriteContext) -> str:
             # Media playlist URI may be extensionless or query-only. Keeping a raw absolute
             # URL here would bypass signed handles, ProxyContext, redirects and SSRF checks.
             if ctx.proxy_segments:
-                tagged = _inject_wf_seq(absolute, current_seq)
-                out.append(_make_handle_url(kind="chunk", upstream_url=tagged, ctx=ctx))
+                out.append(_make_handle_url(
+                    kind="chunk",
+                    upstream_url=absolute,
+                    ctx=ctx,
+                    internal_seq=current_seq,
+                ))
                 current_seq += 1
             else:
                 out.append(absolute)

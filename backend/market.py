@@ -1393,6 +1393,126 @@ def _installed_metadata(install: dict | None) -> dict:
         return {}
 
 
+def _safe_persisted_market_url(value: Any) -> str:
+    """Keep restart metadata useful without persisting URL query secrets."""
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    try:
+        return urlparse(raw)._replace(query="", fragment="").geturl()
+    except ValueError:
+        return ""
+
+
+def _safe_persisted_market_source(value: Any) -> dict:
+    source = deepcopy(value) if isinstance(value, dict) else {}
+    source.pop("url", None)
+    return source
+
+
+_MARKET_PACKAGE_SNAPSHOT_FIELDS = (
+    "id",
+    "original_id",
+    "name",
+    "description",
+    "kind",
+    "package_type",
+    "version",
+    "updated_at",
+    "region",
+    "operators",
+    "language",
+    "categories",
+    "tags",
+    "status",
+    "source_origin",
+    "source_policy",
+    "risk_level",
+    "requires_proxy",
+    "requires_resolver",
+    "requires_cookie",
+    "requires_referer",
+    "requires_custom_ua",
+    "channel_count",
+    "source_count",
+    "health",
+    "compatibility",
+    "contributors",
+    "importable",
+    "previewable",
+    "supported_in_v1",
+    "unsupported_reason",
+    "manifest_url",
+    "market_url",
+    "market_source",
+    "display",
+    "package_type",
+    "content_capabilities",
+    "logo_priority",
+)
+
+
+def _market_package_snapshot(package: dict) -> dict:
+    """Persist only safe package index metadata for restart projection."""
+    snapshot = {
+        key: deepcopy(package[key])
+        for key in _MARKET_PACKAGE_SNAPSHOT_FIELDS
+        if key in package
+    }
+    for key in ("market_url", "manifest_url"):
+        if key in snapshot:
+            snapshot[key] = _safe_persisted_market_url(snapshot[key])
+    source = snapshot.get("market_source")
+    if isinstance(source, dict):
+        snapshot["market_source"] = _safe_persisted_market_source(source)
+    return snapshot
+
+
+def _installed_package_fallback(install: dict | None) -> dict | None:
+    if not install or install.get("plugin_identity"):
+        return None
+    metadata = _installed_metadata(install)
+    snapshot = metadata.get("market_package")
+    package = deepcopy(snapshot) if isinstance(snapshot, dict) else {}
+    package_id = str(install.get("package_id") or "").strip()
+    if not package_id:
+        return None
+    package.setdefault("id", package_id)
+    package.setdefault("original_id", package_id)
+    package.setdefault("name", metadata.get("name") or package_id)
+    package.setdefault(
+        "kind",
+        metadata.get("kind") or (LOGO_PACKAGE_KIND if not install.get("installed_subscription_id") else "playlist"),
+    )
+    package.setdefault("package_type", metadata.get("package_type") or CONTENT_PACKAGE_TYPE)
+    package.setdefault("version", install.get("installed_version") or metadata.get("version") or "")
+    package.setdefault("market_url", _safe_persisted_market_url(install.get("market_url")))
+    package.setdefault("market_source", metadata.get("market_source") or {})
+    package["importable"] = False
+    package["previewable"] = False
+    package["supported_in_v1"] = False
+    package["catalog_unavailable"] = True
+    package["catalog_stale"] = True
+    package["source_origin"] = package.get("source_origin") or "installed_state"
+    package["unsupported_reason"] = "Market 源当前不可用，已保留已安装状态"
+    return package
+
+
+def _catalog_with_installed_fallback(
+    catalog_packages: list[dict],
+    installed: dict[str, dict],
+) -> list[dict]:
+    packages = list(catalog_packages)
+    catalog_ids = {str(package.get("id") or "") for package in packages}
+    for package_id in sorted(installed):
+        if package_id in catalog_ids:
+            continue
+        fallback = _installed_package_fallback(installed.get(package_id))
+        if fallback:
+            packages.append(fallback)
+    return packages
+
+
 _NUMERIC_VERSION_RE = re.compile(r"^[vV]?(\d+(?:[._-]\d+)*)$")
 
 
@@ -1437,6 +1557,9 @@ async def list_packages(filters: dict[str, str | bool]) -> list[dict]:
     await ensure_market_loaded()
     installed = await _installed_map()
     packages = []
+    catalog_packages = _catalog_with_installed_fallback(
+        list(_market_cache.get("packages") or []), installed,
+    )
     search = str(filters.get("search") or "").strip().lower()
     region = str(filters.get("region") or "").strip()
     operator = str(filters.get("operator") or "").strip()
@@ -1446,7 +1569,7 @@ async def list_packages(filters: dict[str, str | bool]) -> list[dict]:
     supported_only = bool(filters.get("supported_only"))
     importable_only = bool(filters.get("importable_only"))
 
-    for package in _market_cache.get("packages") or []:
+    for package in catalog_packages:
         region_values = [str(v or "") for v in (package.get("region") or {}).values()]
         haystack = " ".join([
             package.get("id", ""),
@@ -1468,7 +1591,9 @@ async def list_packages(filters: dict[str, str | bool]) -> list[dict]:
         if tag and tag not in (package.get("tags") or []):
             continue
         if supported_only and not (
-            package.get("supported_in_v1") or package.get("plugin_installable")
+            package.get("supported_in_v1")
+            or package.get("plugin_installable")
+            or package.get("catalog_unavailable")
         ):
             continue
         if importable_only and not package.get("importable"):
@@ -1503,7 +1628,7 @@ def _package_card(package: dict) -> dict:
         "version_status",
         "package_type", "requires_plugins", "plugin_manifest",
         "plugin_installable", "content_capabilities", "asset_count", "logo_count",
-        "logo_priority",
+        "logo_priority", "catalog_unavailable", "catalog_stale",
     ]
     card = {key: deepcopy(package.get(key)) for key in keys if key in package}
     card["asset_count"] = len(package.get("assets") or [])
@@ -1560,6 +1685,8 @@ async def get_package(package_id: str, *, include_internal: bool = False) -> dic
     await ensure_market_loaded()
     installed = await _installed_map()
     package = next((item for item in _market_cache.get("packages") or [] if item.get("id") == package_id), None)
+    if not package:
+        package = _installed_package_fallback(installed.get(package_id))
     if not package:
         raise MarketError("Market 包不存在", 404)
     try:
@@ -2087,7 +2214,49 @@ async def _stage_logo_assets(package: dict) -> tuple[list[dict], Path | None]:
             shutil.rmtree(staging, ignore_errors=True)
             raise
 
-    return await asyncio.to_thread(_stage)
+    worker = asyncio.create_task(asyncio.to_thread(_stage))
+    try:
+        return await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        # ``to_thread`` cannot cancel filesystem work already in flight. Wait
+        # for its result, remove a late-published directory, then propagate the
+        # cancellation to the caller.
+        try:
+            _staged, late_final_dir = await asyncio.shield(worker)
+        except BaseException:
+            pass
+        else:
+            await _remove_logo_stage_dir(late_final_dir)
+        raise
+
+
+async def _remove_logo_stage_dir(final_dir: Path | None) -> None:
+    if not final_dir:
+        return
+    root = _logo_store_root()
+    try:
+        resolved = final_dir.resolve()
+        root_resolved = root.resolve()
+    except OSError:
+        return
+    if resolved == root_resolved or root_resolved not in resolved.parents:
+        return
+
+    def _remove() -> None:
+        shutil.rmtree(resolved, ignore_errors=True)
+        parent = resolved.parent
+        while parent != root_resolved and root_resolved in parent.parents:
+            try:
+                parent.rmdir()
+            except OSError:
+                break
+            parent = parent.parent
+        try:
+            (root_resolved / ".staging").rmdir()
+        except OSError:
+            pass
+
+    await asyncio.to_thread(_remove)
 
 
 async def _logo_binding_specs(package: dict, preview_entries: list[dict] | None = None) -> list[dict]:
@@ -2170,22 +2339,43 @@ async def _publish_logo_state(
     staged_assets: list[dict],
     preview_entries: list[dict] | None = None,
 ) -> None:
-    bindings = await _logo_binding_specs(package, preview_entries)
-    valid_asset_ids = {item["asset_id"] for item in staged_assets}
-    bindings = [item for item in bindings if item["asset_id"] in valid_asset_ids]
+    bindings = await _logo_bindings_for_package(package, staged_assets, preview_entries)
     await db.replace_package_logo_state(
         str(package["id"]), str(package.get("version") or ""), staged_assets, bindings,
     )
 
 
+async def _logo_bindings_for_package(
+    package: dict,
+    staged_assets: list[dict],
+    preview_entries: list[dict] | None = None,
+) -> list[dict]:
+    bindings = await _logo_binding_specs(package, preview_entries)
+    valid_asset_ids = {item["asset_id"] for item in staged_assets}
+    return [item for item in bindings if item["asset_id"] in valid_asset_ids]
+
+
 async def _remove_old_logo_files(old_assets: list[dict], new_assets: list[dict]) -> None:
     keep = {str(item.get("stored_path") or "") for item in new_assets}
     paths = {str(item.get("stored_path") or "") for item in old_assets} - keep
+    paths -= await db.get_referenced_package_asset_paths(list(paths))
+    root = _logo_store_root()
 
     def _remove() -> None:
         for raw in paths:
             path = Path(raw)
-            if not raw or path.is_symlink() or not path.is_file():
+            try:
+                resolved = path.resolve()
+                root_resolved = root.resolve()
+            except OSError:
+                continue
+            if (
+                not raw
+                or path.is_symlink()
+                or not path.is_file()
+                or resolved == root_resolved
+                or root_resolved not in resolved.parents
+            ):
                 continue
             try:
                 path.unlink()
@@ -2256,12 +2446,16 @@ async def _import_package_locked(
                 "version": package.get("version", ""),
                 "content_capabilities": package.get("content_capabilities", []),
                 "logos": package.get("logos", []),
+                "market_source": _safe_persisted_market_source(package.get("market_source", {})),
+                "market_package": _market_package_snapshot(package),
                 "imported_at": _now_iso(),
             }
             bindings = await _logo_binding_specs(package)
             await db.install_logo_package_atomic(
                 package_id=package_id,
-                market_url=package.get("market_url") or _market_cache.get("market_url", ""),
+                market_url=_safe_persisted_market_url(
+                    package.get("market_url") or _market_cache.get("market_url", "")
+                ),
                 installed_version=package.get("version", ""),
                 metadata_json=json.dumps(metadata, ensure_ascii=False),
                 assets=staged_assets,
@@ -2270,7 +2464,7 @@ async def _import_package_locked(
             )
         except BaseException:
             if final_dir and final_dir.exists():
-                await asyncio.to_thread(shutil.rmtree, final_dir, True)
+                await _remove_logo_stage_dir(final_dir)
             raise
         await _remove_old_logo_files(old_assets, staged_assets)
         return {
@@ -2309,6 +2503,7 @@ async def _import_package_locked(
         staged_assets, final_dir = await _stage_logo_assets(package)
     except BaseException:
         raise
+    logo_bindings = await _logo_bindings_for_package(package, staged_assets, channels)
 
     # subscription 级属性只允许来自 manifest 明确声明，不得从子 source 聚合。
     # 一个 source 因 Referer/headers 需要代理，不能影响同包其他 source。
@@ -2332,17 +2527,21 @@ async def _import_package_locked(
         "kind": package.get("kind"),
         "version": package.get("version", ""),
         "updated_at": package.get("updated_at", ""),
-        "manifest_url": package.get("manifest_url", ""),
+        "manifest_url": _safe_persisted_market_url(package.get("manifest_url", "")),
         "channel_sources": package.get("channel_sources", []),
         "defaults": package.get("defaults", {}),
         "warnings": preview.get("warnings", []),
         "requires_plugins": package.get("requires_plugins", []),
+        "market_source": _safe_persisted_market_source(package.get("market_source", {})),
+        "market_package": _market_package_snapshot(package),
         "imported_at": _now_iso(),
     }
     try:
         sub_id = await db.install_market_package_atomic(
             package_id=package_id,
-            market_url=package.get("market_url") or _market_cache.get("market_url", ""),
+            market_url=_safe_persisted_market_url(
+                package.get("market_url") or _market_cache.get("market_url", "")
+            ),
             title=package.get("name") or package_id,
             subscription_url=url,
             channels=channels,
@@ -2351,30 +2550,47 @@ async def _import_package_locked(
             custom_ua=subscription_custom_ua,
             force_proxy=force_proxy,
             auto_update=preserved_auto_update,
+            logo_assets=staged_assets,
+            logo_bindings=logo_bindings,
         )
     except db.DuplicateSubscriptionError as exc:
         if final_dir and final_dir.exists():
-            await asyncio.to_thread(shutil.rmtree, final_dir, True)
+            await _remove_logo_stage_dir(final_dir)
         raise MarketError("Market 包已安装", 409) from exc
+    except BaseException:
+        if final_dir and final_dir.exists():
+            await _remove_logo_stage_dir(final_dir)
+        raise
     await _run_epg_binding_maintenance('market_install')
-    if staged_assets:
+    visual_status = "success"
+    visual_error = ""
+    if staged_assets or old_assets:
         try:
-            await _publish_logo_state(package, staged_assets, channels)
-        except BaseException:
-            # The channel transaction is already durable, but the old logo
-            # binding remains authoritative when publication fails.  Do not
-            # expose an unverified asset or delete the old files.
-            if final_dir and final_dir.exists():
-                await asyncio.to_thread(shutil.rmtree, final_dir, True)
+            latest_bindings = await _logo_bindings_for_package(package, staged_assets, channels)
+            await db.replace_package_logo_bindings_atomic(
+                package_id,
+                str(package.get("version") or ""),
+                latest_bindings,
+            )
+        except asyncio.CancelledError:
             raise
-        await _remove_old_logo_files(old_assets, staged_assets)
-    elif old_assets:
-        await _publish_logo_state(package, [], channels)
-        await _remove_old_logo_files(old_assets, [])
+        except Exception as exc:
+            visual_status = "degraded"
+            visual_error = _sanitize_refresh_error(exc)
+            logger.warning(
+                "market_logo_binding_maintenance_degraded",
+                extra={"package_id": package_id, "error": visual_error},
+            )
+        await _remove_old_logo_files(
+            old_assets,
+            staged_assets if staged_assets else [],
+        )
     return {
         "ok": True,
         "subscription_id": sub_id,
         "channel_count": preview.get("channel_count", 0),
         "source_count": len(channels),
         "warnings": preview.get("warnings", []),
+        "visual_status": visual_status,
+        "visual_error": visual_error,
     }

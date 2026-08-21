@@ -197,6 +197,41 @@ class MediaRedirectSecurityTest(IsolatedAsyncioTestCase):
         self.assertEqual(final_headers.get("if-none-match"), '"etag"')
         self.assertEqual(final_headers.get("referer"), "https://player.example/")
 
+    async def test_stateless_client_does_not_reuse_upstream_set_cookie(self):
+        seen_cookies = []
+
+        def handler(request):
+            seen_cookies.append((str(request.url), request.headers.get("cookie")))
+            if request.url.path == "/seed":
+                return httpx.Response(
+                    200,
+                    headers={"set-cookie": "sid=from-upstream; Path=/"},
+                    request=request,
+                )
+            return httpx.Response(200, content=b"ok", request=request)
+
+        client = media_http.StatelessAsyncClient(transport=httpx.MockTransport(handler))
+        try:
+            await client.get("https://a.example/seed")
+            await client.get("https://a.example/same-origin")
+            await client.get("https://b.example/cross-origin")
+            await client.get(
+                "https://a.example/explicit",
+                headers={"Cookie": "sid=explicit"},
+            )
+        finally:
+            await client.aclose()
+
+        self.assertEqual(
+            seen_cookies,
+            [
+                ("https://a.example/seed", None),
+                ("https://a.example/same-origin", None),
+                ("https://b.example/cross-origin", None),
+                ("https://a.example/explicit", "sid=explicit"),
+            ],
+        )
+
     async def test_omitted_default_header_is_removed_on_every_redirect_hop(self):
         seen_user_agents = []
 
@@ -246,8 +281,9 @@ class MediaRedirectSecurityTest(IsolatedAsyncioTestCase):
             line for line in rewritten.splitlines()
             if line.startswith("/api/media/proxy/chunk/")
         )
-        payload = decode_for_kind(proxy_path.rsplit("/", 1)[-1], "chunk")
-        self.assertEqual(payload.url, "https://cdn.example/live/seg.ts?wf_seq=0")
+        payload = decode_for_kind(proxy_path.rsplit("/", 1)[-1].split("?", 1)[0], "chunk")
+        self.assertEqual(payload.url, "https://cdn.example/live/seg.ts")
+        self.assertIn("?wf_seq=0", proxy_path)
 
     async def test_stream_redirect_keeps_response_streaming(self):
         seen = []

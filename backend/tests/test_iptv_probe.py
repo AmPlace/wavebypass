@@ -1,10 +1,13 @@
 import unittest
+import os
+import tempfile
 import types
 import json
 from unittest import mock
 
 from adapters import AdapterResolveError, parse_adapter_url
 from adapters.youtube import resolve_youtube
+import database
 import iptv_probe
 from plugin_runtime import PluginError
 from iptv_probe import (
@@ -57,6 +60,19 @@ class RemovedLegacyProviderSchemeTest(unittest.TestCase):
 
 
 class IptvProbeRealtimeStreamTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self._old_db_path = os.environ.get("WAVEFLOW_DB_PATH")
+        self._tmp = tempfile.TemporaryDirectory(prefix="waveflow-probe-")
+        os.environ["WAVEFLOW_DB_PATH"] = os.path.join(self._tmp.name, "waveflow.db")
+        await database.initialize()
+
+    async def asyncTearDown(self):
+        if self._old_db_path is None:
+            os.environ.pop("WAVEFLOW_DB_PATH", None)
+        else:
+            os.environ["WAVEFLOW_DB_PATH"] = self._old_db_path
+        self._tmp.cleanup()
+
     async def test_production_probe_fails_closed_for_plugin_owner_but_keeps_legacy_owner(self):
         from provider_resolver import ProviderResolver
 

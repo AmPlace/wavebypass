@@ -2,6 +2,7 @@ import asyncio
 import unittest
 from unittest import mock
 
+import httpx
 
 
 def _main_module():
@@ -187,6 +188,66 @@ class IptvProxyStreamResponseTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(response.media_type, media_type)
                 self.assertTrue(FakeAsyncClient.instances[-1].closed)
 
+    async def test_read_timeout_reconnects_once_and_reuses_stream_headers(self):
+        class TimeoutUpstream(FakeUpstreamResponse):
+            async def aiter_raw(self, chunk_size=None):
+                self.raw_calls += 1
+                self.chunk_size_seen = chunk_size
+                yield b"first"
+                raise httpx.ReadTimeout("read timed out")
+
+        first_upstream = TimeoutUpstream([])
+        second_upstream = FakeUpstreamResponse([b"second"])
+
+        class SequenceClient:
+            def __init__(self, *args, **kwargs):
+                self.responses = [first_upstream, second_upstream]
+                self.requests = []
+                self.closed = False
+
+            def build_request(self, method, url, headers=None):
+                return {"method": method, "url": url, "headers": headers or {}}
+
+            async def send(self, request, stream=False):
+                self.requests.append(request)
+                return self.responses.pop(0)
+
+            async def aclose(self):
+                self.closed = True
+
+        client = None
+
+        def client_factory(*args, **kwargs):
+            nonlocal client
+            client = SequenceClient(*args, **kwargs)
+            return client
+
+        async def fake_stream(client, method, url, *, headers=None, **_kwargs):
+            request = client.build_request(method, url, headers=headers)
+            return await client.send(request, stream=True)
+
+        main_mod = _main_module()
+        with mock.patch.object(main_mod.httpx, "AsyncClient", client_factory):
+            with mock.patch.object(main_mod, "stream_with_safe_redirects", new=fake_stream):
+                response = await main_mod.serve_iptv_proxy_stream_response(
+                    request=FakeRequest(disconnected_after=10),
+                    upstream_url="https://stream.example.test/live.flv",
+                    upstream_headers={
+                        "User-Agent": "fixture-ua",
+                        "Referer": "https://origin.example/",
+                        "Cookie": "fixture-cookie",
+                    },
+                    stream_type="http_flv",
+                )
+                output = await _consume_response(response)
+
+        self.assertEqual(output, [b"first", b"second"])
+        self.assertEqual(len(client.requests), 2)
+        self.assertEqual(client.requests[0]["headers"], client.requests[1]["headers"])
+        self.assertTrue(first_upstream.closed)
+        self.assertTrue(second_upstream.closed)
+        self.assertTrue(client.closed)
+
     async def test_audio_http_preserves_upstream_mpeg_mime(self):
         upstream = FakeUpstreamResponse(
             [b"mp3"],
@@ -272,6 +333,143 @@ class IptvProxyStreamResponseTest(unittest.IsolatedAsyncioTestCase):
             await iterator.__anext__()
         self.assertTrue(upstream.closed)
         self.assertTrue(FakeAsyncClient.instances[-1].closed)
+
+    async def test_stream_diagnostics_do_not_log_upstream_query_parameters(self):
+        class BrokenUpstream(FakeUpstreamResponse):
+            async def aiter_raw(self, chunk_size=None):
+                self.raw_calls += 1
+                self.chunk_size_seen = chunk_size
+                yield b"first"
+                raise httpx.ReadTimeout(f"upstream failed: {secret_url}")
+
+        secret_url = "https://stream.example.test/live.flv?token=secret-value&accountinfo=private"
+        upstream = BrokenUpstream([])
+        response = await _make_stream_response(
+            upstream,
+            stream_type="http_flv",
+            request=FakeRequest(disconnected_after=3),
+            upstream_url=secret_url,
+        )
+
+        with self.assertLogs("waveflow", level="WARNING") as logs:
+            self.assertEqual(await _consume_response(response), [b"first"])
+
+        output = "\n".join(logs.output)
+        self.assertIn("https://stream.example.test", output)
+        self.assertNotIn("secret-value", output)
+        self.assertNotIn("accountinfo=private", output)
+        self.assertNotIn("?token=", output)
+
+    async def test_midstream_http_error_does_not_echo_url_query_parameters(self):
+        secret_url = "https://stream.example.test/live.flv?token=secret-value&signature=private"
+
+        class BrokenUpstream(FakeUpstreamResponse):
+            async def aiter_raw(self, chunk_size=None):
+                self.raw_calls += 1
+                self.chunk_size_seen = chunk_size
+                yield b"first"
+                raise httpx.ReadError(f"connection reset: {secret_url}")
+
+        response = await _make_stream_response(
+            BrokenUpstream([]),
+            stream_type="http_flv",
+            request=FakeRequest(disconnected_after=3),
+            upstream_url=secret_url,
+        )
+
+        with self.assertLogs("waveflow", level="WARNING") as logs:
+            self.assertEqual(await _consume_response(response), [b"first"])
+
+        output = "\n".join(logs.output)
+        self.assertIn("ReadError", output)
+        self.assertNotIn("secret-value", output)
+        self.assertNotIn("signature=private", output)
+
+    async def test_initial_upstream_error_does_not_echo_url_query_parameters(self):
+        secret_url = "https://stream.example.test/live.ts?token=secret-value&signature=private"
+
+        class FailedUpstream(FakeUpstreamResponse):
+            def raise_for_status(self):
+                request = httpx.Request("GET", secret_url)
+                response = httpx.Response(403, request=request)
+                raise httpx.HTTPStatusError(
+                    "upstream denied: " + secret_url,
+                    request=request,
+                    response=response,
+                )
+
+        with self.assertRaises(_main_module().HTTPException) as raised:
+            await _make_stream_response(
+                FailedUpstream([]),
+                stream_type="mpegts",
+                upstream_url=secret_url,
+            )
+
+        self.assertEqual(raised.exception.status_code, 502)
+        detail = str(raised.exception.detail)
+        self.assertIn("HTTP 403", detail)
+        self.assertNotIn("secret-value", detail)
+        self.assertNotIn("signature=private", detail)
+
+    async def test_local_transport_fixture_preserves_http_flv_and_mpegts_bytes_and_headers(self):
+        main_mod = _main_module()
+        real_async_client = httpx.AsyncClient
+
+        for stream_type, expected_media_type, chunks in (
+            (
+                "http_flv",
+                "video/x-flv",
+                [b"FLV\x01\x05\x00\x00\x00\x09", b"\x00" * 32, b"FLV-tail"],
+            ),
+            (
+                "mpegts",
+                "video/MP2T",
+                [b"\x47" + bytes(range(187)), b"\x47" + bytes(range(187))],
+            ),
+        ):
+            seen_headers = {}
+
+            class FixtureStream(httpx.AsyncByteStream):
+                async def __aiter__(self):
+                    for chunk in chunks:
+                        yield chunk
+
+            async def handle(request):
+                seen_headers.update(dict(request.headers))
+                return httpx.Response(
+                    200,
+                    headers={"Content-Type": "application/octet-stream"},
+                    stream=FixtureStream(),
+                    request=request,
+                )
+
+            def client_factory(*args, **kwargs):
+                kwargs["transport"] = httpx.MockTransport(handle)
+                return real_async_client(*args, **kwargs)
+
+            async def allow_fixture_target(_url, **_kwargs):
+                return None
+
+            with mock.patch.object(main_mod.httpx, "AsyncClient", client_factory):
+                with mock.patch("infrastructure.http_client.assert_safe_target_url", new=allow_fixture_target):
+                    response = await main_mod.serve_iptv_proxy_stream_response(
+                        request=FakeRequest(disconnected_after=6),
+                        upstream_url="http://fixture.test/live?token=fixture-secret",
+                        upstream_headers={
+                            "User-Agent": "fixture-ua",
+                            "Referer": "https://origin.example/",
+                            "Cookie": "fixture-cookie",
+                        },
+                        stream_type=stream_type,
+                    )
+                    output = await _consume_response(response)
+
+            self.assertEqual(b"".join(output), b"".join(chunks))
+            self.assertEqual(response.media_type, expected_media_type)
+            self.assertEqual(seen_headers["user-agent"], "fixture-ua")
+            self.assertEqual(seen_headers["referer"], "https://origin.example/")
+            self.assertEqual(seen_headers["cookie"], "fixture-cookie")
+            self.assertEqual(seen_headers["accept-encoding"], "identity")
 
 if __name__ == "__main__":
     unittest.main()

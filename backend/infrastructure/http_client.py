@@ -18,12 +18,39 @@ _CROSS_ORIGIN_SENSITIVE_HEADERS = frozenset({
 })
 
 
+class _StatelessCookies(httpx.Cookies):
+    """Keep explicit request cookies without accepting upstream Set-Cookie."""
+
+    def extract_cookies(self, response: httpx.Response) -> None:
+        return None
+
+
+class StatelessAsyncClient(httpx.AsyncClient):
+    """An AsyncClient whose cookie state is never populated by responses."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._stateless_cookies = _StatelessCookies(self._cookies)
+
+    @property
+    def cookies(self) -> httpx.Cookies:
+        return self._stateless_cookies
+
+    @cookies.setter
+    def cookies(self, cookies) -> None:
+        self._stateless_cookies = _StatelessCookies(cookies)
+
+
 class RedirectTargetRejected(httpx.HTTPError):
     """A redirect target failed WaveFlow's SSRF policy before any request."""
 
     def __init__(self, cause: Exception):
         super().__init__(f"redirect target rejected: {cause}")
         self.cause = cause
+
+
+class ResponseTooLargeError(httpx.HTTPError):
+    """The decoded response body exceeded the caller's byte policy."""
 
 
 def _origin(url: str) -> tuple[str, str, int | None]:
@@ -190,8 +217,13 @@ async def fetch_bytes(
 ) -> tuple[str, bytes, httpx.Headers]:
     policy = policy or default_policy()
     current_url = url
+    current_headers = dict(headers or {})
     timeout = httpx.Timeout(policy.read_timeout, connect=policy.connect_timeout)
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, verify=policy.verify_tls) as client:
+    async with httpx.AsyncClient(
+        timeout=timeout,
+        follow_redirects=False,
+        verify=policy.verify_tls,
+    ) as client:
         for redirect_count in range(policy.max_redirects + 1):
             await assert_safe_target_url(
                 current_url,
@@ -199,22 +231,35 @@ async def fetch_bytes(
                 allow_loopback=policy.allow_loopback,
                 allowed_schemes=policy.allowed_schemes,
             )
-            async with client.stream("GET", current_url, headers=headers or {}) as resp:
+            async with client.stream("GET", current_url, headers=current_headers) as resp:
                 if resp.status_code in {301, 302, 303, 307, 308}:
                     location = resp.headers.get("location")
                     if not location:
                         raise httpx.HTTPError("redirect missing Location")
                     if redirect_count >= policy.max_redirects:
                         raise httpx.HTTPError("too many redirects")
-                    current_url = urljoin(current_url, location)
+                    next_url = urljoin(current_url, location)
+                    current_headers = _headers_for_redirect(
+                        current_headers,
+                        current_url,
+                        next_url,
+                    )
+                    current_url = next_url
                     continue
                 resp.raise_for_status()
+                content_length = resp.headers.get("content-length")
+                if content_length:
+                    try:
+                        if int(content_length) > policy.max_response_bytes:
+                            raise ResponseTooLargeError("response too large")
+                    except ValueError:
+                        pass
                 chunks: list[bytes] = []
                 total = 0
                 async for chunk in resp.aiter_bytes():
                     total += len(chunk)
                     if total > policy.max_response_bytes:
-                        raise httpx.HTTPError("response too large")
+                        raise ResponseTooLargeError("response too large")
                     chunks.append(chunk)
                 return str(resp.url), b"".join(chunks), resp.headers
     raise httpx.HTTPError("fetch failed")

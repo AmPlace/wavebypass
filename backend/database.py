@@ -3,7 +3,9 @@ import sqlite3
 import os
 import json
 import time
+import threading
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any
 
@@ -14,6 +16,7 @@ from epg_source_model import (
     validate_epg_source_origin,
     validate_epg_source_url,
 )
+from security.source_ids import source_revision_for
 
 
 AUTOMATION_ERROR_MAX_LENGTH = 2048
@@ -34,6 +37,8 @@ MARKET_AUTOMATION_TASK_ID = 'market_auto_update'
 MARKET_AUTOMATION_CONFLICT_GROUP = 'market'
 MARKET_AUTOMATION_INTERVAL_SECONDS = 86400
 RADIO_CATALOG_DEFAULT_STALE_GRACE_SECONDS = 24 * 60 * 60
+DATABASE_BUSY_TIMEOUT_MS = 30_000
+_INITIALIZE_LOCK = threading.Lock()
 
 DB_PATH_RAW = (
     os.environ.get('WAVEFLOW_DB_PATH')
@@ -104,7 +109,11 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     custom_ua     TEXT DEFAULT '',
     force_proxy   INTEGER DEFAULT 0,
     last_tested   TEXT DEFAULT '',
-    refresh_generation INTEGER NOT NULL DEFAULT 0
+    refresh_generation INTEGER NOT NULL DEFAULT 0,
+    last_attempt_at TEXT DEFAULT '',
+    last_success_at TEXT DEFAULT '',
+    last_refresh_status TEXT NOT NULL DEFAULT 'never',
+    last_error TEXT DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS channels (
@@ -731,11 +740,82 @@ def _current_db_path() -> str:
 def _connect() -> sqlite3.Connection:
     path = _current_db_path()
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    conn = sqlite3.connect(path)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.row_factory = sqlite3.Row
-    return conn
+    conn = sqlite3.connect(path, timeout=DATABASE_BUSY_TIMEOUT_MS / 1000)
+    try:
+        conn.execute(f"PRAGMA busy_timeout={DATABASE_BUSY_TIMEOUT_MS}")
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.row_factory = sqlite3.Row
+        return conn
+    except BaseException:
+        conn.close()
+        raise
+
+
+async def _await_thread_operation(operation):
+    """Drain a SQLite worker before propagating cancellation."""
+    task = asyncio.create_task(asyncio.to_thread(operation))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+        raise
+
+
+def _execute_sql_script(conn: sqlite3.Connection, script: str) -> None:
+    pending = ""
+    for line in script.splitlines(keepends=True):
+        pending += line
+        if not sqlite3.complete_statement(pending):
+            continue
+        statement = pending.strip()
+        pending = ""
+        if statement:
+            conn.execute(statement)
+    if pending.strip():
+        raise sqlite3.OperationalError("incomplete database schema statement")
+
+
+def _add_column_if_missing(
+    conn: sqlite3.Connection,
+    table: str,
+    column: str,
+    declaration: str,
+) -> bool:
+    columns = {
+        str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+    if column in columns:
+        return False
+    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+    return True
+
+
+@contextmanager
+def _initialization_transaction():
+    with _INITIALIZE_LOCK:
+        conn = _connect()
+        try:
+            _migrate_radio_station_sources_schema(conn)
+            conn.execute("BEGIN IMMEDIATE")
+            yield conn
+            conn.commit()
+        except BaseException:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+
+def _run_initialization(callback) -> None:
+    with _initialization_transaction() as conn:
+        callback(conn)
 
 
 def _utc_now() -> str:
@@ -1007,8 +1087,13 @@ def _migrate_radio_station_sources_schema(conn: sqlite3.Connection) -> None:
     if 'source_discriminator' in columns and expected in unique_sets:
         return
 
+    if conn.in_transaction:
+        raise sqlite3.OperationalError(
+            'radio_station_sources migration requires an independent transaction'
+        )
     conn.execute("PRAGMA foreign_keys=OFF")
     try:
+        conn.execute("BEGIN IMMEDIATE")
         conn.execute("""
             CREATE TABLE radio_station_sources_new (
                 source_id              TEXT PRIMARY KEY,
@@ -1062,33 +1147,62 @@ def _migrate_radio_station_sources_schema(conn: sqlite3.Connection) -> None:
             CREATE INDEX IF NOT EXISTS idx_radio_station_sources_lifecycle
             ON radio_station_sources(lifecycle_state, catalog_expires_at)
         """)
+        conn.commit()
+    except BaseException:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
     finally:
         conn.execute("PRAGMA foreign_keys=ON")
 
 
 async def initialize():
-    def _init():
-        conn = _connect()
-        conn.executescript(_SCHEMA)
+    def _init(conn):
+        _execute_sql_script(conn, _SCHEMA)
         _migrate_plugin_permission_approval_key(conn)
-        _migrate_radio_station_sources_schema(conn)
         _finalize_legacy_epg_map_upgrade(conn)
         # 兼容已有数据库：补充新字段
         for col, typ, default in [
             ('custom_ua', 'TEXT', "''"),
             ('force_proxy', 'INTEGER', '0'),
             ('last_tested', 'TEXT', "''"),
+            ('refresh_generation', 'INTEGER NOT NULL', '0'),
+            ('last_attempt_at', 'TEXT', "''"),
+            ('last_success_at', 'TEXT', "''"),
+            ('last_refresh_status', 'TEXT NOT NULL', "'never'"),
+            ('last_error', 'TEXT', "''"),
         ]:
-            try:
-                conn.execute(f"ALTER TABLE subscriptions ADD COLUMN {col} {typ} DEFAULT {default}")
-            except sqlite3.OperationalError:
-                pass  # 字段已存在
-        try:
-            conn.execute("ALTER TABLE radio_programme_snapshots ADD COLUMN source_revision TEXT NOT NULL DEFAULT ''")
-        except sqlite3.OperationalError:
-            pass
+            _add_column_if_missing(
+                conn, 'subscriptions', col, f'{typ} DEFAULT {default}'
+            )
+        conn.execute(
+            """
+            UPDATE subscriptions
+            SET last_attempt_at=last_updated
+            WHERE last_attempt_at='' AND last_updated<>''
+            """
+        )
+        conn.execute(
+            """
+            UPDATE subscriptions
+            SET last_success_at=last_updated
+            WHERE last_success_at='' AND last_updated<>''
+            """
+        )
+        conn.execute(
+            """
+            UPDATE subscriptions
+            SET last_refresh_status=CASE WHEN valid=1 THEN 'success' ELSE 'failed' END
+            WHERE last_refresh_status='never' AND last_updated<>''
+            """
+        )
+        _add_column_if_missing(
+            conn,
+            'radio_programme_snapshots',
+            'source_revision',
+            "TEXT NOT NULL DEFAULT ''",
+        )
         for col, typ, default in [
-            ('refresh_generation', 'INTEGER', '0'),
             ('source_type', 'TEXT', "'hls'"),
             ('youtube_video_id', 'TEXT', "''"),
             ('referer', 'TEXT', "''"),
@@ -1120,18 +1234,12 @@ async def initialize():
                 "'passthrough'",
             ),
         ]:
-            try:
-                conn.execute(f"ALTER TABLE channels ADD COLUMN {col} {typ} DEFAULT {default}")
-            except sqlite3.OperationalError:
-                pass  # 字段已存在
+            _add_column_if_missing(conn, 'channels', col, f'{typ} DEFAULT {default}')
         conn.execute("CREATE INDEX IF NOT EXISTS idx_channels_market_pkg ON channels(market_package_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_channels_market_item ON channels(market_package_id, market_source_item_id)")
-        try:
-            conn.execute(
-                "ALTER TABLE iptv_logical_channels ADD COLUMN orphaned_at TEXT DEFAULT NULL"
-            )
-        except sqlite3.OperationalError:
-            pass
+        _add_column_if_missing(
+            conn, 'iptv_logical_channels', 'orphaned_at', 'TEXT DEFAULT NULL'
+        )
         # Existing installations predate a reliable orphan transition time.
         # Give historical orphan rows one explicit upgrade-time baseline so
         # startup never treats them as immediately expired. Repeated startup
@@ -1170,18 +1278,17 @@ async def initialize():
             ('source_origin', 'TEXT', "'custom'"),
             ('builtin_key', 'TEXT', 'NULL'),
         ]:
-            try:
-                conn.execute(f"ALTER TABLE epg_sources ADD COLUMN {col} {typ} DEFAULT {default}")
-            except sqlite3.OperationalError:
-                pass
+            _add_column_if_missing(conn, 'epg_sources', col, f'{typ} DEFAULT {default}')
         for col, typ, default in [
             ('manifest_signature_json', 'TEXT', "'{}'"),
             ('trust_class', 'TEXT', "'official'"),
         ]:
-            try:
-                conn.execute(f"ALTER TABLE plugin_installations ADD COLUMN {col} {typ} NOT NULL DEFAULT {default}")
-            except sqlite3.OperationalError:
-                pass
+            _add_column_if_missing(
+                conn,
+                'plugin_installations',
+                col,
+                f'{typ} NOT NULL DEFAULT {default}',
+            )
         conn.execute(
             """
             UPDATE plugin_installations
@@ -1219,16 +1326,18 @@ async def initialize():
         for col, typ, default in [
             ('shadow_run_id', 'TEXT', 'NULL'),
         ]:
-            try:
-                conn.execute(f"ALTER TABLE iptv_logical_channel_epg_bindings ADD COLUMN {col} {typ} DEFAULT {default}")
-            except sqlite3.OperationalError:
-                pass
-        try:
-            conn.execute(
-                "ALTER TABLE epg_match_shadow_runs ADD COLUMN preference_snapshot_fingerprint TEXT NOT NULL DEFAULT ''"
+            _add_column_if_missing(
+                conn,
+                'iptv_logical_channel_epg_bindings',
+                col,
+                f'{typ} DEFAULT {default}',
             )
-        except sqlite3.OperationalError:
-            pass
+        _add_column_if_missing(
+            conn,
+            'epg_match_shadow_runs',
+            'preference_snapshot_fingerprint',
+            "TEXT NOT NULL DEFAULT ''",
+        )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_iptv_logical_epg_bindings_shadow_run ON iptv_logical_channel_epg_bindings(shadow_run_id)")
         conn.execute("UPDATE epg_sources SET revision=1 WHERE revision IS NULL OR revision < 1")
         conn.execute(
@@ -1273,10 +1382,7 @@ async def initialize():
             ('last_error', 'TEXT', "''"),
             ('updated_at', 'TEXT', "''"),
         ]:
-            try:
-                conn.execute(f"ALTER TABLE market_sources ADD COLUMN {col} {typ} DEFAULT {default}")
-            except sqlite3.OperationalError:
-                pass
+            _add_column_if_missing(conn, 'market_sources', col, f'{typ} DEFAULT {default}')
         for col, typ, default in [
             ('last_checked_at', 'TEXT', "''"),
             ('remote_version', 'TEXT', "''"),
@@ -1287,10 +1393,12 @@ async def initialize():
             ('last_update_error', 'TEXT', "''"),
             ('last_update_run_token', 'TEXT', "''"),
         ]:
-            try:
-                conn.execute(f"ALTER TABLE market_packages_installed ADD COLUMN {col} {typ} DEFAULT {default}")
-            except sqlite3.OperationalError:
-                pass
+            _add_column_if_missing(
+                conn,
+                'market_packages_installed',
+                col,
+                f'{typ} DEFAULT {default}',
+            )
         now = _utc_now()
         conn.execute(
             """
@@ -1316,9 +1424,7 @@ async def initialize():
             """,
             (MARKET_AUTOMATION_TASK_ID, market_config['conflict_group']),
         )
-        conn.commit()
-        conn.close()
-    await asyncio.to_thread(_init)
+    await asyncio.to_thread(_run_initialization, _init)
 
 
 # ── Settings ──
@@ -1367,10 +1473,8 @@ async def get_app_settings() -> dict:
         conn = _connect()
         try:
             rows = conn.execute("SELECT key, value_json FROM app_settings").fetchall()
-        except sqlite3.OperationalError:
+        finally:
             conn.close()
-            return {}
-        conn.close()
         result = {}
         for row in rows:
             try:
@@ -1384,21 +1488,23 @@ async def get_app_settings() -> dict:
 async def set_app_settings(values: dict, updated_by: int | None = None) -> None:
     def _set():
         conn = _connect()
-        now = datetime.now(timezone.utc).isoformat()
-        for key, value in values.items():
-            conn.execute(
-                """
-                INSERT INTO app_settings(key, value_json, updated_at, updated_by)
-                VALUES(?, ?, ?, ?)
-                ON CONFLICT(key) DO UPDATE SET
-                    value_json=excluded.value_json,
-                    updated_at=excluded.updated_at,
-                    updated_by=excluded.updated_by
-                """,
-                (key, json.dumps(value, ensure_ascii=False), now, updated_by),
-            )
-        conn.commit()
-        conn.close()
+        try:
+            now = datetime.now(timezone.utc).isoformat()
+            with conn:
+                for key, value in values.items():
+                    conn.execute(
+                        """
+                        INSERT INTO app_settings(key, value_json, updated_at, updated_by)
+                        VALUES(?, ?, ?, ?)
+                        ON CONFLICT(key) DO UPDATE SET
+                            value_json=excluded.value_json,
+                            updated_at=excluded.updated_at,
+                            updated_by=excluded.updated_by
+                        """,
+                        (key, json.dumps(value, ensure_ascii=False), now, updated_by),
+                    )
+        finally:
+            conn.close()
     await asyncio.to_thread(_set)
 
 
@@ -1863,13 +1969,30 @@ async def get_subscription_by_url(url: str) -> dict | None:
 
 
 async def update_subscription(sub_id: int, **kwargs):
+    if not kwargs:
+        return
+
     def _update():
         conn = _connect()
-        sets = ', '.join(f"{k}=?" for k in kwargs)
-        conn.execute(f"UPDATE subscriptions SET {sets} WHERE id=?", (*kwargs.values(), sub_id))
-        conn.commit()
-        conn.close()
-    await asyncio.to_thread(_update)
+        try:
+            refresh_identity_changed = bool({'url', 'custom_ua'} & kwargs.keys())
+            sets = [f"{key}=?" for key in kwargs]
+            values = list(kwargs.values())
+            if refresh_identity_changed:
+                sets.extend([
+                    "refresh_generation=refresh_generation+1",
+                    "valid=0",
+                    "last_refresh_status='config_changed'",
+                    "last_error=''",
+                ])
+            with conn:
+                conn.execute(
+                    f"UPDATE subscriptions SET {', '.join(sets)} WHERE id=?",
+                    (*values, sub_id),
+                )
+        finally:
+            conn.close()
+    return await asyncio.to_thread(_update)
 
 
 class SubscriptionRefreshSuperseded(Exception):
@@ -1890,9 +2013,17 @@ async def begin_subscription_refresh(sub_id: int) -> int:
                 conn.rollback()
                 raise ValueError('订阅不存在')
             generation = int(row['refresh_generation'] or 0) + 1
+            attempted_at = datetime.now(timezone.utc).isoformat()
             conn.execute(
-                "UPDATE subscriptions SET refresh_generation=? WHERE id=?",
-                (generation, sub_id),
+                """
+                UPDATE subscriptions SET
+                    refresh_generation=?,
+                    last_attempt_at=?,
+                    last_refresh_status='running',
+                    last_error=''
+                WHERE id=?
+                """,
+                (generation, attempted_at, sub_id),
             )
             conn.commit()
             return generation
@@ -1901,19 +2032,61 @@ async def begin_subscription_refresh(sub_id: int) -> int:
     return await asyncio.to_thread(_begin)
 
 
-async def mark_subscription_invalid_if_current(sub_id: int, generation: int) -> bool:
+async def mark_subscription_invalid_if_current(
+    sub_id: int,
+    generation: int,
+    *,
+    status: str = 'failed',
+    error: str = '',
+) -> bool:
+    status_value = str(status or 'failed').strip()[:64] or 'failed'
+    error_value = ' '.join(str(error or '').split())[:512]
+
     def _mark():
         conn = _connect()
         try:
             with conn:
                 cursor = conn.execute(
-                    "UPDATE subscriptions SET valid=0 WHERE id=? AND refresh_generation=?",
-                    (sub_id, int(generation)),
+                    """
+                    UPDATE subscriptions SET
+                        valid=0,
+                        last_refresh_status=?,
+                        last_error=?
+                    WHERE id=? AND refresh_generation=?
+                    """,
+                    (status_value, error_value, sub_id, int(generation)),
                 )
                 return cursor.rowcount == 1
         finally:
             conn.close()
     return await asyncio.to_thread(_mark)
+
+
+async def recover_interrupted_subscription_refreshes(
+    *,
+    error: str = '服务启动时检测到上次订阅刷新被中断',
+) -> int:
+    error_value = ' '.join(str(error or '').split())[:512]
+
+    def _recover():
+        conn = _connect()
+        try:
+            with conn:
+                cursor = conn.execute(
+                    """
+                    UPDATE subscriptions SET
+                        valid=0,
+                        last_refresh_status='interrupted',
+                        last_error=?
+                    WHERE last_refresh_status='running'
+                    """,
+                    (error_value,),
+                )
+                return cursor.rowcount
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_recover)
 
 
 async def delete_subscription(sub_id: int):
@@ -2157,10 +2330,14 @@ async def add_subscription_with_channels(
                 cursor = conn.execute(
                     """
                     INSERT INTO subscriptions(
-                        title, url, channel_count, created_at, custom_ua, force_proxy
-                    ) VALUES(?, ?, ?, ?, ?, ?)
+                        title, url, channel_count, created_at, custom_ua, force_proxy,
+                        last_attempt_at, last_success_at, last_refresh_status, last_error
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'success', '')
                     """,
-                    (title, url, len(prepared), now, custom_ua, force_proxy),
+                    (
+                        title, url, len(prepared), now, custom_ua, force_proxy,
+                        now, now,
+                    ),
                 )
                 sub_id = int(cursor.lastrowid)
                 _sync_channels_conn(conn, sub_id, prepared)
@@ -2198,10 +2375,24 @@ async def replace_subscription_channels_atomic(
                         raise SubscriptionRefreshSuperseded(sub_id)
                 _sync_channels_conn(conn, sub_id, prepared)
                 if valid is not None:
-                    conn.execute(
-                        "UPDATE subscriptions SET valid=? WHERE id=?",
-                        (valid, sub_id),
-                    )
+                    if int(valid) == 1:
+                        completed_at = datetime.now(timezone.utc).isoformat()
+                        conn.execute(
+                            """
+                            UPDATE subscriptions SET
+                                valid=1,
+                                last_success_at=?,
+                                last_refresh_status='success',
+                                last_error=''
+                            WHERE id=?
+                            """,
+                            (completed_at, sub_id),
+                        )
+                    else:
+                        conn.execute(
+                            "UPDATE subscriptions SET valid=? WHERE id=?",
+                            (valid, sub_id),
+                        )
         finally:
             conn.close()
 
@@ -2220,6 +2411,8 @@ async def install_market_package_atomic(
     custom_ua: str = '',
     force_proxy: int = 0,
     auto_update: int = 0,
+    logo_assets: list[dict] | None = None,
+    logo_bindings: list[dict] | None = None,
 ) -> int:
     if not channels:
         raise ValueError('没有可导入的频道源')
@@ -2251,10 +2444,14 @@ async def install_market_package_atomic(
                         """
                         INSERT INTO subscriptions(
                             title, url, channel_count, valid, last_updated, created_at,
-                            custom_ua, force_proxy
-                        ) VALUES(?, ?, ?, 1, ?, ?, ?, ?)
+                            custom_ua, force_proxy, last_attempt_at, last_success_at,
+                            last_refresh_status, last_error
+                        ) VALUES(?, ?, ?, 1, ?, ?, ?, ?, ?, ?, 'success', '')
                         """,
-                        (title, subscription_url, len(channels), now, now, custom_ua, force_proxy),
+                        (
+                            title, subscription_url, len(channels), now, now,
+                            custom_ua, force_proxy, now, now,
+                        ),
                     )
                     sub_id = int(cursor.lastrowid)
                 else:
@@ -2262,10 +2459,14 @@ async def install_market_package_atomic(
                         """
                         UPDATE subscriptions SET
                             title=?, url=?, channel_count=?, valid=1, last_updated=?,
-                            custom_ua=?, force_proxy=?
+                            custom_ua=?, force_proxy=?, last_attempt_at=?,
+                            last_success_at=?, last_refresh_status='success', last_error=''
                         WHERE id=?
                         """,
-                        (title, subscription_url, len(channels), now, custom_ua, force_proxy, sub_id),
+                        (
+                            title, subscription_url, len(channels), now,
+                            custom_ua, force_proxy, now, now, sub_id,
+                        ),
                     )
 
                 _sync_channels_conn(conn, sub_id, prepared)
@@ -2285,6 +2486,15 @@ async def install_market_package_atomic(
                     """,
                     (package_id, market_url, sub_id, installed_version, now, auto_update, metadata_json),
                 )
+                if logo_assets is not None or logo_bindings is not None:
+                    _replace_package_logo_state_conn(
+                        conn,
+                        package_id,
+                        installed_version,
+                        logo_assets or [],
+                        logo_bindings or [],
+                        now=now,
+                    )
                 return sub_id
         finally:
             conn.close()
@@ -2329,42 +2539,107 @@ async def install_logo_package_atomic(
                     """,
                     (package_id, market_url, installed_version, now, auto_update, metadata_json),
                 )
-                for asset in assets:
-                    conn.execute(
-                        """
-                        INSERT INTO package_assets(
-                            package_id, asset_id, package_version, relative_path,
-                            media_type, sha256, size_bytes, stored_path, state,
-                            created_at, updated_at
-                        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
-                        """,
-                        (
-                            package_id, asset["asset_id"], installed_version,
-                            asset["relative_path"], asset["media_type"],
-                            asset["sha256"], int(asset["size_bytes"]),
-                            asset["stored_path"], now, now,
-                        ),
-                    )
-                for binding in bindings:
-                    conn.execute(
-                        """
-                        INSERT INTO logical_channel_logo_bindings(
-                            logical_channel_id, package_id, asset_id, binding_type,
-                            match_type, match_key, priority, package_version,
-                            enabled, lifecycle_state, created_at, updated_at
-                        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 1, 'active', ?, ?)
-                        """,
-                        (
-                            binding["logical_channel_id"], package_id,
-                            binding["asset_id"], binding["binding_type"],
-                            binding["match_type"], binding["match_key"],
-                            int(binding.get("priority", 0)), installed_version,
-                            now, now,
-                        ),
-                    )
+                _replace_package_logo_state_conn(
+                    conn,
+                    package_id,
+                    installed_version,
+                    assets,
+                    bindings,
+                    now=now,
+                )
         finally:
             conn.close()
     await asyncio.to_thread(_install)
+
+
+def _insert_package_logo_bindings_conn(
+    conn: sqlite3.Connection,
+    package_id: str,
+    package_version: str,
+    bindings: list[dict],
+    *,
+    now: str,
+) -> None:
+    for binding in bindings:
+        conn.execute(
+            """
+            INSERT INTO logical_channel_logo_bindings(
+                logical_channel_id, package_id, asset_id, binding_type,
+                match_type, match_key, priority, package_version,
+                enabled, lifecycle_state, created_at, updated_at
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 1, 'active', ?, ?)
+            """,
+            (
+                binding["logical_channel_id"], package_id,
+                binding["asset_id"], binding["binding_type"],
+                binding["match_type"], binding["match_key"],
+                int(binding.get("priority", 0)), package_version,
+                now, now,
+            ),
+        )
+
+
+def _replace_package_logo_state_conn(
+    conn: sqlite3.Connection,
+    package_id: str,
+    package_version: str,
+    assets: list[dict],
+    bindings: list[dict],
+    *,
+    now: str,
+) -> None:
+    """Replace verified asset rows and bindings inside the caller's transaction."""
+    conn.execute(
+        "DELETE FROM logical_channel_logo_bindings WHERE package_id=?",
+        (package_id,),
+    )
+    conn.execute("DELETE FROM package_assets WHERE package_id=?", (package_id,))
+    for asset in assets:
+        conn.execute(
+            """
+            INSERT INTO package_assets(
+                package_id, asset_id, package_version, relative_path,
+                media_type, sha256, size_bytes, stored_path, state,
+                created_at, updated_at
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
+            """,
+            (
+                package_id, asset["asset_id"], package_version,
+                asset["relative_path"], asset["media_type"],
+                asset["sha256"], int(asset["size_bytes"]),
+                asset["stored_path"], now, now,
+            ),
+        )
+    _insert_package_logo_bindings_conn(
+        conn, package_id, package_version, bindings, now=now,
+    )
+
+
+async def replace_package_logo_bindings_atomic(
+    package_id: str,
+    package_version: str,
+    bindings: list[dict],
+) -> None:
+    """Replace only bindings after logical-channel maintenance.
+
+    Asset bytes and the installed package version are already published by the
+    package transaction. A binding refresh must not delete verified assets.
+    """
+    def _replace():
+        conn = _connect()
+        try:
+            with conn:
+                now = datetime.now(timezone.utc).isoformat()
+                conn.execute(
+                    "DELETE FROM logical_channel_logo_bindings WHERE package_id=?",
+                    (package_id,),
+                )
+                _insert_package_logo_bindings_conn(
+                    conn, package_id, package_version, bindings, now=now,
+                )
+        finally:
+            conn.close()
+    await asyncio.to_thread(_replace)
 
 
 async def uninstall_market_package_atomic(package_id: str) -> bool:
@@ -2383,7 +2658,29 @@ async def uninstall_market_package_atomic(package_id: str) -> bool:
                 conn.execute("DELETE FROM logical_channel_logo_bindings WHERE package_id=?", (package_id,))
                 conn.execute("DELETE FROM package_assets WHERE package_id=?", (package_id,))
                 if sub_id:
-                    conn.execute("DELETE FROM subscriptions WHERE id=?", (sub_id,))
+                    subscription = conn.execute(
+                        "SELECT url FROM subscriptions WHERE id=?",
+                        (sub_id,),
+                    ).fetchone()
+                    # Only the synthetic subscription created by the Market
+                    # installer is owned by this package. Retain any legacy
+                    # or manually-associated user subscription.
+                    if subscription and str(subscription['url'] or '') == f'market://{package_id}':
+                        ownership = conn.execute(
+                            """
+                            SELECT SUM(
+                                       CASE
+                                           WHEN market_package_id<>'' AND market_package_id<>?
+                                           THEN 1 ELSE 0
+                                       END
+                                   ) AS foreign_rows
+                            FROM channels
+                            WHERE subscription_id=?
+                            """,
+                            (package_id, sub_id),
+                        ).fetchone()
+                        if ownership and int(ownership['foreign_rows'] or 0) == 0:
+                            conn.execute("DELETE FROM subscriptions WHERE id=?", (sub_id,))
                 return True
         finally:
             conn.close()
@@ -2896,6 +3193,32 @@ async def get_package_assets(package_id: str, *, package_version: str = '', acti
     return await asyncio.to_thread(_get)
 
 
+async def get_referenced_package_asset_paths(paths: list[str]) -> set[str]:
+    """Return stored paths still referenced by any package asset row."""
+    values = list(dict.fromkeys(str(path) for path in paths if str(path)))
+    if not values:
+        return set()
+
+    def _get() -> set[str]:
+        conn = _connect()
+        try:
+            placeholders = ','.join('?' for _ in values)
+            rows = conn.execute(
+                f"""
+                SELECT DISTINCT stored_path
+                FROM package_assets
+                WHERE stored_path IN ({placeholders})
+                  AND state IN ('staged', 'active', 'retained')
+                """,
+                values,
+            ).fetchall()
+            return {str(row['stored_path']) for row in rows}
+        finally:
+            conn.close()
+
+    return await asyncio.to_thread(_get)
+
+
 async def get_active_package_asset(package_id: str, asset_id: str) -> dict | None:
     def _get():
         conn = _connect()
@@ -3016,44 +3339,14 @@ async def replace_package_logo_state(
         try:
             with conn:
                 now = datetime.now(timezone.utc).isoformat()
-                conn.execute(
-                    "DELETE FROM logical_channel_logo_bindings WHERE package_id=?",
-                    (package_id,),
+                _replace_package_logo_state_conn(
+                    conn,
+                    package_id,
+                    package_version,
+                    assets,
+                    bindings,
+                    now=now,
                 )
-                conn.execute("DELETE FROM package_assets WHERE package_id=?", (package_id,))
-                for asset in assets:
-                    conn.execute(
-                        """
-                        INSERT INTO package_assets(
-                            package_id, asset_id, package_version, relative_path,
-                            media_type, sha256, size_bytes, stored_path, state,
-                            created_at, updated_at
-                        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
-                        """,
-                        (
-                            package_id, asset["asset_id"], package_version,
-                            asset["relative_path"], asset["media_type"],
-                            asset["sha256"], int(asset["size_bytes"]),
-                            asset["stored_path"], now, now,
-                        ),
-                    )
-                for binding in bindings:
-                    conn.execute(
-                        """
-                        INSERT INTO logical_channel_logo_bindings(
-                            logical_channel_id, package_id, asset_id, binding_type,
-                            match_type, match_key, priority, package_version,
-                            enabled, lifecycle_state, created_at, updated_at
-                        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 1, 'active', ?, ?)
-                        """,
-                        (
-                            binding["logical_channel_id"], package_id,
-                            binding["asset_id"], binding["binding_type"],
-                            binding["match_type"], binding["match_key"],
-                            int(binding.get("priority", 0)), package_version,
-                            now, now,
-                        ),
-                    )
         finally:
             conn.close()
     await asyncio.to_thread(_replace)
@@ -4766,65 +5059,94 @@ async def update_channel_status(ch_id: int, is_working: int, latency_ms: float =
     await asyncio.to_thread(_update)
 
 
-async def update_channel_probe_result(ch_id: int, result: dict):
+async def update_channel_probe_result(
+    ch_id: int,
+    result: dict,
+    *,
+    expected_source_revision: str | None = None,
+) -> bool:
     def _update():
         conn = _connect()
-        now = datetime.now(timezone.utc).isoformat()
-        probe_status = str(result.get('probe_status') or 'error')
-        is_working = 1 if probe_status == 'online' else 0
-        last_success_at = now if probe_status == 'online' else str(result.get('last_success_at') or '')
-        conn.execute(
-            """
-            UPDATE channels SET
-                is_working=?,
-                latency_ms=?,
-                last_tested=?,
-                probe_status=?,
-                live_status=?,
-                probe_method=?,
-                speed_mbps=?,
-                resolution=?,
-                fps=?,
-                video_codec=?,
-                audio_codec=?,
-                requires_headers=?,
-                requires_proxy_declared=?,
-                proxy_required_hint=?,
-                last_success_at=COALESCE(NULLIF(?, ''), last_success_at),
-                last_error=?,
-                adapter_provider=?,
-                adapter_title=?,
-                youtube_video_id=COALESCE(NULLIF(?, ''), youtube_video_id),
-                probe_meta_json=?
-            WHERE id=?
-            """,
-            (
-                is_working,
-                float(result.get('latency_ms') or 0),
-                now,
-                probe_status,
-                str(result.get('live_status') or 'unknown'),
-                str(result.get('probe_method') or ''),
-                float(result.get('speed_mbps') or 0),
-                str(result.get('resolution') or ''),
-                float(result.get('fps') or 0),
-                str(result.get('video_codec') or ''),
-                str(result.get('audio_codec') or ''),
-                1 if result.get('requires_headers') else 0,
-                1 if result.get('requires_proxy_declared') else 0,
-                1 if result.get('proxy_required_hint') else 0,
-                last_success_at,
-                str(result.get('last_error') or ''),
-                str(result.get('adapter_provider') or ''),
-                str(result.get('adapter_title') or ''),
-                str(result.get('youtube_video_id') or ''),
-                str(result.get('probe_meta_json') or '{}'),
-                ch_id,
-            ),
-        )
-        conn.commit()
-        conn.close()
-    await asyncio.to_thread(_update)
+        try:
+            conn.execute('BEGIN IMMEDIATE')
+            if expected_source_revision is not None:
+                row = conn.execute(
+                    """
+                    SELECT c.*, s.custom_ua AS sub_custom_ua,
+                           s.force_proxy AS sub_force_proxy
+                    FROM channels AS c
+                    JOIN subscriptions AS s ON s.id=c.subscription_id
+                    WHERE c.id=?
+                    """,
+                    (ch_id,),
+                ).fetchone()
+                if row is None:
+                    conn.rollback()
+                    return False
+                current_source = dict(row)
+                _apply_sub_fallbacks([current_source])
+                if source_revision_for(current_source) != str(expected_source_revision):
+                    conn.rollback()
+                    return False
+
+            now = datetime.now(timezone.utc).isoformat()
+            probe_status = str(result.get('probe_status') or 'error')
+            is_working = 1 if probe_status == 'online' else 0
+            last_success_at = now if probe_status == 'online' else str(result.get('last_success_at') or '')
+            cursor = conn.execute(
+                """
+                UPDATE channels SET
+                    is_working=?,
+                    latency_ms=?,
+                    last_tested=?,
+                    probe_status=?,
+                    live_status=?,
+                    probe_method=?,
+                    speed_mbps=?,
+                    resolution=?,
+                    fps=?,
+                    video_codec=?,
+                    audio_codec=?,
+                    requires_headers=?,
+                    requires_proxy_declared=?,
+                    proxy_required_hint=?,
+                    last_success_at=COALESCE(NULLIF(?, ''), last_success_at),
+                    last_error=?,
+                    adapter_provider=?,
+                    adapter_title=?,
+                    youtube_video_id=COALESCE(NULLIF(?, ''), youtube_video_id),
+                    probe_meta_json=?
+                WHERE id=?
+                """,
+                (
+                    is_working,
+                    float(result.get('latency_ms') or 0),
+                    now,
+                    probe_status,
+                    str(result.get('live_status') or 'unknown'),
+                    str(result.get('probe_method') or ''),
+                    float(result.get('speed_mbps') or 0),
+                    str(result.get('resolution') or ''),
+                    float(result.get('fps') or 0),
+                    str(result.get('video_codec') or ''),
+                    str(result.get('audio_codec') or ''),
+                    1 if result.get('requires_headers') else 0,
+                    1 if result.get('requires_proxy_declared') else 0,
+                    1 if result.get('proxy_required_hint') else 0,
+                    last_success_at,
+                    str(result.get('last_error') or ''),
+                    str(result.get('adapter_provider') or ''),
+                    str(result.get('adapter_title') or ''),
+                    str(result.get('youtube_video_id') or ''),
+                    str(result.get('probe_meta_json') or '{}'),
+                    ch_id,
+                ),
+            )
+            conn.commit()
+            return cursor.rowcount == 1
+        finally:
+            conn.close()
+    return await asyncio.to_thread(_update)
 
 
 async def reset_channel_statuses(sub_id: int):
@@ -5293,7 +5615,7 @@ async def replace_epg_dataset_atomic(
         finally:
             conn.close()
 
-    return await asyncio.to_thread(_replace)
+    return await _await_thread_operation(_replace)
 
 
 async def replace_epg_channels(source_id: int, channels: list[dict]):
@@ -5417,7 +5739,7 @@ async def get_epg_programs(source_id: int, channel_id: str, start_after: str = '
         query = "SELECT * FROM epg_programs WHERE source_id=? AND channel_id=?"
         params: list = [source_id, channel_id]
         if start_after:
-            query += " AND stop >= ?"
+            query += " AND stop > ?"
             params.append(start_after)
         if start_before:
             query += " AND start <= ?"
@@ -5502,7 +5824,7 @@ async def batch_get_current_programs(canonical_keys: list[str]) -> dict:
                             field: program[field]
                             for field in ('title', 'start', 'stop', 'description')
                         }
-                    if next_prog is None and program['start'] >= now:
+                    if next_prog is None and program['start'] > now:
                         next_prog = {
                             field: program[field]
                             for field in ('title', 'start', 'stop')
