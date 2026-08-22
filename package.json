@@ -37,7 +37,11 @@
       }
     ],
     "win": {
-      "target": "nsis"
+      "target": [
+        "dir",
+        "zip",
+        "nsis"
+      ]
     },
     "mac": {
       "target": [

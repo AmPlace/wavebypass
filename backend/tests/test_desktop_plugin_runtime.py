@@ -10,7 +10,12 @@ from types import SimpleNamespace
 from unittest import mock
 
 from desktop_entry import configure_desktop_environment
-from desktop_runtime_manifest import runtime_tree_digest
+from desktop_runtime_manifest import (
+    desktop_runtime_target,
+    runtime_metadata_from_lock,
+    runtime_tree_digest,
+    validate_runtime_metadata,
+)
 from plugin_desktop_runtime import resolve_plugin_python_executable
 from plugin_market import FixtureTrustPolicy, PluginArtifactStore, PluginMarketService
 from plugin_production import _python_backed_rollout_enabled
@@ -21,7 +26,14 @@ from plugin_runtime.process import PluginProcess
 ROOT = Path(__file__).parents[1]
 
 
-def _write_runtime_metadata(runtime_root: Path, *, abi: str = "cp314") -> None:
+def _write_runtime_metadata(
+    runtime_root: Path,
+    *,
+    abi: str = "cp314",
+    os_name: str = "macos",
+    arch: str = "arm64",
+    executable: str = "bin/python3.14",
+) -> None:
     tree_sha256, tree_file_count = runtime_tree_digest(runtime_root)
     (runtime_root / "runtime.json").write_text(
         json.dumps({
@@ -29,9 +41,9 @@ def _write_runtime_metadata(runtime_root: Path, *, abi: str = "cp314") -> None:
             "runtime_type": "python",
             "python_version": "3.14.7",
             "python_abi": abi,
-            "os": "macos",
-            "arch": "arm64",
-            "executable": "bin/python3.14",
+            "os": os_name,
+            "arch": arch,
+            "executable": executable,
             "tree_sha256": tree_sha256,
             "tree_file_count": tree_file_count,
         }),
@@ -65,6 +77,59 @@ class DesktopPluginRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(PluginError) as raised:
                     resolve_plugin_python_executable()
                 self.assertEqual(raised.exception.code, "PYTHON_RUNTIME_UNSUPPORTED")
+
+    async def test_frozen_windows_backend_uses_python_exe_without_posix_mode_bits(self):
+        with tempfile.TemporaryDirectory(prefix="waveflow windows runtime ") as temp:
+            root = Path(temp)
+            executable = root / "waveflow-backend.exe"
+            python = root / "python-runtime" / "python.exe"
+            python.parent.mkdir(parents=True)
+            python.write_text("windows runtime", encoding="utf-8")
+            _write_runtime_metadata(
+                python.parent,
+                os_name="windows",
+                arch="x86_64",
+                executable="python.exe",
+            )
+            executable.write_text("backend", encoding="utf-8")
+            with mock.patch.object(sys, "frozen", True, create=True), \
+                    mock.patch.object(sys, "executable", str(executable)), \
+                    mock.patch.object(sys, "platform", "win32"), \
+                    mock.patch("desktop_runtime_manifest.host_platform.machine", return_value="AMD64"):
+                self.assertEqual(resolve_plugin_python_executable(), python.resolve())
+
+    async def test_runtime_target_normalizes_windows_architecture_aliases(self):
+        target = desktop_runtime_target("Windows", "AMD64")
+        self.assertIsNotNone(target)
+        self.assertEqual(
+            (target.platform_os, target.arch, target.executable),
+            ("windows", "x86_64", "python.exe"),
+        )
+
+    async def test_windows_runtime_metadata_round_trip_uses_locked_contract(self):
+        with tempfile.TemporaryDirectory(prefix="waveflow windows metadata ") as temp:
+            root = Path(temp)
+            executable = root / "python.exe"
+            executable.write_text("windows runtime", encoding="utf-8")
+            lock = json.loads(
+                (ROOT.parent / "desktop_runtime" / "cpython-3.14.7-windows-x64.json").read_text(
+                    encoding="utf-8",
+                )
+            )
+            target = desktop_runtime_target("windows", "x86_64")
+            self.assertIsNotNone(target)
+            metadata = runtime_metadata_from_lock(
+                root,
+                lock,
+                target,
+                executable="python.exe",
+                ca_runtime_path="certifi/cacert.pem",
+            )
+            (root / "runtime.json").write_text(json.dumps(metadata), encoding="utf-8")
+            self.assertEqual(
+                validate_runtime_metadata(root, metadata, target, expected_python_version="3.14"),
+                executable.resolve(),
+            )
 
     async def test_frozen_backend_rejects_runtime_integrity_mismatch(self):
         with tempfile.TemporaryDirectory() as temp:
