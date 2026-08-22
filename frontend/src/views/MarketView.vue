@@ -2,30 +2,55 @@
   <main
     class="market-main page-shell min-h-screen w-full page-with-mini-player"
   >
-    <section class="market-page-header">
-      <div class="market-header-row">
-        <div class="market-header-identity">
-          <div class="market-header-copy">
-            <p class="market-eyebrow">MARKET</p>
-            <div class="flex min-w-0 items-baseline gap-3">
-              <h1 class="truncate text-[22px] font-semibold leading-tight text-[var(--text-primary)]">Market</h1>
-              <span class="hidden text-[13px] text-[var(--text-secondary)] sm:inline">{{ packageType === 'plugins' ? '扩展 WaveFlow 能力' : '添加频道与内容' }}</span>
-            </div>
-          </div>
-          <div class="market-package-type-switch" aria-label="Market 包类型">
-            <button
-              v-for="item in packageTypeOptions"
-              :key="item.key"
-              type="button"
-              class="market-package-type-button"
-              :class="{ 'is-active': packageType === item.key }"
-              :aria-pressed="packageType === item.key"
-              @click="selectPackageType(item.key)"
-            >{{ item.label }}</button>
-          </div>
+    <section class="market-filter-bar">
+      <div class="market-filter-scroll">
+        <div class="market-package-type-switch" aria-label="Market 包类型">
+          <button v-for="item in packageTypeOptions" :key="item.key" type="button" class="market-package-type-button" :class="{ 'is-active': packageType === item.key }" @click="selectPackageType(item.key)">{{ item.label }}</button>
         </div>
+        <button
+          v-for="quick in quickFilterTabs"
+          :key="quick.key"
+          type="button"
+          class="market-filter-pill"
+          :class="{ 'is-active': quick.active() }"
+          @click="quick.select"
+        >
+          {{ quick.label }}
+        </button>
+        <button type="button" class="market-filter-sheet-trigger" @click="filterSheetOpen = true">
+          <svg class="size-4" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="M4 6h16M7 12h10M10 18h4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+          筛选
+          <span v-if="selectedChips.length" class="market-filter-count">{{ selectedChips.length }}</span>
+        </button>
+        <MarketFilterDropdown
+          v-for="group in visibleFilterGroups"
+          :key="group.key"
+          :label="group.label"
+          :options="group.options()"
+          :selected="filterMultiSelections[group.key]"
+          :multi="true"
+          :dropdown-key="group.key"
+          :open="activeDropdownKey === group.key"
+          class="market-desktop-filter"
+          @change="(values) => onMultiFilterChange(group.key, values)"
+          @toggle="handleDropdownToggle"
+          @close="handleDropdownClose"
+        />
+      </div>
+    </section>
 
-        <div class="market-list-actions">
+    <section class="market-list-head">
+      <div class="flex min-w-0 items-center gap-3">
+        <span class="flex size-8 shrink-0 items-center justify-center rounded-full bg-[var(--surface)] text-[var(--text-primary)]">
+          <svg class="size-4" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 8.4 12 4l8 4.4-8 4.4L4 8.4Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M4 12.2 12 16.6l8-4.4M4 16l8 4.4L20 16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </span>
+        <h1 class="truncate text-lg font-semibold leading-none text-[var(--text-primary)]">{{ packageType === 'plugins' ? 'Plugin Packages' : '频道包' }}</h1>
+        <span class="shrink-0 text-sm text-[var(--text-secondary)]">{{ resultCountLabel }}</span>
+      </div>
+
+      <div class="market-list-actions">
         <div class="market-inline-search" :class="{ 'is-open': searchOpen || filters.search }">
           <button
             type="button"
@@ -138,105 +163,6 @@
             <button v-if="hasUpdatableInstalled" type="button" class="market-menu-item" :disabled="updating || importLoading" @click="closeOverflowMenuAnd(handleUpdateAllInstalled)">更新全部 · {{ updatableInstalledCount }}</button>
           </div>
         </div>
-        </div>
-      </div>
-    </section>
-
-    <section v-if="featuredPackages.length" class="market-featured-section" aria-labelledby="market-featured-title">
-      <div class="market-featured-heading">
-        <div>
-          <h2 id="market-featured-title" class="market-section-heading">推荐内容</h2>
-          <p class="market-section-caption">来自当前 Market 源的精选{{ packageType === 'plugins' ? '扩展' : '频道包' }}</p>
-        </div>
-        <span class="market-section-count">{{ featuredPackages.length }} 个</span>
-      </div>
-      <div class="market-featured-rail">
-        <article
-          v-for="pkg in featuredPackages"
-          :key="`featured-${pkg.id}`"
-          class="market-featured-card"
-          tabindex="0"
-          role="button"
-          :aria-label="`查看 ${packageCardTitle(pkg)} 详情`"
-          @click="openDetail(pkg, $event)"
-          @keydown.enter="openDetail(pkg, $event)"
-          @keydown.space.prevent="openDetail(pkg, $event)"
-        >
-          <div class="market-featured-card-top">
-            <span class="market-featured-badge">{{ isPluginPackage(pkg) ? 'P' : isLogoPackage(pkg) ? 'L' : regionBadge(pkg) }}</span>
-            <span class="market-featured-source">{{ packageTrustLabel(pkg) }}</span>
-          </div>
-          <div class="market-featured-card-copy">
-            <h3 class="truncate text-[15px] font-semibold text-[var(--text-primary)]">{{ packageCardTitle(pkg) }}</h3>
-            <p class="market-featured-description">{{ packageDescription(pkg) }}</p>
-          </div>
-          <div class="market-featured-meta">
-            <span>{{ cardMeta(pkg) || '可用内容' }}</span>
-            <span class="market-featured-dot">·</span>
-            <span>{{ featuredSecondarySummary(pkg) }}</span>
-          </div>
-          <div class="market-featured-footer">
-            <span class="market-featured-version">{{ pkg.version ? `v${pkg.version}` : '当前可用' }}</span>
-            <button type="button" class="market-featured-cta" @click.stop="handleFeaturedAction(pkg)">
-              {{ featuredActionLabel(pkg) }}
-            </button>
-          </div>
-        </article>
-      </div>
-    </section>
-
-    <section class="market-filter-bar">
-      <div class="market-filter-scroll">
-        <button
-          v-for="quick in quickFilterTabs"
-          :key="quick.key"
-          type="button"
-          class="market-filter-pill"
-          :class="{ 'is-active': quick.active() }"
-          @click="quick.select"
-        >{{ quick.label }}</button>
-        <button type="button" class="market-filter-sheet-trigger" @click="filterSheetOpen = true">
-          <svg class="size-4" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-            <path d="M4 6h16M7 12h10M10 18h4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-          </svg>
-          筛选
-          <span v-if="selectedChips.length" class="market-filter-count">{{ selectedChips.length }}</span>
-        </button>
-        <MarketFilterDropdown
-          v-for="group in visibleFilterGroups"
-          :key="group.key"
-          :label="group.label"
-          :options="group.options()"
-          :selected="filterMultiSelections[group.key]"
-          :multi="true"
-          :dropdown-key="group.key"
-          :open="activeDropdownKey === group.key"
-          class="market-desktop-filter"
-          @change="(values) => onMultiFilterChange(group.key, values)"
-          @toggle="handleDropdownToggle"
-          @close="handleDropdownClose"
-        />
-      </div>
-    </section>
-
-    <div v-if="selectedChips.length" class="market-selected-chips" aria-label="已选筛选条件">
-      <span class="market-selected-label">已筛选</span>
-      <button v-for="chip in selectedChips" :key="`${chip.group}-${chip.value}`" type="button" class="market-active-chip" @click="removeSelection(chip.group, chip.value)">
-        {{ chip.label }}
-        <svg class="size-3" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-      </button>
-      <button type="button" class="market-clear-filters" @click="clearAllFilters">清除</button>
-    </div>
-
-    <section class="market-list-head">
-      <div class="flex min-w-0 items-center gap-3">
-        <span class="market-list-marker" aria-hidden="true">
-          <svg class="size-4" viewBox="0 0 24 24" fill="none"><path d="M4 8.4 12 4l8 4.4-8 4.4L4 8.4Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M4 12.2 12 16.6l8-4.4M4 16l8 4.4L20 16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        </span>
-        <div class="min-w-0">
-          <h2 class="truncate text-[16px] font-semibold leading-tight text-[var(--text-primary)]">{{ packageType === 'plugins' ? '插件包' : '频道包' }}</h2>
-          <p class="mt-0.5 text-[12.5px] text-[var(--text-secondary)]">{{ resultCountLabel }}</p>
-        </div>
       </div>
     </section>
 
@@ -266,24 +192,25 @@
           :aria-label="`查看 ${pkg.name} 详情`"
           @click="openDetail(pkg, $event)"
           @keydown.enter="openDetail(pkg, $event)"
-          @keydown.space.prevent="openDetail(pkg, $event)"
-        >
-          <div class="market-card-head">
-            <span class="market-region-badge" :class="isPluginPackage(pkg) ? 'market-region-violet' : regionBadgeClass(pkg)">
-              {{ isPluginPackage(pkg) ? 'P' : isLogoPackage(pkg) ? 'L' : regionBadge(pkg) }}
+            @keydown.space.prevent="openDetail(pkg, $event)"
+          >
+            <div class="market-card-head">
+            <span class="market-region-badge" :class="packageIdentity(pkg).toneClass">
+              {{ packageIdentity(pkg).text }}
             </span>
             <div class="min-w-0 flex-1">
               <h2 class="truncate text-[15px] font-semibold leading-snug text-[var(--text-primary)]">{{ packageCardTitle(pkg) }}</h2>
-              <p class="mt-1 truncate text-[13px] text-[var(--text-secondary)]">{{ cardMeta(pkg) }}</p>
+              <p class="market-card-source truncate">{{ packageSourceLabel(pkg) }}</p>
             </div>
           </div>
 
-          <p v-if="isPluginPackage(pkg) && packageDescription(pkg)" class="market-card-description">{{ packageDescription(pkg) }}</p>
+          <div class="market-card-scale">{{ packageScaleLabel(pkg) }}</div>
 
           <AdaptiveTagList
             class="market-card-tags"
-            :items="cardTagItems(pkg)"
+            :items="isPluginPackage(pkg) ? pluginCardTagItems(pkg) : displayTagItems(pkg)"
             :max-rows="1"
+            :max-items="3"
             :gap="6"
           >
             <template #tag="{ item }">
@@ -293,6 +220,8 @@
               <span class="market-tag market-tag-rest">+{{ count }}</span>
             </template>
           </AdaptiveTagList>
+
+          <p class="market-card-secondary truncate">{{ packageSecondaryMeta(pkg) }}</p>
         </div>
 
         <div class="market-card-foot">
@@ -303,7 +232,7 @@
             disabled
             @click.stop
           >
-            {{ pkg.unsupported_reason || '暂不支持' }}
+            暂不支持
           </button>
           <button
             v-else-if="installState(pkg) === 'installed'"
@@ -381,12 +310,12 @@
           @keydown.tab="onDrawerTab"
         >
           <header class="market-drawer-header">
-            <span class="market-region-badge" :class="isPluginPackage(selectedPackage) ? 'market-region-violet' : regionBadgeClass(selectedPackage || {})">
-              {{ isPluginPackage(selectedPackage) ? 'P' : isLogoPackage(selectedPackage) ? 'L' : regionBadge(selectedPackage || {}) }}
+            <span class="market-region-badge" :class="packageIdentity(selectedPackage || {}).toneClass">
+              {{ packageIdentity(selectedPackage || {}).text }}
             </span>
             <div class="min-w-0 flex-1">
-              <h2 :id="drawerTitleId" class="truncate text-[16px] font-semibold leading-snug text-[var(--text-primary)]">{{ selectedPackage?.name }}</h2>
-              <p class="mt-0.5 truncate text-[12.5px] text-[var(--text-secondary)]">{{ isPluginPackage(selectedPackage) ? pluginIdentity(selectedPackage) : displayMeta(selectedPackage || {}) }}</p>
+              <h2 :id="drawerTitleId" class="truncate text-[16px] font-semibold leading-snug text-[var(--text-primary)]">{{ packageCardTitle(selectedPackage || {}) }}</h2>
+              <p class="mt-0.5 truncate text-[12.5px] text-[var(--text-secondary)]">{{ packageSourceLabel(selectedPackage || {}) }}</p>
             </div>
             <button type="button" class="market-touch-icon-btn" aria-label="关闭" @click="closeDialog">
               <svg class="size-4" viewBox="0 0 24 24" fill="none"><path d="M6 6l12 12M18 6 6 18" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
@@ -716,6 +645,7 @@ import MarketFilterDropdown from '../components/MarketFilterDropdown.vue'
 import AdaptiveTagList from '../components/AdaptiveTagList.vue'
 import { isLogoPackage, isPluginPackage, packageActionLabel, packageInstallable, permissionLabel, pluginDependencies, pluginIdentity, pluginRuntimeLabel, pluginSchemeLabels, providerContractLabels, requestedPermissions } from './marketPackageUi'
 import { createLatestMarketSourceProjection, marketSourceDraft } from './marketSourceUi.js'
+import { packageCardTitle, packageIdentity, packageScaleLabel, packageSecondaryMeta, packageSourceLabel, pluginCardTagItems } from './marketCardUi.js'
 
 const toastStore = useToastStore()
 const route = useRoute()
@@ -853,6 +783,7 @@ const DEFAULT_TAG_RULES = {
   '卫视': { priority: 92, aliases: ['satellite'] },
   '本地台': { priority: 88, aliases: ['local'] },
   '本省台': { priority: 86 },
+  '地方': { priority: 84, aliases: ['local_content'] },
   '体育': { priority: 82, tone: 'blue', aliases: ['sports', 'sport', '赛事'] },
   '足球': { priority: 78, tone: 'blue', aliases: ['football'] },
   '篮球': { priority: 76, tone: 'blue', aliases: ['basketball'] },
@@ -982,9 +913,7 @@ function _mergeSourceDefsInto(merged, sourceDefs, { keepDefaultAliases }) {
 // 卡片标签需要排除的"身份信息"（避免与标题/Meta 重复）。
 const IDENTITY_EXCLUDE_PATTERNS = [
   /^IPTV$/i,
-  /^HLS$/i,
-  /^HTTP[S]?$/i,
-  /^M3U[8]?$/i,
+  /^(HLS|HTTP[S]?|M3U[8]?|RTSP|DASH|HTTP-FLV|MPEG-TS)(?:[/-].*)?$/i,
   /^TV$/i, /^Live$/i,
   /^单播$/, /^组播$/, /^直播$/, /^播放列表$/, /^电视$/,
   /^移动$/, /^联通$/, /^电信$/, /^广电$/, /^教育网$/, /^海外$/,
@@ -1256,7 +1185,13 @@ function pkgContentTags(pkg) {
 // AdaptiveTagList 基于两行真实宽度测量决定，组件外部不再做硬编码 slice。
 // 强调色名额仍然限制为 3：tone 必须存在且不是 'neutral'，emphasized=false 不计入。
 function displayTagItems(pkg) {
-  const tags = pkgContentTags(pkg)
+  const tags = pkgContentTags(pkg).filter((label) => {
+    const rules = packageTagRules(pkg)
+    const rule = directRule(rules, label, { allowSubstring: tagModeOf(pkg) === 'inherit' })
+    // 首页只显示被 WaveFlow 或当前 Market 源定义为内容摘要的标签。
+    // 未定义的频道台/平台名和传输字段留给详情层，避免把来源与内容类型混在一起。
+    return Boolean(rule)
+  })
   const rules = packageTagRules(pkg)
   const allowSubstring = tagModeOf(pkg) === 'inherit'
   let accentCount = 0
@@ -1271,81 +1206,6 @@ function displayTagItems(pkg) {
       accentClass: canAccent ? `market-tag-${tone}` : '',
     }
   })
-}
-
-function packageCardTitle(pkg) {
-  if (!pkg) return ''
-  if (!isPluginPackage(pkg)) return String(pkg.name || pkg.id || '未命名内容')
-  const displayName = pkg.plugin?.display_name || pkg.plugin_manifest?.display_name || pkg.name || pkg.id
-  return String(displayName || '').replace(/\s+Plugin(?:\s+Package)?$/i, '').trim() || '未命名 Plugin'
-}
-
-function packageDescription(pkg) {
-  if (!pkg) return ''
-  const description = String(pkg.description || '').trim()
-  if (description) return description
-  if (isPluginPackage(pkg)) {
-    const contracts = providerContractLabels(pkg)
-    if (contracts.includes('TVProvider')) return '为 WaveFlow 提供电视目录与播放地址解析能力。'
-    if (contracts.includes('RadioProvider')) return '为 WaveFlow 提供电台目录与播放地址解析能力。'
-    return '为 WaveFlow 提供可安装的 Provider 能力。'
-  }
-  if (isLogoPackage(pkg)) return '改善已有频道台标，不添加频道或播放源。'
-  return ''
-}
-
-function productContractLabel(contract) {
-  if (contract === 'TVProvider') return '电视 Provider'
-  if (contract === 'RadioProvider') return '电台 Provider'
-  return contract
-}
-
-function pluginProductTags(pkg) {
-  const contracts = providerContractLabels(pkg).map(productContractLabel)
-  const capabilities = new Set()
-  for (const item of pkg?.plugin?.provider_contracts || []) {
-    for (const value of item?.features || []) {
-      if (/resolve_stream$/i.test(String(value))) capabilities.add('自动解析')
-      else if (/catalog$/i.test(String(value))) capabilities.add('目录')
-    }
-  }
-  return Array.from(new Set([...contracts, ...capabilities]))
-}
-
-function cardTagItems(pkg) {
-  if (isPluginPackage(pkg)) {
-    return pluginProductTags(pkg).map(label => ({
-      label,
-      accentClass: /Provider/.test(label) ? 'market-tag-blue' : '',
-    }))
-  }
-  return displayTagItems(pkg)
-}
-
-function cardMeta(pkg) {
-  if (!pkg) return ''
-  if (isPluginPackage(pkg)) {
-    const labels = pluginProductTags(pkg)
-    return labels.slice(0, 2).join(' · ') || 'WaveFlow 扩展'
-  }
-  return displayMeta(pkg)
-}
-
-function packageTrustLabel(pkg) {
-  const source = pkg?.market_source || {}
-  if (source.is_builtin || source.source_key === 'official' || source.source_key === 'official_plugins') return '官方源'
-  if (source.name) return String(source.name)
-  return 'Market 源'
-}
-
-function packageCardTagSummary(pkg) {
-  const labels = (isPluginPackage(pkg) ? pluginProductTags(pkg) : pkgContentTags(pkg)).slice(0, 2)
-  return labels.join(' · ') || (isPluginPackage(pkg) ? '可安装扩展' : '频道内容')
-}
-
-function featuredSecondarySummary(pkg) {
-  if (!isPluginPackage(pkg)) return packageCardTagSummary(pkg)
-  return pluginSchemeLabels(pkg).slice(0, 2).join(' · ') || '可安装扩展'
 }
 
 // 从规则集合中查 label 的有效规则。
@@ -1845,46 +1705,6 @@ const filteredPackages = computed(() => {
   }
   return list
 })
-
-function featuredScore(pkg) {
-  const source = pkg?.market_source || {}
-  let score = 0
-  if (source.is_builtin || source.source_key === 'official' || source.source_key === 'official_plugins') score += 50
-  if (pkg.status === 'stable') score += 15
-  if (packageInstallable(pkg)) score += 10
-  if (pkg.update_available) score += 4
-  if (pkg.installed) score += 2
-  score += Math.min(Number(pkg.channel_count) || 0, 1000) / 1000
-  return score
-}
-
-const featuredPackages = computed(() => {
-  if (filters.search.trim() || hasActiveSelections.value) return []
-  return packages.value
-    .map((pkg, index) => ({ pkg, index }))
-    .filter(({ pkg }) => (
-      (packageType.value === 'plugins' ? isPluginPackage(pkg) : !isPluginPackage(pkg))
-      && packageInstallable(pkg)
-    ))
-    .sort((a, b) => featuredScore(b.pkg) - featuredScore(a.pkg) || a.index - b.index)
-    .slice(0, 3)
-    .map(({ pkg }) => pkg)
-})
-
-function featuredActionLabel(pkg) {
-  const state = installState(pkg)
-  if (state === 'update') return '更新'
-  if (state === 'installed') return '已安装'
-  if (state === 'unsupported') return '查看详情'
-  return '安装'
-}
-
-function handleFeaturedAction(pkg) {
-  const state = installState(pkg)
-  if (state === 'update') return handleReinstall(pkg)
-  if (state === 'installed' || state === 'unsupported') return openDetail(pkg)
-  return handleImport(pkg)
-}
 
 const resultCountLabel = computed(() => {
   const visible = filteredPackages.value.length
@@ -2630,249 +2450,6 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-.market-page-header {
-  margin-bottom: 22px;
-}
-
-.market-header-row {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 20px;
-  min-width: 0;
-}
-
-@media (min-width: 1024px) {
-  /* AppShell 的固定搜索/主题操作位于页面右上角，给 Market header 留出独立空间。 */
-  .market-header-row {
-    padding-right: 112px;
-  }
-}
-
-.market-header-identity {
-  display: flex;
-  flex: 1 1 auto;
-  min-width: 0;
-  align-items: flex-end;
-  gap: 18px;
-}
-
-.market-header-copy {
-  min-width: 0;
-}
-
-.market-eyebrow {
-  margin-bottom: 5px;
-  color: var(--text-tertiary);
-  font-size: 11px;
-  font-weight: 700;
-}
-
-.market-featured-section {
-  margin-bottom: 24px;
-}
-
-.market-featured-heading {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 10px;
-}
-
-.market-section-heading {
-  color: var(--text-primary);
-  font-size: 15px;
-  font-weight: 650;
-}
-
-.market-section-caption,
-.market-section-count,
-.market-featured-version {
-  color: var(--text-tertiary);
-  font-size: 12px;
-}
-
-.market-section-caption {
-  margin-top: 3px;
-}
-
-.market-featured-rail {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: var(--card-gap);
-  min-width: 0;
-}
-
-.market-featured-card {
-  display: flex;
-  min-width: 0;
-  min-height: 176px;
-  flex-direction: column;
-  gap: 12px;
-  padding: 16px;
-  border: 1px solid var(--border);
-  border-radius: var(--card-radius);
-  background: var(--card-bg);
-  box-shadow: var(--card-shadow);
-  cursor: pointer;
-  outline: none;
-  transition: border-color 160ms ease, transform 160ms ease;
-}
-
-.market-featured-card:hover {
-  transform: translateY(-2px);
-  border-color: var(--border-strong);
-}
-
-.market-featured-card:focus-visible {
-  border-color: var(--text-primary);
-}
-
-.market-featured-card-top,
-.market-featured-footer,
-.market-featured-meta {
-  display: flex;
-  align-items: center;
-  min-width: 0;
-}
-
-.market-featured-card-top,
-.market-featured-footer {
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.market-featured-badge {
-  display: inline-flex;
-  width: 30px;
-  height: 30px;
-  align-items: center;
-  justify-content: center;
-  border-radius: 9px;
-  background: var(--surface-active);
-  color: var(--text-primary);
-  font-size: 13px;
-  font-weight: 700;
-}
-
-.market-featured-source {
-  overflow: hidden;
-  color: var(--text-tertiary);
-  font-size: 11.5px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.market-featured-card-copy {
-  min-width: 0;
-}
-
-.market-featured-description,
-.market-card-description {
-  display: -webkit-box;
-  overflow: hidden;
-  color: var(--text-secondary);
-  font-size: 12.5px;
-  line-height: 1.55;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-}
-
-.market-featured-description {
-  margin-top: 5px;
-  min-height: 38px;
-}
-
-.market-featured-meta {
-  overflow: hidden;
-  gap: 7px;
-  color: var(--text-secondary);
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.market-featured-meta > span:first-child {
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.market-featured-dot {
-  color: var(--text-tertiary);
-}
-
-.market-featured-footer {
-  margin-top: auto;
-}
-
-.market-featured-cta {
-  display: inline-flex;
-  min-width: 58px;
-  height: 32px;
-  align-items: center;
-  justify-content: center;
-  padding: 0 12px;
-  border-radius: 999px;
-  background: var(--text-primary);
-  color: var(--bg);
-  font-size: 12px;
-  font-weight: 600;
-  transition: opacity 140ms ease, transform 140ms ease;
-}
-
-.market-featured-cta:hover {
-  transform: translateY(-1px);
-}
-
-.market-featured-cta:active {
-  transform: translateY(0);
-}
-
-.market-list-marker {
-  display: inline-flex;
-  width: 30px;
-  height: 30px;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  background: var(--surface);
-  color: var(--text-secondary);
-}
-
-.market-selected-chips {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  gap: 7px;
-  margin: -10px 0 var(--card-gap);
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-
-.market-selected-chips::-webkit-scrollbar {
-  display: none;
-}
-
-.market-selected-label {
-  flex: 0 0 auto;
-  color: var(--text-tertiary);
-  font-size: 12px;
-}
-
-.market-clear-filters {
-  flex: 0 0 auto;
-  margin-left: 2px;
-  color: var(--text-secondary);
-  font-size: 12px;
-}
-
-.market-clear-filters:hover {
-  color: var(--text-primary);
-}
-
 .market-list-head {
   display: flex;
   align-items: center;
@@ -2884,7 +2461,6 @@ onBeforeUnmount(() => {
 
 .market-list-actions {
   display: flex;
-  flex: 0 0 auto;
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
@@ -3180,7 +2756,7 @@ onBeforeUnmount(() => {
 }
 
 .market-filter-sheet-trigger {
-  display: none;
+  display: inline-flex;
   align-items: center;
   gap: 7px;
   height: 40px;
@@ -3207,6 +2783,10 @@ onBeforeUnmount(() => {
   font-weight: 650;
 }
 
+.market-desktop-filter {
+  display: none;
+}
+
 .market-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -3221,11 +2801,17 @@ onBeforeUnmount(() => {
 
 @media (min-width: 1024px) {
   .market-grid {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 
 @media (min-width: 1280px) {
+  .market-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 1600px) {
   .market-grid {
     grid-template-columns: repeat(5, minmax(0, 1fr));
   }
@@ -3434,9 +3020,9 @@ onBeforeUnmount(() => {
 .market-card {
   display: flex;
   flex-direction: column;
-  min-height: 202px;
-  gap: 14px;
-  padding: 18px;
+  min-height: 226px;
+  gap: 12px;
+  padding: 16px;
   border-radius: var(--card-radius);
   border: 1px solid var(--border);
   background: var(--card-bg);
@@ -3459,7 +3045,7 @@ onBeforeUnmount(() => {
 }
 
 .market-card-skeleton {
-  height: 200px;
+  height: 226px;
   border-radius: var(--card-radius);
   border: 1px solid var(--border);
   background: var(--surface);
@@ -3473,9 +3059,10 @@ onBeforeUnmount(() => {
 
 .market-card-body {
   display: flex;
+  flex: 1 1 auto;
   min-width: 0;
   flex-direction: column;
-  gap: 11px;
+  gap: 10px;
   border-radius: 12px;
   cursor: pointer;
   outline: none;
@@ -3521,9 +3108,33 @@ onBeforeUnmount(() => {
 .market-card-tags {
   display: flex;
   flex-wrap: wrap;
-  min-height: 30px;
+  min-height: 25px;
+  max-height: 25px;
   align-content: flex-start;
+  overflow: hidden;
   gap: 6px;
+}
+
+.market-card-source {
+  margin-top: 4px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.market-card-scale {
+  min-height: 20px;
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 20px;
+}
+
+.market-card-secondary {
+  min-height: 16px;
+  color: var(--text-tertiary);
+  font-size: 11.5px;
+  line-height: 16px;
 }
 
 .market-tag {
@@ -3839,60 +3450,6 @@ onBeforeUnmount(() => {
 
 /* ── 移动端 ────────────────────────────────────────────── */
 @media (max-width: 640px) {
-  .market-page-header {
-    margin-bottom: 18px;
-  }
-
-  .market-header-row {
-    align-items: stretch;
-    flex-direction: column;
-    gap: 14px;
-    padding-right: 0;
-  }
-
-  .market-header-identity {
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-  }
-
-  .market-package-type-switch {
-    flex: 0 0 auto;
-  }
-
-  .market-list-actions {
-    width: 100%;
-  }
-
-  .market-featured-section {
-    margin-bottom: 20px;
-  }
-
-  .market-featured-rail {
-    display: flex;
-    gap: 10px;
-    margin-right: -16px;
-    overflow-x: auto;
-    padding-right: 16px;
-    padding-bottom: 3px;
-    scroll-snap-type: x mandatory;
-    scrollbar-width: none;
-  }
-
-  .market-featured-rail::-webkit-scrollbar {
-    display: none;
-  }
-
-  .market-featured-card {
-    width: min(82vw, 310px);
-    flex: 0 0 auto;
-    scroll-snap-align: start;
-  }
-
-  .market-selected-chips {
-    margin-top: -8px;
-  }
-
   .market-list-head {
     align-items: flex-start;
     flex-direction: column;
@@ -3945,12 +3502,13 @@ onBeforeUnmount(() => {
   }
 
   .market-card {
-    min-height: 184px;
+    min-height: 220px;
     padding: 16px;
   }
 
   .market-card-tags {
-    min-height: 30px;
+    min-height: 25px;
+    max-height: 25px;
   }
 
   .market-btn-primary,
