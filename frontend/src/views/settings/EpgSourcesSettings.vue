@@ -490,8 +490,8 @@ onBeforeUnmount(() => {
 .epg-primary-button,
 .epg-secondary-button,
 .epg-danger-button {
-  min-height: 2.5rem;
-  border-radius: 0.75rem;
+  min-height: var(--control-height);
+  border-radius: var(--control-radius);
   padding: 0.625rem 1rem;
   font-size: 0.875rem;
   font-weight: 600;
@@ -567,9 +567,9 @@ onBeforeUnmount(() => {
 .epg-status--disabled { border-color: var(--border); background: var(--surface); color: var(--text-tertiary); }
 
 .epg-action-button {
-  min-height: 2.5rem;
+  min-height: var(--control-height);
   flex-shrink: 0;
-  border-radius: 0.75rem;
+  border-radius: var(--control-radius);
   padding: 0.5rem 0.75rem;
   font-size: 0.75rem;
   font-weight: 500;
@@ -599,7 +599,7 @@ onBeforeUnmount(() => {
   max-height: calc(100dvh - 1rem);
   overflow-y: auto;
   border: 1px solid var(--border);
-  border-radius: 1.5rem 1.5rem 0 0;
+  border-radius: var(--panel-radius) var(--panel-radius) 0 0;
   background: var(--bg-soft);
   padding: 1.25rem;
   box-shadow: 0 24px 64px rgb(0 0 0 / 0.22);
@@ -607,12 +607,12 @@ onBeforeUnmount(() => {
 
 .epg-icon-button {
   display: inline-flex;
-  width: 2.5rem;
-  height: 2.5rem;
+  width: var(--icon-button-size);
+  height: var(--icon-button-size);
   flex-shrink: 0;
   align-items: center;
   justify-content: center;
-  border-radius: 0.75rem;
+  border-radius: var(--control-radius);
   color: var(--text-secondary);
 }
 
@@ -628,9 +628,9 @@ onBeforeUnmount(() => {
 
 .epg-input {
   width: 100%;
-  min-height: 2.75rem;
+  min-height: var(--chip-hit-height);
   border: 1px solid var(--border);
-  border-radius: 0.75rem;
+  border-radius: var(--control-radius);
   background: var(--bg-soft);
   padding: 0.625rem 0.875rem;
   font-size: 0.875rem;
@@ -643,6 +643,6 @@ onBeforeUnmount(() => {
 
 @media (min-width: 640px) {
   .epg-dialog-layer { align-items: center; padding: 2rem 1rem; }
-  .epg-dialog-panel { max-width: 36rem; max-height: calc(100dvh - 4rem); border-radius: 1.25rem; padding: 1.5rem; }
+  .epg-dialog-panel { max-width: 36rem; max-height: calc(100dvh - 4rem); border-radius: var(--panel-radius); padding: 1.5rem; }
 }
 </style>

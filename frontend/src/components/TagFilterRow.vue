@@ -10,7 +10,7 @@
         v-for="(item, index) in displayItems"
         :key="`t-${itemKey(item, index)}`"
         type="button"
-        class="tag-filter-row__item h-11 shrink-0 rounded-full border px-5 text-sm font-medium transition-colors"
+        class="tag-filter-row__item h-[var(--chip-hit-height)] shrink-0 rounded-full border px-5 text-sm font-medium transition-colors"
         :class="[pillClass(isActive(item)), { 'tag-filter-row__item--selected': isActive(item) }]"
         @click="$emit('select', item)"
       >
@@ -20,7 +20,7 @@
       <button
         v-if="hasOverflow"
         type="button"
-        class="tag-filter-row__more inline-flex h-11 shrink-0 items-center gap-1 rounded-full border border-[var(--border)] bg-[var(--surface)] px-4 text-sm font-medium text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)]"
+        class="tag-filter-row__more inline-flex h-[var(--chip-hit-height)] shrink-0 items-center gap-1 rounded-full border border-[var(--border)] bg-[var(--surface)] px-4 text-sm font-medium text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)]"
         :aria-expanded="expanded || collapsing"
         :aria-label="expanded || collapsing ? '收起标签' : '展开全部标签'"
         @click="toggle"
@@ -66,7 +66,7 @@ function itemKey(item, index) {
 
 function pillClass(active) {
   return active
-    ? 'border-black bg-black text-white dark:border-white dark:bg-white dark:text-black'
+    ? 'border-[var(--text-primary)] bg-[var(--text-primary)] text-[var(--bg)]'
     : 'border-[var(--border)] bg-[var(--surface)] text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)]'
 }
 
@@ -103,7 +103,7 @@ function measure() {
   // 复刻按钮样式以测准宽度
   const sample = (text) => {
     const b = document.createElement('button')
-    b.className = 'h-11 shrink-0 rounded-full border px-5 text-sm font-medium'
+    b.className = 'h-[var(--chip-hit-height)] shrink-0 rounded-full border px-5 text-sm font-medium'
     b.textContent = text
     return b
   }
@@ -151,7 +151,7 @@ function measure() {
   wrapProbe.style.cssText = `position:absolute;visibility:hidden;pointer-events:none;left:-9999px;top:0;display:flex;flex-wrap:wrap;gap:8px;width:${totalWidth}px;`
   const sampleBtn = (text) => {
     const b = document.createElement('button')
-    b.className = 'h-11 shrink-0 rounded-full border px-5 text-sm font-medium'
+    b.className = 'h-[var(--chip-hit-height)] shrink-0 rounded-full border px-5 text-sm font-medium'
     b.textContent = text
     return b
   }

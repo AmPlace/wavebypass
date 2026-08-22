@@ -1,8 +1,8 @@
 <template>
-  <main class="settings-page min-h-screen w-full px-5 pt-[calc(env(safe-area-inset-top)+4rem)] sm:px-8 lg:px-10 lg:pt-6 page-with-mini-player">
+  <main class="settings-page page-shell min-h-screen w-full page-with-mini-player">
     <nav
       ref="tabsRef"
-      class="settings-primary-tabs scrollbar-hide mb-4 flex max-w-full items-center gap-2 overflow-x-auto pb-[3px]"
+      class="settings-primary-tabs scrollbar-hide mb-[var(--card-gap)] flex max-w-full items-center gap-2 overflow-x-auto pb-[3px]"
       aria-label="设置分类"
     >
       <RouterLink
@@ -53,14 +53,8 @@ onMounted(revealActiveTab)
 }
 
 .settings-primary-tab.is-active {
-  border-color: #000;
-  background: #000;
-  color: #fff;
-}
-
-.dark .settings-primary-tab.is-active {
-  border-color: #fff;
-  background: #fff;
-  color: #000;
+  border-color: var(--text-primary);
+  background: var(--text-primary);
+  color: var(--bg);
 }
 </style>

@@ -266,15 +266,9 @@ onBeforeUnmount(() => {
 }
 
 .market-dropdown-trigger.has-selection {
-  border-color: #000;
-  background: #000;
-  color: #fff;
-}
-
-.dark .market-dropdown-trigger.has-selection {
-  border-color: #fff;
-  background: #fff;
-  color: #000;
+  border-color: var(--text-primary);
+  background: var(--text-primary);
+  color: var(--bg);
 }
 
 .market-dropdown-count {
@@ -285,26 +279,17 @@ onBeforeUnmount(() => {
   height: 18px;
   padding: 0 5px;
   border-radius: 999px;
-  background: rgb(15 15 15);
-  color: #fff;
+  background: var(--text-primary);
+  color: var(--bg);
   font-size: 10.5px;
   font-weight: 600;
 }
 
 .market-dropdown-trigger.has-selection .market-dropdown-count {
-  background: #fff;
-  color: #000;
+  background: var(--bg);
+  color: var(--text-primary);
 }
 
-.dark .market-dropdown-count {
-  background: #fff;
-  color: #000;
-}
-
-.dark .market-dropdown-trigger.has-selection .market-dropdown-count {
-  background: #000;
-  color: #fff;
-}
 </style>
 
 <style>

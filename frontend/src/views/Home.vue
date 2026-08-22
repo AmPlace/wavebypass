@@ -1,5 +1,5 @@
 <template>
-  <main class="radio-main min-h-screen w-full px-5 pt-[calc(env(safe-area-inset-top)+4rem)] sm:px-8 lg:px-10 lg:pt-6 page-with-mini-player">
+  <main class="radio-main page-shell min-h-screen w-full page-with-mini-player">
     <header class="mb-7 space-y-7">
       <div class="space-y-3 lg:pr-[300px]">
         <TagFilterRow
@@ -101,7 +101,7 @@
       >
         <div
           class="grid"
-          :style="{ gap: `${gap}px`, gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }"
+          :style="{ gap: 'var(--card-gap)', gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }"
         >
           <button
             v-for="item in row.items"
@@ -110,7 +110,7 @@
             :aria-label="`切换到 ${item.station.name}`"
             :aria-current="isCurrentStationSelected(item.station.id) ? 'true' : undefined"
             :style="{ height: `${cardHeight}px` }"
-            class="channel-card group relative overflow-hidden rounded-[18px] border border-[var(--border)] bg-[var(--card-bg)] text-left outline-none transition duration-200 ease-out hover:-translate-y-0.5 hover:border-[var(--border-strong)]"
+            class="channel-card group relative overflow-hidden rounded-[var(--card-radius)] border border-[var(--border)] bg-[var(--card-bg)] text-left outline-none transition duration-200 ease-out hover:-translate-y-0.5 hover:border-[var(--border-strong)]"
             :class="[
               'channel-card--logo-card',
               {

@@ -1,7 +1,7 @@
 <template>
   <footer class="bottom-player-dock fixed left-4 right-4 z-40">
     <div
-      class="mobile-player-shell relative mx-auto flex h-[72px] items-center justify-between gap-2 rounded-[20px] border border-[var(--border)] bg-[var(--player-bg)] px-3 shadow-[0_12px_32px_rgba(0,0,0,0.12)] backdrop-blur-[12px] backdrop-saturate-110 dark:shadow-[0_14px_36px_rgba(0,0,0,0.34)] sm:px-5 lg:h-16 lg:rounded-[20px] lg:px-4"
+      class="mobile-player-shell relative mx-auto flex h-[72px] items-center justify-between gap-2 border border-[var(--border)] bg-[var(--player-bg)] px-3 backdrop-blur-[12px] backdrop-saturate-110 sm:px-5 lg:h-16 lg:px-4"
       role="group"
       tabindex="0"
       aria-label="打开播放器"

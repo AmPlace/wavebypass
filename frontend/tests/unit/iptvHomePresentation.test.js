@@ -60,8 +60,8 @@ test('IPTV Home 支持 Standard/Compact presentation density，Compact 不渲染
 test('IPTV Home Light Theme only edges identity logos, not cover or text fallback', () => {
   const styles = fs.readFileSync(path.join(frontendRoot, 'src/style.css'), 'utf8')
   assert.match(styles, /\.iptv-main \.channel-card__center-logo--badge,\s*\.iptv-main \.channel-card__center-logo--wide[\s\S]*?drop-shadow\(0 0 1px rgba\(15, 23, 42, 0\.52\)\)[\s\S]*?drop-shadow\(0 1px 1px rgba\(15, 23, 42, 0\.18\)\)/)
-  assert.match(styles, /\.iptv-main \.channel-card__center-logo--cover,[\s\S]*?filter: none;/)
-  assert.match(styles, /\.dark \.iptv-main \.channel-card__center-logo,[\s\S]*?filter: none;/)
+  assert.match(styles, /\.iptv-main \.channel-card__center-logo--cover[\s\S]*?filter: none;/)
+  assert.match(styles, /\.dark :is\(\.iptv-main, \.radio-main\) \.channel-card__center-logo--cover[\s\S]*?filter: none;/)
   assert.doesNotMatch(styles, /\.iptv-main \.channel-card__text-logo[\s\S]*?filter:/)
 })
 

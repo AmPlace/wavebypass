@@ -1,6 +1,6 @@
 <template>
   <main
-    class="iptv-main min-h-screen w-full px-5 pt-[calc(env(safe-area-inset-top)+4rem)] sm:px-8 lg:px-10 lg:pt-6 page-with-mini-player"
+    class="iptv-main page-shell min-h-screen w-full page-with-mini-player"
     :class="{ 'iptv-density-compact': densityMode === 'compact' }"
   >
     <header class="mb-7 space-y-7">
@@ -130,7 +130,7 @@
       >
         <div
           class="grid"
-          :style="{ gap: `${gap}px`, gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }"
+          :style="{ gap: 'var(--card-gap)', gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }"
         >
           <button
             v-for="item in row.items"
@@ -140,7 +140,7 @@
             :style="{ height: `${cardHeight}px` }"
             :disabled="isUnavailable(item.channel)"
             :data-canonical-key="item.channel.canonical_key"
-            class="channel-card group relative overflow-hidden rounded-[18px] border border-[var(--border)] bg-[var(--card-bg)] text-left outline-none transition duration-200 ease-out hover:-translate-y-0.5 hover:border-[var(--border-strong)] disabled:cursor-not-allowed disabled:opacity-45"
+            class="channel-card group relative overflow-hidden rounded-[var(--card-radius)] border border-[var(--border)] bg-[var(--card-bg)] text-left outline-none transition duration-200 ease-out hover:-translate-y-0.5 hover:border-[var(--border-strong)] disabled:cursor-not-allowed disabled:opacity-45"
             :class="[defaultCoverClass(item.channel), { 'channel-card-current': isCurrentChannel(item.channel) }]"
             @click="playChannel(item.channel)"
           >
