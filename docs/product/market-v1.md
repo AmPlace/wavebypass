@@ -1,187 +1,142 @@
-# Market V1 UI Product Specification
+# WaveFlow Market V1 Product Contract
 
-This document defines the durable product rules for the WaveFlow Market V1
-package catalog. It describes the current card and filter behavior; it is not
-an implementation log and it is not proof that a package is installed.
+This document describes the current Market product behavior. It is not an
+implementation log and it is not proof that a package is installed.
 
-## 1. Product Goal
+## Authority
 
-Market helps an administrator quickly decide what a package is, where it comes
-from, how much content or capability it provides, and which action is
-available. The first screen favors recognition and comparison. Complete
-package metadata remains available in the package detail drawer.
+Package/catalog data is the authority for user-visible semantics: `name`,
+`description`, `display.subtitle`, `display.summary`, explicit identity,
+tags, regions, operators, providers, package type, counts, and metadata.
 
-## 2. Page Information Architecture
+The frontend owns layout, responsive behavior, tag overflow, filtering
+presentation, and install/update runtime state. It must not infer meaning
+from a package name, id, region, operator, tag, provider, publisher, or
+Plugin manifest.
 
-The V1 page keeps the existing Market IA:
+When a package omits a field, the field stays absent. The only generic visual
+fallback is a neutral identity placeholder with no semantic label.
 
-- package type switch: Content / Plugins;
-- high-frequency status shortcuts: All / Installed / Updates;
-- a filter entry for lower-frequency conditions;
-- search, sort, source management, refresh, and update actions;
-- a responsive package grid;
-- a package detail drawer.
+## Information Architecture
 
-V1 does not add a Featured, recommendation, or promotional section.
+Market keeps the current IA:
 
-## 3. Grid and Responsive Rules
+- Content / Plugins package switch;
+- `全部`, `已安装`, and `有更新` quick filters;
+- package search and explicit catalog sorting;
+- refresh, Market source management, and update actions;
+- responsive package grid;
+- package detail drawer;
+- anchored desktop structured filters and a mobile bottom-sheet filter.
 
-Cards use a regular CSS grid. Masonry and content-dependent row packing are not
-used.
+This contract does not add a recommendation area or change package
+install/update lifecycle semantics.
 
-- under `640px`: one column;
-- `640px` through `1023px`: two columns;
-- `1024px` through `1279px`: three columns;
-- `1280px` through `1599px`: four columns;
-- `1600px` and wider: five columns when the available content width supports
-  readable package identity and titles.
+## Card Anatomy
 
-The grid is allowed to show fewer packages per viewport when that preserves
-title, identity, and action readability. A smaller card count is preferable to
-truncating the package identity into an ambiguous tile.
+The normal card projects package data in this order:
 
-## 4. Package Card Anatomy
+1. explicit identity visual, or neutral placeholder;
+2. package `name` exactly as supplied;
+3. optional `display.subtitle`;
+4. optional `display.summary`;
+5. explicit package metric;
+6. ordered root `tags`;
+7. install, update, installed, or unsupported runtime state.
 
-The normal card follows this order:
+The card does not show generated source labels, guessed region/provider
+identity, transport sentences, capability-derived Plugin tags, or generated
+subtitle/summary text. Full `description`, raw machine metadata, and channel
+preview remain in the detail drawer.
 
-1. identity badge, package title, and source/region line;
-2. scale: channel count, logo count, or Plugin scheme count;
-3. up to three content or capability summary tags, followed by `+N` when
-   additional core items exist;
-4. quiet package/source metadata;
-5. status and primary action, with overflow fixed at the trailing edge.
+## Identity And Description
 
-Card height is stable enough for row comparison. A package with fewer summary
-items does not receive a large empty taxonomy area, and a package with a long
-taxonomy does not grow the grid row indefinitely.
+Identity is explicit package data. `display.identity.brand` selects an
+existing built-in asset; it is not a detector. An explicit
+`display.identity.icon` may select a built-in icon or HTTPS image. An
+explicit `display.badge` supplies badge text and tone.
 
-The home card does not show full channel previews, long descriptions, package
-versions, full taxonomy, transport details, or complete technical capability
-lists. Clicking the card opens the detail drawer.
+Changing a package name, region, operator, provider, publisher, or scheme
+must not change its identity visual unless the package's `display` object
+changes.
 
-## 5. Package Identity Resolution
+`description` is the complete detail description. `display.summary` is an
+optional short card/detail summary and `display.subtitle` is an optional
+explicit subtitle. None of these fields is generated from another field.
 
-The identity badge is a package identity cue, not a guessed channel logo. All
-identity badges use the same container size, radius, padding, and visual
-weight.
+## Tags
 
-Resolution priority:
+The package root-level `tags` is the one tag list shared by card and detail.
+The frontend preserves the package's original text and order, including
+unknown/custom values. It never applies aliases, category inference,
+priority, sorting, or hidden semantic filtering.
 
-1. explicit `package.display.badge` text and tone;
-2. Plugin publisher/provider identity;
-3. Content operator identity;
-4. region or country identity;
-5. WaveFlow or official source identity;
-6. stable package-name monogram fallback.
+Cards use `AdaptiveTagList` to render one row according to actual available
+width. Only tags that do not fit produce `+N`; there is no fixed `maxItems`
+limit. The detail drawer renders the same complete ordered list.
 
-Examples:
+`categories` and `tags` remain separate: categories are controlled filter
+taxonomy, tags are package-authored display/discovery labels.
 
-- an operator package uses an operator cue such as Mobile, Telecom, or
-  Unicom, while the province remains in the source line;
-- an official Plugin uses the WaveFlow publisher cue and displays its stable
-  publisher/plugin identity in text;
-- a region-only package uses the region cue;
-- a custom badge is honored without inferring a broadcaster logo.
+## Metrics
 
-The current V1 backend contract exposes a sanitized badge override, not a
-generic remote package image contract. The card therefore does not invent or
-fetch identity artwork.
+Content cards display only an explicit positive `channel_count` as
+`N 个频道`. Logo cards display only an explicit positive `logo_count` as
+`N 个台标`. `source_count` remains source count and is never a fallback for
+channel count. Plugin cards do not invent a scheme/provider/permission
+count.
 
-## 6. Content Tag Taxonomy and Priority
+Index counts describe the package's catalog snapshot. Preview counts are
+computed after the manifest is actually parsed and supported sources are
+resolved. The UI does not present one metric as another.
 
-Visible Content tags summarize content categories. They may express groups such
-as CCTV, satellite, local, sports, children, film, news, education,
-documentary, music, shopping, and similar curated categories.
+## Filters
 
-The presenter normalizes aliases, removes identity and transport fields, and
-orders tags by deterministic priority. The card shows at most three core tags;
-additional core categories are represented by `+N`. Source-defined tag rules
-may extend or replace the built-in taxonomy within the Market schema contract.
+Structured filters project raw package fields:
 
-The following are not ordinary Content tags on the card:
+| UI label | Package field |
+| --- | --- |
+| 地区 | `regions[]` |
+| 运营商 | `operators[]` |
+| 提供方 | `providers[]` |
+| 类型 | `kind` |
+| 状态 | lifecycle/runtime status |
+| 分类 | `categories[]` |
+| 标签 | root `tags[]` |
 
-- HLS, HTTP, RTSP, MPEG-TS, DASH, multicast, and other transport details;
-- IPTV, playlist, dynamic package, and other package implementation fields;
-- region/operator identity already shown in the source line;
-- complete channel names and provider-specific technical labels.
+地区 options are built from explicit `country`, `province`, `city`, and
+`global` values. The UI does not turn provider/broadcaster values into
+operators, and does not alias or discard options.
 
-These values remain available in the detail layer where they affect playback,
-compatibility, or package inspection.
+On desktop, the high-frequency quick filters stay visible. Region,
+provider, and type remain anchored controls; operator, status, category, and
+tag are available from the anchored `更多筛选` panel. The panel is bounded,
+scrollable, preserves the Market context, shows selected state, and closes
+on outside click. On mobile, all structured filters remain in the bottom
+sheet.
 
-## 7. Home Metadata vs Detail Metadata
+## Search And Sort
 
-Home card metadata includes:
+The Market package search is the canonical search interaction on the Market
+route. The AppShell global search is hidden there because it does not consume
+Market package search state.
 
-- package title;
-- source, operator, region, or publisher identity;
-- scale count;
-- a short category/capability summary;
-- quiet provenance/runtime/network metadata when it helps choose a package;
-- current install/update/unsupported state and action.
+Backend search covers explicit package fields: id, name, description, regions,
+operators, providers, languages, categories, tags, publisher, and for Plugin
+packages the publisher and owned schemes. Search does not parse package names
+to synthesize a semantic field. Catalog recommendation order uses explicit
+`catalog.sort_weight` plus runtime state; it does not hard-code official,
+provider, or title heuristics.
 
-The detail drawer includes:
+## Runtime State
 
-- complete channel preview and taxonomy;
-- playback and transport method;
-- Plugin contracts, complete schemes, dependencies, runtime, permissions,
-  publisher, trust, and version information;
-- source provenance, compatibility, risk, and support details.
+Install, update, installed, unsupported, permission confirmation, loading,
+and source refresh states come from backend/runtime state. These interaction
+labels may be composed by the frontend, but they are not package metadata.
 
-## 8. CTA and Status Semantics
+## Package Authoring Rule
 
-The backend operation semantics remain authoritative:
-
-- Content install uses `导入` because it creates or updates content
-  subscriptions;
-- Plugin install uses `安装 Plugin` because it installs a runtime package and
-  establishes Plugin ownership;
-- installed packages use a low-emphasis `已安装` status;
-- updates use a distinct `有更新` marker and update action;
-- unsupported packages use a disabled `暂不支持` status;
-- in-progress operations disable the relevant action and show the operation
-  label.
-
-The overflow menu remains the home for preview/list, uninstall, and immediate
-update actions when those actions are available.
-
-## 9. Content vs Plugins
-
-Content cards answer: what content package is this, where is it from, and how
-many channels or logos does it contain? Their visible tags are content
-categories.
-
-Plugin cards answer: what provider capability is this, who publishes it, and
-what runtime/capability scale does it have? Their visible tags are contract or
-capability summaries. Scheme count, runtime, permission, dependency, and
-complete scheme lists are metadata or detail fields, not Content tags.
-
-## 10. Light and Dark Themes
-
-Market uses the shared WaveFlow semantic surface, border, text, radius, and
-control tokens. Light and Dark are two mappings of one visual language. Color
-is an identification aid for identity or one emphasized category, not card
-decoration. The primary action remains the text-primary/background contrast
-pair in both themes.
-
-## 11. Mobile Rules
-
-Mobile uses one-column cards with the same anatomy and a minimum touch-friendly
-action height. Complex filters open in the existing bottom sheet. The card
-still shows no more than three summary tags, even though the wider mobile card
-could fit more labels. Full taxonomy and technical information stay in the
-detail drawer.
-
-## 12. Explicit V1 Non-goals
-
-V1 does not redesign Market IA, add recommendations, add a remote artwork
-system, change install/update lifecycle semantics, change package/API schema,
-rewrite the detail drawer, or turn package cards into channel preview grids.
-
-## 13. Extension Rules
-
-Future Market card changes should first classify a field as identity, scale,
-content summary, source/provenance, runtime/technical metadata, or action
-state. Only identity, scale, three core summary items, useful source metadata,
-and action state belong on the normal card. New technical fields belong in the
-detail layer unless they change a common package selection decision and have a
-stable sanitized schema contract.
+When a package needs new card-facing meaning, add the explicit field to the
+package/catalog contract and package JSON first. Do not add a title detector,
+tag priority table, alias map, manifest-derived card presenter, or per-package
+branch in `MarketView.vue`.

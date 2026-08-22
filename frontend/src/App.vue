@@ -102,7 +102,7 @@
           </button>
         </div>
         <div class="flex items-center gap-2">
-          <div class="mobile-search-shell relative flex items-center rounded-full backdrop-blur-xl transition-all duration-300 ease-out" :class="searchExpanded ? 'mobile-search-expanded' : 'mobile-search-collapsed'">
+          <div v-if="showGlobalSearch" class="mobile-search-shell relative flex items-center rounded-full backdrop-blur-xl transition-all duration-300 ease-out" :class="searchExpanded ? 'mobile-search-expanded' : 'mobile-search-collapsed'">
             <button type="button" class="mobile-search-trigger flex shrink-0 items-center justify-center text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]" aria-label="搜索" @click="toggleSearch">
               <svg class="size-[19px] toolbar-search-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="1.7" /><path d="M16.5 16.5L21 21" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" /></svg>
             </button>
@@ -139,7 +139,7 @@
       </div>
     </div>
 
-    <div v-if="showAppShell" class="desktop-top-actions fixed top-6 z-30 hidden items-center gap-3 lg:flex">
+    <div v-if="showGlobalSearch" class="desktop-top-actions fixed top-6 z-30 hidden items-center gap-3 lg:flex">
       <div
         class="flex h-11 items-center overflow-hidden rounded-full border border-[var(--border)] bg-[var(--surface)] text-[var(--text-secondary)] backdrop-blur-[12px] backdrop-saturate-110 transition-all duration-300 ease-out"
         :class="searchExpanded ? 'w-[260px] px-1' : 'w-11 px-0'"
@@ -207,6 +207,7 @@ const route = useRoute()
 const mobileMenuOpen = ref(false)
 const mobileMenuRef = ref(null)
 const showAppShell = computed(() => !route.meta.authPage)
+const showGlobalSearch = computed(() => showAppShell.value && route.path !== '/market')
 const hasDesktopShell = computed(() => showAppShell.value)
 const SIDEBAR_STORAGE_KEY = 'waveflow-sidebar-collapsed'
 const sidebarCollapsed = ref(window.localStorage.getItem(SIDEBAR_STORAGE_KEY) === '1')

@@ -45,11 +45,8 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 const props = defineProps({
   items: { type: Array, required: true },
-  // 最多允许的行数。
-  maxRows: { type: Number, default: 2 },
-  // 卡片可参与布局的核心项数量。剩余项仍计入 +N，但不会把首页
-  // 标签区扩成完整 taxonomy；详情层可以继续渲染完整列表。
-  maxItems: { type: Number, default: 0 },
+  // Market cards use one row; the component keeps this configurable for other callers.
+  maxRows: { type: Number, default: 1 },
   // 行内项之间的间距（与 CSS gap 相同），用来计算累计宽度。
   gap: { type: Number, default: 6 },
 })
@@ -67,8 +64,7 @@ const measured = ref(false)
 const visibleItems = computed(() => props.items.slice(0, visibleCount.value))
 const overflowCount = computed(() => Math.max(0, props.items.length - visibleCount.value))
 const overflowSampleCount = computed(() => {
-  const limit = props.maxItems > 0 ? Math.min(props.items.length, props.maxItems) : props.items.length
-  return Math.max(props.items.length - limit, 1)
+  return Math.max(props.items.length, 1)
 })
 
 // 同宽度 + 同 items 签名的连续两次回调短路掉，避免 ResizeObserver 反复触发布局抖动。
@@ -123,7 +119,7 @@ function recompute({ force = false } = {}) {
 
   const gap = props.gap
   const maxRows = Math.max(1, props.maxRows | 0)
-  const total = props.maxItems > 0 ? Math.min(itemWidths.length, props.maxItems) : itemWidths.length
+  const total = itemWidths.length
 
   // 第一遍：尝试在 maxRows 行内塞下尽量多的项，不预留 +N。
   const rowOf = []
@@ -210,10 +206,6 @@ watch(() => props.items, () => {
   schedule()
 }, { deep: false })
 watch(() => props.maxRows, () => {
-  lastLayoutSignature = ''
-  schedule()
-})
-watch(() => props.maxItems, () => {
   lastLayoutSignature = ''
   schedule()
 })

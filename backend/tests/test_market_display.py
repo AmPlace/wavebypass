@@ -1,11 +1,12 @@
-"""验证 Market 协议中受控的展示字段：display.badge 与 tag_definitions。
-两者都只能从 market.json 进入，必须经过 _normalize_display / _normalize_tag_definitions
-做白名单/枚举/长度过滤，非法值静默丢弃。
-"""
+"""Market V1 package-owned display contract tests."""
+
+import json
+from pathlib import Path
 import unittest
+from unittest.mock import AsyncMock, patch
 
 
-class MarketDisplayBadgeTest(unittest.TestCase):
+class MarketDisplayContractTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         try:
@@ -13,191 +14,256 @@ class MarketDisplayBadgeTest(unittest.TestCase):
         except Exception as exc:
             raise unittest.SkipTest(f"market module unavailable: {exc}")
 
-    def test_valid_badge_passes_through(self):
+    def test_display_fields_are_projected_without_semantic_derivation(self):
         from market import _normalize_display
 
-        self.assertEqual(
-            _normalize_display({"badge": {"text": "鲁", "tone": "orange"}}),
-            {"badge": {"text": "鲁", "tone": "orange"}},
-        )
+        display = {
+            "subtitle": "Package subtitle",
+            "summary": "Package summary",
+            "identity": {
+                "brand": "waveflow",
+                "icon": {"type": "builtin", "name": "waveflow"},
+            },
+            "badge": {"text": "FX", "tone": "sky"},
+        }
+        self.assertEqual(_normalize_display(display), display)
 
-    def test_invalid_tone_dropped(self):
+    def test_display_tags_are_not_a_second_tag_source(self):
         from market import _normalize_display
 
-        out = _normalize_display({"badge": {"text": "鲁", "tone": "rainbow"}})
-        # text 保留，tone 被丢弃
-        self.assertEqual(out, {"badge": {"text": "鲁"}})
+        result = _normalize_display({
+            "tags": [
+                {"label": "zeta", "tone": "violet"},
+                {"label": "央视", "tone": "red"},
+                {"label": "zeta", "tone": "neutral"},
+            ],
+        })
+        self.assertEqual(result, {})
 
-    def test_html_text_dropped(self):
+    def test_invalid_display_members_are_dropped_safely(self):
         from market import _normalize_display
 
-        out = _normalize_display({"badge": {"text": "<script>x</script>", "tone": "rose"}})
-        # 文本含 HTML 字符 → text 整体丢弃；tone 仍合法保留。
-        self.assertEqual(out, {"badge": {"tone": "rose"}})
+        result = _normalize_display({
+            "subtitle": "<script>",
+            "identity": {
+                "brand": "移动",
+                "icon": {"type": "image", "url": "http://insecure.example/icon.png"},
+            },
+            "badge": {"text": "<bad>", "tone": "rainbow"},
+        })
+        self.assertEqual(result, {})
 
-    def test_overlong_text_truncated(self):
-        from market import _normalize_display, BADGE_TEXT_MAX_GRAPHEMES
+    def test_explicit_https_image_icon_is_allowed(self):
+        from market import _normalize_display
 
-        out = _normalize_display({"badge": {"text": "超长徽章测试"}})
-        self.assertLessEqual(len(out["badge"]["text"]), BADGE_TEXT_MAX_GRAPHEMES)
+        result = _normalize_display({
+            "identity": {"icon": {"type": "image", "url": "https://cdn.example/icon.png?v=1"}},
+        })
+        self.assertEqual(result, {
+            "identity": {"icon": {"type": "image", "url": "https://cdn.example/icon.png?v=1"}},
+        })
 
-    def test_non_dict_returns_empty(self):
+    def test_non_object_display_returns_empty_projection(self):
         from market import _normalize_display
 
         self.assertEqual(_normalize_display(None), {})
-        self.assertEqual(_normalize_display("anything"), {})
-        self.assertEqual(_normalize_display([{"text": "鲁"}]), {})
+        self.assertEqual(_normalize_display("display"), {})
+        self.assertEqual(_normalize_display([]), {})
 
 
-class MarketTagDefinitionsTest(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        try:
-            from market import _normalize_tag_definitions  # noqa: F401
-        except Exception as exc:
-            raise unittest.SkipTest(f"market module unavailable: {exc}")
+class MarketPackageProjectionTest(unittest.TestCase):
+    def test_name_and_display_are_preserved_by_package_normalization(self):
+        from market import _normalize_package, _package_card
 
-    def test_valid_definition(self):
-        from market import _normalize_tag_definitions
-
-        out = _normalize_tag_definitions({
-            "央视": {"priority": 100, "tone": "red", "emphasized": True, "aliases": ["CCTV", "CGTN"]},
-        })
-        self.assertEqual(out["央视"]["priority"], 100)
-        self.assertEqual(out["央视"]["tone"], "red")
-        self.assertTrue(out["央视"]["emphasized"])
-        self.assertEqual(out["央视"]["aliases"], ["CCTV", "CGTN"])
-
-    def test_priority_clamped(self):
-        from market import _normalize_tag_definitions
-
-        out = _normalize_tag_definitions({"x": {"priority": 9999}, "y": {"priority": -50}})
-        self.assertEqual(out["x"]["priority"], 100)
-        self.assertEqual(out["y"]["priority"], 0)
-
-    def test_invalid_tone_dropped(self):
-        from market import _normalize_tag_definitions
-
-        out = _normalize_tag_definitions({"x": {"priority": 1, "tone": "fluorescent"}})
-        self.assertNotIn("tone", out["x"])
-
-    def test_emphasized_must_be_bool(self):
-        from market import _normalize_tag_definitions
-
-        out = _normalize_tag_definitions({"x": {"emphasized": "yes", "priority": 1}})
-        self.assertNotIn("emphasized", out["x"])
-
-    def test_one_bad_entry_does_not_kill_others(self):
-        from market import _normalize_tag_definitions
-
-        out = _normalize_tag_definitions({
-            "央视": {"priority": 100, "tone": "red"},
-            "<bad>": {"priority": 50},                # label 含 HTML → 丢弃
-            "无规则": {},                               # rule 全部非法 → 跳过
-            "体育": {"priority": 90, "tone": "blue"},
-        })
-        self.assertIn("央视", out)
-        self.assertIn("体育", out)
-        self.assertNotIn("<bad>", out)
-        self.assertNotIn("无规则", out)
-
-    def test_non_dict_returns_empty(self):
-        from market import _normalize_tag_definitions
-
-        self.assertEqual(_normalize_tag_definitions(None), {})
-        self.assertEqual(_normalize_tag_definitions([{"x": 1}]), {})
-
-
-class MarketNormalizePackageDisplayTest(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        try:
-            from market import _normalize_package  # noqa: F401
-        except Exception as exc:
-            raise unittest.SkipTest(f"market module unavailable: {exc}")
-
-    def test_legacy_package_without_display_keeps_empty_dict(self):
-        # 旧包不带 display 字段，规整化后应得到空 dict，不抛错。
-        from market import _normalize_package
-
-        pkg = _normalize_package({"id": "legacy", "kind": "playlist"})
-        self.assertEqual(pkg["display"], {})
-
-    def test_display_badge_survives_normalization(self):
-        from market import _normalize_package
-
-        pkg = _normalize_package({
-            "id": "shandong",
+        package = _normalize_package({
+            "id": "custom",
+            "name": "Name with Plugin suffix",
             "kind": "playlist",
-            "display": {"badge": {"text": "鲁", "tone": "orange"}},
+            "description": "Full description",
+            "tags": ["custom"],
+            "display": {
+                "subtitle": "Explicit subtitle",
+                "summary": "Explicit summary",
+            },
         })
-        self.assertEqual(pkg["display"], {"badge": {"text": "鲁", "tone": "orange"}})
+        self.assertEqual(package["name"], "Name with Plugin suffix")
+        self.assertEqual(package["description"], "Full description")
+        self.assertEqual(package["tags"], ["custom"])
+        self.assertNotIn("tags", package["display"])
+        self.assertEqual(_package_card(package)["display"], package["display"])
 
-    def test_display_with_invalid_badge_filtered(self):
-        from market import _normalize_package
+    def test_card_and_detail_tag_source_is_root_package_tags(self):
+        from market import _normalize_package, _package_card
 
-        pkg = _normalize_package({
-            "id": "x",
+        package = _normalize_package({
+            "id": "single-tag-source",
+            "name": "Single Tag Source",
             "kind": "playlist",
-            "display": {"badge": {"text": "<script>", "tone": "rainbow"}},
+            "tags": ["first", "second"],
+            "display": {"subtitle": "No second tag list"},
         })
-        # 全部非法 → display.badge 被丢弃 → display 整体应为 {}（不渲染徽章配置）。
-        self.assertEqual(pkg["display"], {})
+        card = _package_card(package)
+        self.assertEqual(card["tags"], ["first", "second"])
+        self.assertNotIn("tags", card["display"])
 
-
-class MarketTagDefinitionsModeTest(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        try:
-            from market import _normalize_tag_definitions_mode  # noqa: F401
-        except Exception as exc:
-            raise unittest.SkipTest(f"market module unavailable: {exc}")
-
-    def test_default_when_missing(self):
-        from market import _normalize_tag_definitions_mode
-
-        self.assertEqual(_normalize_tag_definitions_mode(None), "inherit")
-        self.assertEqual(_normalize_tag_definitions_mode(""), "inherit")
-
-    def test_inherit_passes_through(self):
-        from market import _normalize_tag_definitions_mode
-
-        self.assertEqual(_normalize_tag_definitions_mode("inherit"), "inherit")
-
-    def test_replace_passes_through(self):
-        from market import _normalize_tag_definitions_mode
-
-        self.assertEqual(_normalize_tag_definitions_mode("replace"), "replace")
-
-    def test_invalid_falls_back_to_inherit(self):
-        from market import _normalize_tag_definitions_mode
-
-        # 未知字符串、布尔值、整数、列表都必须回退到 inherit，不抛错。
-        for bad in ("override", "INHERIT", "Replace", True, 0, ["replace"], {"mode": "replace"}):
-            self.assertEqual(_normalize_tag_definitions_mode(bad), "inherit")
-
-    def test_legacy_market_without_mode_treated_as_inherit(self):
-        # _normalize_tag_definitions_mode 只接受单值，但旧 market.json 整体上
-        # 不会带这个字段。模拟从 dict 读取：market.get(...) 返回 None → 回退 inherit。
-        from market import _normalize_tag_definitions_mode
-
-        legacy_market = {"schema_version": 1, "packages": []}
-        self.assertEqual(
-            _normalize_tag_definitions_mode(legacy_market.get("tag_definitions_mode")),
-            "inherit",
-        )
-
-    def test_mode_does_not_affect_package_supported_or_importable(self):
-        # 该字段属于纯展示元数据，不影响 supported_in_v1 / importable / unsupported_reason。
+    def test_missing_display_uses_empty_projection_only(self):
         from market import _normalize_package
 
-        pkg = _normalize_package({"id": "x", "kind": "playlist"})
-        baseline_supported = pkg["supported_in_v1"]
-        baseline_importable = pkg["importable"]
+        package = _normalize_package({"id": "neutral", "name": "Neutral", "kind": "playlist"})
+        self.assertEqual(package["display"], {})
 
-        # 该字段是 market 根级，不通过 _normalize_package；这里只断言包字段不被任何别的上下文动到。
-        self.assertTrue(baseline_supported)
-        self.assertTrue(baseline_importable)
+    def test_market_index_requires_explicit_package_type(self):
+        from market import MarketError, _validate_package_minimal
+
+        with self.assertRaises(MarketError):
+            _validate_package_minimal({
+                "id": "missing-type",
+                "name": "Missing type",
+                "description": "Description",
+                "kind": "playlist",
+                "version": "1.0.0",
+                "updated_at": "2026-08-23T00:00:00Z",
+            }, context="market.json")
+
+    def test_manifest_context_keeps_runtime_boundary_separate(self):
+        from market import _validate_package_minimal
+
+        _validate_package_minimal({"id": "manifest", "name": "Manifest", "kind": "playlist"}, context="manifest")
+
+    def test_v1_metadata_projection_keeps_region_language_and_provider_distinct(self):
+        from market import _normalize_package, _package_card, _package_search_haystack
+
+        package = _normalize_package({
+            "id": "multi-region",
+            "name": "Explicit metadata",
+            "description": "Description",
+            "kind": "playlist",
+            "regions": [{"country": "CN", "province": "福建", "city": None}, {"global": True}],
+            "operators": ["中国移动"],
+            "providers": ["YouTube"],
+            "languages": ["zh-CN", "en-US"],
+            "categories": ["体育"],
+            "tags": ["作者标签", "未知标签"],
+            "publisher": {"id": "org.example", "name": "Example"},
+            "published_at": "2026-08-23T00:00:00Z",
+            "compatibility": {"min_waveflow_version": "0.1.0"},
+            "replacement": "new-package",
+            "links": {"source": "https://example.com/source"},
+            "catalog": {"sort_weight": 12, "featured": True},
+        })
+        card = _package_card(package)
+        self.assertEqual(card["regions"][1], {"global": True})
+        self.assertEqual(card["operators"], ["中国移动"])
+        self.assertEqual(card["providers"], ["YouTube"])
+        self.assertEqual(card["languages"], ["zh-CN", "en-US"])
+        self.assertEqual(card["tags"], ["作者标签", "未知标签"])
+        self.assertIn("youtube", _package_search_haystack(package))
+        self.assertIn("org.example", _package_search_haystack(package))
+
+    def test_v1_rejects_legacy_semantic_fields_and_non_operator_values(self):
+        from market import MarketError, _normalize_package
+
+        for field in ("region", "language", "provider"):
+            with self.subTest(field=field), self.assertRaises(MarketError):
+                _normalize_package({"id": field, "kind": "playlist", field: "legacy"})
+        with self.assertRaises(MarketError):
+            _normalize_package({"id": "bad-operator", "kind": "playlist", "operators": ["global"]})
+
+    def test_official_distribution_packages_are_valid_v1_packages(self):
+        from market import _normalize_package
+
+        package_root = Path(__file__).parents[1] / "official_plugins" / "distribution" / "packages"
+        paths = sorted(package_root.glob("*.json"))
+        self.assertEqual(len(paths), 10)
+        for path in paths:
+            with self.subTest(package=path.name):
+                raw = json.loads(path.read_text())
+                package = _normalize_package(raw)
+                self.assertEqual(package["kind"], "plugin_package")
+                self.assertEqual(package["package_type"], "plugin_package")
+                self.assertIsInstance(package["providers"], list)
+                self.assertIsInstance(package["publisher"], dict)
+
+
+class MarketSourceLoadingTest(unittest.IsolatedAsyncioTestCase):
+    async def test_legacy_root_tag_definitions_do_not_empty_market_source(self):
+        import market
+
+        payload = {
+            "schema_version": 1,
+            "tag_definitions": {"央视": {"priority": 100}},
+            "tag_definitions_mode": "inherit",
+            "packages": [{
+                "id": "legacy-content",
+                "name": "Legacy Content",
+                "description": "Still loadable without legacy tag semantics.",
+                "kind": "playlist",
+                "package_type": "content_package",
+                "version": "1.0.0",
+                "updated_at": "2026-08-23T00:00:00Z",
+            }],
+        }
+        source = {
+            "id": 1,
+            "name": "Legacy source",
+            "url": "https://market.example/market.json",
+            "source_key": "community",
+            "enabled": 1,
+            "allow_private": 0,
+        }
+        with patch.object(
+            market,
+            "safe_http_fetch",
+            new=AsyncMock(return_value=(source["url"], json.dumps(payload), {})),
+        ):
+            _market, packages = await market._load_source_packages(source)
+
+        self.assertEqual([item["id"] for item in packages], ["community::legacy-content"])
+        self.assertEqual(packages[0]["display"], {})
+
+    async def test_invalid_legacy_package_becomes_unsupported_item_without_emptying_source(self):
+        import market
+
+        payload = {
+            "schema_version": 1,
+            "packages": [{
+                "id": "legacy-region",
+                "name": "Legacy Region",
+                "description": "Rejected package",
+                "kind": "playlist",
+                "package_type": "content_package",
+                "version": "1.0.0",
+                "updated_at": "2026-08-23T00:00:00Z",
+                "region": {"country": "CN"},
+            }, {
+                "id": "valid",
+                "name": "Valid",
+                "description": "Valid package",
+                "kind": "playlist",
+                "package_type": "content_package",
+                "version": "1.0.0",
+                "updated_at": "2026-08-23T00:00:00Z",
+            }],
+        }
+        source = {
+            "id": 1,
+            "name": "Community source",
+            "url": "https://market.example/market.json",
+            "source_key": "community",
+            "enabled": 1,
+            "allow_private": 0,
+        }
+        with patch.object(
+            market,
+            "safe_http_fetch",
+            new=AsyncMock(return_value=(source["url"], json.dumps(payload), {})),
+        ):
+            _market, packages = await market._load_source_packages(source)
+
+        self.assertEqual([item["id"] for item in packages], ["community::legacy-region", "community::valid"])
+        self.assertFalse(packages[0]["supported_in_v1"])
+        self.assertIn("旧字段", packages[0]["unsupported_reason"])
+        self.assertTrue(packages[1]["supported_in_v1"])
 
 
 if __name__ == "__main__":

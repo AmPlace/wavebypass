@@ -29,6 +29,7 @@ from ssrf_guard import UnsafeTargetError, assert_safe_target_url
 
 SCHEMA_VERSION = 1
 SUPPORTED_IMPORT_KINDS = {"playlist", "dynamic_playlist", "mixed"}
+SUPPORTED_PACKAGE_KINDS = SUPPORTED_IMPORT_KINDS | {"logo_pack", "plugin_package"}
 SUPPORTED_CHANNEL_SOURCE_TYPES = {"inline_channels", "playlist"}
 CONTENT_PACKAGE_TYPE = "content_package"
 PLUGIN_PACKAGE_TYPE = "plugin_package"
@@ -55,12 +56,14 @@ RECOMMENDED_INDEX_FIELDS = {
     "name",
     "description",
     "kind",
+    "package_type",
     "version",
     "updated_at",
     "manifest_url",
-    "region",
+    "regions",
     "operators",
-    "language",
+    "providers",
+    "languages",
     "categories",
     "tags",
     "status",
@@ -70,14 +73,26 @@ RECOMMENDED_INDEX_FIELDS = {
     "importable",
     "previewable",
     "supported_in_v1",
+    "display",
+    "publisher",
+    "published_at",
+    "compatibility",
+    "replacement",
+    "links",
+    "catalog",
 }
-RESERVED_KINDS = {
-    "provider",
-    "remote_resolver",
-    "dynamic_provider",
-    "platform_pack",
-    "radio_pack",
+PACKAGE_STATUS_VALUES = {"active", "experimental", "stable", "deprecated", "broken", "unknown"}
+CATEGORY_TAXONOMY = {
+    "央视", "卫视", "地方", "新闻", "体育", "电影", "少儿", "教育", "纪实",
+    "广播", "国际", "港澳台", "购物", "剧场", "动画", "音乐", "综艺", "戏曲",
+    "财经", "生活", "影视", "电视", "插件", "Provider", "健康", "宗教", "民族", "韩流",
 }
+NON_OPERATOR_VALUES = {
+    "cn", "jp", "hk", "tw", "mo", "global", "world", "ard", "zdf", "tdm",
+    "youtube", "radiobrowser", "platform", "provider", "broadcaster", "香港",
+    "澳门", "台湾", "福建", "北京", "上海", "广东", "湖南", "日本", "德国",
+}
+LEGACY_PACKAGE_FIELDS = {"region", "language", "provider"}
 DEFAULT_MARKET_URL = "https://market.waveflow.tv/market.json"
 OFFICIAL_MARKET_SOURCE_KEY = "official"
 MARKET_URL = os.environ.get("WAVEFLOW_MARKET_URL", DEFAULT_MARKET_URL).strip() or DEFAULT_MARKET_URL
@@ -382,6 +397,17 @@ def _validate_package_minimal(raw: dict, *, context: str) -> None:
         raise MarketError(f"{context} package 缺少 id", 400)
     if not str(raw.get("kind") or "").strip():
         raise MarketError(f"{context} package 缺少 kind", 400)
+    if context in {"market.json", "bundled official market"}:
+        if not str(raw.get("name") or "").strip():
+            raise MarketError(f"{context} package 缺少 name", 400)
+        required = ("description", "package_type", "version", "updated_at")
+        missing = [field for field in required if field not in raw]
+        if missing:
+            raise MarketError(f"{context} package 缺少字段: {', '.join(missing)}", 400)
+        if raw.get("package_type") not in {CONTENT_PACKAGE_TYPE, PLUGIN_PACKAGE_TYPE}:
+            raise MarketError(f"{context} package_type 无效", 400)
+        if not isinstance(raw.get("description"), str):
+            raise MarketError(f"{context} package description 必须是 string", 400)
 
 
 def _normalize_plugin_requirements(value: Any) -> list[dict[str, Any]]:
@@ -449,14 +475,6 @@ def _source_public(source: dict | None) -> dict:
         "last_status": source.get("last_status", ""),
         "last_error": source.get("last_error", ""),
     }
-    # tag_definitions / tag_definitions_mode 来自 market.json 根级，由
-    # _load_source_packages 在 source 字典中临时注入；DB 行不会有这些字段。
-    raw_mode = source.get("tag_definitions_mode") if isinstance(source, dict) else None
-    if isinstance(raw_mode, str) and raw_mode:
-        out["tag_definitions_mode"] = raw_mode
-    raw_defs = source.get("tag_definitions") if isinstance(source, dict) else None
-    if isinstance(raw_defs, dict) and raw_defs:
-        out["tag_definitions"] = raw_defs
     return out
 
 
@@ -751,19 +769,25 @@ async def delete_source(source_id: int) -> dict:
     return {"ok": True}
 
 
-# ── 受控的展示协议字段 ────────────────────────────────────────────────
-# Market 源只能向前端提供受控的展示建议（徽章文字 / 色调、Tag 优先级 / 色调 / 别名）。
-# 不允许任何 HTML、SVG、CSS class、自由色值；非法值一律忽略并回落到前端 fallback。
+# ── Package Presentation Contract V1 ─────────────────────────────────
+# display 是 package/catalog 的用户可见语义边界。Backend 只做白名单投影，
+# 不根据 name、region、operators 或 Plugin manifest 生成展示内容。
 
 BADGE_TONES = {"neutral", "rose", "sky", "emerald", "orange", "violet"}
-TAG_TONES = {"neutral", "red", "blue", "orange", "green", "violet"}
-TAG_DEFINITIONS_MODES = {"inherit", "replace"}
-DEFAULT_TAG_DEFINITIONS_MODE = "inherit"
-TAG_DEFS_MAX_ENTRIES = 256
-TAG_DEFS_MAX_ALIASES = 16
-TAG_LABEL_MAX_LEN = 32
-TAG_ALIAS_MAX_LEN = 32
 BADGE_TEXT_MAX_GRAPHEMES = 3
+DISPLAY_TEXT_MAX_LENGTH = 240
+DISPLAY_SUMMARY_MAX_LENGTH = 360
+DISPLAY_BRAND_MAX_LENGTH = 64
+DISPLAY_ICON_NAME_MAX_LENGTH = 64
+DISPLAY_ICON_TYPES = {"builtin", "image"}
+DISPLAY_BUILTIN_BRANDS = {
+    "waveflow",
+    "youtube",
+    "china-mobile",
+    "china-unicom",
+    "china-telecom",
+    "china-broadcast",
+}
 
 
 def _safe_text(value, *, max_chars: int) -> str:
@@ -786,6 +810,36 @@ def _normalize_display(value) -> dict:
     if not isinstance(value, dict):
         return {}
     out: dict[str, Any] = {}
+    subtitle = _safe_text(value.get("subtitle"), max_chars=DISPLAY_TEXT_MAX_LENGTH)
+    if subtitle:
+        out["subtitle"] = subtitle
+    summary = _safe_text(value.get("summary"), max_chars=DISPLAY_SUMMARY_MAX_LENGTH)
+    if summary:
+        out["summary"] = summary
+
+    identity_raw = value.get("identity")
+    if isinstance(identity_raw, dict):
+        identity: dict[str, Any] = {}
+        brand = _safe_text(identity_raw.get("brand"), max_chars=DISPLAY_BRAND_MAX_LENGTH)
+        if brand and brand.lower() in DISPLAY_BUILTIN_BRANDS:
+            identity["brand"] = brand.lower()
+        icon_raw = identity_raw.get("icon")
+        if isinstance(icon_raw, dict) and icon_raw.get("type") in DISPLAY_ICON_TYPES:
+            icon_type = icon_raw["type"]
+            if icon_type == "builtin":
+                name = _safe_text(icon_raw.get("name"), max_chars=DISPLAY_ICON_NAME_MAX_LENGTH)
+                if name and re.fullmatch(r"[a-z0-9][a-z0-9._-]*", name.lower()):
+                    identity["icon"] = {"type": "builtin", "name": name.lower()}
+            else:
+                url = str(icon_raw.get("url") or "").strip()
+                parsed = urlparse(url)
+                if (parsed.scheme.lower() == "https" and parsed.hostname
+                        and not parsed.username and not parsed.password
+                        and len(url) <= 2048):
+                    identity["icon"] = {"type": "image", "url": parsed.geturl()}
+        if identity:
+            out["identity"] = identity
+
     badge_raw = value.get("badge")
     if isinstance(badge_raw, dict):
         text = _safe_text(badge_raw.get("text"), max_chars=BADGE_TEXT_MAX_GRAPHEMES * 4)
@@ -804,62 +858,153 @@ def _normalize_display(value) -> dict:
     return out
 
 
-def _normalize_tag_definitions_mode(value) -> str:
-    """规整化 market.json 根级 tag_definitions_mode。
+def _normalize_text_list(value: Any, field: str, *, max_items: int = 128) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list) or len(value) > max_items:
+        raise MarketError(f"{field} 必须是受限 string array", 400)
+    result: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise MarketError(f"{field} 只能包含 string", 400)
+        cleaned = item.strip()
+        if not cleaned or len(cleaned) > 128 or any(ord(ch) < 0x20 for ch in cleaned):
+            raise MarketError(f"{field} 包含无效值", 400)
+        result.append(cleaned)
+    return result
 
-    inherit  —— 当前 Market 源 tag_definitions 叠加在 WaveFlow 内置 DEFAULT_TAG_RULES 之上（默认）。
-    replace  —— 仅使用当前 Market 源显式声明的 tag_definitions；未声明的标签按中性默认。
 
-    缺失 / 非字符串 / 非法值一律回退到 inherit；该字段不参与播放、能力或安全判断。
-    """
-    if isinstance(value, str) and value in TAG_DEFINITIONS_MODES:
-        return value
-    return DEFAULT_TAG_DEFINITIONS_MODE
-
-
-def _normalize_tag_definitions(value) -> dict:
-    """规整化 market.json 根级 tag_definitions：受控枚举 + 数量/长度上限。
-    非法字段静默丢弃，保证一个坏配置不会让整个 source 加载失败。
-    """
-    if not isinstance(value, dict):
-        return {}
-    out: dict[str, dict[str, Any]] = {}
-    for raw_label, raw_rule in list(value.items())[:TAG_DEFS_MAX_ENTRIES]:
-        label = _safe_text(raw_label, max_chars=TAG_LABEL_MAX_LEN)
-        if not label or not isinstance(raw_rule, dict):
+def _normalize_regions(value: Any) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    if not isinstance(value, list) or len(value) > 64:
+        raise MarketError("regions 必须是受限 array", 400)
+    result: list[dict[str, Any]] = []
+    for raw in value:
+        if not isinstance(raw, dict):
+            raise MarketError("regions 项格式无效", 400)
+        if set(raw) - {"global", "country", "province", "city"}:
+            raise MarketError("regions 项包含未知字段", 400)
+        is_global = raw.get("global") is True
+        if is_global:
+            if any(raw.get(key) not in (None, "") for key in ("country", "province", "city")):
+                raise MarketError("global region 不能同时声明 country/province/city", 400)
+            result.append({"global": True})
             continue
-        rule: dict[str, Any] = {}
-        # priority 限制 0–100。
-        prio = raw_rule.get("priority")
-        if isinstance(prio, bool):
-            prio_val = None
-        elif isinstance(prio, (int, float)):
-            prio_val = max(0, min(100, int(prio)))
-        else:
-            prio_val = None
-        if prio_val is not None:
-            rule["priority"] = prio_val
-        # tone 受控枚举。
-        tone = raw_rule.get("tone")
-        if tone in TAG_TONES:
-            rule["tone"] = tone
-        # emphasized 必须显式 boolean。
-        emp = raw_rule.get("emphasized")
-        if isinstance(emp, bool):
-            rule["emphasized"] = emp
-        # aliases 数组限长。
-        aliases_raw = raw_rule.get("aliases")
-        if isinstance(aliases_raw, list):
-            aliases: list[str] = []
-            for alias in aliases_raw[:TAG_DEFS_MAX_ALIASES]:
-                cleaned = _safe_text(alias, max_chars=TAG_ALIAS_MAX_LEN)
-                if cleaned:
-                    aliases.append(cleaned)
-            if aliases:
-                rule["aliases"] = aliases
-        if rule:
-            out[label] = rule
-    return out
+        country = raw.get("country")
+        if not isinstance(country, str) or not country.strip() or country.strip().lower() == "global":
+            raise MarketError("非 global region 必须声明 country", 400)
+        item: dict[str, Any] = {"country": country.strip().upper()}
+        for key in ("province", "city"):
+            value_item = raw.get(key)
+            if value_item is None:
+                item[key] = None
+            elif isinstance(value_item, str) and value_item.strip():
+                item[key] = value_item.strip()
+            else:
+                raise MarketError(f"regions.{key} 必须是 string 或 null", 400)
+        result.append(item)
+    return result
+
+
+def _normalize_operators(value: Any) -> list[str]:
+    operators = _normalize_text_list(value, "operators")
+    for operator in operators:
+        if operator.lower() in NON_OPERATOR_VALUES or operator in NON_OPERATOR_VALUES:
+            raise MarketError(f"operators 包含非运营商值: {operator}", 400)
+    return operators
+
+
+def _normalize_categories(value: Any) -> list[str]:
+    categories = _normalize_text_list(value, "categories")
+    unknown = [item for item in categories if item not in CATEGORY_TAXONOMY]
+    if unknown:
+        raise MarketError(f"categories 包含未定义 taxonomy: {', '.join(unknown[:5])}", 400)
+    return categories
+
+
+def _normalize_languages(value: Any) -> list[str]:
+    languages = _normalize_text_list(value, "languages")
+    for language in languages:
+        if not re.fullmatch(r"[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*", language):
+            raise MarketError(f"languages 包含无效 locale: {language}", 400)
+    return languages
+
+
+def _normalize_publisher(value: Any) -> dict[str, str]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise MarketError("publisher 必须是 object", 400)
+    if set(value) - {"id", "name"}:
+        raise MarketError("publisher 包含未知字段", 400)
+    result = {}
+    for key in ("id", "name"):
+        item = value.get(key)
+        if item is not None:
+            if not isinstance(item, str) or not item.strip() or len(item.strip()) > 128:
+                raise MarketError(f"publisher.{key} 无效", 400)
+            result[key] = item.strip()
+    if not result:
+        raise MarketError("publisher 至少需要 id 或 name", 400)
+    return result
+
+
+def _normalize_compatibility(value: Any) -> dict[str, str]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise MarketError("compatibility 必须是 object", 400)
+    result = {}
+    for key, item in value.items():
+        if not isinstance(key, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", key):
+            raise MarketError("compatibility key 无效", 400)
+        if not isinstance(item, str) or not item.strip() or len(item.strip()) > 128:
+            raise MarketError("compatibility value 无效", 400)
+        result[key] = item.strip()
+    return result
+
+
+def _normalize_links(value: Any) -> dict[str, str]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise MarketError("links 必须是 object", 400)
+    allowed = {"homepage", "documentation", "source", "issues"}
+    if set(value) - allowed:
+        raise MarketError("links 包含未知字段", 400)
+    result = {}
+    for key, item in value.items():
+        if item is None:
+            continue
+        if not isinstance(item, str):
+            raise MarketError(f"links.{key} 必须是 string", 400)
+        parsed = urlparse(item.strip())
+        if parsed.scheme.lower() != "https" or not parsed.hostname or parsed.username or parsed.password:
+            raise MarketError(f"links.{key} 只允许无凭据 HTTPS URL", 400)
+        result[key] = parsed.geturl()
+    return result
+
+
+def _normalize_catalog(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict) or set(value) - {"sort_weight", "featured"}:
+        raise MarketError("catalog 格式无效", 400)
+    result: dict[str, Any] = {}
+    if "sort_weight" in value:
+        try:
+            weight = int(value["sort_weight"])
+        except (TypeError, ValueError) as exc:
+            raise MarketError("catalog.sort_weight 无效", 400) from exc
+        if weight < -1000 or weight > 1000:
+            raise MarketError("catalog.sort_weight 超出范围", 400)
+        result["sort_weight"] = weight
+    if "featured" in value:
+        if not isinstance(value["featured"], bool):
+            raise MarketError("catalog.featured 必须是 boolean", 400)
+        result["featured"] = value["featured"]
+    return result
 
 
 def _normalize_package(raw: dict, *, manifest_url: str = "", market_url: str = "", schema_warnings: list[str] | None = None) -> dict:
@@ -867,27 +1012,51 @@ def _normalize_package(raw: dict, *, manifest_url: str = "", market_url: str = "
     package.setdefault("schema_version", SCHEMA_VERSION)
     if package.get("schema_version") != SCHEMA_VERSION:
         raise MarketError("不支持的 package schema_version", 400)
+    legacy_fields = sorted(LEGACY_PACKAGE_FIELDS.intersection(package))
+    if legacy_fields:
+        raise MarketError(f"Package V1 不再接受旧字段: {', '.join(legacy_fields)}", 400)
     package.setdefault("id", "")
     package.setdefault("name", package.get("id") or "未命名 Market 包")
     package.setdefault("description", "")
     package.setdefault("kind", "playlist")
+    if package["kind"] not in SUPPORTED_PACKAGE_KINDS:
+        raise MarketError("不支持的 package kind", 400)
     package.setdefault("package_type", PLUGIN_PACKAGE_TYPE if package.get("kind") == PLUGIN_PACKAGE_TYPE else CONTENT_PACKAGE_TYPE)
     if package["package_type"] not in {CONTENT_PACKAGE_TYPE, PLUGIN_PACKAGE_TYPE}:
         raise MarketError("不支持的 package_type", 400)
+    if package["package_type"] == PLUGIN_PACKAGE_TYPE and package["kind"] != PLUGIN_PACKAGE_TYPE:
+        raise MarketError("plugin_package 必须使用 plugin_package kind", 400)
+    if package["package_type"] == CONTENT_PACKAGE_TYPE and package["kind"] == PLUGIN_PACKAGE_TYPE:
+        raise MarketError("content_package 不能使用 plugin_package kind", 400)
     package["requires_plugins"] = _normalize_plugin_requirements(package.get("requires_plugins"))
     package.setdefault("plugin_manifest", None)
     package.setdefault("artifact_references", [])
     package.setdefault("version", "")
     package.setdefault("updated_at", "")
-    package.setdefault("region", {})
-    package.setdefault("operators", ["global"])
-    package.setdefault("language", ["zh-CN"])
-    package.setdefault("categories", [])
-    package.setdefault("tags", [])
+    package["regions"] = _normalize_regions(package.get("regions"))
+    package["operators"] = _normalize_operators(package.get("operators"))
+    package["providers"] = _normalize_text_list(package.get("providers"), "providers")
+    package["languages"] = _normalize_languages(package.get("languages"))
+    package["categories"] = _normalize_categories(package.get("categories"))
+    package["tags"] = _normalize_text_list(package.get("tags"), "tags")
     package.setdefault("status", "unknown")
+    if package["status"] not in PACKAGE_STATUS_VALUES:
+        raise MarketError("status 无效", 400)
     package.setdefault("source_origin", "unknown")
     package.setdefault("source_policy", "unknown")
     package.setdefault("risk_level", "unknown")
+    package["publisher"] = _normalize_publisher(package.get("publisher"))
+    package["compatibility"] = _normalize_compatibility(package.get("compatibility"))
+    package["links"] = _normalize_links(package.get("links"))
+    package["catalog"] = _normalize_catalog(package.get("catalog"))
+    if package.get("published_at") is None:
+        package["published_at"] = ""
+    if not isinstance(package["published_at"], str):
+        raise MarketError("published_at 必须是 string", 400)
+    if package.get("replacement") is not None:
+        if not isinstance(package["replacement"], str) or not package["replacement"].strip():
+            raise MarketError("replacement 必须是 package id", 400)
+        package["replacement"] = package["replacement"].strip()
     package.setdefault("defaults", {})
     package.setdefault("channel_sources", [])
     package.setdefault("channel_count", 0)
@@ -1044,18 +1213,34 @@ async def _load_source_packages(source: dict) -> tuple[dict, list[dict]]:
     if market.get("schema_version", SCHEMA_VERSION) != SCHEMA_VERSION:
         raise MarketError("不支持的 Market schema_version", 400)
 
-    # 根级 tag_definitions / tag_definitions_mode：来自当前 Market 源的展示规则。
-    # 先做受控规整，再以浅拷贝注入到这个 source 字典里，让后续 _attach_source /
-    # _source_public 能把它们原样带到响应中。注入不会污染 DB 行
-    # （外层 source 是 list_market_sources 返回的浅拷贝）。
-    tag_definitions = _normalize_tag_definitions(market.get("tag_definitions"))
-    tag_definitions_mode = _normalize_tag_definitions_mode(market.get("tag_definitions_mode"))
-    market["tag_definitions"] = tag_definitions
-    market["tag_definitions_mode"] = tag_definitions_mode
-    source_with_defs = dict(source)
-    source_with_defs["tag_definitions_mode"] = tag_definitions_mode
-    if tag_definitions:
-        source_with_defs["tag_definitions"] = tag_definitions
+    # Legacy root-level presentation rules are ignored. They are not part of
+    # V1 semantics, but must not invalidate an otherwise loadable catalog.
+
+    def broken_projection(item: Any, fallback_id: str, error: Exception) -> dict:
+        """Keep one invalid index item visible without re-validating bad fields.
+
+        A breaking schema rejects the item, but a malformed package must not
+        make the whole Market source disappear. Only safe identity/status
+        fields are retained for the unsupported card.
+        """
+        raw = item if isinstance(item, dict) else {}
+        kind = raw.get("kind") if raw.get("kind") in SUPPORTED_PACKAGE_KINDS else "playlist"
+        safe = {
+            "id": fallback_id,
+            "name": str(raw.get("name") or fallback_id),
+            "description": str(raw.get("description") or ""),
+            "kind": kind,
+            "package_type": PLUGIN_PACKAGE_TYPE if kind == PLUGIN_PACKAGE_TYPE else CONTENT_PACKAGE_TYPE,
+            "version": str(raw.get("version") or ""),
+            "updated_at": str(raw.get("updated_at") or ""),
+            "status": raw.get("status") if raw.get("status") in PACKAGE_STATUS_VALUES else "unknown",
+        }
+        broken = _normalize_package(safe, market_url=final_url, schema_warnings=[str(error)])
+        broken["supported_in_v1"] = False
+        broken["previewable"] = False
+        broken["importable"] = False
+        broken["unsupported_reason"] = f"索引校验失败: {error}"
+        return broken
 
     packages = []
     for item in market.get("packages", []):
@@ -1065,20 +1250,11 @@ async def _load_source_packages(source: dict) -> tuple[dict, list[dict]]:
             index_warnings = _schema_warnings(item, index=True)
             loaded = _normalize_package(item, market_url=final_url, schema_warnings=index_warnings)
             loaded["_manifest_loaded"] = not bool(loaded.get("manifest_url"))
-            packages.append(_attach_source(loaded, source_with_defs, raw_id or loaded.get("id")))
+            packages.append(_attach_source(loaded, source, raw_id or loaded.get("id")))
         except Exception as exc:
             fallback_id = str(item.get("id") or f"invalid-{len(packages) + 1}") if isinstance(item, dict) else f"invalid-{len(packages) + 1}"
-            broken = _normalize_package(
-                item if isinstance(item, dict) else {"id": fallback_id, "name": fallback_id, "kind": "unknown"},
-                market_url=final_url,
-                schema_warnings=[str(exc)],
-            )
-            broken["id"] = fallback_id
-            broken["supported_in_v1"] = False
-            broken["previewable"] = False
-            broken["importable"] = False
-            broken["unsupported_reason"] = f"索引校验失败: {exc}"
-            packages.append(_attach_source(broken, source_with_defs, fallback_id))
+            broken = broken_projection(item, fallback_id, exc)
+            packages.append(_attach_source(broken, source, fallback_id))
     for package in packages:
         package["_allow_private_fetch"] = allow_private
     if str(source.get("source_key") or "") == OFFICIAL_MARKET_SOURCE_KEY:
@@ -1101,7 +1277,7 @@ async def _load_source_packages(source: dict) -> tuple[dict, list[dict]]:
                     # version. Remote sources can only supersede it with a newer one.
                     packages[current_index] = fallback
             market["distribution"] = "remote_with_bundled_fallback"
-    market["_source"] = _source_public({**source_with_defs, "url": final_url})
+    market["_source"] = _source_public({**source, "url": final_url})
     return market, packages
 
 
@@ -1109,7 +1285,6 @@ def _load_bundled_official_source(source: dict) -> tuple[dict, list[dict]]:
     from official_plugin_distribution import load_bundled_official_market
 
     market, raw_packages = load_bundled_official_market()
-    source_with_defs = dict(source)
     packages = []
     for item in raw_packages:
         _validate_package_minimal(item, context="bundled official market")
@@ -1117,8 +1292,8 @@ def _load_bundled_official_source(source: dict) -> tuple[dict, list[dict]]:
         loaded = _normalize_package(item, market_url=str(source.get("url") or ""))
         loaded["_manifest_loaded"] = True
         loaded["_allow_private_fetch"] = False
-        packages.append(_attach_source(loaded, source_with_defs, raw_id))
-    market["_source"] = _source_public(source_with_defs)
+        packages.append(_attach_source(loaded, source, raw_id))
+    market["_source"] = _source_public(source)
     market["_bundled_fallback"] = True
     return market, packages
 
@@ -1392,9 +1567,10 @@ _MARKET_PACKAGE_SNAPSHOT_FIELDS = (
     "package_type",
     "version",
     "updated_at",
-    "region",
+    "regions",
     "operators",
-    "language",
+    "providers",
+    "languages",
     "categories",
     "tags",
     "status",
@@ -1410,6 +1586,11 @@ _MARKET_PACKAGE_SNAPSHOT_FIELDS = (
     "source_count",
     "health",
     "compatibility",
+    "publisher",
+    "published_at",
+    "replacement",
+    "links",
+    "catalog",
     "contributors",
     "importable",
     "previewable",
@@ -1536,30 +1717,30 @@ async def list_packages(filters: dict[str, str | bool]) -> list[dict]:
     search = str(filters.get("search") or "").strip().lower()
     region = str(filters.get("region") or "").strip()
     operator = str(filters.get("operator") or "").strip()
+    provider = str(filters.get("provider") or "").strip()
     kind = str(filters.get("kind") or "").strip()
     status = str(filters.get("status") or "").strip()
+    category = str(filters.get("category") or "").strip()
     tag = str(filters.get("tag") or "").strip()
     supported_only = bool(filters.get("supported_only"))
     importable_only = bool(filters.get("importable_only"))
 
     for package in catalog_packages:
-        region_values = [str(v or "") for v in (package.get("region") or {}).values()]
-        haystack = " ".join([
-            package.get("id", ""),
-            package.get("name", ""),
-            package.get("description", ""),
-            " ".join(package.get("tags") or []),
-            " ".join(region_values),
-        ]).lower()
+        region_values = _package_region_values(package)
+        haystack = _package_search_haystack(package)
         if search and search not in haystack:
             continue
         if region and region not in region_values:
             continue
         if operator and operator not in (package.get("operators") or []):
             continue
+        if provider and provider not in (package.get("providers") or []):
+            continue
         if kind and package.get("kind") != kind:
             continue
         if status and package.get("status") != status:
+            continue
+        if category and category not in (package.get("categories") or []):
             continue
         if tag and tag not in (package.get("tags") or []):
             continue
@@ -1588,17 +1769,55 @@ async def list_packages(filters: dict[str, str | bool]) -> list[dict]:
     return packages
 
 
+def _package_region_values(package: dict) -> list[str]:
+    values: list[str] = []
+    for region in package.get("regions") or []:
+        if region.get("global") is True:
+            values.append("global")
+        else:
+            values.extend(str(region.get(key) or "") for key in ("country", "province", "city"))
+    return [value for value in values if value]
+
+
+def _package_search_haystack(package: dict) -> str:
+    values = [
+        package.get("id", ""),
+        package.get("original_id", ""),
+        package.get("name", ""),
+        package.get("description", ""),
+        package.get("published_at", ""),
+        " ".join(_package_region_values(package)),
+        " ".join(package.get("operators") or []),
+        " ".join(package.get("providers") or []),
+        " ".join(package.get("languages") or []),
+        " ".join(package.get("categories") or []),
+        " ".join(package.get("tags") or []),
+    ]
+    publisher = package.get("publisher") or {}
+    if isinstance(publisher, dict):
+        values.extend([publisher.get("id", ""), publisher.get("name", "")])
+    manifest = package.get("plugin_manifest") or {}
+    if isinstance(manifest, dict):
+        values.extend([manifest.get("publisher_id", ""), manifest.get("display_name", "")])
+        values.extend(
+            str(item.get("scheme") or "")
+            for item in manifest.get("owned_schemes") or []
+            if isinstance(item, dict)
+        )
+    return " ".join(str(value or "") for value in values).lower()
+
+
 def _package_card(package: dict) -> dict:
     keys = [
-        "id", "name", "description", "kind", "version", "updated_at", "region",
-        "operators", "language", "categories", "tags", "status", "source_origin",
+        "id", "name", "description", "kind", "version", "published_at", "updated_at", "regions",
+        "operators", "providers", "languages", "categories", "tags", "status", "source_origin",
         "source_policy", "risk_level", "requires_proxy", "requires_resolver",
         "requires_cookie", "requires_referer", "requires_custom_ua", "channel_count",
         "source_count", "health", "compatibility", "contributors", "importable",
         "previewable", "supported_in_v1", "unsupported_reason", "schema_warnings",
         "manifest_url", "market_url", "market_source", "display", "installed",
         "installed_version", "auto_update", "update_available",
-        "version_status",
+        "version_status", "publisher", "replacement", "links", "catalog",
         "package_type", "requires_plugins", "plugin_manifest",
         "plugin_installable", "content_capabilities", "asset_count", "logo_count",
         "logo_priority", "catalog_unavailable", "catalog_stale",

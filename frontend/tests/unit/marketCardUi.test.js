@@ -5,60 +5,74 @@ import {
   packageCardTitle,
   packageIdentity,
   packageScaleLabel,
-  packageSecondaryMeta,
-  packageSourceLabel,
-  pluginCardTagItems,
+  packageSubtitle,
+  packageSummary,
+  packageTagItems,
 } from '../../src/views/marketCardUi.js'
 
-test('Market identity resolves explicit badge before provider, operator, and region fallbacks', () => {
+test('Market card title and copy come directly from package display fields', () => {
+  const pkg = {
+    id: 'custom',
+    name: '福建联通 IPTV Plugin',
+    description: 'Full package description',
+    display: {
+      subtitle: 'Package-owned subtitle',
+      summary: 'Package-owned summary',
+    },
+  }
+  assert.equal(packageCardTitle(pkg), '福建联通 IPTV Plugin')
+  assert.equal(packageSubtitle(pkg), 'Package-owned subtitle')
+  assert.equal(packageSummary(pkg), 'Package-owned summary')
+})
+
+test('identity only resolves explicit badge, brand, and image values', () => {
   assert.deepEqual(
     packageIdentity({
       id: 'custom',
       name: '福建联通 IPTV',
-      region: { province: '福建', country: 'CN' },
-      operators: ['联通'],
+      region: { province: '福建' },
+      operators: ['cucc'],
       display: { badge: { text: 'FX', tone: 'sky' } },
     }),
-    { text: 'FX', toneClass: 'market-region-sky', sourceLabel: '福建 · 联通' },
+    { text: 'FX', toneClass: 'market-region-sky', imageUrl: '', iconName: '' },
   )
 
-  const operator = packageIdentity({ id: 'fj', name: '福建联通 IPTV', region: { province: '福建' }, operators: ['cucc'] })
-  assert.equal(operator.text, '联')
-  assert.equal(operator.sourceLabel, '福建 · 联通')
+  assert.deepEqual(packageIdentity({
+    id: 'wave-plugin',
+    name: 'A name containing waveflow',
+    source_origin: 'official',
+    display: { identity: { brand: 'waveflow' } },
+  }), { text: 'WF', toneClass: 'market-region-violet', imageUrl: '', iconName: '' })
 
-  const region = packageIdentity({ id: 'hk', name: '香港内容包', region: { country: '香港' }, operators: ['global'] })
-  assert.equal(region.text, '港')
-  assert.match(region.toneClass, /^market-region-/)
+  assert.deepEqual(packageIdentity({
+    id: 'neutral',
+    name: '福建联通 IPTV',
+    region: { province: '福建' },
+    operators: ['cucc'],
+  }), { text: '', toneClass: 'market-region-neutral', imageUrl: '', iconName: '' })
+
+  assert.deepEqual(packageIdentity({
+    id: 'image',
+    name: 'Image package',
+    display: { identity: { icon: { type: 'image', url: 'https://cdn.example/icon.png' } } },
+  }), { text: '', toneClass: 'market-region-neutral', imageUrl: 'https://cdn.example/icon.png', iconName: '' })
 })
 
-test('Market package presenter keeps Content and Plugin card grammar separate', () => {
-  const content = { id: 'wave', name: 'WaveFlow 内容', package_type: 'content_package', kind: 'dynamic_playlist', channel_count: 42, source_origin: 'official', market_source: { name: 'Official' } }
-  assert.equal(packageCardTitle(content), 'WaveFlow 内容')
-  assert.equal(packageScaleLabel(content), '42 个频道')
-  assert.equal(packageSecondaryMeta(content), '官方 Market · 动态目录')
-  assert.equal(packageSourceLabel(content), 'Official')
-
-  const plugin = {
-    id: 'official::fjtv-plugin',
-    name: 'FJTV Provider Plugin',
-    package_type: 'plugin_package',
-    source_origin: 'official',
-    plugin: {
-      publisher_id: 'org.waveflow',
-      plugin_id: 'fjtv',
-      display_name: 'FJTV Provider',
-      provider_contracts: [{ contract: 'tv_provider', features: ['resolve_stream'] }],
-      owned_schemes: [{ scheme: 'fjtv' }],
-      platforms: [{ runtime: 'python' }],
-      permissions: ['network.managed'],
-    },
-  }
-  assert.equal(packageCardTitle(plugin), 'FJTV Provider')
-  assert.equal(packageScaleLabel(plugin), '1 个 scheme')
-  assert.equal(packageSourceLabel(plugin), 'org.waveflow/fjtv')
-  assert.equal(packageSecondaryMeta(plugin), 'Python · Managed Network')
-  assert.deepEqual(pluginCardTagItems(plugin), [
-    { label: 'TVProvider', accentClass: 'market-tag-blue' },
-    { label: '自动解析', accentClass: '' },
+test('one package tag list is shared by card and detail views', () => {
+  const tags = packageTagItems({
+    tags: ['Custom first', '央视', 'Custom first'],
+  })
+  assert.deepEqual(tags, [
+    { key: '0:Custom first', label: 'Custom first', accentClass: 'market-tag-neutral' },
+    { key: '1:央视', label: '央视', accentClass: 'market-tag-neutral' },
+    { key: '2:Custom first', label: 'Custom first', accentClass: 'market-tag-neutral' },
   ])
+})
+
+test('scale only formats explicit count fields and does not invent plugin metadata', () => {
+  assert.equal(packageScaleLabel({ channel_count: 42 }), '42 个频道')
+  assert.equal(packageScaleLabel({ source_count: 3 }), '')
+  assert.equal(packageScaleLabel({ channel_count: 0, source_count: 3 }), '')
+  assert.equal(packageScaleLabel({ kind: 'logo_pack', logo_count: 3 }), '3 个台标')
+  assert.equal(packageScaleLabel({ plugin: { owned_schemes: [{ scheme: 'custom' }] } }), '')
 })

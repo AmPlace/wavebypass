@@ -25,7 +25,7 @@
           <span v-if="selectedChips.length" class="market-filter-count">{{ selectedChips.length }}</span>
         </button>
         <MarketFilterDropdown
-          v-for="group in visibleFilterGroups"
+          v-for="group in desktopQuickFilterGroups"
           :key="group.key"
           :label="group.label"
           :options="group.options()"
@@ -39,6 +39,33 @@
           @close="handleDropdownClose"
         />
       </div>
+        <button type="button" class="market-more-filter-trigger" :class="{ 'is-active': moreFilterCount > 0 }" @click.stop="toggleMoreFilters">
+          更多筛选
+          <span v-if="moreFilterCount" class="market-filter-count">{{ moreFilterCount }}</span>
+          <svg class="size-3.5" :class="{ 'rotate-180': moreFiltersOpen }" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m6 9 6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+        <div v-if="moreFiltersOpen" class="market-more-filter-panel" @click.stop>
+          <section v-for="group in desktopMoreFilterGroups" :key="group.key" class="market-more-filter-group">
+            <h3 class="market-section-title">{{ group.label }}</h3>
+            <div class="market-more-filter-options">
+              <button
+                v-for="opt in group.options()"
+                :key="opt.key"
+                type="button"
+                class="market-more-filter-option"
+                :class="{ 'is-selected': filterMultiSelections[group.key].includes(opt.key) }"
+                @click="toggleMoreFilterOption(group.key, opt.key)"
+              >
+                <span class="market-more-filter-check" aria-hidden="true"><svg v-if="filterMultiSelections[group.key].includes(opt.key)" class="size-3" viewBox="0 0 24 24" fill="none"><path d="m5 12 4 4L19 6" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+                <span class="truncate">{{ opt.label }}</span>
+              </button>
+            </div>
+          </section>
+          <footer class="market-more-filter-footer">
+            <button type="button" class="market-btn-ghost" :disabled="moreFilterCount === 0" @click="clearMoreFilters">清除更多筛选</button>
+            <button type="button" class="market-btn-primary" @click="moreFiltersOpen = false">完成</button>
+          </footer>
+        </div>
     </section>
 
     <section class="market-list-head">
@@ -196,21 +223,24 @@
           >
             <div class="market-card-head">
             <span class="market-region-badge" :class="packageIdentity(pkg).toneClass">
-              {{ packageIdentity(pkg).text }}
+              <img v-if="packageIdentity(pkg).imageUrl" :src="packageIdentity(pkg).imageUrl" alt="" class="market-region-image">
+              <span v-else-if="packageIdentity(pkg).text">{{ packageIdentity(pkg).text }}</span>
+              <span v-else aria-hidden="true">•</span>
             </span>
             <div class="min-w-0 flex-1">
               <h2 class="truncate text-[15px] font-semibold leading-snug text-[var(--text-primary)]">{{ packageCardTitle(pkg) }}</h2>
-              <p class="market-card-source truncate">{{ packageSourceLabel(pkg) }}</p>
+              <p v-if="packageSubtitle(pkg)" class="market-card-subtitle truncate">{{ packageSubtitle(pkg) }}</p>
             </div>
           </div>
 
-          <div class="market-card-scale">{{ packageScaleLabel(pkg) }}</div>
+          <p v-if="packageSummary(pkg)" class="market-card-summary">{{ packageSummary(pkg) }}</p>
+          <div v-if="packageScaleLabel(pkg)" class="market-card-scale">{{ packageScaleLabel(pkg) }}</div>
 
           <AdaptiveTagList
+            v-if="packageTagItems(pkg).length"
             class="market-card-tags"
-            :items="isPluginPackage(pkg) ? pluginCardTagItems(pkg) : displayTagItems(pkg)"
+            :items="packageTagItems(pkg)"
             :max-rows="1"
-            :max-items="3"
             :gap="6"
           >
             <template #tag="{ item }">
@@ -221,7 +251,6 @@
             </template>
           </AdaptiveTagList>
 
-          <p class="market-card-secondary truncate">{{ packageSecondaryMeta(pkg) }}</p>
         </div>
 
         <div class="market-card-foot">
@@ -311,11 +340,13 @@
         >
           <header class="market-drawer-header">
             <span class="market-region-badge" :class="packageIdentity(selectedPackage || {}).toneClass">
-              {{ packageIdentity(selectedPackage || {}).text }}
+              <img v-if="packageIdentity(selectedPackage || {}).imageUrl" :src="packageIdentity(selectedPackage || {}).imageUrl" alt="" class="market-region-image">
+              <span v-else-if="packageIdentity(selectedPackage || {}).text">{{ packageIdentity(selectedPackage || {}).text }}</span>
+              <span v-else aria-hidden="true">•</span>
             </span>
             <div class="min-w-0 flex-1">
               <h2 :id="drawerTitleId" class="truncate text-[16px] font-semibold leading-snug text-[var(--text-primary)]">{{ packageCardTitle(selectedPackage || {}) }}</h2>
-              <p class="mt-0.5 truncate text-[12.5px] text-[var(--text-secondary)]">{{ packageSourceLabel(selectedPackage || {}) }}</p>
+              <p v-if="packageSubtitle(selectedPackage || {})" class="mt-0.5 truncate text-[12.5px] text-[var(--text-secondary)]">{{ packageSubtitle(selectedPackage || {}) }}</p>
             </div>
             <button type="button" class="market-touch-icon-btn" aria-label="关闭" @click="closeDialog">
               <svg class="size-4" viewBox="0 0 24 24" fill="none"><path d="M6 6l12 12M18 6 6 18" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
@@ -323,6 +354,16 @@
           </header>
 
           <div class="market-drawer-body">
+            <section v-if="selectedPackage?.description" class="market-drawer-section">
+              <h3 class="market-section-title">描述</h3>
+              <p class="text-[13px] leading-5 text-[var(--text-secondary)]">{{ selectedPackage.description }}</p>
+            </section>
+
+            <section v-if="packageSummary(selectedPackage || {})" class="market-drawer-section">
+              <h3 class="market-section-title">摘要</h3>
+              <p class="text-[13px] leading-5 text-[var(--text-secondary)]">{{ packageSummary(selectedPackage || {}) }}</p>
+            </section>
+
             <section class="market-drawer-section">
               <h3 class="market-section-title">可用性</h3>
               <p class="text-[13.5px] font-medium text-[var(--text-primary)]">{{ availabilitySummary.headline }}</p>
@@ -334,12 +375,15 @@
               <p class="text-[13px] leading-5 text-[var(--text-secondary)]">改善已有频道台标，不添加频道或播放源。{{ selectedPackage?.logo_count ? `包含 ${selectedPackage.logo_count} 个台标。` : '' }}</p>
             </section>
 
-            <section v-if="!isPluginPackage(selectedPackage) && (drawerTags.length || selectedPackage?.previewable)" ref="channelSectionRef" class="market-drawer-section">
-              <h3 class="market-section-title">频道</h3>
-              <div v-if="drawerTags.length" class="mb-3 flex flex-wrap gap-1.5">
-                <span v-for="tag in drawerTags" :key="tag" class="market-tag" :class="tagAccentClass(tag, selectedPackage || {})">{{ tag }}</span>
+            <section v-if="drawerTags.length" class="market-drawer-section">
+              <h3 class="market-section-title">标签</h3>
+              <div class="flex flex-wrap gap-1.5">
+                <span v-for="tag in drawerTags" :key="tag.key" class="market-tag" :class="tag.accentClass">{{ tag.label }}</span>
               </div>
+            </section>
 
+            <section v-if="!isPluginPackage(selectedPackage) && selectedPackage?.previewable" ref="channelSectionRef" class="market-drawer-section">
+              <h3 class="market-section-title">频道</h3>
               <div v-if="previewLoading" class="text-[12.5px] text-[var(--text-secondary)]">正在读取频道…</div>
               <ul
                 v-else-if="visibleChannelItems.length"
@@ -645,7 +689,7 @@ import MarketFilterDropdown from '../components/MarketFilterDropdown.vue'
 import AdaptiveTagList from '../components/AdaptiveTagList.vue'
 import { isLogoPackage, isPluginPackage, packageActionLabel, packageInstallable, permissionLabel, pluginDependencies, pluginIdentity, pluginRuntimeLabel, pluginSchemeLabels, providerContractLabels, requestedPermissions } from './marketPackageUi'
 import { createLatestMarketSourceProjection, marketSourceDraft } from './marketSourceUi.js'
-import { packageCardTitle, packageIdentity, packageScaleLabel, packageSecondaryMeta, packageSourceLabel, pluginCardTagItems } from './marketCardUi.js'
+import { packageCardTitle, packageIdentity, packageScaleLabel, packageSubtitle, packageSummary, packageTagItems } from './marketCardUi.js'
 
 const toastStore = useToastStore()
 const route = useRoute()
@@ -676,6 +720,7 @@ const menuOpenId = ref(null)
 const actingId = ref(null)
 const searchOpen = ref(false)
 const searchInputRef = ref(null)
+const moreFiltersOpen = ref(false)
 // 父级集中管理 Dropdown 打开状态，确保任何时间只有一个 Dropdown 展开。
 const activeDropdownKey = ref(null)
 // 第二行窄桌面时收纳低优先操作的菜单。
@@ -718,9 +763,11 @@ const filters = reactive({
 const filterMultiSelections = reactive({
   region: [],
   operator: [],
+  provider: [],
   kind: [],
   status: [],
   category: [],
+  tag: [],
 })
 
 // ── 维度映射 ─────────────────────────────────────────────────
@@ -729,6 +776,8 @@ const KIND_LABELS = {
   playlist: '静态播放列表',
   dynamic_playlist: '动态播放列表',
   mixed: '混合包',
+  logo_pack: '台标包',
+  plugin_package: 'Plugin Package',
   provider: 'Provider',
   remote_resolver: '远程解析器',
   dynamic_provider: '动态 Provider',
@@ -745,32 +794,6 @@ const STATUS_LABELS = {
   unknown: '未知',
 }
 
-const OPERATOR_LABELS = {
-  global: '不限',
-  cn: '',
-  cmcc: '移动',
-  ctcc: '电信',
-  cucc: '联通',
-  china_mobile: '移动',
-  china_telecom: '电信',
-  china_unicom: '联通',
-  cernet: '教育网',
-  broadcast: '广电',
-  oversea: '海外',
-  unknown: '其他',
-}
-
-const OPERATOR_IGNORE_VALUES = new Set(['cn', 'global', 'unknown', ''])
-
-const OPERATOR_ALIAS_LABELS = [
-  { pattern: /^(cmcc|china_mobile|中国移动|移动)$/i, label: '移动' },
-  { pattern: /^(ctcc|china_telecom|中国电信|电信)$/i, label: '电信' },
-  { pattern: /^(cucc|china_unicom|中国联通|联通)$/i, label: '联通' },
-  { pattern: /^(broadcast|中国广电|广电)$/i, label: '广电' },
-  { pattern: /^(cernet|教育网)$/i, label: '教育网' },
-  { pattern: /^(oversea|海外)$/i, label: '海外' },
-]
-
 const RISK_LABELS = {
   low: '低',
   medium: '中',
@@ -778,469 +801,9 @@ const RISK_LABELS = {
   unknown: '未知',
 }
 
-const DEFAULT_TAG_RULES = {
-  '央视': { priority: 100, tone: 'red', aliases: ['cctv', 'cgtn'] },
-  '卫视': { priority: 92, aliases: ['satellite'] },
-  '本地台': { priority: 88, aliases: ['local'] },
-  '本省台': { priority: 86 },
-  '地方': { priority: 84, aliases: ['local_content'] },
-  '体育': { priority: 82, tone: 'blue', aliases: ['sports', 'sport', '赛事'] },
-  '足球': { priority: 78, tone: 'blue', aliases: ['football'] },
-  '篮球': { priority: 76, tone: 'blue', aliases: ['basketball'] },
-  '少儿': { priority: 74, aliases: ['kids', 'kid', 'children'] },
-  '动画': { priority: 70, aliases: ['animation', 'cartoon', 'anime'] },
-  '电影': { priority: 66, tone: 'orange', aliases: ['movie', 'movies', 'film'] },
-  '剧场': { priority: 62, tone: 'orange' },
-  '港片': { priority: 60, tone: 'orange' },
-  '香港': { priority: 58 },
-  '教育': { priority: 54, aliases: ['education'] },
-  '新闻': { priority: 50, aliases: ['news'] },
-  '纪录': { priority: 46, aliases: ['documentary'] },
-  '音乐': { priority: 42, aliases: ['music'] },
-  '生活': { priority: 38 },
-  '购物': { priority: 34, aliases: ['shopping'] },
-  '戏曲': { priority: 30 },
-  '国际': { priority: 26 },
-  'CETV': { priority: 24 },
-  'BesTV': { priority: 22 },
-  'CHC': { priority: 20 },
-  '电视': { priority: 0, aliases: ['tv'] },
-  '直播': { priority: 0, aliases: ['live'] },
-}
-
-const USER_TAG_RULES = {}
-
-function mergeTagRules(base, overrides = {}) {
-  const merged = {}
-  for (const [label, rule] of Object.entries(base)) {
-    merged[label] = { ...rule, aliases: [...(rule.aliases || [])] }
-  }
-  for (const [label, rule] of Object.entries(overrides)) {
-    const current = merged[label] || {}
-    merged[label] = {
-      ...current,
-      ...rule,
-      aliases: [...(current.aliases || []), ...(rule.aliases || [])],
-    }
-  }
-  return merged
-}
-
-const TAG_RULES = mergeTagRules(DEFAULT_TAG_RULES, USER_TAG_RULES)
-
-// 由 (label, rule) -> alias 索引：用于把 alias 归一化回标签。
-function buildAliasIndex(rules) {
-  const out = {}
-  for (const [label, rule] of Object.entries(rules)) {
-    out[String(label).toLowerCase().replace(/[\s_-]+/g, '_')] = label
-    for (const alias of (rule.aliases || [])) {
-      out[String(alias).toLowerCase().replace(/[\s_-]+/g, '_')] = label
-    }
-  }
-  return out
-}
-
-const DEFAULT_TAG_ALIAS_LABELS = buildAliasIndex(TAG_RULES)
-
-// Market 协议允许包级 tag tone 枚举。前端再做一次防御性校验：来自第三方源的
-// 任意 tone 字符串都必须落在此白名单内。
-const ALLOWED_TAG_TONES = new Set(['neutral', 'red', 'blue', 'orange', 'green', 'violet'])
-
-// 单个 pkg 的有效 tag 规则。继承策略由 market_source.tag_definitions_mode 决定：
-//
-//   inherit (默认) —— Market 源 tag_definitions 叠加在 WaveFlow 内置
-//                     DEFAULT_TAG_RULES 之上：源里没声明的标签继续沿用内置
-//                     priority / tone / emphasized / aliases。
-//   replace        —— 仅使用当前 Market 源显式声明的 tag_definitions；未声明
-//                     的标签按中性默认（priority 为 0、无 tone、emphasized=false），
-//                     且 alias 索引也只使用源声明，不会让英文别名被映射到
-//                     内置中文标签。
-//
-// 第三方源的规则只能影响自己的包；同一 label 在源中有自定义时，priority / tone /
-// emphasized 取源的；inherit 模式下 aliases 与默认值合并去重；replace 模式下
-// aliases 仅来自源声明。tone 必须落入受控枚举，否则忽略。
-function packageTagRules(pkg) {
-  const source = pkg?.market_source || {}
-  const mode = source.tag_definitions_mode === 'replace' ? 'replace' : 'inherit'
-  const sourceDefs = source.tag_definitions
-  const hasSourceDefs = sourceDefs && typeof sourceDefs === 'object' && Object.keys(sourceDefs).length > 0
-
-  if (mode === 'inherit') {
-    if (!hasSourceDefs) return TAG_RULES
-    const merged = {}
-    for (const [label, rule] of Object.entries(TAG_RULES)) {
-      merged[label] = { ...rule, aliases: [...(rule.aliases || [])] }
-    }
-    return _mergeSourceDefsInto(merged, sourceDefs, { keepDefaultAliases: true })
-  }
-
-  // replace：忽略 DEFAULT_TAG_RULES，仅使用源自身声明。
-  return _mergeSourceDefsInto({}, hasSourceDefs ? sourceDefs : {}, { keepDefaultAliases: false })
-}
-
-function _mergeSourceDefsInto(merged, sourceDefs, { keepDefaultAliases }) {
-  for (const [label, rule] of Object.entries(sourceDefs)) {
-    if (!rule || typeof rule !== 'object') continue
-    const current = merged[label] || {}
-    const next = { ...current }
-    if (typeof rule.priority === 'number' && Number.isFinite(rule.priority)) {
-      next.priority = Math.max(0, Math.min(100, rule.priority))
-    }
-    if (typeof rule.tone === 'string' && ALLOWED_TAG_TONES.has(rule.tone)) {
-      next.tone = rule.tone
-    }
-    if (typeof rule.emphasized === 'boolean') {
-      next.emphasized = rule.emphasized
-    }
-    const aliasArr = Array.isArray(rule.aliases) ? rule.aliases : []
-    const cleanAliases = aliasArr.filter(v => typeof v === 'string' && v.trim())
-    if (keepDefaultAliases) {
-      next.aliases = Array.from(new Set([
-        ...(current.aliases || []),
-        ...cleanAliases,
-      ]))
-    } else {
-      // replace 模式下不合并默认 aliases。
-      next.aliases = cleanAliases
-    }
-    merged[label] = next
-  }
-  return merged
-}
-
-// 注意：alias 索引按 pkg 重算（normalizeTagLabel 内部完成），
-// 否则源自定义的 alias 不会被识别。
-// 卡片标签需要排除的"身份信息"（避免与标题/Meta 重复）。
-const IDENTITY_EXCLUDE_PATTERNS = [
-  /^IPTV$/i,
-  /^(HLS|HTTP[S]?|M3U[8]?|RTSP|DASH|HTTP-FLV|MPEG-TS)(?:[/-].*)?$/i,
-  /^TV$/i, /^Live$/i,
-  /^单播$/, /^组播$/, /^直播$/, /^播放列表$/, /^电视$/,
-  /^移动$/, /^联通$/, /^电信$/, /^广电$/, /^教育网$/, /^海外$/,
-  /^cmcc$/i, /^ctcc$/i, /^cucc$/i, /^cernet$/i, /^broadcast$/i, /^oversea$/i, /^global$/i, /^cn$/i,
-  /^playlist$/i, /^dynamic_playlist$/i, /^provider$/i, /^remote_resolver$/i, /^dynamic_provider$/i,
-  /^platform_pack$/i, /^radio_pack$/i, /^mixed$/i,
-]
-
-const PROVINCE_BADGES = {
-  '北京': '京', '上海': '沪', '天津': '津', '重庆': '渝',
-  '黑龙江': '黑', '吉林': '吉', '辽宁': '辽',
-  '河北': '冀', '河南': '豫', '山东': '鲁', '山西': '晋',
-  '陕西': '陕', '甘肃': '甘', '宁夏': '宁', '青海': '青',
-  '新疆': '新', '内蒙古': '蒙', '西藏': '藏',
-  '四川': '川', '贵州': '贵', '云南': '云',
-  '湖北': '鄂', '湖南': '湘', '江苏': '苏', '浙江': '浙', '安徽': '皖',
-  '江西': '赣', '福建': '闽', '广东': '粤', '广西': '桂', '海南': '琼',
-  '香港': '港', '澳门': '澳', '台湾': '台',
-}
-
-// 区域徽章背景色 hash，避免每个区域都用同色，但保持低饱和。
-const REGION_PALETTE = [
-  'market-region-rose',
-  'market-region-sky',
-  'market-region-emerald',
-  'market-region-orange',
-]
-
-// Market 协议允许包级显式声明的徽章 tone 集合。tone → CSS class 一一映射。
-// 与后端 BADGE_TONES 一致；前端不接受任何不在此集合内的值。
-const BADGE_TONE_CLASS = {
-  neutral: 'market-region-neutral',
-  rose: 'market-region-rose',
-  sky: 'market-region-sky',
-  emerald: 'market-region-emerald',
-  orange: 'market-region-orange',
-  violet: 'market-region-violet',
-}
-
-function hashIndex(str, mod) {
-  let h = 0
-  const s = String(str || '')
-  for (let i = 0; i < s.length; i += 1) {
-    h = (h * 31 + s.charCodeAt(i)) >>> 0
-  }
-  return h % mod
-}
-
-// 自动推导徽章文本：基于 region/country/品牌识别。
-function autoBadgeText(pkg) {
-  const province = String(pkg?.region?.province || '').trim()
-  const country = String(pkg?.region?.country || '').trim()
-  const identity = `${pkg?.name || ''} ${pkg?.id || ''} ${pkg?.source_origin || ''}`.toLowerCase()
-  if (identity.includes('youtube') || identity.includes('yt_')) return 'YT'
-  if (identity.includes('waveflow')) return 'W'
-  if (province) {
-    for (const [key, badge] of Object.entries(PROVINCE_BADGES)) {
-      if (province.includes(key)) return badge
-    }
-    if (/global|world|unknown/i.test(province)) return '全'
-    if (/^[a-z]/i.test(province)) return '全'
-    return province.slice(0, 1)
-  }
-  if (country) {
-    if (/global|world|unknown/i.test(country)) return '全'
-    if (country.includes('中国')) return '中'
-    if (/^[a-z]/i.test(country)) return '全'
-    return country.slice(0, 1)
-  }
-  return '全'
-}
-
-function autoBadgeToneClass(pkg) {
-  const seed = String(pkg?.region?.province || pkg?.region?.country || pkg?.id || 'x')
-  return REGION_PALETTE[hashIndex(seed, REGION_PALETTE.length)]
-}
-
-// 解析包级 display.badge 的合法配置（受控；后端已经 sanitized，前端再做一次防御性校验）。
-function packageBadgeOverride(pkg) {
-  const raw = pkg?.display?.badge
-  if (!raw || typeof raw !== 'object') return null
-  const text = typeof raw.text === 'string' ? raw.text.trim().slice(0, 3) : ''
-  const tone = typeof raw.tone === 'string' && BADGE_TONE_CLASS[raw.tone] ? raw.tone : ''
-  if (!text && !tone) return null
-  return { text, tone }
-}
-
-// 单一入口：返回 { text, toneClass }，模板/列表统一调用。优先级：
-//   package.display.badge → 内置品牌 / 省份 / 国家识别 → 稳定 hash 调色板。
-function effectiveBadge(pkg) {
-  const override = packageBadgeOverride(pkg)
-  const text = override?.text || autoBadgeText(pkg)
-  const toneClass = override?.tone
-    ? BADGE_TONE_CLASS[override.tone]
-    : autoBadgeToneClass(pkg)
-  return { text, toneClass }
-}
-
-function regionBadge(pkg) { return effectiveBadge(pkg).text }
-function regionBadgeClass(pkg) { return effectiveBadge(pkg).toneClass }
-
 function kindLabel(kind) { return KIND_LABELS[kind] || kind || '未知' }
 function statusLabel(status) { return STATUS_LABELS[status] || status || '未知' }
 function riskLabel(level) { return RISK_LABELS[level] || level || '未知' }
-
-function normalizeOperatorLabel(value) {
-  const raw = String(value || '').trim()
-  const key = raw.toLowerCase()
-  if (OPERATOR_IGNORE_VALUES.has(key)) return ''
-  if (Object.prototype.hasOwnProperty.call(OPERATOR_LABELS, key)) return OPERATOR_LABELS[key]
-  for (const rule of OPERATOR_ALIAS_LABELS) {
-    if (rule.pattern.test(raw)) return rule.label
-  }
-  return raw
-}
-
-function operatorLabels(pkg) {
-  const seen = new Set()
-  const out = []
-  for (const raw of (pkg?.operators || [])) {
-    const label = normalizeOperatorLabel(raw)
-    if (!label || seen.has(label)) continue
-    seen.add(label)
-    out.push(label)
-  }
-  return out
-}
-
-function provinceOf(pkg) {
-  const value = String(pkg?.region?.province || '').trim()
-  return /^(global|world|unknown)$/i.test(value) ? '' : value
-}
-
-function countryOf(pkg) {
-  const value = String(pkg?.region?.country || '').trim()
-  return /^(global|world|unknown)$/i.test(value) ? '' : value
-}
-
-function normalizeTagLabel(value, pkg) {
-  const raw = String(value || '').trim()
-  if (!raw) return ''
-  const key = raw.toLowerCase().replace(/[\s_-]+/g, '_')
-  // alias 解析受当前包所属源的模式控制：
-  //   inherit —— 先查源合并索引，再回退到 DEFAULT_TAG_ALIAS_LABELS；
-  //   replace —— 仅查源自身索引，不能让英文别名被映射到内置中文标签。
-  const mode = pkg?.market_source?.tag_definitions_mode === 'replace' ? 'replace' : 'inherit'
-  if (pkg) {
-    const rules = packageTagRules(pkg)
-    if (rules !== TAG_RULES) {
-      const idx = buildAliasIndex(rules)
-      if (idx[key]) return idx[key]
-    }
-  }
-  if (mode === 'replace') return raw
-  return DEFAULT_TAG_ALIAS_LABELS[key] || raw
-}
-
-// ── displayMeta / displayTags ─────────────────────────────────
-
-function displayMeta(pkg) {
-  if (!pkg) return ''
-  if (isLogoPackage(pkg)) return `${pkg.logo_count || 0} 个台标 · 不添加频道`
-  const parts = []
-  if (pkg.channel_count) parts.push(`${pkg.channel_count} 个频道`)
-  const operators = operatorLabels(pkg)
-  const province = provinceOf(pkg)
-  const country = countryOf(pkg)
-  // "安徽移动" 这种地区+运营商紧贴写法更像直播频道页的内容描述。
-  if (province && operators.length) {
-    parts.push(`${province}${operators[0]}`)
-  } else if (province) {
-    parts.push(province)
-  } else if (country) {
-    parts.push(country)
-  } else if (operators.length) {
-    parts.push(operators[0])
-  }
-  parts.push(deliveryLabel(pkg))
-  return parts.filter(Boolean).join(' · ')
-}
-
-function deliveryLabel(pkg) {
-  const structured = [
-    pkg?.delivery,
-    pkg?.transport,
-    pkg?.mode,
-    pkg?.manifest?.delivery,
-    pkg?.manifest?.transport,
-    pkg?.manifest?.mode,
-  ].map(v => String(v || '').trim()).find(Boolean)
-  const normalized = normalizeDeliveryToken(structured)
-  if (normalized) return normalized
-
-  const tokens = [...(pkg?.tags || []), ...(pkg?.categories || [])].map(v => String(v || '').trim())
-  if (tokens.some(v => /^组播$/i.test(v) || /multicast|igmp|rtp/i.test(v))) return '组播'
-  if (tokens.some(v => /^单播$/i.test(v) || /unicast|hls|m3u8|http/i.test(v))) return '单播'
-  if (/dynamic/i.test(String(pkg?.kind || ''))) return '动态包'
-  return kindLabel(pkg?.kind)
-}
-
-function normalizeDeliveryToken(value) {
-  const v = String(value || '').trim()
-  if (!v) return ''
-  if (/^(unicast|single|http|hls|m3u8|单播)$/i.test(v)) return '单播'
-  if (/^(multicast|igmp|rtp|udp|组播)$/i.test(v)) return '组播'
-  if (/^(dynamic|dynamic_playlist|动态|动态包)$/i.test(v)) return '动态包'
-  return ''
-}
-
-function isIdentityToken(value, pkg) {
-  const v = String(value || '').trim()
-  if (!v) return true
-  for (const pattern of IDENTITY_EXCLUDE_PATTERNS) {
-    if (pattern.test(v)) return true
-  }
-  // 重复地区/运营商身份：和当前 pkg 完全一致的省份/运营商
-  const province = provinceOf(pkg)
-  const country = countryOf(pkg)
-  if (province && v === province) return true
-  if (country && v === country) return true
-  if (operatorLabels(pkg).includes(v)) return true
-  if (kindLabel(pkg?.kind) === v) return true
-  return false
-}
-
-function categoryRank(value, pkg) {
-  const label = normalizeTagLabel(value, pkg)
-  const rules = packageTagRules(pkg)
-  const direct = rules[label]
-  if (direct && typeof direct.priority === 'number') return -direct.priority
-  // 仅 inherit 模式允许子串包含匹配；replace 模式必须精确命中（alias 在
-  // normalizeTagLabel 阶段已经被还原为主标签），未命中则按 priority 0 处理。
-  if (tagModeOf(pkg) === 'inherit') {
-    for (const [name, rule] of Object.entries(rules)) {
-      if (typeof rule.priority !== 'number') continue
-      if (String(label).includes(name)) return -rule.priority
-    }
-  }
-  // 未配置任何规则的标签视为 priority 0（与 replace 模式约定一致），
-  // 配合 pkgContentTags 中的 originalIndex 保持稳定原始顺序。
-  return 0
-}
-
-function pkgContentTags(pkg) {
-  const seen = new Set()
-  const tags = []
-  // 优先用 categories，再 fallback 到 tags。
-  const candidates = [...(pkg?.categories || []), ...(pkg?.tags || [])]
-  for (const raw of candidates) {
-    const v = normalizeTagLabel(raw, pkg)
-    if (!v) continue
-    if (seen.has(v)) continue
-    if (isIdentityToken(v, pkg)) continue
-    seen.add(v)
-    tags.push({ label: v, originalIndex: tags.length })
-  }
-  // 稳定排序：priority 高的先（categoryRank 返回 -priority），相同 priority
-  // 时保持原始数组顺序（不依赖 Array.sort 在不同引擎下的稳定性，显式比较 originalIndex）。
-  tags.sort((a, b) => {
-    const ra = categoryRank(a.label, pkg)
-    const rb = categoryRank(b.label, pkg)
-    if (ra !== rb) return ra - rb
-    return a.originalIndex - b.originalIndex
-  })
-  return tags.map(t => t.label)
-}
-
-// 卡片标签条目（label + tone class）。返回完整列表——可见数量与 +N 由
-// AdaptiveTagList 基于两行真实宽度测量决定，组件外部不再做硬编码 slice。
-// 强调色名额仍然限制为 3：tone 必须存在且不是 'neutral'，emphasized=false 不计入。
-function displayTagItems(pkg) {
-  const tags = pkgContentTags(pkg).filter((label) => {
-    const rules = packageTagRules(pkg)
-    const rule = directRule(rules, label, { allowSubstring: tagModeOf(pkg) === 'inherit' })
-    // 首页只显示被 WaveFlow 或当前 Market 源定义为内容摘要的标签。
-    // 未定义的频道台/平台名和传输字段留给详情层，避免把来源与内容类型混在一起。
-    return Boolean(rule)
-  })
-  const rules = packageTagRules(pkg)
-  const allowSubstring = tagModeOf(pkg) === 'inherit'
-  let accentCount = 0
-  return tags.map((label) => {
-    const rule = directRule(rules, label, { allowSubstring })
-    const tone = rule?.tone
-    const emphasized = rule?.emphasized !== false
-    const canAccent = Boolean(tone) && tone !== 'neutral' && emphasized && accentCount < 3
-    if (canAccent) accentCount += 1
-    return {
-      label,
-      accentClass: canAccent ? `market-tag-${tone}` : '',
-    }
-  })
-}
-
-// 从规则集合中查 label 的有效规则。
-//   inherit 模式：精确名称命中失败时回退到子串包含匹配，复用历史宽松行为以兼容
-//                 既有显示效果（如"体育新闻" → 命中"体育"）。
-//   replace 模式：只允许精确名称命中。alias 已在 normalizeTagLabel 阶段把别名映射
-//                 回了主标签，因此精确命中等价于"精确名称 + 该定义声明的 alias"。
-//                 子串包含会让源作者声明"体育"后意外把"体育新闻"/"地方体育频道"
-//                 也染色，违反 replace 的"只使用源明确提供的规则"含义，禁掉。
-function directRule(rules, label, { allowSubstring = true } = {}) {
-  if (rules[label]) return rules[label]
-  if (!allowSubstring) return null
-  for (const [name, rule] of Object.entries(rules)) {
-    if (String(label).includes(name)) return rule
-  }
-  return null
-}
-
-function tagModeOf(pkg) {
-  return pkg?.market_source?.tag_definitions_mode === 'replace' ? 'replace' : 'inherit'
-}
-
-function tagRuleFor(value, pkg) {
-  const label = normalizeTagLabel(value, pkg)
-  return directRule(packageTagRules(pkg), label, {
-    allowSubstring: tagModeOf(pkg) === 'inherit',
-  })
-}
-
-// 详情 Drawer 内继续按规则染色（不受卡片三色名额限制）。
-function tagAccentClass(tag, pkg) {
-  const rule = tagRuleFor(tag, pkg)
-  if (!rule || rule.emphasized === false) return ''
-  return rule.tone ? `market-tag-${rule.tone}` : ''
-}
 
 // ── installState ─────────────────────────────────────────────
 
@@ -1254,27 +817,7 @@ function installState(pkg) {
 
 // ── 抽屉派生数据 ────────────────────────────────────────────
 
-const drawerTags = computed(() => {
-  const pkg = selectedPackage.value
-  if (!pkg) return []
-  const seen = new Set()
-  const indexed = []
-  for (const raw of [...(pkg.categories || []), ...(pkg.tags || [])]) {
-    const v = normalizeTagLabel(raw, pkg)
-    if (!v) continue
-    if (seen.has(v)) continue
-    if (isIdentityToken(v, pkg)) continue
-    seen.add(v)
-    indexed.push({ label: v, originalIndex: indexed.length })
-  }
-  indexed.sort((a, b) => {
-    const ra = categoryRank(a.label, pkg)
-    const rb = categoryRank(b.label, pkg)
-    if (ra !== rb) return ra - rb
-    return a.originalIndex - b.originalIndex
-  })
-  return indexed.map(t => t.label)
-})
+const drawerTags = computed(() => packageTagItems(selectedPackage.value || {}))
 
 const availabilitySummary = computed(() => {
   const pkg = selectedPackage.value
@@ -1332,14 +875,6 @@ const availabilitySummary = computed(() => {
   }
 
   // 4) 普通直连。
-  const operators = operatorLabels(pkg)
-  const region = provinceOf(pkg)
-  if (region && operators.length) {
-    return {
-      headline: '可直接使用',
-      detail: `无需代理，播放地址由 WaveFlow 自动识别处理。需要${region}${operators[0]}网络环境。`,
-    }
-  }
   return { headline: '可直接使用', detail: '无需代理，播放地址由 WaveFlow 自动识别处理。' }
 })
 
@@ -1392,23 +927,11 @@ const exampleChannels = computed(() => {
   // 优先用已加载的 preview.channels；否则使用 selectedPackage 上预置的 sample_channels（若有）。
   const source = preview.value?.channels || selectedPackage.value?.sample_channels || []
   if (!source.length) return []
-  // 按 CCTV/卫视/本地/体育/少儿 优先级取 6 个。
   const named = source.map((ch, idx) => ({
     key: `${ch.name || idx}-${ch.url || idx}`,
     name: String(ch.name || '').trim(),
     group: String(ch.group_name || ch.group || '').trim(),
   })).filter(ch => ch.name)
-  const score = (ch) => {
-    if (/CCTV|央视/i.test(ch.name)) return 0
-    if (/卫视/.test(ch.name)) return 1
-    const province = provinceOf(selectedPackage.value || {})
-    if (province && ch.name.includes(province)) return 2
-    if (/体育/.test(ch.name)) return 3
-    if (/少儿|动画|卡通/.test(ch.name)) return 4
-    if (/电影|剧场/.test(ch.name)) return 5
-    return 9
-  }
-  named.sort((a, b) => score(a) - score(b))
   return named.slice(0, 6)
 })
 
@@ -1487,8 +1010,26 @@ function statusFilterLabel(key) {
 }
 
 function pkgRegionTokens(pkg) {
-  const r = pkg?.region || {}
-  return [r.country, r.province, r.city].filter(Boolean).map(v => String(v).trim())
+  return (Array.isArray(pkg?.regions) ? pkg.regions : []).flatMap(region => {
+    if (region?.global === true) return ['global']
+    return [region?.country, region?.province, region?.city].filter(Boolean).map(v => String(v).trim())
+  })
+}
+
+function pkgOperatorValues(pkg) {
+  return Array.isArray(pkg?.operators) ? pkg.operators.filter(Boolean).map(v => String(v)) : []
+}
+
+function pkgProviderValues(pkg) {
+  return Array.isArray(pkg?.providers) ? pkg.providers.filter(Boolean).map(v => String(v)) : []
+}
+
+function pkgCategoryValues(pkg) {
+  return Array.isArray(pkg?.categories) ? pkg.categories.filter(Boolean).map(v => String(v)) : []
+}
+
+function pkgMachineTagValues(pkg) {
+  return Array.isArray(pkg?.tags) ? pkg.tags.filter(Boolean).map(v => String(v)) : []
 }
 
 const filterGroups = [
@@ -1500,7 +1041,12 @@ const filterGroups = [
   {
     key: 'operator',
     label: '运营商',
-    options: () => uniqueValues(packages.value.flatMap(operatorLabels)).map(v => ({ key: v, label: v })),
+    options: () => uniqueValues(packages.value.flatMap(pkgOperatorValues)).map(v => ({ key: v, label: v })),
+  },
+  {
+    key: 'provider',
+    label: '提供方',
+    options: () => uniqueValues(packages.value.flatMap(pkgProviderValues)).map(v => ({ key: v, label: v })),
   },
   {
     key: 'kind',
@@ -1516,13 +1062,18 @@ const filterGroups = [
   },
   {
     key: 'category',
-    label: '内容标签',
-    options: () => uniqueValues(packages.value.flatMap(pkgContentTags)).slice(0, 60).map(v => ({ key: v, label: v })),
+    label: '分类',
+    options: () => uniqueValues(packages.value.flatMap(pkgCategoryValues)).map(v => ({ key: v, label: v })),
+  },
+  {
+    key: 'tag',
+    label: '标签',
+    options: () => uniqueValues(packages.value.flatMap(pkgMachineTagValues)).map(v => ({ key: v, label: v })),
   },
 ]
-const visibleFilterGroups = computed(() => packageType.value === 'plugins'
-  ? filterGroups.filter(group => group.key === 'status')
-  : filterGroups)
+const visibleFilterGroups = computed(() => filterGroups)
+const desktopQuickFilterGroups = computed(() => filterGroups.filter(group => ['region', 'provider', 'kind'].includes(group.key)))
+const desktopMoreFilterGroups = computed(() => filterGroups.filter(group => ['operator', 'category', 'tag', 'status'].includes(group.key)))
 
 function selectPackageType(value) {
   packageType.value = value === 'plugins' ? 'plugins' : 'content'
@@ -1581,6 +1132,11 @@ const selectedChips = computed(() => {
   return out
 })
 
+const moreFilterCount = computed(() => desktopMoreFilterGroups.value.reduce(
+  (count, group) => count + (filterMultiSelections[group.key] || []).length,
+  0,
+))
+
 function removeSelection(group, value) {
   const current = filterMultiSelections[group] || []
   filterMultiSelections[group] = current.filter(v => v !== value)
@@ -1591,6 +1147,16 @@ function toggleMobileFilterOption(group, value) {
   if (current.has(value)) current.delete(value)
   else current.add(value)
   filterMultiSelections[group] = Array.from(current)
+}
+
+function toggleMoreFilterOption(group, value) {
+  toggleMobileFilterOption(group, value)
+}
+
+function clearMoreFilters() {
+  for (const group of desktopMoreFilterGroups.value) {
+    filterMultiSelections[group.key] = []
+  }
 }
 
 function clearSelections() {
@@ -1665,7 +1231,10 @@ const filteredPackages = computed(() => {
     })
   }
   if (sel.operator.length) {
-    list = list.filter(p => operatorLabels(p).some(op => sel.operator.includes(op)))
+    list = list.filter(p => pkgOperatorValues(p).some(op => sel.operator.includes(op)))
+  }
+  if (sel.provider.length) {
+    list = list.filter(p => pkgProviderValues(p).some(provider => sel.provider.includes(provider)))
   }
   if (sel.kind.length) {
     list = list.filter(p => sel.kind.includes(p.kind))
@@ -1674,10 +1243,10 @@ const filteredPackages = computed(() => {
     list = list.filter(p => sel.status.some(k => packageMatchesStatusKey(p, k)))
   }
   if (sel.category.length) {
-    list = list.filter(p => {
-      const set = new Set(pkgContentTags(p))
-      return sel.category.some(v => set.has(v))
-    })
+    list = list.filter(p => pkgCategoryValues(p).some(value => sel.category.includes(value)))
+  }
+  if (sel.tag.length) {
+    list = list.filter(p => pkgMachineTagValues(p).some(value => sel.tag.includes(value)))
   }
   switch (filters.sort) {
     case 'updated':
@@ -1690,14 +1259,14 @@ const filteredPackages = computed(() => {
       list.sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'zh-CN'))
       break
     default:
-      // 默认推荐：已安装/有更新优先，其次稳定，其次频道数。
+      // 默认推荐：运行时状态优先，其次使用 Market catalog 明确提供的权重。
       list.sort((a, b) => {
         const score = (p) => {
           let s = 0
           if (p.installed && p.update_available) s -= 30
           else if (p.installed) s -= 10
-          if (p.status === 'stable') s -= 5
           if (!p.supported_in_v1 || !p.importable) s += 50
+          s -= Number(p.catalog?.sort_weight || 0)
           return s
         }
         return score(a) - score(b) || (b.channel_count || 0) - (a.channel_count || 0)
@@ -2193,6 +1762,13 @@ function handleDropdownClose(key) {
   }
 }
 
+function toggleMoreFilters() {
+  moreFiltersOpen.value = !moreFiltersOpen.value
+  activeDropdownKey.value = null
+  overflowMenuOpen.value = false
+  menuOpenId.value = null
+}
+
 function closeAllDropdowns() {
   if (activeDropdownKey.value !== null) activeDropdownKey.value = null
 }
@@ -2212,11 +1788,13 @@ function closeOverflowMenuAnd(fn) {
 function onWindowClick() {
   if (menuOpenId.value !== null) menuOpenId.value = null
   if (overflowMenuOpen.value) overflowMenuOpen.value = false
+  if (moreFiltersOpen.value) moreFiltersOpen.value = false
   // activeDropdownKey 由 Dropdown 组件自身的文档点击监听处理（识别其 root + teleported menu）。
 }
 function onWindowKey(e) {
   if (e.key === 'Escape') {
     if (filterSheetOpen.value) filterSheetOpen.value = false
+    else if (moreFiltersOpen.value) moreFiltersOpen.value = false
     else if (overflowMenuOpen.value) overflowMenuOpen.value = false
     else if (activeDropdownKey.value !== null) closeAllDropdowns()
     else if (searchOpen.value || filters.search) closeSearch()
@@ -2380,17 +1958,6 @@ async function confirmPermissionAndRetry(pkg, error, retry) {
   } catch (caught) {
     if (!componentDisposed) toastStore.error(pluginErrorMessage(caught))
   }
-}
-
-function pluginTagItems(pkg) {
-  return [
-    ...providerContractLabels(pkg).map(label => ({ label, accentClass: 'market-tag-blue' })),
-    ...pluginSchemeLabels(pkg).map(label => ({ label, accentClass: '' })),
-    ...requestedPermissions(pkg).map(name => ({
-      label: permissionLabel(name),
-      accentClass: name === 'network.direct' ? 'market-tag-orange' : '',
-    })),
-  ]
 }
 
 function setPackageAutoUpdate(packageId, autoUpdate) {
@@ -2756,7 +2323,7 @@ onBeforeUnmount(() => {
 }
 
 .market-filter-sheet-trigger {
-  display: inline-flex;
+  display: none;
   align-items: center;
   gap: 7px;
   height: 40px;
@@ -2768,6 +2335,105 @@ onBeforeUnmount(() => {
   color: var(--text-primary);
   font-size: 14px;
   font-weight: 500;
+}
+
+.market-more-filter-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 40px;
+  flex: 0 0 auto;
+  padding: 0 16px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.market-more-filter-trigger:hover,
+.market-more-filter-trigger.is-active {
+  border-color: var(--border-strong);
+  background: var(--surface-hover);
+}
+
+.market-more-filter-panel {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 40;
+  width: min(420px, calc(100vw - 32px));
+  max-height: min(62vh, 520px);
+  overflow-y: auto;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--bg-soft);
+  box-shadow: 0 16px 36px rgba(15, 23, 42, 0.14);
+}
+
+:global(.dark) .market-more-filter-panel {
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.42);
+}
+
+.market-more-filter-group + .market-more-filter-group {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.market-more-filter-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.market-more-filter-option {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+  min-height: 32px;
+  padding: 0 8px;
+  border-radius: 8px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-align: left;
+}
+
+.market-more-filter-option:hover,
+.market-more-filter-option.is-selected {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.market-more-filter-check {
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+}
+
+.market-more-filter-option.is-selected .market-more-filter-check {
+  border-color: var(--text-primary);
+  background: var(--text-primary);
+  color: var(--bg);
+}
+
+.market-more-filter-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
 }
 
 .market-filter-count {
@@ -2784,7 +2450,8 @@ onBeforeUnmount(() => {
 }
 
 .market-desktop-filter {
-  display: none;
+  display: inline-flex;
+  flex: 0 0 auto;
 }
 
 .market-grid {
@@ -3020,7 +2687,7 @@ onBeforeUnmount(() => {
 .market-card {
   display: flex;
   flex-direction: column;
-  min-height: 226px;
+  min-height: 198px;
   gap: 12px;
   padding: 16px;
   border-radius: var(--card-radius);
@@ -3045,7 +2712,7 @@ onBeforeUnmount(() => {
 }
 
 .market-card-skeleton {
-  height: 226px;
+  height: 198px;
   border-radius: var(--card-radius);
   border: 1px solid var(--border);
   background: var(--surface);
@@ -3091,6 +2758,13 @@ onBeforeUnmount(() => {
   letter-spacing: 0.02em;
 }
 
+.market-region-image {
+  width: 24px;
+  height: 24px;
+  object-fit: contain;
+  border-radius: 6px;
+}
+
 .market-region-rose { background: rgba(244, 63, 94, 0.10); color: rgb(190 18 60); }
 .market-region-emerald { background: rgba(16, 185, 129, 0.12); color: rgb(4 120 87); }
 .market-region-sky { background: rgba(14, 165, 233, 0.12); color: rgb(2 132 199); }
@@ -3108,7 +2782,6 @@ onBeforeUnmount(() => {
 .market-card-tags {
   display: flex;
   flex-wrap: wrap;
-  min-height: 25px;
   max-height: 25px;
   align-content: flex-start;
   overflow: hidden;
@@ -3122,8 +2795,24 @@ onBeforeUnmount(() => {
   line-height: 1.2;
 }
 
+.market-card-subtitle {
+  margin-top: 4px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.market-card-summary {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  line-height: 17px;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
 .market-card-scale {
-  min-height: 20px;
   color: var(--text-primary);
   font-size: 14px;
   font-weight: 600;
@@ -3168,9 +2857,9 @@ onBeforeUnmount(() => {
 :global(.dark) .market-tag-neutral { background: var(--surface); color: var(--text-secondary); }
 
 .market-tag-rest {
-  background: transparent;
-  color: var(--text-tertiary);
-  border: 1px dashed var(--border);
+  background: var(--surface);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
 }
 
 .market-card-foot {
@@ -3472,6 +3161,11 @@ onBeforeUnmount(() => {
     height: 40px;
   }
 
+  .market-more-filter-trigger,
+  .market-more-filter-panel {
+    display: none;
+  }
+
   .market-desktop-filter {
     display: none;
   }
@@ -3502,12 +3196,11 @@ onBeforeUnmount(() => {
   }
 
   .market-card {
-    min-height: 220px;
+    min-height: 192px;
     padding: 16px;
   }
 
   .market-card-tags {
-    min-height: 25px;
     max-height: 25px;
   }
 

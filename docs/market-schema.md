@@ -1,370 +1,238 @@
-# WaveFlow Market Schema
+# WaveFlow Market Package Schema V1
 
-WaveFlow Market uses two layers:
+WaveFlow Market V1 is a breaking package contract. Existing project-owned
+packages are migrated to this contract; the backend does not provide a
+compatibility adapter for removed package-level fields.
 
-- `market.json`: index data for listing, search, filters, badges, update checks, and dependency hints.
-- `manifest.json`: executable import/preview configuration loaded lazily when the user opens details, previews, or imports a package.
+The authority boundary is:
 
-Market data is configuration only. WaveFlow does not download or execute third-party code from Market packages.
+```text
+Package / Market catalog owns semantics
+Backend validates and safely projects data
+Frontend owns presentation, responsive layout, and runtime state
+```
 
-## market.json
+## Market Index
 
-`market.json` should be fast to fetch and safe to render. Do not put concrete channel lists or playback URLs in it.
+`market.json` is the listing/index layer. It contains package metadata needed
+for listing, filtering, search, card presentation, and update checks. It must
+not contain executable import configuration such as `defaults`,
+`channel_sources`, `inline_channels`, `channels`, `channels_url`, `headers`,
+`assets`, or `logos`.
+
+An index package requires `id`, `name`, `description`, `kind`,
+`package_type`, `version`, and `updated_at`. Other fields are optional and
+are projected as empty or absent when not supplied.
 
 ```json
 {
   "schema_version": 1,
-  "market_version": "2026.05.28",
-  "updated_at": "2026-05-28T00:00:00+08:00",
-  "tag_definitions": {
-    "央视": { "priority": 100, "tone": "red", "emphasized": true, "aliases": ["CCTV", "CGTN"] },
-    "体育": { "priority": 90,  "tone": "blue", "emphasized": true, "aliases": ["sports", "sport", "赛事"] },
-    "电影": { "priority": 80,  "tone": "orange", "emphasized": true, "aliases": ["movie", "film"] },
-    "少儿": { "priority": 70,  "tone": "neutral", "emphasized": false, "aliases": ["kids", "children"] }
-  },
+  "market_version": "2026.08.23",
+  "updated_at": "2026-08-23T00:00:00Z",
   "packages": [
     {
       "id": "japantv-public",
       "name": "Japan Public TV",
-      "description": "A dynamic M3U package for public Japanese TV streams.",
+      "description": "Complete description shown in package details.",
       "kind": "dynamic_playlist",
-      "version": "2026.05.28",
-      "updated_at": "2026-05-28T00:00:00+08:00",
+      "package_type": "content_package",
+      "version": "2026.08.23",
+      "updated_at": "2026-08-23T00:00:00Z",
       "manifest_url": "packages/japantv-public/manifest.json",
-      "display": {
-        "badge": { "text": "JP", "tone": "sky" }
-      },
-      "region": {
-        "country": "JP",
-        "province": null,
-        "city": null
-      },
-      "operators": ["global"],
-      "language": ["ja-JP"],
-      "categories": ["tv"],
-      "tags": ["Japan", "public", "dynamic_playlist", "HLS"],
+      "regions": [{"country": "JP", "province": null, "city": null}],
+      "operators": [],
+      "providers": ["NHK"],
+      "languages": ["ja-JP"],
+      "categories": ["国际", "电视"],
+      "tags": ["Japan", "Public", "HLS"],
+      "channel_count": 35,
+      "source_count": 35,
       "status": "stable",
       "source_origin": "community",
       "source_policy": "community_index",
       "risk_level": "low",
-      "importable": true,
-      "previewable": true,
-      "supported_in_v1": true,
-      "unsupported_reason": null,
-      "requires_proxy": false,
-      "requires_resolver": false,
-      "requires_cookie": false,
-      "requires_referer": false,
-      "requires_custom_ua": false,
-      "channel_count": 35,
-      "source_count": 35,
-      "health": {
-        "rate": 0.9,
-        "last_checked_at": "2026-05-28T00:00:00+08:00"
-      },
-      "compatibility": {
-        "waveflow": "recommended",
-        "vlc": "supported",
-        "aptv": "supported",
-        "tivimate": "supported"
-      },
-      "contributors": [
-        {
-          "name": "AmPlace",
-          "url": "https://github.com/AmPlace"
-        }
-      ]
+      "publisher": {"id": "org.example", "name": "Example"},
+      "published_at": "2026-08-23T00:00:00Z",
+      "compatibility": {"min_waveflow_version": "0.1.0"},
+      "links": {"source": "https://example.com/source"},
+      "catalog": {"sort_weight": 0, "featured": false},
+      "display": {
+        "subtitle": "Public Japanese TV",
+        "summary": "A short package-owned card description.",
+        "identity": {
+          "brand": "waveflow",
+          "icon": {"type": "builtin", "name": "waveflow"}
+        },
+        "badge": {"text": "JP", "tone": "sky"}
+      }
     }
   ]
 }
 ```
 
-Recommended package fields:
+## Package Identity And Type
 
-| Field | Purpose |
-| --- | --- |
-| `id`, `name`, `description`, `kind` | Basic display and package identity. |
-| `version`, `updated_at` | Lightweight update checks. |
-| `manifest_url` | Lazy-loaded package manifest. Prefer relative paths. |
-| `region`, `operators`, `language` | Region/operator/language filters. |
-| `categories`, `tags` | Category filters and fuzzy discovery. |
-| `status`, `source_origin`, `source_policy`, `risk_level` | Source quality and risk hints. |
-| `importable`, `previewable`, `supported_in_v1`, `unsupported_reason` | V1 support status. |
-| `requires_proxy`, `requires_resolver`, `requires_cookie`, `requires_referer`, `requires_custom_ua` | Capability hints. WaveFlow auto-routes `requires_proxy` packages through the backend proxy and resolves URLs by scheme automatically — these flags do not require user-side configuration. |
-| `display.badge.{text,tone}` | Optional explicit badge override. `text` ≤ 3 chars, no HTML/SVG/CSS. `tone` ∈ `neutral, rose, sky, emerald, orange, violet`. Invalid values fall back to the auto badge. |
-| `channel_count`, `source_count` | Package scale hints. |
-| `health`, `compatibility`, `contributors` | Optional richer details. |
+`kind` is the stable machine enum used by the current implementation:
 
-### Root-level `tag_definitions` (optional)
-
-A Market source may publish a controlled set of tag display rules at the root of `market.json`. They apply only to packages from that source; a third-party source cannot override another source's tags.
-
-| Field | Type | Constraints |
+| `kind` | Meaning | `package_type` |
 | --- | --- | --- |
-| `priority` | integer | Clamped to `0..100`. Higher = more prominent. |
-| `tone` | enum | One of `neutral, red, blue, orange, green, violet`. |
-| `emphasized` | boolean | `false` forces a neutral tag chip even if `tone` is set. |
-| `aliases` | string[] | Each alias is normalized to the same label. Up to 16 aliases, each ≤ 32 chars. |
+| `playlist` | Static or inline content package | `content_package` |
+| `dynamic_playlist` | Remote playlist/content package | `content_package` |
+| `mixed` | Content package combining supported source forms | `content_package` |
+| `logo_pack` | Channel logo package | `content_package` |
+| `plugin_package` | Signed WaveFlow Plugin distribution package | `plugin_package` |
 
-#### `tag_definitions_mode` (optional, root-level)
+`package_type` is a separate top-level contract for lifecycle routing. A
+`plugin_package` must use `kind: plugin_package`; content packages cannot use
+that kind. UI labels are localization of these enums, not inference.
 
-Choose how `tag_definitions` interact with the WaveFlow built-in defaults.
+## Region, Operator, Provider, Publisher
 
-| Mode | Behaviour |
+`regions` is an ordered array. Each item is either a global marker or a
+structured location:
+
+```json
+"regions": [
+  {"country": "CN", "province": "福建", "city": null},
+  {"country": "HK", "province": null, "city": null},
+  {"global": true}
+]
+```
+
+`country` is an explicit ISO-style country/territory code. `province` and
+`city` are explicit strings or `null`. Multiple entries express
+multi-region content. `{ "global": true }` expresses global scope and cannot
+be combined with another location in the same item.
+
+These fields have different owners and must not be merged:
+
+| Field | Meaning |
 | --- | --- |
-| `inherit` (default) | Source `tag_definitions` are layered **on top of** the built-in `DEFAULT_TAG_RULES`. Tags not declared by the source still inherit built-in `priority`, `tone`, `emphasized`, and aliases. Substring matching against rule names is allowed (so `体育新闻` still inherits the `体育` rule), preserving historical display behaviour. |
-| `replace` | Only the rules declared in this source apply. Matching is **strict**: a tag must exactly equal a declared rule name (or one of its declared `aliases`). Substring containment is **not** considered, so declaring `体育` will not pull in `体育新闻` / `地方体育频道`. Tags that do not match any declaration render with neutral styling, get `priority = 0`, and keep their original order from the package's `categories` / `tags` arrays. Built-in aliases are not consulted, so an English alias never maps onto a built-in Chinese label. |
+| `operators` | Network/telecom operators only, for example `中国移动`, `中国联通`, `中国电信` |
+| `providers` | Content, broadcast, platform, or service provider, for example `YouTube`, `ARD`, `ZDF`, `TDM` |
+| `publisher` | Organization or person maintaining and publishing the package; `{id,name}` |
+| `market_source` | Backend-added source identity describing which Market source supplied the package |
 
-Missing, non-string, or unknown values silently fall back to `inherit`. The mode is presentation-only — it never affects import, preview, capability flags, or security checks.
+Region names, broadcasters, platforms, and provider names must not be placed
+in `operators` merely to make a filter option appear.
 
-#### Default behaviour (no configuration)
+Removed package-level fields are rejected: `region`, `language`, and
+`provider`. Channel-level fields under `defaults.channel` remain channel
+metadata and are not package fields.
 
-Equivalent to:
+## Languages, Categories, And Tags
 
-```json
-{ "tag_definitions_mode": "inherit" }
-```
+`languages` is an ordered array of explicit locale values such as `zh-CN`,
+`en-US`, `ja-JP`, or `zh-HK`. The frontend never guesses language from
+region.
 
-So even if a source ships **no** `tag_definitions` block, well-known tags such as `央视`, `体育`, `电影`, `少儿`, `卫视`, `新闻` still receive their built-in priority and accent colour. This is intentional, not a leak — sources that want a clean slate must set `tag_definitions_mode: "replace"` explicitly.
-
-#### Fully source-defined
-
-```json
-{
-  "tag_definitions_mode": "replace",
-  "tag_definitions": {
-    "体育": { "priority": 100, "tone": "blue", "emphasized": true }
-  }
-}
-```
-
-Anything not in this block — including built-in well-known tags — has `priority = 0`, no tone, and is rendered as a neutral chip. Items with equal priority preserve their package-level original order via stable sort.
-
-Resolution order on the client (`inherit` mode):
-`per-source tag_definitions` → built-in WaveFlow defaults → neutral fallback.
-
-Resolution order in `replace` mode:
-`per-source tag_definitions` → neutral fallback (no built-in lookup, no built-in alias mapping).
-
-Invalid rules are silently dropped without failing the whole source.
-
-Resolver behaviour is decided by the playback URL scheme at runtime; `tag_definitions` and `display.badge` only affect presentation.
-
-Do not put these execution fields in `market.json`:
+`categories` is a controlled taxonomy for stable navigation and filtering.
+The current taxonomy is:
 
 ```text
-defaults
-channel_sources
-inline_channels
-channels
-channels_url
-source_defaults
-headers
+央视, 卫视, 地方, 新闻, 体育, 电影, 少儿, 教育, 纪实, 广播, 国际,
+港澳台, 购物, 剧场, 动画, 音乐, 综艺, 戏曲, 财经, 生活, 影视, 电视,
+插件, Provider, 健康, 宗教, 民族, 韩流
 ```
 
-## manifest.json
+`tags` is the single package-owned user-visible tag list. Its text and order
+are authoritative. Tags may be more free-form than categories and may
+overlap with them. The frontend:
 
-`manifest.json` is loaded only when WaveFlow needs to preview or import a package.
+- preserves text and order;
+- keeps unknown and custom tags;
+- does not alias, classify, prioritize, sort, or hide tags;
+- does not copy tags into `display`;
+- uses the same root list for card, detail, and tag filtering.
 
-```json
-{
-  "schema_version": 1,
-  "id": "japantv-public",
-  "name": "Japan Public TV",
-  "kind": "dynamic_playlist",
-  "version": "2026.05.28",
-  "updated_at": "2026-05-28T00:00:00+08:00",
-  "defaults": {
-    "source": {
-      "type": "hls",
-      "requires_proxy": false,
-      "headers": {}
-    }
-  },
-  "channel_sources": [
-    {
-      "type": "playlist",
-      "id": "japantv-public-m3u",
-      "name": "Japan public M3U",
-      "url": "https://example.com/japan.m3u",
-      "format": "auto",
-      "headers": {
-        "User-Agent": "Mozilla/5.0"
-      }
-    }
-  ]
-}
-```
+There is no second `display.tags` contract.
 
-`manifest.json` may keep display fields such as `description`, `region`, and `tags`, but `market.json` must still contain index metadata because refresh does not read manifests.
+## Presentation Contract
 
-## channel_sources
+`display` is optional package-owned card presentation. The backend performs
+safe projection and rejects unsafe URLs/control content; it does not invent
+missing values.
 
-V1 supports:
-
-### playlist
-
-Remote M3U/M3U8/TXT subscription file. This is a channel list, not a single HLS playlist.
-
-```json
-{
-  "type": "playlist",
-  "id": "public-list",
-  "name": "Public IPTV list",
-  "url": "https://example.com/list.m3u",
-  "format": "auto",
-  "headers": {
-    "User-Agent": "Mozilla/5.0"
-  }
-}
-```
-
-Supported content:
-
-- M3U / M3U8 with `#EXTINF`.
-- TXT in the common form:
-
-```text
-News,#genre#
-Channel 1,http://example.com/1.m3u8
-Channel 2,http://example.com/2.m3u8
-```
-
-### inline_channels
-
-Inline channels or a remote `channels.json`.
-
-```json
-{
-  "type": "inline_channels",
-  "channels_url": "channels.json"
-}
-```
-
-`channels.json` may be:
-
-```json
-{
-  "channels": [
-    {
-      "id": "cctv-1",
-      "name": "CCTV-1",
-      "group_name": "CCTV",
-      "sources": [
-        {
-          "type": "hls",
-          "url": "https://example.com/cctv1.m3u8"
-        }
-      ]
-    }
-  ]
-}
-```
-
-or a raw array of channel objects.
-
-## Headers
-
-There are two different header meanings.
-
-### channel_sources[].headers
-
-Used only when WaveFlow fetches the remote playlist or `channels_url`.
-
-```json
-{
-  "type": "playlist",
-  "url": "https://example.com/list.m3u",
-  "headers": {
-    "User-Agent": "Mozilla/5.0"
-  }
-}
-```
-
-This does not mean each playback source requires a custom UA.
-
-### defaults.source.headers / source.headers
-
-Used for playback sources. If a playback source needs `User-Agent` or `Referer`, put it here.
-
-```json
-{
-  "defaults": {
-    "source": {
-      "headers": {
-        "User-Agent": "okHttp/Mod-1.5.0.0",
-        "Referer": "https://example.com/"
-      }
-    }
-  }
-}
-```
-
-Playback headers usually imply proxying because browsers cannot safely set all media request headers.
-
-Cookie sources are not imported as playable V1 sources. Mark them with `requires_cookie=true`; users will need a future local credential configuration.
-
-## requires_* rules
-
-In `market.json`, dependency flags should summarize package-level needs:
-
-- `requires_proxy=true` if package/default source requires backend proxy.
-- `requires_resolver=true` if playback needs provider or remote resolver resolution.
-- `requires_cookie=true` if any source needs Cookie or login.
-- `requires_referer=true` if playback sources need `Referer`.
-- `requires_custom_ua=true` if playback sources need custom `User-Agent`.
-
-Do not set `requires_custom_ua` just because `channel_sources[].headers.User-Agent` exists. That header is only for fetching the remote playlist file.
-
-## YouTube
-
-V1 supports YouTube URLs only when an embeddable video id can be extracted, for example:
-
-```text
-https://www.youtube.com/watch?v=xxxxxxxxxxx
-https://youtu.be/xxxxxxxxxxx
-https://www.youtube.com/live/xxxxxxxxxxx
-```
-
-V1 does not resolve channel live URLs:
-
-```text
-https://www.youtube.com/@SomeChannel/live
-https://www.youtube.com/channel/UCxxxx/live
-```
-
-Packages containing channel live URLs should usually be marked:
-
-```json
-{
-  "requires_resolver": true,
-  "supported_in_v1": false,
-  "importable": false,
-  "previewable": false,
-  "unsupported_reason": "YouTube channel live URLs require a resolver; V1 does not support them yet."
-}
-```
-
-## Validation Checklist
-
-- `market.json` and every manifest are valid JSON.
-- Each market package has `id`, `name`, `kind`, and `manifest_url`.
-- `manifest_url` is relative whenever the manifest is in the same Market repository.
-- `market.json` does not include execution fields such as `defaults` or `channel_sources`.
-- `null` is real JSON `null`, not the string `"null"`.
-- Use consistent casing such as `JP`, `CN`, `global`, `ja-JP`, `zh-CN`.
-- `market.json` contains enough metadata for cards, filters, dependency badges, and update checks.
-- `manifest.json` contains enough configuration for preview/import.
-
-## Local Import Provenance
-
-When WaveFlow imports a Market package, it stores package/source identity on each local channel source:
-
-| Local field | Source |
+| Field | Meaning |
 | --- | --- |
-| `market_package_id` | Imported package id. |
-| `market_source_id` | `channel_sources[].id` when present, otherwise `channel_sources[].name`. |
-| `market_channel_id` | Channel `id`, `canonical_key`, `tvg_id`, EPG `tvg_id`, or channel name. |
-| `market_source_item_id` | Source `id` / `source_id`; if missing, WaveFlow generates an `auto-...` id from package, channel source, channel, source index, and URL. |
+| `display.subtitle` | Explicit short card subtitle |
+| `display.summary` | Explicit short card summary |
+| `display.identity.brand` | Explicit built-in asset key |
+| `display.identity.icon` | Explicit `{type: builtin, name}` or HTTPS image URL |
+| `display.badge.text` | Explicit text badge, at most three characters |
+| `display.badge.tone` | Explicit tone: `neutral`, `rose`, `sky`, `emerald`, `orange`, or `violet` |
 
-These fields are for future package diff updates, uninstall checks, and local health display. Ordinary user subscriptions keep them empty.
+The built-in brand registry is an asset lookup only. A title containing
+`YouTube`, a region containing `福建`, or an operator value cannot activate a
+brand or badge. Missing `subtitle`, `summary`, `identity`, or `badge` stays
+missing; the frontend may show only a neutral, non-semantic placeholder.
+
+`description` is the complete package description for the detail view. It is
+not silently replaced by `display.summary` or generated from the name.
+
+## Lifecycle And Distribution Metadata
+
+`status` is one of `active`, `experimental`, `stable`, `deprecated`,
+`broken`, or `unknown`. A deprecated package may set `replacement` to the
+recommended package id.
+
+`published_at` and `updated_at` are package timestamps. `compatibility` is a
+package-owned object; the standard current key is
+`min_waveflow_version`. `links` may contain `homepage`, `documentation`,
+`source`, and `issues`, each as an HTTPS URL without credentials.
+
+`catalog.sort_weight` and `catalog.featured` are Market index metadata. They
+control catalog ordering/curation only; a package cannot use them to change
+runtime support or installation semantics.
+
+## Metrics
+
+Metrics never fall back across semantic types:
+
+| Package | Card metric |
+| --- | --- |
+| Content package | `channel_count` -> `N 个频道` |
+| Logo package | `logo_count` -> `N 个台标` |
+| Plugin package | No invented count; package may provide explicit wording through `display` |
+
+`source_count` means source count only. It is never displayed as channel
+count, and a missing/zero `channel_count` does not become `N 个源`.
+
+The count in the Market index is catalog metadata. A preview reads the
+manifest and resolves/filters sources, then reports the actual parsed
+`channel_count` and `source_count` for that preview. These are different
+lifecycles and are not silently written back into the index.
+
+## Manifest And Source Contract
+
+`manifest.json` is fetched lazily for preview/import. It contains executable
+configuration such as `defaults`, `channel_sources`, inline channels,
+playlist URLs, and source headers. It may repeat package metadata so the
+backend can validate the loaded package, but runtime fields do not generate
+card semantics.
+
+V1 supports `channel_sources[].type` values `playlist` and
+`inline_channels`. Remote playlist files are parsed as channel lists; a
+channel may contain multiple playback sources. Channel-level
+`defaults.channel` metadata remains distinct from package-level
+`regions/operators/providers/languages`.
+
+The index must not leak private execution configuration. The backend removes
+internal artifact paths and source execution inputs from public projections.
+
+## Backend Projection And Search
+
+Backend normalization validates enums, arrays, locales, URL safety, package
+types, lifecycle values, and display members. `_package_card()` projects the
+new metadata to both list and detail responses without deriving semantic
+values.
+
+Market search uses explicit fields: `id`, `original_id`, `name`,
+`description`, `regions`, `operators`, `providers`, `languages`,
+`categories`, `tags`, `publisher`, and Plugin publisher/scheme metadata.
+Filters map directly to `regions`, `operators`, `providers`, `kind`,
+`status`, `categories`, and `tags`.
+
+Missing fields result in empty options or absent presentation, not inferred
+fallback values. Invalid package items are represented as unsupported items
+with a schema warning so one bad item does not make the whole source empty.

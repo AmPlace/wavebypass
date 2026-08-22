@@ -6,6 +6,7 @@ import hashlib
 import json
 import shutil
 import tempfile
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -168,12 +169,33 @@ def build_release(
                 "source_origin": "official",
                 "source_policy": "signed_release",
                 "risk_level": "official_signed_not_sandboxed",
+                "regions": deepcopy(item.get("regions") or []),
+                "operators": deepcopy(item.get("operators") or []),
+                "providers": deepcopy(item.get("providers") or []),
+                "languages": deepcopy(item.get("languages") or []),
+                "categories": deepcopy(item.get("categories") or ["插件", "Provider"]),
+                "publisher": {
+                    "id": manifest.publisher_id,
+                    "name": str(item.get("publisher_name") or "WaveFlow"),
+                },
+                "published_at": str(item.get("published_at") or plan.get("updated_at") or ""),
+                "compatibility": deepcopy(item.get("compatibility") or {}),
+                "links": deepcopy(item.get("links") or {}),
+                "catalog": deepcopy(item.get("catalog") or {"sort_weight": 0, "featured": False}),
                 "artifact_references": [{
                     "sha256": package["plugin_manifest"]["artifacts"][0]["sha256"],
                     "url": f"payloads/{artifact_name}",
                 }],
                 "dependency_references": _dependency_sources(item, manifest, staging, plugin_id),
             })
+            tags = item.get("tags")
+            if not isinstance(tags, list):
+                raise PluginError("INVALID_PLUGIN_RESPONSE", "Official Plugin package tags metadata is missing", category="release")
+            display = item.get("display")
+            if not isinstance(display, dict) or "tags" in display:
+                raise PluginError("INVALID_PLUGIN_RESPONSE", "Official Plugin package display metadata is missing", category="release")
+            package["tags"] = deepcopy(tags)
+            package["display"] = deepcopy(display)
             rollout = item.get("rollout")
             if rollout is not None:
                 try:

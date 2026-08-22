@@ -8,7 +8,35 @@
         "default_ownership": "plugin",
         "deployment": "python_backed"
       },
-      "source": "../bundled_plugins/jstv"
+      "source": "../bundled_plugins/jstv",
+      "display": {
+        "subtitle": "TV Provider Plugin",
+        "summary": "为 WaveFlow 提供 JSTV 直播地址解析。",
+        "identity": {
+          "brand": "waveflow",
+          "icon": {
+            "type": "builtin",
+            "name": "waveflow"
+          }
+        },
+        "badge": {
+          "text": "WF",
+          "tone": "violet"
+        }
+      },
+      "tags": [
+        "TV Provider",
+        "URL Resolver",
+        "jstv"
+      ],
+      "providers": [
+        "JSTV"
+      ],
+      "categories": [
+        "插件",
+        "Provider"
+      ],
+      "publisher_name": "WaveFlow"
     },
     {
       "description": "WaveFlow official FJTV TV Provider.",
@@ -18,7 +46,35 @@
         "default_ownership": "plugin",
         "deployment": "python_backed"
       },
-      "source": "../bundled_plugins/fjtv"
+      "source": "../bundled_plugins/fjtv",
+      "display": {
+        "subtitle": "TV Provider Plugin",
+        "summary": "为 WaveFlow 提供 FJTV 直播地址解析。",
+        "identity": {
+          "brand": "waveflow",
+          "icon": {
+            "type": "builtin",
+            "name": "waveflow"
+          }
+        },
+        "badge": {
+          "text": "WF",
+          "tone": "violet"
+        }
+      },
+      "tags": [
+        "TV Provider",
+        "URL Resolver",
+        "fjtv"
+      ],
+      "providers": [
+        "FJTV"
+      ],
+      "categories": [
+        "插件",
+        "Provider"
+      ],
+      "publisher_name": "WaveFlow"
     },
     {
       "description": "WaveFlow official ND0593TV TV Provider.",
@@ -28,7 +84,35 @@
         "default_ownership": "plugin",
         "deployment": "python_backed"
       },
-      "source": "../bundled_plugins/nd0593tv"
+      "source": "../bundled_plugins/nd0593tv",
+      "display": {
+        "subtitle": "TV Provider Plugin",
+        "summary": "为 WaveFlow 提供 ND0593TV 直播地址解析。",
+        "identity": {
+          "brand": "waveflow",
+          "icon": {
+            "type": "builtin",
+            "name": "waveflow"
+          }
+        },
+        "badge": {
+          "text": "WF",
+          "tone": "violet"
+        }
+      },
+      "tags": [
+        "TV Provider",
+        "URL Resolver",
+        "nd0593tv"
+      ],
+      "providers": [
+        "ND0593TV"
+      ],
+      "categories": [
+        "插件",
+        "Provider"
+      ],
+      "publisher_name": "WaveFlow"
     },
     {
       "description": "WaveFlow official GZSTV TV Provider.",
@@ -38,7 +122,35 @@
         "default_ownership": "plugin",
         "deployment": "python_backed"
       },
-      "source": "../bundled_plugins/gzstv"
+      "source": "../bundled_plugins/gzstv",
+      "display": {
+        "subtitle": "TV Provider Plugin",
+        "summary": "为 WaveFlow 提供 GZSTV 直播地址解析。",
+        "identity": {
+          "brand": "waveflow",
+          "icon": {
+            "type": "builtin",
+            "name": "waveflow"
+          }
+        },
+        "badge": {
+          "text": "WF",
+          "tone": "violet"
+        }
+      },
+      "tags": [
+        "TV Provider",
+        "URL Resolver",
+        "gzstv"
+      ],
+      "providers": [
+        "GZSTV"
+      ],
+      "categories": [
+        "插件",
+        "Provider"
+      ],
+      "publisher_name": "WaveFlow"
     },
     {
       "description": "WaveFlow official NOW TV Provider.",
@@ -55,7 +167,35 @@
           }
         ]
       },
-      "source": "../bundled_plugins/nowtv"
+      "source": "../bundled_plugins/nowtv",
+      "display": {
+        "subtitle": "TV Provider Plugin",
+        "summary": "为 WaveFlow 提供 NOW TV 直播地址解析。",
+        "identity": {
+          "brand": "waveflow",
+          "icon": {
+            "type": "builtin",
+            "name": "waveflow"
+          }
+        },
+        "badge": {
+          "text": "WF",
+          "tone": "violet"
+        }
+      },
+      "tags": [
+        "TV Provider",
+        "URL Resolver",
+        "nowtv"
+      ],
+      "providers": [
+        "NOW TV"
+      ],
+      "categories": [
+        "插件",
+        "Provider"
+      ],
+      "publisher_name": "WaveFlow"
     },
     {
       "dependency_sources": [
@@ -82,7 +222,35 @@
           }
         ]
       },
-      "source": "../bundled_plugins/nmtv"
+      "source": "../bundled_plugins/nmtv",
+      "display": {
+        "subtitle": "TV Provider Plugin",
+        "summary": "为 WaveFlow 提供 NMTV 直播地址解析。",
+        "identity": {
+          "brand": "waveflow",
+          "icon": {
+            "type": "builtin",
+            "name": "waveflow"
+          }
+        },
+        "badge": {
+          "text": "WF",
+          "tone": "violet"
+        }
+      },
+      "tags": [
+        "TV Provider",
+        "URL Resolver",
+        "nmtv"
+      ],
+      "providers": [
+        "NMTV"
+      ],
+      "categories": [
+        "插件",
+        "Provider"
+      ],
+      "publisher_name": "WaveFlow"
     },
     {
       "dependency_sources": [
@@ -121,7 +289,35 @@
           }
         ]
       },
-      "source": "../bundled_plugins/sdtv"
+      "source": "../bundled_plugins/sdtv",
+      "display": {
+        "subtitle": "TV Provider Plugin",
+        "summary": "为 WaveFlow 提供 SDTV 直播地址解析。",
+        "identity": {
+          "brand": "waveflow",
+          "icon": {
+            "type": "builtin",
+            "name": "waveflow"
+          }
+        },
+        "badge": {
+          "text": "WF",
+          "tone": "violet"
+        }
+      },
+      "tags": [
+        "TV Provider",
+        "URL Resolver",
+        "sdtv"
+      ],
+      "providers": [
+        "SDTV"
+      ],
+      "categories": [
+        "插件",
+        "Provider"
+      ],
+      "publisher_name": "WaveFlow"
     },
     {
       "description": "WaveFlow official PTBTV TV Provider.",
@@ -161,13 +357,69 @@
           "source": "dependency_artifacts/ptbtv/rich-15.0.0-py3-none-any.whl"
         }
       ],
-      "source": "../bundled_plugins/ptbtv"
+      "source": "../bundled_plugins/ptbtv",
+      "display": {
+        "subtitle": "TV Provider Plugin",
+        "summary": "为 WaveFlow 提供 PTBTV 直播地址解析。",
+        "identity": {
+          "brand": "waveflow",
+          "icon": {
+            "type": "builtin",
+            "name": "waveflow"
+          }
+        },
+        "badge": {
+          "text": "WF",
+          "tone": "violet"
+        }
+      },
+      "tags": [
+        "TV Provider",
+        "URL Resolver",
+        "ptbtv"
+      ],
+      "providers": [
+        "PTBTV"
+      ],
+      "categories": [
+        "插件",
+        "Provider"
+      ],
+      "publisher_name": "WaveFlow"
     },
     {
       "description": "WaveFlow official HNNTV TV Provider.",
       "name": "HNNTV Provider Plugin",
       "plugin_id": "hnntv",
-      "source": "../bundled_plugins/hnntv"
+      "source": "../bundled_plugins/hnntv",
+      "display": {
+        "subtitle": "TV Provider Plugin",
+        "summary": "为 WaveFlow 提供 HNNTV 直播地址解析。",
+        "identity": {
+          "brand": "waveflow",
+          "icon": {
+            "type": "builtin",
+            "name": "waveflow"
+          }
+        },
+        "badge": {
+          "text": "WF",
+          "tone": "violet"
+        }
+      },
+      "tags": [
+        "TV Provider",
+        "URL Resolver",
+        "hnntv"
+      ],
+      "providers": [
+        "HNNTV"
+      ],
+      "categories": [
+        "插件",
+        "Provider"
+      ],
+      "publisher_name": "WaveFlow"
     },
     {
       "description": "WaveFlow official StreamGet multi-scheme Provider Bundle.",
@@ -259,7 +511,35 @@
           "source": "dependency_artifacts/streamget-providers/wrapt-2.2.1-cp314-cp314-macosx_11_0_arm64.whl"
         }
       ],
-      "source": "../bundled_plugins/streamget-providers"
+      "source": "../bundled_plugins/streamget-providers",
+      "display": {
+        "subtitle": "Multi-scheme Provider Plugin",
+        "summary": "为 WaveFlow 提供 StreamGet 多 scheme 直播地址解析。",
+        "identity": {
+          "brand": "waveflow",
+          "icon": {
+            "type": "builtin",
+            "name": "waveflow"
+          }
+        },
+        "badge": {
+          "text": "WF",
+          "tone": "violet"
+        }
+      },
+      "tags": [
+        "TV Provider",
+        "URL Resolver",
+        "Multi-scheme"
+      ],
+      "providers": [
+        "StreamGet"
+      ],
+      "categories": [
+        "插件",
+        "Provider"
+      ],
+      "publisher_name": "WaveFlow"
     }
   ],
   "publisher_id": "org.waveflow",
