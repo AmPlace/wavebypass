@@ -76,3 +76,14 @@ test('scale only formats explicit count fields and does not invent plugin metada
   assert.equal(packageScaleLabel({ kind: 'logo_pack', logo_count: 3 }), '3 个台标')
   assert.equal(packageScaleLabel({ plugin: { owned_schemes: [{ scheme: 'custom' }] } }), '')
 })
+
+test('missing or zero card metrics never borrow another metric across install states', () => {
+  for (const state of [{}, { installed: true }, { installed: true, update_available: true }]) {
+    for (const count of [undefined, null, 0, '', -1, NaN]) {
+      assert.equal(packageScaleLabel({ ...state, kind: 'playlist', channel_count: count, source_count: 9, logo_count: 12 }), '')
+      assert.equal(packageScaleLabel({ ...state, kind: 'logo_pack', logo_count: count, channel_count: 12, source_count: 9 }), '')
+    }
+    assert.equal(packageScaleLabel({ ...state, kind: 'playlist', channel_count: 617, source_count: 1 }), '617 个频道')
+    assert.equal(packageScaleLabel({ ...state, kind: 'logo_pack', logo_count: 12, source_count: 1 }), '12 个台标')
+  }
+})

@@ -2687,7 +2687,6 @@ onBeforeUnmount(() => {
 .market-card {
   display: flex;
   flex-direction: column;
-  min-height: 198px;
   gap: 12px;
   padding: 16px;
   border-radius: var(--card-radius);
@@ -2726,10 +2725,9 @@ onBeforeUnmount(() => {
 
 .market-card-body {
   display: flex;
-  flex: 1 1 auto;
   min-width: 0;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
   border-radius: 12px;
   cursor: pointer;
   outline: none;
@@ -2781,8 +2779,8 @@ onBeforeUnmount(() => {
 
 .market-card-tags {
   display: flex;
-  flex-wrap: wrap;
-  max-height: 25px;
+  flex-wrap: nowrap;
+  max-height: 24px;
   align-content: flex-start;
   overflow: hidden;
   gap: 6px;
@@ -2830,10 +2828,11 @@ onBeforeUnmount(() => {
   display: inline-flex;
   align-items: center;
   max-width: 100%;
-  height: 25px;
-  padding: 0 9px;
-  border-radius: 8px;
-  background: var(--surface);
+  height: 24px;
+  padding: 0 7px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-active);
   color: var(--text-secondary);
   font-size: 12px;
   font-weight: 500;
@@ -2847,17 +2846,17 @@ onBeforeUnmount(() => {
 .market-tag-orange { background: rgba(249, 115, 22, 0.10); color: rgb(194 65 12); }
 .market-tag-green { background: rgba(16, 185, 129, 0.10); color: rgb(4 120 87); }
 .market-tag-violet { background: rgba(139, 92, 246, 0.10); color: rgb(91 33 182); }
-.market-tag-neutral { background: var(--surface); color: var(--text-secondary); }
+.market-tag-neutral { background: var(--surface-active); color: var(--text-secondary); }
 
 :global(.dark) .market-tag-red { background: rgba(244, 63, 94, 0.18); color: rgb(253 164 175); }
 :global(.dark) .market-tag-blue { background: rgba(14, 165, 233, 0.18); color: rgb(125 211 252); }
 :global(.dark) .market-tag-orange { background: rgba(249, 115, 22, 0.18); color: rgb(253 186 116); }
 :global(.dark) .market-tag-green { background: rgba(16, 185, 129, 0.20); color: rgb(110 231 183); }
 :global(.dark) .market-tag-violet { background: rgba(139, 92, 246, 0.22); color: rgb(196 181 253); }
-:global(.dark) .market-tag-neutral { background: var(--surface); color: var(--text-secondary); }
+:global(.dark) .market-tag-neutral { background: var(--surface-active); color: var(--text-secondary); }
 
 .market-tag-rest {
-  background: var(--surface);
+  background: var(--surface-active);
   color: var(--text-secondary);
   border: 1px solid var(--border);
 }
@@ -3196,12 +3195,11 @@ onBeforeUnmount(() => {
   }
 
   .market-card {
-    min-height: 192px;
     padding: 16px;
   }
 
   .market-card-tags {
-    max-height: 25px;
+    max-height: 24px;
   }
 
   .market-btn-primary,
