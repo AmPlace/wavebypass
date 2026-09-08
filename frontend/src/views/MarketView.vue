@@ -69,7 +69,7 @@
         <span class="flex size-8 shrink-0 items-center justify-center rounded-full bg-[var(--surface)] text-[var(--text-primary)]">
           <svg class="size-4" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 8.4 12 4l8 4.4-8 4.4L4 8.4Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M4 12.2 12 16.6l8-4.4M4 16l8 4.4L20 16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </span>
-        <h1 class="truncate text-lg font-semibold leading-none text-[var(--text-primary)]">{{ packageType === 'plugins' ? 'Plugin Packages' : '频道包' }}</h1>
+        <h1 class="truncate text-lg font-semibold leading-none text-[var(--text-primary)]">{{ packageType === 'plugins' ? '插件' : '频道包' }}</h1>
         <span class="shrink-0 text-sm text-[var(--text-secondary)]">{{ resultCountLabel }}</span>
       </div>
 
@@ -221,6 +221,7 @@
             <img v-if="packageIdentity(pkg).imageUrl && !failedCardImages.has(packageIdentity(pkg).imageUrl)" :src="packageIdentity(pkg).imageUrl" alt="" class="market-card-image" @error="failedCardImages.add(packageIdentity(pkg).imageUrl)">
             <div class="min-w-0 flex-1">
               <h2 class="market-card-title" :title="packageCardTitle(pkg)">{{ packageCardTitle(pkg) }}</h2>
+              <p v-if="isPluginPackage(pkg) && pluginPublisher(pkg)" class="market-plugin-publisher" :title="pluginPublisher(pkg)">发布者：{{ pluginPublisher(pkg) }}</p>
               <div v-if="packageScaleLabel(pkg)" class="market-card-scale">{{ packageScaleLabel(pkg) }}</div>
             </div>
           </div>
@@ -345,7 +346,7 @@
             </button>
           </header>
 
-          <div class="market-drawer-body">
+          <div class="market-drawer-body" :class="{ 'market-plugin-detail': isPluginPackage(selectedPackage) }">
             <section v-if="selectedPackage?.description" class="market-drawer-section">
               <h3 class="market-section-title">描述</h3>
               <p class="text-[13px] leading-5 text-[var(--text-secondary)]">{{ selectedPackage.description }}</p>
@@ -413,23 +414,9 @@
               </dl>
             </section>
 
-            <section v-if="isPluginPackage(selectedPackage)" class="market-drawer-section">
-              <h3 class="market-section-title">Capability</h3>
-              <dl class="grid grid-cols-[96px_minmax(0,1fr)] gap-y-1.5 text-[13px]"><dt class="text-[var(--text-tertiary)]">Contracts</dt><dd class="text-[var(--text-primary)]">{{ providerContractLabels(selectedPackage).join(', ') || '无' }}</dd><dt class="text-[var(--text-tertiary)]">Schemes</dt><dd class="text-[var(--text-primary)]">{{ pluginSchemeLabels(selectedPackage).join(', ') || '无' }}</dd></dl>
-            </section>
+            <MarketPluginInfo v-if="isPluginPackage(selectedPackage)" :pkg="selectedPackage" @manage="openPluginManagement" />
 
-            <section v-if="isPluginPackage(selectedPackage)" class="market-drawer-section">
-              <h3 class="market-section-title">Dependencies</h3>
-              <p v-if="!pluginDependencies(selectedPackage).length" class="text-[13px] text-[var(--text-secondary)]">无额外 Python dependency</p>
-              <ul v-else class="space-y-1.5 text-[13px]"><li v-for="dependency in pluginDependencies(selectedPackage).slice(0, 8)" :key="`${dependency.name}-${dependency.version}`" class="flex items-center justify-between gap-3"><span class="truncate text-[var(--text-primary)]">{{ dependency.name }}</span><span class="shrink-0 text-[12px] text-[var(--text-tertiary)]">{{ dependency.version }}</span></li></ul>
-            </section>
-
-            <section v-if="isPluginPackage(selectedPackage)" class="market-drawer-section">
-              <h3 class="market-section-title">Runtime 与权限</h3>
-                <dl class="grid grid-cols-[96px_minmax(0,1fr)] gap-y-1.5 text-[13px]"><dt class="text-[var(--text-tertiary)]">Runtime</dt><dd class="text-[var(--text-primary)]">{{ pluginRuntimeLabel(selectedPackage) }}</dd><dt class="text-[var(--text-tertiary)]">Permissions</dt><dd class="text-[var(--text-primary)]">{{ requestedPermissions(selectedPackage).map(permissionLabel).join(', ') || '无额外权限' }}</dd><dt class="text-[var(--text-tertiary)]">Publisher</dt><dd class="text-[var(--text-primary)]">{{ selectedPackage?.plugin?.publisher_id || 'unknown' }}</dd><dt class="text-[var(--text-tertiary)]">Trust</dt><dd class="text-[var(--text-primary)]">{{ selectedPackage?.installed_trust_state || '安装时验证 publisher 与签名' }}</dd></dl>
-            </section>
-
-            <section class="market-drawer-section">
+            <section v-if="!isPluginPackage(selectedPackage)" class="market-drawer-section">
               <h3 class="market-section-title">详细信息</h3>
               <dl class="grid grid-cols-[88px_minmax(0,1fr)] gap-y-1.5 text-[13px]">
                 <dt class="text-[var(--text-tertiary)]">最近更新</dt>
@@ -682,7 +669,8 @@ import { useToastStore } from '../stores/toast'
 import MarketFilterDropdown from '../components/MarketFilterDropdown.vue'
 import AdaptiveTagList from '../components/AdaptiveTagList.vue'
 import MarketAutomationSettings from '../components/MarketAutomationSettings.vue'
-import { isLogoPackage, isPluginPackage, packageActionLabel, packageInstallable, permissionLabel, pluginDependencies, pluginIdentity, pluginRuntimeLabel, pluginSchemeLabels, providerContractLabels, requestedPermissions } from './marketPackageUi'
+import MarketPluginInfo from '../components/MarketPluginInfo.vue'
+import { isLogoPackage, isPluginPackage, packageActionLabel, packageInstallable, permissionLabel, pluginIdentity, pluginPublisher } from './marketPackageUi'
 import { createLatestMarketSourceProjection, marketSourceDraft } from './marketSourceUi.js'
 import { packageCardTitle, packageIdentity, packageScaleLabel, packageSubtitle, packageSummary, packageTagItems } from './marketCardUi.js'
 
@@ -821,15 +809,15 @@ const availabilitySummary = computed(() => {
 
   if (isPluginPackage(pkg)) {
     if (!pkg.plugin_installable) {
-      return { headline: '当前平台暂不支持', detail: pkg.unsupported_reason || '此 Plugin Package 没有当前平台可用的 artifact。' }
+      return { headline: '当前不可安装', detail: pkg.unsupported_reason || '请检查插件兼容性与安装要求。' }
     }
     if (pkg.installed && pkg.update_available) {
       return { headline: '有可用更新', detail: `已安装 ${pkg.installed_version || '当前版本'}，Market 提供 ${pkg.version || '新版本'}。` }
     }
     if (pkg.installed) {
-      return { headline: 'Plugin 已安装', detail: '运行状态、权限和 scheme ownership 请前往 Settings → Plugins 管理。' }
+      return { headline: '插件已安装', detail: '运行状态、权限和解析接管由「设置 → Plugins」管理。' }
     }
-    return { headline: '可以安装', detail: '安装会验证 publisher trust、签名、平台兼容性与所需权限。' }
+    return { headline: '可以安装', detail: '安装会验证发布者信任、签名、平台兼容性与所需权限。' }
   }
 
   if (isLogoPackage(pkg)) {
@@ -1846,7 +1834,7 @@ async function importPackageOnce(pkg, operationId) {
   if (componentDisposed || operationId !== packageOperationId) return
   markPackageInstalled(pkg.id, result.subscription_id, result.active_version)
   if (isPluginPackage(pkg)) {
-    toastStore.success('Plugin 已安装，scheme ownership 保持 Legacy')
+    toastStore.success('插件已安装，解析接管状态保持不变')
   } else if (Array.isArray(result.warnings) && result.warnings.length) {
     toastStore.warning(`已导入 ${result.channel_count || 0} 个频道（含 ${result.warnings.length} 条警告）`)
   } else {
@@ -1918,6 +1906,8 @@ async function handleUninstall(pkg) {
     }
   }
 }
+
+function openPluginManagement() { closeDialog(); router.push('/settings/plugins') }
 
 function markPackageInstalled(packageId, subscriptionId, activeVersion = '') {
   packages.value = packages.value.map(item => item.id === packageId
@@ -2793,6 +2783,8 @@ onBeforeUnmount(() => {
   border-radius: 6px;
 }
 
+.market-plugin-publisher { margin-top: 3px; font-size: 11px; line-height: 16px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
 @media (min-width: 1280px) and (max-width: 1439px) {
   .market-card {
     padding: calc(var(--card-padding) - 4px);
@@ -3110,6 +3102,8 @@ onBeforeUnmount(() => {
 .market-drawer-section:last-child {
   border-bottom: 1px solid var(--border);
 }
+
+.market-plugin-detail > .market-drawer-section { padding: 12px 0; border: 0; border-bottom: 1px solid var(--border); border-radius: 0; background: transparent; }
 
 .market-channel-list {
   margin: 0;

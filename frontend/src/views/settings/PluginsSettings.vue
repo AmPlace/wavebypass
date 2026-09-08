@@ -58,16 +58,16 @@
             <div class="flex min-w-0 items-start justify-between gap-3">
               <div class="min-w-0">
                 <h3 class="truncate text-[15px] font-semibold text-[var(--text-primary)]">{{ plugin.display_name }}</h3>
-                <p class="mt-1 truncate text-xs text-[var(--text-tertiary)]">{{ plugin.plugin }}</p>
+                <p class="mt-1 truncate text-xs text-[var(--text-secondary)]">{{ contractLabels(plugin.provider_contracts) }}</p>
               </div>
               <span class="plugin-status" :class="statusClass(plugin)">{{ statusLabel(plugin) }}</span>
             </div>
             <div class="mt-4 flex flex-wrap gap-1.5 text-xs text-[var(--text-secondary)]">
               <span class="plugin-chip">v{{ plugin.version || '未知' }}</span>
               <span class="plugin-chip">{{ runtimeLabel(plugin.runtime) }}</span>
-              <span v-if="plugin.trust_class === 'developer_local'" class="plugin-chip plugin-chip-warning">Developer Local</span>
+              <span v-if="plugin.trust_class === 'developer_local'" class="plugin-chip plugin-chip-warning">本地开发插件</span>
               <span v-if="plugin.permissions?.pending?.length" class="plugin-chip plugin-chip-warning">待批准 {{ plugin.permissions.pending.length }}</span>
-              <span v-if="plugin.quarantined" class="plugin-chip plugin-chip-danger">Quarantined</span>
+              <span v-if="plugin.quarantined" class="plugin-chip plugin-chip-danger">已隔离</span>
               <span v-if="plugin.market?.update_available" class="plugin-chip plugin-chip-update">有更新</span>
             </div>
             <dl class="mt-4 grid grid-cols-[72px_minmax(0,1fr)] gap-y-1.5 text-xs">
@@ -108,7 +108,7 @@
             <template v-else-if="selected">
               <DetailSection title="运行状态">
                 <dl class="plugin-detail-grid">
-                  <dt>生命周期</dt><dd>{{ selected.lifecycle_state || 'unknown' }}</dd>
+                  <dt>生命周期</dt><dd>{{ lifecycleLabel(selected.lifecycle_state) }}</dd>
                   <dt>启用状态</dt><dd>{{ selected.enabled ? '已启用' : '已停用' }}</dd>
                   <dt>运行时</dt><dd>{{ runtimeLabel(selected.runtime) }}</dd>
                   <dt>运行环境</dt><dd>{{ environmentLabel(selected.runtime?.environment_status) }}</dd>
@@ -121,20 +121,21 @@
                 </div>
               </DetailSection>
 
-              <DetailSection title="Provider · 内容提供方">
+              <DetailSection title="提供的能力">
                 <p class="text-xs text-[var(--text-secondary)]">{{ contractLabels(selected.provider_contracts) }}</p>
+                <p v-if="featureLabels(selected.provider_contracts).length" class="mt-2 text-xs leading-5 text-[var(--text-secondary)]">{{ featureLabels(selected.provider_contracts).join(' · ') }}</p>
                 <div v-if="selected.ownership?.length" class="mt-3 space-y-2">
                   <div v-for="item in selected.ownership" :key="item.scheme" class="flex flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-3 sm:flex-row sm:items-center sm:justify-between">
-                    <div><p class="text-sm font-medium text-[var(--text-primary)]">{{ item.scheme }}</p><p class="mt-1 text-xs text-[var(--text-secondary)]">当前：{{ item.mode === 'plugin' ? 'Plugin' : 'Legacy' }}</p></div>
-                    <button type="button" class="plugin-btn" :disabled="acting || !selected.enabled" @click="switchOwnership(item)">{{ item.mode === 'plugin' ? '切换回 Legacy' : '切换到 Plugin' }}</button>
+                    <div><p class="text-sm font-medium text-[var(--text-primary)]">{{ item.scheme }}://</p><p class="mt-1 text-xs text-[var(--text-secondary)]">当前：{{ item.mode === 'plugin' ? '插件解析' : '内置兼容解析' }}</p></div>
+                    <button type="button" class="plugin-btn" :disabled="acting || !selected.enabled" @click="switchOwnership(item)">{{ item.mode === 'plugin' ? '切回内置解析' : '交由插件解析' }}</button>
                   </div>
                 </div>
               </DetailSection>
 
-              <DetailSection title="Permissions · 权限">
+              <DetailSection title="权限">
                 <div v-if="selected.permissions?.requested?.length" class="space-y-2">
                   <div v-for="permission in selected.permissions.requested" :key="permission.name" class="flex flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-3 sm:flex-row sm:items-center sm:justify-between">
-                    <div><p class="text-sm font-medium text-[var(--text-primary)]">{{ permissionLabel(permission.name) }}</p><p class="mt-1 text-xs" :class="permission.risk === 'high' ? 'text-red-600 dark:text-red-300' : 'text-[var(--text-secondary)]'">{{ permission.risk === 'high' ? '高风险权限' : '标准权限' }}</p></div>
+                    <div><p class="text-sm font-medium text-[var(--text-primary)]">{{ permissionLabel(permission.name) }}</p><p class="mt-1 text-xs" :class="permission.risk === 'high' ? 'text-red-600 dark:text-red-300' : 'text-[var(--text-secondary)]'">{{ permission.risk === 'high' ? '高风险权限' : '标准权限' }}</p><p class="mt-1 text-xs leading-5 text-[var(--text-secondary)]">{{ permissionDescription(permission.name) }}</p></div>
                     <button v-if="isPending(permission.name)" type="button" class="plugin-btn plugin-btn-primary" :disabled="acting" @click="approvePermission(permission.name)">允许</button>
                     <button v-else-if="isRevocable(permission.name)" type="button" class="plugin-btn" :disabled="acting" @click="revokePermission(permission.name)">撤销</button>
                     <span v-else class="text-xs text-emerald-600 dark:text-emerald-300">已允许</span>
@@ -143,17 +144,23 @@
                 <p v-else class="text-sm text-[var(--text-secondary)]">此插件未申请额外权限。</p>
               </DetailSection>
 
+              <p class="mb-4 text-xs leading-5 text-[var(--text-secondary)]">当前没有通用的插件参数编辑器。安装与更新由 Market 管理；此处管理插件运行、权限和解析接管。</p>
+
+              <details class="plugin-technical border-t border-[var(--border)] py-4">
+                <summary class="cursor-pointer text-sm font-medium text-[var(--text-primary)]">技术详情</summary>
               <DetailSection title="运行依赖">
-                <p class="text-xs text-[var(--text-secondary)]">{{ selected.runtime?.dependency_count || 0 }} dependencies</p>
+                <p class="text-xs text-[var(--text-secondary)]">{{ selected.runtime?.dependency_count || 0 }} 项依赖</p>
                 <ul v-if="selected.runtime?.dependencies?.length" class="mt-3 divide-y divide-[var(--border)] rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3">
                   <li v-for="dependency in selected.runtime.dependencies" :key="`${dependency.name}-${dependency.version}`" class="flex items-center justify-between gap-3 py-2.5 text-sm"><span class="truncate text-[var(--text-primary)]">{{ dependency.name }}</span><span class="shrink-0 text-xs text-[var(--text-tertiary)]">{{ dependency.version }}</span></li>
                 </ul>
               </DetailSection>
 
               <DetailSection title="安装来源">
-                <dl class="plugin-detail-grid"><dt>Version</dt><dd>{{ selected.version || '未知' }}</dd><dt>Source</dt><dd>{{ selected.source_provenance?.source_key || 'unknown' }}</dd><dt>Package</dt><dd class="truncate">{{ selected.market?.package_id || 'unknown' }}</dd></dl>
-                <RouterLink :to="marketLink(selected)" class="plugin-btn plugin-btn-primary mt-4 inline-flex">{{ selected.market?.update_available ? '有可用更新 · 在 Market 中查看' : '在 Market 中查看' }}</RouterLink>
+                <dl class="plugin-detail-grid"><dt>插件标识</dt><dd>{{ selected.plugin }}</dd><dt>版本</dt><dd>{{ selected.version || '未知' }}</dd><dt>来源标识</dt><dd>{{ selected.source_provenance?.source_key || '未提供' }}</dd><dt>包标识</dt><dd>{{ selected.market?.package_id || '未提供' }}</dd><dt>原始状态</dt><dd>{{ selected.lifecycle_state }}</dd></dl>
+                <ul class="mt-3 text-xs leading-5 text-[var(--text-secondary)]"><li v-for="(contract, index) in selected.provider_contracts || []" :key="index">{{ typeof contract === 'string' ? contract : [contract.contract, contract.contract_version, ...(contract.features || [])].filter(Boolean).join(' · ') }}</li></ul>
               </DetailSection>
+              </details>
+              <RouterLink :to="marketLink(selected)" class="plugin-btn mt-4 inline-flex">{{ selected.market?.update_available ? '有可用更新 · 在 Market 中查看' : '在 Market 中查看' }}</RouterLink>
             </template>
           </div>
         </aside>
@@ -168,6 +175,7 @@ import { RouterLink } from 'vue-router'
 import { approvePluginPermission, disablePlugin, enablePlugin, fetchDeveloperMode, fetchPlugin, fetchPlugins, installDeveloperPlugin, pluginErrorMessage, recoverPlugin, revokePluginPermission, setDeveloperMode, setPluginOwnership } from '../../api/plugins'
 import { safeAdminDiagnostic } from '../../api/adminUi.js'
 import { useToastStore } from '../../stores/toast'
+import { contractLabel, environmentLabel, featureLabels, lifecycleLabel, permissionDescription, permissionLabel, pluginStatusLabel as statusLabel, runtimeLabel, trustLabel } from '../pluginPresentation.js'
 
 const DetailSection = defineComponent({
   props: { title: { type: String, required: true } },
@@ -277,16 +285,16 @@ async function installLocalPlugin() {
 async function toggleEnabled(plugin) {
   const action = plugin.enabled ? '停用' : '启用'
   await runConfirmedAction(
-    { title: `${action}插件`, message: plugin.enabled ? '停用不会自动切换 scheme ownership。若插件仍拥有 scheme，后端会拒绝此操作。' : '启用后插件恢复运行，但不会自动接管任何 scheme。', confirmText: action, danger: plugin.enabled },
+    { title: `${action}插件`, message: plugin.enabled ? '停用不会自动转交解析权。若来源仍由此插件解析，后端会拒绝此操作，请先切回内置兼容解析。' : '启用后插件恢复运行，但不会自动接管任何解析协议。', confirmText: action, danger: plugin.enabled },
     () => plugin.enabled ? disablePlugin(plugin.plugin) : enablePlugin(plugin.plugin),
     `插件已${action}`,
     plugin.plugin,
   )
 }
-async function recoverSelected() { const identity = selectedIdentity.value; await runConfirmedAction({ title: '恢复插件', message: 'WaveFlow 将清除 quarantine 状态。恢复后仍需显式启用或重新检查运行状态。', confirmText: '恢复' }, () => recoverPlugin(identity), '插件已恢复', identity) }
+async function recoverSelected() { const identity = selectedIdentity.value; await runConfirmedAction({ title: '恢复插件', message: 'WaveFlow 将清除隔离状态。恢复后仍需显式启用或重新检查运行状态。', confirmText: '恢复' }, () => recoverPlugin(identity), '插件已恢复', identity) }
 async function approvePermission(permission) { const identity = selectedIdentity.value; const packageId = selected.value?.market?.package_id || ''; await runConfirmedAction({ title: '允许高风险权限', message: permission === 'network.direct' ? '此插件需要直接访问网络。该能力不经过 Core managed HTTP，并非强安全沙箱。' : permission === 'network.managed_http' ? '此插件需要通过 Core managed HTTP 访问明文 HTTP。目标、DNS、重定向和 SSRF 检查仍然有效。' : `允许 ${permission}？`, confirmText: '允许并继续', danger: true }, () => approvePluginPermission(identity, permission, packageId), '权限已允许', identity) }
-async function revokePermission(permission) { const identity = selectedIdentity.value; await runConfirmedAction({ title: '撤销权限', message: '撤销会停止插件运行。若 scheme 仍由此插件拥有，后端会拒绝并要求先切回 Legacy。', confirmText: '撤销', danger: true }, () => revokePluginPermission(identity, permission), '权限已撤销', identity) }
-async function switchOwnership(item) { const identity = selectedIdentity.value; const toPlugin = item.mode !== 'plugin'; const message = toPlugin ? `切换后，${item.scheme}:// 来源将由 ${selected.value.display_name} 解析。Legacy Adapter 将保留，可随时回滚。` : `切换后，${item.scheme}:// 来源将重新由内置 Legacy Adapter 解析。`; await runConfirmedAction({ title: toPlugin ? '切换到 Plugin' : '切换回 Legacy', message, confirmText: toPlugin ? '切换到 Plugin' : '切换回 Legacy', danger: toPlugin }, () => setPluginOwnership(item.scheme, toPlugin ? 'plugin' : 'legacy', toPlugin ? identity : ''), `已切换到 ${toPlugin ? 'Plugin' : 'Legacy'}`, identity) }
+async function revokePermission(permission) { const identity = selectedIdentity.value; await runConfirmedAction({ title: '撤销权限', message: '撤销会停止插件运行。若来源仍由此插件解析，后端会拒绝并要求先切回内置兼容解析。', confirmText: '撤销', danger: true }, () => revokePluginPermission(identity, permission), '权限已撤销', identity) }
+async function switchOwnership(item) { const identity = selectedIdentity.value; const toPlugin = item.mode !== 'plugin'; const message = toPlugin ? `切换后，${item.scheme}:// 来源将由 ${selected.value.display_name} 解析。内置兼容解析仍保留，可切回。` : `切换后，${item.scheme}:// 来源将重新由内置兼容解析处理。`; await runConfirmedAction({ title: toPlugin ? '交由插件解析' : '切回内置解析', message, confirmText: toPlugin ? '交由插件解析' : '切回内置解析', danger: toPlugin }, () => setPluginOwnership(item.scheme, toPlugin ? 'plugin' : 'legacy', toPlugin ? identity : ''), `已切换到${toPlugin ? '插件解析' : '内置兼容解析'}`, identity) }
 async function runConfirmedAction(confirmOptions, action, success, identity) {
   if (acting.value || componentDisposed) return
   acting.value = true
@@ -304,15 +312,9 @@ async function runConfirmedAction(confirmOptions, action, success, identity) {
   }
 }
 
-function statusLabel(plugin) { if (plugin.quarantined) return 'Quarantined'; if (!plugin.enabled) return '已停用'; if (isPluginCrashed(plugin)) return 'Crashed'; if (plugin.runtime_available) return 'Running'; return 'Unavailable' }
 function statusClass(plugin) { if (plugin.quarantined || !plugin.runtime_available && plugin.enabled) return 'is-danger'; if (!plugin.enabled) return 'is-muted'; return 'is-healthy' }
-function isPluginCrashed(plugin) { return plugin?.lifecycle_state === 'unavailable' && /\bPLUGIN_CRASHED\b/.test(String(plugin?.last_error || '')) }
-function runtimeLabel(runtime) { if (runtime?.type === 'python') return runtime.python_version_range ? `Python ${runtime.python_version_range}` : 'Python'; if (runtime?.type === 'subprocess') return 'Binary / subprocess'; return runtime?.type || 'Unknown runtime' }
-function environmentLabel(status) { return ({ ready: 'Healthy', unavailable: 'Unavailable', not_applicable: 'Not applicable' })[status] || status || 'Unknown' }
-function trustLabel(value) { return ({ official: 'Official publisher', third_party: 'Trusted third party', developer_local: 'Developer Local（未经过 Official 签名）' })[value] || value || 'Unknown' }
-function ownershipSummary(plugin) { const values = plugin.ownership || []; if (!values.length) return 'Legacy'; const owned = values.filter((item) => item.mode === 'plugin').length; return owned ? `${owned}/${values.length} Plugin` : 'Legacy' }
-function contractLabels(contracts) { return (contracts || []).map((item) => item.contract === 'tv_provider' ? 'TVProvider' : item.contract === 'radio_provider' ? 'RadioProvider' : item.contract).join(' · ') || '无 Provider Contract' }
-function permissionLabel(name) { return ({ 'network.managed': 'Managed Network', 'network.direct': 'Direct Network', 'network.managed_http': 'Managed Plain HTTP' })[name] || name }
+function ownershipSummary(plugin) { const values = plugin.ownership || []; if (!values.length) return '未声明解析协议'; const owned = values.filter((item) => item.mode === 'plugin').length; return owned ? `${owned}/${values.length} 由插件解析` : '内置兼容解析' }
+function contractLabels(contracts) { return (contracts || []).map((item) => contractLabel(typeof item === 'string' ? item : item.contract)).join(' · ') || '未声明提供方契约' }
 function isPending(name) { return Boolean(selected.value?.permissions?.pending?.some((item) => item.name === name)) }
 function isRevocable(name) { return (name === 'network.direct' || name === 'network.managed_http') && Boolean(selected.value?.permissions?.approved?.some((item) => item.name === name)) }
 function marketLink(plugin) { const params = new URLSearchParams({ type: 'plugins' }); if (plugin?.market?.package_id) params.set('package', plugin.market.package_id); return `/market?${params}` }
@@ -328,6 +330,8 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .plugin-developer > div { margin-top: 16px; }
+.plugin-technical > section { margin-top: 16px; }
+.plugin-detail-grid dd { overflow-wrap: anywhere; }
 .plugin-developer summary:focus-visible { outline: 2px solid var(--text-secondary); outline-offset: 3px; }
 :global(html.dark .plugin-status.is-healthy) { color: #6ee7b7; }
 :global(html.dark .plugin-status.is-danger), :global(html.dark .plugin-chip-danger) { color: #fca5a5; }

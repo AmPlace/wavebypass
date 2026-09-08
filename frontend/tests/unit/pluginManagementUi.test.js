@@ -20,7 +20,7 @@ test('Market presenter 区分 Content 与 Plugin Package 语义', () => {
   assert.equal(isPluginPackage(plugin), true)
   assert.equal(packageInstallable(plugin), true)
   assert.equal(pluginIdentity(plugin), 'org.waveflow/ptbtv')
-  assert.deepEqual(providerContractLabels(plugin), ['TVProvider'])
+  assert.deepEqual(providerContractLabels(plugin), ['电视来源'])
   assert.deepEqual(pluginSchemeLabels({ plugin: { owned_schemes: [{ scheme: 'ptbtv', contract: 'tv_provider' }] } }), ['ptbtv'])
   assert.equal(packageActionLabel(plugin, 'install'), '安装 Plugin')
   assert.equal(packageActionLabel({ package_type: 'content_package' }, 'install'), '导入')
@@ -52,7 +52,7 @@ test('Market 保留 Content presenter 并增加独立 package type 和 Plugin de
   assert.match(market, /packageTagItems/)
   assert.doesNotMatch(market, /function pluginTagItems/)
   assert.match(market, /安装 Plugin/)
-  assert.match(market, /providerContractLabels/)
+  assert.match(market, /MarketPluginInfo/)
   assert.match(market, /network\.direct/)
   assert.match(market, /允许并继续/)
   assert.match(market, /handleImport[\s\S]*已导入 \$\{result\.channel_count/)
@@ -65,7 +65,7 @@ test('Settings Plugins 只做 runtime management 并把 update/uninstall 留给 
   for (const symbol of ['fetchPlugins', 'fetchPlugin', 'enablePlugin', 'disablePlugin', 'recoverPlugin', 'approvePluginPermission', 'revokePluginPermission', 'setPluginOwnership']) {
     assert.match(view, new RegExp(`\\b${symbol}\\b`))
   }
-  for (const label of ['运行状态', 'Permissions', '运行依赖', '切换到 Plugin', '切换回 Legacy', '在 Market 中查看']) {
+  for (const label of ['运行状态', '权限', '运行依赖', '交由插件解析', '切回内置解析', '在 Market 中查看']) {
     assert.match(view, new RegExp(label))
   }
   assert.doesNotMatch(view, /updatePlugin|uninstallPlugin|安装 Plugin/)

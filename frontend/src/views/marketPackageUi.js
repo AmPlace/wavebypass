@@ -1,3 +1,6 @@
+import { contractLabel, runtimeLabel } from './pluginPresentation.js'
+export { permissionLabel } from './pluginPresentation.js'
+
 export const CONTENT_PACKAGE = 'content_package'
 export const PLUGIN_PACKAGE = 'plugin_package'
 export const LOGO_PACKAGE_KIND = 'logo_pack'
@@ -32,9 +35,7 @@ export function providerContractLabels(pkg) {
   const values = pkg?.plugin?.provider_contracts || pkg?.plugin_manifest?.provider_contracts || []
   return values.map((item) => {
     const contract = typeof item === 'string' ? item : item?.contract
-    if (contract === 'tv_provider') return 'TVProvider'
-    if (contract === 'radio_provider') return 'RadioProvider'
-    return contract
+    return contractLabel(contract)
   }).filter(Boolean)
 }
 
@@ -46,26 +47,26 @@ export function pluginSchemeLabels(pkg) {
 }
 
 export function requestedPermissions(pkg) {
-  const values = pkg?.plugin?.permissions || Object.keys(pkg?.plugin_manifest?.permissions || {})
-  if (Array.isArray(values)) return values.map(String)
-  return []
-}
-
-export function permissionLabel(name) {
-  return ({ 'network.managed': 'Managed Network', 'network.direct': 'Direct Network', 'network.managed_http': 'Managed Plain HTTP' })[name] || name
+  if (Array.isArray(pkg?.plugin?.permissions)) return pkg.plugin.permissions.map(String)
+  const raw = pkg?.plugin_manifest?.permissions || {}
+  const result = []
+  if (raw.network?.managed === true) result.push('network.managed')
+  if (raw.network?.direct === true) result.push('network.direct')
+  if (raw.network?.allow_http === true) result.push('network.managed_http')
+  return result.concat(Object.keys(raw).filter(key => key !== 'network' && raw[key] === true))
 }
 
 export function pluginRuntimeLabel(pkg) {
   const runtime = pkg?.plugin_manifest?.runtime || {}
-  if (runtime.type === 'python') return runtime.python_version_range ? `Python ${runtime.python_version_range}` : 'Python'
+  if (runtime.type) return runtimeLabel(runtime)
   const platforms = pkg?.plugin?.platforms || []
   const kinds = new Set(platforms.map((item) => item.runtime).filter(Boolean))
-  return kinds.has('python') ? 'Python' : runtime.type === 'subprocess' ? 'Binary / subprocess' : 'Subprocess'
+  return [...kinds].map(type => runtimeLabel({ type })).join(' / ') || '未提供运行环境信息'
 }
 
 export function pluginDependencies(pkg) {
   const lock = pkg?.plugin_manifest?.runtime?.dependency_lock || {}
-  const items = Array.isArray(lock.artifacts) ? lock.artifacts : []
+  const items = Array.isArray(lock.artifacts) ? lock.artifacts : (pkg?.plugin?.dependencies || [])
   const seen = new Set()
   return items.filter((item) => {
     const key = `${item?.name || ''}@${item?.version || ''}`
@@ -73,4 +74,8 @@ export function pluginDependencies(pkg) {
     seen.add(key)
     return true
   }).map(item => ({ name: String(item.name), version: String(item.version || '') }))
+}
+
+export function pluginPublisher(pkg) {
+  return pkg?.publisher?.name || pkg?.publisher?.id || pkg?.plugin?.publisher_id || pkg?.plugin_manifest?.publisher_id || ''
 }
