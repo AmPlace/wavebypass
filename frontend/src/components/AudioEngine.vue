@@ -8,7 +8,7 @@ import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import Hls from 'hls.js'
 import { usePlayerStore } from '../stores/player'
-import { API_BASE } from '../apiBase'
+import { API_BASE, isDesktop } from '../apiBase'
 import { publicAsset } from '../publicAsset'
 import { createRadioAudioEngine } from '../utils/radioAudioEngine'
 
@@ -27,6 +27,7 @@ const radioEngine = createRadioAudioEngine({
   volume,
   Hls,
   API_BASE,
+  apiCredentials: isDesktop ? 'include' : 'same-origin',
   publicAsset,
 })
 

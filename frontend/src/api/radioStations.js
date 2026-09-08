@@ -1,13 +1,4 @@
-import { API_BASE } from '../apiBase.js'
-
-function inferType(station) {
-  const value = `${station?.name || ''} ${station?.group_name || ''}`.toLowerCase()
-  if (/(music|音乐|音樂|金曲|经典|經典)/i.test(value)) return 'music'
-  if (/(news|新闻|新聞|资讯|資訊|交通)/i.test(value)) return 'news'
-  if (/(talk|谈话|談話|生活|都市|城市)/i.test(value)) return 'talk'
-  if (/(sport|体育|體育)/i.test(value)) return 'sports'
-  return 'other'
-}
+import { API_BASE, isDesktop } from '../apiBase.js'
 
 function mapRadioStation(station) {
   const stationId = String(station?.station_id || '').trim()
@@ -45,9 +36,12 @@ function mapRadioStation(station) {
     radioSources: safeSources,
     radioDomain: 'radio',
     catalogStatus: String(station?.catalog_status || '').trim(),
+    radioRegion: String(station?.country || '').trim(),
+    radioGroup: String(station?.group_name || '').trim(),
+    radioType: typeof metadata.tag === 'string' ? metadata.tag.trim() : '',
     livePath: true,
     directPlay: false,
-    tags: [station?.country, station?.group_name, station?.language, metadata.tag || inferType(station)]
+    tags: [station?.country, station?.group_name, station?.language, typeof metadata.tag === 'string' ? metadata.tag : '']
       .map((tag) => String(tag || '').trim())
       .filter(Boolean),
   }
@@ -83,7 +77,7 @@ export function summarizeRadioCatalogState(stations, catalogStates = []) {
   return 'success'
 }
 
-export async function fetchRadioCatalog({ fetchImpl = fetch, signal } = {}) {
+async function fetchCatalogData(endpoint, { fetchImpl = fetch, signal } = {}) {
   const controller = new AbortController()
   let timer = null
   let timedOut = false
@@ -100,16 +94,13 @@ export async function fetchRadioCatalog({ fetchImpl = fetch, signal } = {}) {
       timedOut = true
       controller.abort()
     }, 15_000)
-    const response = await fetchImpl(`${API_BASE}/api/radio/stations`, { signal: controller.signal })
+    const response = await fetchImpl(`${API_BASE}${endpoint}`, {
+      signal: controller.signal,
+      credentials: isDesktop ? 'include' : 'same-origin',
+    })
     if (!response.ok) return { status: 'error', errorKind: 'http' }
     const body = await response.json()
-    const rows = Array.isArray(body) ? body : body?.stations
-    if (!Array.isArray(rows)) return { status: 'error', errorKind: 'invalid_response' }
-    return {
-      status: 'success',
-      stations: rows.map(mapRadioStation).filter(Boolean),
-      catalogStates: normalizeCatalogStates(body?.catalog_states),
-    }
+    return { status: 'success', body }
   } catch (error) {
     if (error?.name === 'AbortError') {
       return timedOut
@@ -123,6 +114,24 @@ export async function fetchRadioCatalog({ fetchImpl = fetch, signal } = {}) {
   }
 }
 
+export async function fetchRadioCatalog(options = {}) {
+  const result = await fetchCatalogData('/api/radio/stations', options)
+  if (result.status !== 'success') return result
+  const rows = Array.isArray(result.body) ? result.body : result.body?.stations
+  if (!Array.isArray(rows)) return { status: 'error', errorKind: 'invalid_response' }
+  return {
+    status: 'success', stations: rows.map(mapRadioStation).filter(Boolean),
+    catalogStates: normalizeCatalogStates(result.body?.catalog_states),
+  }
+}
+
+export async function fetchStaticRadioCatalog(options = {}) {
+  const result = await fetchCatalogData('/api/stations', options)
+  if (result.status !== 'success') return result
+  if (!Array.isArray(result.body)) return { status: 'error', errorKind: 'invalid_response' }
+  return { status: 'success', stations: result.body.filter(station => station?.id) }
+}
+
 export async function fetchRadioStations(options = {}) {
   const result = await fetchRadioCatalog(options)
   return result.status === 'success' ? result.stations : null
@@ -132,19 +141,20 @@ export async function fetchRadioProgramme(station, { fetchImpl = fetch } = {}) {
   const stationId = String(station?.radioStationId || '').trim()
   const sourceId = String(station?.radioSourceId || '').trim()
   if (!stationId || !sourceId) return null
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 10_000)
   try {
-    const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), 10_000)
     const query = new URLSearchParams({ source_id: sourceId })
     const response = await fetchImpl(
       `${API_BASE}/api/radio/stations/${encodeURIComponent(stationId)}/programme?${query}`,
-      { signal: controller.signal },
+      { signal: controller.signal, credentials: isDesktop ? 'include' : 'same-origin' },
     )
-    clearTimeout(timer)
     if (!response.ok) return null
     return await response.json()
   } catch {
     return null
+  } finally {
+    clearTimeout(timer)
   }
 }
 

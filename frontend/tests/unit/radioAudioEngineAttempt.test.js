@@ -154,7 +154,7 @@ function responseJson(value) {
   return { ok: true, json: async () => value }
 }
 
-function createHarness({ hlsSupported = false, fetchImpl, setTimerImpl, clearTimerImpl } = {}) {
+function createHarness({ hlsSupported = false, fetchImpl, setTimerImpl, clearTimerImpl, apiBase = '', apiCredentials = 'same-origin' } = {}) {
   const audio = new FakeAudio('main')
   const hlsMock = createHlsMock({ supported: hlsSupported })
   const probeAudios = []
@@ -206,7 +206,8 @@ function createHarness({ hlsSupported = false, fetchImpl, setTimerImpl, clearTim
     currentStation: state.currentStation,
     volume: state.volume,
     Hls: hlsMock.Hls,
-    API_BASE: '',
+    API_BASE: apiBase,
+    apiCredentials,
     publicAsset: (url) => url,
     getNavigator: () => ({ mediaSession }),
     getMediaMetadata: () => FakeMediaMetadata,
@@ -613,6 +614,28 @@ test('persisted Radio source resolves by source_id and bypasses legacy URL racin
   assert.equal(h.audio.src, '/api/media/radio/radio_a/stream?source_id=source_a')
   assert.deepEqual(h.audio.playCalls, ['/api/media/radio/radio_a/stream?source_id=source_a'])
   assert.equal(h.probeAudios.length, 0)
+})
+
+test('Desktop Radio credentials reach only Core JSON/HLS, never external HLS origins', async () => {
+  const h = createHarness({hlsSupported:true,apiBase:'http://127.0.0.1:18765',apiCredentials:'include',fetchImpl:async(url,options)=>{
+    assert.equal(url,'http://127.0.0.1:18765/api/radio/stations/radio_a/resolve?source_id=source_a')
+    assert.equal(options.credentials,'include')
+    return responseJson({source_type:'hls'})
+  }})
+  h.store.stationMap.RADIO={id:'RADIO',name:'Radio',radioStationId:'radio_a',radioSourceId:'source_a'}
+  h.state.currentStation.value='RADIO'
+  h.engine.loadStation('RADIO',{intent:'station_click'})
+  await flush()
+  const hls=h.hlsInstances.at(-1)
+  assert.ok(hls)
+  const xhr={}
+  hls.config.xhrSetup(xhr,hls.source)
+  assert.equal(xhr.withCredentials,true)
+  hls.config.xhrSetup(xhr,'https://provider.invalid/live.m3u8')
+  assert.equal(xhr.withCredentials,false)
+  hls.config.xhrSetup(xhr,'http://127.0.0.1:18766/live.m3u8')
+  assert.equal(xhr.withCredentials,false)
+  h.engine.stopRadioAttempt()
 })
 
 test('persisted Radio resolve continues the same attempt and performs one play request', async () => {

@@ -7,6 +7,7 @@ export function createRadioAudioEngine({
   volume,
   Hls,
   API_BASE,
+  apiCredentials = 'same-origin',
   publicAsset,
   getNavigator = () => globalThis.navigator,
   getMediaMetadata = () => globalThis.MediaMetadata,
@@ -64,6 +65,15 @@ export function createRadioAudioEngine({
   function radioMediaUrl(station, path) {
     const query = new URLSearchParams({ source_id: String(station.radioSourceId) })
     return `${API_BASE}/api/media/radio/${encodeURIComponent(station.radioStationId)}/${path}?${query}`
+  }
+
+  function configureCoreCredentials(xhr, url) {
+    // Desktop credentials belong to the Core origin, never a direct provider.
+    xhr.withCredentials = false
+    if (apiCredentials !== 'include' || !API_BASE) return
+    try {
+      xhr.withCredentials = new URL(url, `${API_BASE}/`).origin === new URL(API_BASE).origin
+    } catch {}
   }
 
   function isAttemptActive(attempt) {
@@ -334,6 +344,7 @@ export function createRadioAudioEngine({
 
     if (isHlsUrl(url) && Hls?.isSupported()) {
       const hls = new Hls({
+        xhrSetup: configureCoreCredentials,
         enableWorker: true, lowLatencyMode: true, autoStartLoad: true,
         startFragPrefetch: true, liveSyncDurationCount: 2,
         liveMaxLatencyDurationCount: 5, maxBufferLength: 10,
@@ -458,7 +469,7 @@ export function createRadioAudioEngine({
         return new Promise((resolve) => {
           if (!isAttemptActive(attempt)) { resolve(null); return }
           const probeEl = createAudio()
-          const hls = new Hls({ autoStartLoad: true, maxBufferLength: 1 })
+          const hls = new Hls({ autoStartLoad: true, maxBufferLength: 1, xhrSetup: configureCoreCredentials })
           activeHls.add(hls)
           activeAudio.add(probeEl)
           hls.loadSource(url)
@@ -648,7 +659,7 @@ export function createRadioAudioEngine({
     try {
       const res = await fetchImpl(
         `${API_BASE}/api/${stationId}/all-urls?name=${encodeURIComponent(stName)}`,
-        { signal: ctrl.signal },
+        { signal: ctrl.signal, credentials: apiCredentials },
       )
       if (!isAttemptActive(attempt)) return []
       if (res.ok) {
@@ -700,7 +711,7 @@ export function createRadioAudioEngine({
       const removeCleanup = addAttemptCleanup(attempt, () => controller.abort())
       ;(async () => {
         try {
-          const response = await fetchImpl(radioResolveUrl(radioStation), { signal: controller.signal })
+          const response = await fetchImpl(radioResolveUrl(radioStation), { signal: controller.signal, credentials: apiCredentials })
           if (!isAttemptActive(attempt)) return
           if (!response.ok) throw new Error('Radio source resolve failed')
           const resolved = await response.json()
@@ -782,7 +793,7 @@ export function createRadioAudioEngine({
             const timer = setTimer(() => ctrl.abort(), 5000)
             const removeCleanup = addAttemptCleanup(attempt, () => ctrl.abort())
             try {
-              const res = await fetchImpl(`${API_BASE}/api/${stationId}/stream-url?name=${encodeURIComponent(stName)}`, { signal: ctrl.signal })
+              const res = await fetchImpl(`${API_BASE}/api/${stationId}/stream-url?name=${encodeURIComponent(stName)}`, { signal: ctrl.signal, credentials: apiCredentials })
               if (!isAttemptActive(attempt)) return
               clearTimer(timer)
               removeCleanup()
@@ -801,6 +812,7 @@ export function createRadioAudioEngine({
         if (!isAttemptActive(attempt)) return
 
         const hls = new Hls({
+          xhrSetup: configureCoreCredentials,
           enableWorker: true,
           lowLatencyMode: true,
           autoStartLoad: true,
@@ -873,7 +885,7 @@ export function createRadioAudioEngine({
             const timer = setTimer(() => ctrl.abort(), 5000)
             const removeCleanup = addAttemptCleanup(attempt, () => ctrl.abort())
             try {
-              const res = await fetchImpl(`${API_BASE}/api/${stationId}/stream-url?name=${encodeURIComponent(stName)}`, { signal: ctrl.signal })
+              const res = await fetchImpl(`${API_BASE}/api/${stationId}/stream-url?name=${encodeURIComponent(stName)}`, { signal: ctrl.signal, credentials: apiCredentials })
               if (!isAttemptActive(attempt)) return
               if (res.ok) {
                 const { url } = await res.json()

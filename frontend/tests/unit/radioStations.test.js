@@ -1,14 +1,41 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { mock } from 'node:test'
+import { execFileSync } from 'node:child_process'
 
 import {
   fetchRadioCatalog,
+  fetchStaticRadioCatalog,
   fetchRadioProgramme,
   fetchRadioStations,
   mapRadioStationForTest,
   summarizeRadioCatalogState,
 } from '../../src/api/radioStations.js'
+
+test('Desktop catalog and programme requests use the configured credentialed Core origin', () => {
+  const moduleUrl = new URL('../../src/api/radioStations.js', import.meta.url).href
+  execFileSync(process.execPath, ['--input-type=module', '-e', `
+    import assert from 'node:assert/strict'
+    globalThis.window = {
+      WAVEFLOW_DESKTOP: { apiBase: 'http://127.0.0.1:8000' },
+      location: { protocol: 'file:', origin: 'null' },
+    }
+    const api = await import(${JSON.stringify(moduleUrl)})
+    const calls = []
+    const fetchImpl = async (url, options) => {
+      calls.push({ url, credentials: options.credentials })
+      return { ok: true, json: async () => [] }
+    }
+    await api.fetchStaticRadioCatalog({ fetchImpl })
+    await api.fetchRadioCatalog({ fetchImpl })
+    await api.fetchRadioProgramme({ radioStationId: 'station', radioSourceId: 'source' }, { fetchImpl })
+    assert.equal(calls.length, 3)
+    for (const call of calls) {
+      assert.equal(new URL(call.url).origin, 'http://127.0.0.1:8000')
+      assert.equal(call.credentials, 'include')
+    }
+  `], { timeout: 5000, stdio: 'pipe' })
+})
 
 test('Radio catalog maps explicit station/source identity without upstream URLs', async () => {
   const station = mapRadioStationForTest({
@@ -140,4 +167,41 @@ test('Radio programme fetch submits only the persisted source_id', async () => {
 
   assert.deepEqual(result, { programmes: [] })
   assert.equal(calls[0], '/api/radio/stations/radio_a/programme?source_id=source_a')
+})
+
+test('Radio metadata never guesses a type or region from name/group and preserves custom types', () => {
+  const raw = { station_id: 'one', name: 'Music News Sports', country: 'ZZ', group_name: '北京', sources: [{source_id:'s'}] }
+  const missing = mapRadioStationForTest(raw)
+  assert.equal(missing.radioType, '')
+  assert.equal(missing.radioRegion, 'ZZ')
+  assert.equal(missing.radioGroup, '北京')
+  assert.deepEqual(missing.tags, ['ZZ','北京'])
+  const custom = mapRadioStationForTest({...raw,metadata:{tag:'自定义类型'}})
+  assert.equal(custom.radioType, '自定义类型')
+  assert.equal(custom.tags.at(-1), '自定义类型')
+})
+
+test('static catalog participates in bounded loading and distinguishes failure from valid empty', async () => {
+  assert.deepEqual(await fetchStaticRadioCatalog({fetchImpl:async(url,options)=>{
+    assert.equal(url,'/api/stations')
+    assert.equal(options.credentials,'same-origin')
+    assert.ok(options.signal)
+    return {ok:true,json:async()=>[]}
+  }}),{status:'success',stations:[]})
+  assert.deepEqual(await fetchStaticRadioCatalog({fetchImpl:async()=>({ok:false})}),{status:'error',errorKind:'http'})
+  assert.deepEqual(await fetchStaticRadioCatalog({fetchImpl:async()=>({ok:true,json:async()=>({})})}),{status:'error',errorKind:'invalid_response'})
+})
+
+test('programme failure cleans its timeout and Core reads retain credential policy', async () => {
+  mock.timers.enable({apis:['setTimeout']})
+  let signal
+  try {
+    assert.equal(await fetchRadioProgramme({radioStationId:'one',radioSourceId:'s'},{fetchImpl:async(_url,options)=>{
+      signal=options.signal
+      assert.equal(options.credentials,'same-origin')
+      throw new Error('offline')
+    }}),null)
+    mock.timers.tick(10_000)
+    assert.equal(signal.aborted,false)
+  } finally { mock.timers.reset() }
 })
