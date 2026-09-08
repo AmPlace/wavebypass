@@ -43,8 +43,9 @@ export function packageIdentity(pkg) {
   const identity = display.identity && typeof display.identity === 'object' ? display.identity : {}
   const icon = identity.icon && typeof identity.icon === 'object' ? identity.icon : {}
   const badge = display.badge && typeof display.badge === 'object' ? display.badge : {}
-  const brand = BUILTIN_BRANDS[text(identity.brand).toLowerCase()]
-  const explicitText = text(badge.text).slice(0, 3)
+  const brand = (icon.type === 'builtin' && BUILTIN_BRANDS[text(icon.name).toLowerCase()])
+    || BUILTIN_BRANDS[text(identity.brand).toLowerCase()]
+  const explicitText = text(badge.text)
   const tone = validBadgeTone(badge.tone)
 
   return {

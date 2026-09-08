@@ -34,7 +34,9 @@
         </slot>
       </span>
       <span ref="moreSampleRef" class="adaptive-tag-list__cell">
-        <span class="market-tag market-tag-rest">+{{ overflowSampleCount }}</span>
+        <slot name="more" :count="overflowSampleCount">
+          <span class="market-tag market-tag-rest">+{{ overflowSampleCount }}</span>
+        </slot>
       </span>
     </div>
   </div>

@@ -69,6 +69,14 @@ test('one package tag list is shared by card and detail views', () => {
   ])
 })
 
+test('explicit badges are not shortened and builtin icons use only registered keys', () => {
+  assert.equal(packageIdentity({ display: { badge: { text: 'CUSTOM' } } }).text, 'CUSTOM')
+  assert.equal(packageIdentity({ display: { identity: { icon: { type: 'builtin', name: 'waveflow' } } } }).text, 'WF')
+  assert.equal(packageIdentity({ name: 'WaveFlow 福建联通', display: { identity: { icon: { type: 'builtin', name: 'unknown' } } } }).text, '')
+  assert.equal(packageIdentity({ name: 'YouTube', providers: ['youtube'], regions: [{ province: '福建' }] }).imageUrl, '')
+  assert.equal(packageSubtitle({ name: '福建联通', regions: [{ province: '福建' }], operators: ['cucc'] }), '')
+})
+
 test('scale only formats explicit count fields and does not invent plugin metadata', () => {
   assert.equal(packageScaleLabel({ channel_count: 42 }), '42 个频道')
   assert.equal(packageScaleLabel({ source_count: 3 }), '')

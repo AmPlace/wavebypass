@@ -24,27 +24,14 @@
           筛选
           <span v-if="selectedChips.length" class="market-filter-count">{{ selectedChips.length }}</span>
         </button>
-        <MarketFilterDropdown
-          v-for="group in desktopQuickFilterGroups"
-          :key="group.key"
-          :label="group.label"
-          :options="group.options()"
-          :selected="filterMultiSelections[group.key]"
-          :multi="true"
-          :dropdown-key="group.key"
-          :open="activeDropdownKey === group.key"
-          class="market-desktop-filter"
-          @change="(values) => onMultiFilterChange(group.key, values)"
-          @toggle="handleDropdownToggle"
-          @close="handleDropdownClose"
-        />
       </div>
-        <button type="button" class="market-more-filter-trigger" :class="{ 'is-active': moreFilterCount > 0 }" @click.stop="toggleMoreFilters">
+      <div class="market-more-filter-anchor">
+        <button type="button" class="market-more-filter-trigger" :class="{ 'is-active': moreFilterCount > 0 }" :aria-expanded="moreFiltersOpen" aria-controls="market-structured-filters" @click.stop="toggleMoreFilters">
           更多筛选
           <span v-if="moreFilterCount" class="market-filter-count">{{ moreFilterCount }}</span>
           <svg class="size-3.5" :class="{ 'rotate-180': moreFiltersOpen }" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m6 9 6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </button>
-        <div v-if="moreFiltersOpen" class="market-more-filter-panel" @click.stop>
+        <div v-if="moreFiltersOpen" id="market-structured-filters" class="market-more-filter-panel" role="region" aria-label="更多筛选" @click.stop>
           <section v-for="group in desktopMoreFilterGroups" :key="group.key" class="market-more-filter-group">
             <h3 class="market-section-title">{{ group.label }}</h3>
             <div class="market-more-filter-options">
@@ -54,6 +41,7 @@
                 type="button"
                 class="market-more-filter-option"
                 :class="{ 'is-selected': filterMultiSelections[group.key].includes(opt.key) }"
+                :aria-pressed="filterMultiSelections[group.key].includes(opt.key)"
                 @click="toggleMoreFilterOption(group.key, opt.key)"
               >
                 <span class="market-more-filter-check" aria-hidden="true"><svg v-if="filterMultiSelections[group.key].includes(opt.key)" class="size-3" viewBox="0 0 24 24" fill="none"><path d="m5 12 4 4L19 6" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
@@ -62,11 +50,19 @@
             </div>
           </section>
           <footer class="market-more-filter-footer">
-            <button type="button" class="market-btn-ghost" :disabled="moreFilterCount === 0" @click="clearMoreFilters">清除更多筛选</button>
+            <button type="button" class="market-btn-ghost" :disabled="moreFilterCount === 0" @click="clearMoreFilters">清除筛选</button>
             <button type="button" class="market-btn-primary" @click="moreFiltersOpen = false">完成</button>
           </footer>
         </div>
+      </div>
     </section>
+
+    <div v-if="selectedChips.length" class="market-selected-filters" aria-label="已选筛选条件">
+      <button v-for="chip in selectedChips" :key="`${chip.group}:${chip.value}`" type="button" class="market-active-chip" :aria-label="`清除筛选 ${chip.label}`" @click="removeSelection(chip.group, chip.value)">
+        <span>{{ chip.label }}</span><span aria-hidden="true">×</span>
+      </button>
+      <button type="button" class="market-clear-filters" @click="clearSelections">清除全部</button>
+    </div>
 
     <section class="market-list-head">
       <div class="flex min-w-0 items-center gap-3">
@@ -219,22 +215,15 @@
           :aria-label="`查看 ${pkg.name} 详情`"
           @click="openDetail(pkg, $event)"
           @keydown.enter="openDetail(pkg, $event)"
-            @keydown.space.prevent="openDetail(pkg, $event)"
-          >
-            <div class="market-card-head">
-            <span class="market-region-badge" :class="packageIdentity(pkg).toneClass">
-              <img v-if="packageIdentity(pkg).imageUrl" :src="packageIdentity(pkg).imageUrl" alt="" class="market-region-image">
-              <span v-else-if="packageIdentity(pkg).text">{{ packageIdentity(pkg).text }}</span>
-              <span v-else aria-hidden="true">•</span>
-            </span>
+          @keydown.space.prevent="openDetail(pkg, $event)"
+        >
+          <div class="market-card-head">
+            <img v-if="packageIdentity(pkg).imageUrl && !failedCardImages.has(packageIdentity(pkg).imageUrl)" :src="packageIdentity(pkg).imageUrl" alt="" class="market-card-image" @error="failedCardImages.add(packageIdentity(pkg).imageUrl)">
             <div class="min-w-0 flex-1">
-              <h2 class="truncate text-[15px] font-semibold leading-snug text-[var(--text-primary)]">{{ packageCardTitle(pkg) }}</h2>
-              <p v-if="packageSubtitle(pkg)" class="market-card-subtitle truncate">{{ packageSubtitle(pkg) }}</p>
+              <h2 class="market-card-title" :title="packageCardTitle(pkg)">{{ packageCardTitle(pkg) }}</h2>
+              <div v-if="packageScaleLabel(pkg)" class="market-card-scale">{{ packageScaleLabel(pkg) }}</div>
             </div>
           </div>
-
-          <p v-if="packageSummary(pkg)" class="market-card-summary">{{ packageSummary(pkg) }}</p>
-          <div v-if="packageScaleLabel(pkg)" class="market-card-scale">{{ packageScaleLabel(pkg) }}</div>
 
           <AdaptiveTagList
             v-if="packageTagItems(pkg).length"
@@ -251,6 +240,11 @@
             </template>
           </AdaptiveTagList>
 
+          <div v-if="packageSubtitle(pkg) || packageSummary(pkg)" class="market-card-copy">
+            <span v-if="packageSubtitle(pkg)" class="market-card-subtitle">{{ packageSubtitle(pkg) }} </span>
+            <span v-if="packageSummary(pkg)" class="market-card-summary">{{ packageSummary(pkg) }}</span>
+          </div>
+          <span v-if="packageIdentity(pkg).text" class="market-card-badge" :class="packageIdentity(pkg).toneClass">{{ packageIdentity(pkg).text }}</span>
         </div>
 
         <div class="market-card-foot">
@@ -273,7 +267,6 @@
             已安装
           </button>
           <template v-else-if="installState(pkg) === 'update'">
-            <span class="market-update-tag">有更新</span>
             <button
               type="button"
               class="market-btn-primary"
@@ -286,7 +279,7 @@
           <button
             v-else
             type="button"
-            class="market-btn-primary"
+            class="market-btn-ghost market-card-install"
             :disabled="refreshing || importLoading || updating || !packageInstallable(pkg)"
             @click.stop="handleImport(pkg)"
           >
@@ -339,10 +332,9 @@
           @keydown.tab="onDrawerTab"
         >
           <header class="market-drawer-header">
-            <span class="market-region-badge" :class="packageIdentity(selectedPackage || {}).toneClass">
+            <span v-if="packageIdentity(selectedPackage || {}).imageUrl || packageIdentity(selectedPackage || {}).text" class="market-region-badge" :class="packageIdentity(selectedPackage || {}).toneClass">
               <img v-if="packageIdentity(selectedPackage || {}).imageUrl" :src="packageIdentity(selectedPackage || {}).imageUrl" alt="" class="market-region-image">
               <span v-else-if="packageIdentity(selectedPackage || {}).text">{{ packageIdentity(selectedPackage || {}).text }}</span>
-              <span v-else aria-hidden="true">•</span>
             </span>
             <div class="min-w-0 flex-1">
               <h2 :id="drawerTitleId" class="truncate text-[16px] font-semibold leading-snug text-[var(--text-primary)]">{{ packageCardTitle(selectedPackage || {}) }}</h2>
@@ -721,6 +713,7 @@ const actingId = ref(null)
 const searchOpen = ref(false)
 const searchInputRef = ref(null)
 const moreFiltersOpen = ref(false)
+const failedCardImages = reactive(new Set())
 // 父级集中管理 Dropdown 打开状态，确保任何时间只有一个 Dropdown 展开。
 const activeDropdownKey = ref(null)
 // 第二行窄桌面时收纳低优先操作的菜单。
@@ -1072,8 +1065,7 @@ const filterGroups = [
   },
 ]
 const visibleFilterGroups = computed(() => filterGroups)
-const desktopQuickFilterGroups = computed(() => filterGroups.filter(group => ['region', 'provider', 'kind'].includes(group.key)))
-const desktopMoreFilterGroups = computed(() => filterGroups.filter(group => ['operator', 'category', 'tag', 'status'].includes(group.key)))
+const desktopMoreFilterGroups = computed(() => filterGroups)
 
 function selectPackageType(value) {
   packageType.value = value === 'plugins' ? 'plugins' : 'content'
@@ -2271,25 +2263,28 @@ onBeforeUnmount(() => {
   min-width: 0;
 }
 
-@media (min-width: 1024px) {
-  .market-filter-bar {
-    padding-right: 300px;
-  }
-}
-
 .market-filter-scroll {
   display: flex;
   min-width: 0;
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   align-items: center;
   gap: 8px;
   overflow-x: auto;
-  padding-bottom: 3px;
   scrollbar-width: none;
 }
 
 .market-filter-scroll::-webkit-scrollbar {
   display: none;
+}
+
+.market-more-filter-anchor {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.market-more-filter-anchor .market-more-filter-panel {
+  left: 0;
+  right: auto;
 }
 
 .market-package-type-switch {
@@ -2369,13 +2364,9 @@ onBeforeUnmount(() => {
   overflow-y: auto;
   padding: 14px;
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: 8px;
   background: var(--bg-soft);
-  box-shadow: 0 16px 36px rgba(15, 23, 42, 0.14);
-}
-
-:global(.dark) .market-more-filter-panel {
-  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.42);
+  box-shadow: var(--floating-shadow);
 }
 
 .market-more-filter-group + .market-more-filter-group {
@@ -2460,6 +2451,16 @@ onBeforeUnmount(() => {
   gap: var(--card-gap);
 }
 
+@media (min-width: 641px) {
+  .market-grid {
+    grid-auto-rows: 1fr;
+  }
+
+  .market-card {
+    min-height: 176px;
+  }
+}
+
 @media (max-width: 640px) {
   .market-grid {
     grid-template-columns: minmax(0, 1fr);
@@ -2472,6 +2473,7 @@ onBeforeUnmount(() => {
   }
 }
 
+/* Package titles need more width than TV's logo-led cards beside the sidebar. */
 @media (min-width: 1280px) {
   .market-grid {
     grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -2683,16 +2685,40 @@ onBeforeUnmount(() => {
   background: var(--surface-active);
 }
 
+.market-selected-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: var(--card-gap);
+}
+
+.market-active-chip {
+  max-width: 100%;
+  height: auto;
+  min-height: var(--control-height-small);
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+
+.market-clear-filters {
+  min-height: var(--control-height-small);
+  padding: 0 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
 /* ── 卡片 ────────────────────────────────────────────── */
 .market-card {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  padding: 16px;
+  min-width: 0;
+  padding: var(--card-padding);
   border-radius: var(--card-radius);
-  border: 1px solid var(--border);
+  border: 1px solid var(--iptv-card-border);
   background: var(--card-bg);
-  box-shadow: var(--card-shadow);
+  box-shadow: var(--iptv-card-shadow);
   outline: none;
   transition: transform 180ms ease, border-color 180ms ease;
 }
@@ -2711,7 +2737,7 @@ onBeforeUnmount(() => {
 }
 
 .market-card-skeleton {
-  height: 198px;
+  height: 176px;
   border-radius: var(--card-radius);
   border: 1px solid var(--border);
   background: var(--surface);
@@ -2727,7 +2753,7 @@ onBeforeUnmount(() => {
   display: flex;
   min-width: 0;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
   border-radius: 12px;
   cursor: pointer;
   outline: none;
@@ -2740,20 +2766,78 @@ onBeforeUnmount(() => {
 .market-card-head {
   display: flex;
   align-items: flex-start;
-  gap: 12px;
+  gap: 10px;
+}
+
+.market-card-title {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  text-wrap: balance;
+  color: var(--text-primary);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 21px;
+}
+
+.market-card-image {
+  width: 36px;
+  height: 36px;
+  flex: 0 0 auto;
+  object-fit: contain;
+  border-radius: 6px;
+}
+
+@media (min-width: 1280px) and (max-width: 1439px) {
+  .market-card {
+    padding: calc(var(--card-padding) - 4px);
+  }
+}
+
+.market-card-badge {
+  align-self: flex-start;
+  max-width: 100%;
+  padding: 2px 6px;
+  border-radius: 4px;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.market-card-copy {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.market-card-copy .market-card-subtitle,
+.market-card-copy .market-card-summary {
+  display: inline;
+  margin: 0;
+  font: inherit;
 }
 
 .market-region-badge {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 36px;
-  height: 36px;
+  min-width: 36px;
+  max-width: 80px;
+  min-height: 36px;
+  padding: 4px;
+  overflow-wrap: anywhere;
   flex: 0 0 auto;
   border-radius: 10px;
-  font-size: 15px;
+  font-size: 12px;
   font-weight: 700;
-  letter-spacing: 0.02em;
+  letter-spacing: 0;
 }
 
 .market-region-image {
@@ -2811,9 +2895,10 @@ onBeforeUnmount(() => {
 }
 
 .market-card-scale {
-  color: var(--text-primary);
+  margin-top: 4px;
+  color: var(--iptv-card-label-primary);
   font-size: 14px;
-  font-weight: 600;
+  font-weight: 400;
   line-height: 20px;
 }
 
@@ -2828,14 +2913,14 @@ onBeforeUnmount(() => {
   display: inline-flex;
   align-items: center;
   max-width: 100%;
-  height: 24px;
-  padding: 0 7px;
-  border: 1px solid var(--border);
+  height: 22px;
+  padding: 0 6px;
+  border: 0;
   border-radius: 6px;
-  background: var(--surface-active);
-  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--surface-active) 75%, transparent);
+  color: color-mix(in srgb, var(--text-secondary) 80%, var(--text-primary));
   font-size: 12px;
-  font-weight: 500;
+  font-weight: 400;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2846,26 +2931,61 @@ onBeforeUnmount(() => {
 .market-tag-orange { background: rgba(249, 115, 22, 0.10); color: rgb(194 65 12); }
 .market-tag-green { background: rgba(16, 185, 129, 0.10); color: rgb(4 120 87); }
 .market-tag-violet { background: rgba(139, 92, 246, 0.10); color: rgb(91 33 182); }
-.market-tag-neutral { background: var(--surface-active); color: var(--text-secondary); }
 
 :global(.dark) .market-tag-red { background: rgba(244, 63, 94, 0.18); color: rgb(253 164 175); }
 :global(.dark) .market-tag-blue { background: rgba(14, 165, 233, 0.18); color: rgb(125 211 252); }
 :global(.dark) .market-tag-orange { background: rgba(249, 115, 22, 0.18); color: rgb(253 186 116); }
 :global(.dark) .market-tag-green { background: rgba(16, 185, 129, 0.20); color: rgb(110 231 183); }
 :global(.dark) .market-tag-violet { background: rgba(139, 92, 246, 0.22); color: rgb(196 181 253); }
-:global(.dark) .market-tag-neutral { background: var(--surface-active); color: var(--text-secondary); }
-
-.market-tag-rest {
-  background: var(--surface-active);
-  color: var(--text-secondary);
-  border: 1px solid var(--border);
-}
 
 .market-card-foot {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 8px;
+  width: 100%;
   margin-top: auto;
+  flex-shrink: 0;
+  min-height: var(--control-height-small);
+}
+
+.market-card-foot > button {
+  height: var(--control-height-small);
+  min-width: 0;
+  max-width: calc(100% - 40px);
+  padding-inline: 12px;
+  white-space: nowrap;
+}
+
+.market-card-foot .market-card-install {
+  background: var(--surface);
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.market-card-foot .market-card-install:hover:not(:disabled) {
+  background: var(--surface-active);
+}
+
+.market-card-foot .market-btn-status {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--text-secondary);
+}
+
+.market-card-foot .market-btn-status:hover:not(:disabled) {
+  background: var(--surface-hover);
+  border-color: var(--border-strong);
+}
+
+.market-card-foot > button:disabled {
+  opacity: 0.5;
+}
+
+:is(.market-card-foot > button, .market-more-btn, .market-package-type-button, .market-filter-pill, .market-more-filter-trigger, .market-action-pill, .market-action-icon):focus-visible {
+  outline: 2px solid var(--text-secondary);
+  outline-offset: 3px;
 }
 
 .market-more-wrap {
@@ -3160,6 +3280,22 @@ onBeforeUnmount(() => {
     height: 40px;
   }
 
+  .market-filter-scroll {
+    flex: 1 1 auto;
+    flex-wrap: wrap;
+    overflow: visible;
+  }
+
+  .market-package-type-switch {
+    flex-basis: 100%;
+    width: 100%;
+  }
+
+  .market-package-type-button {
+    flex: 1;
+  }
+
+  .market-more-filter-anchor,
   .market-more-filter-trigger,
   .market-more-filter-panel {
     display: none;
@@ -3172,6 +3308,19 @@ onBeforeUnmount(() => {
   .market-list-actions {
     width: 100%;
     justify-content: flex-end;
+  }
+
+  .market-action-overflowable {
+    display: none;
+  }
+
+  .market-action-overflow-wrap {
+    display: inline-flex;
+  }
+
+  .market-card-foot > button,
+  .market-more-btn {
+    min-height: var(--control-height);
   }
 
   .market-inline-search {
@@ -3195,7 +3344,13 @@ onBeforeUnmount(() => {
   }
 
   .market-card {
-    padding: 16px;
+    padding: calc(var(--card-padding) - 4px);
+    gap: 8px;
+    border-radius: 14px;
+  }
+
+  .market-grid {
+    gap: 14px;
   }
 
   .market-card-tags {
