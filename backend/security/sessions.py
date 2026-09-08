@@ -23,14 +23,19 @@ def new_session_token() -> str:
 
 
 async def create_login_session(user_id: int, response: Response) -> str:
+    settings = get_effective_settings_sync()
     token = new_session_token()
-    await security_db.create_session(user_id, hash_token(token))
-    set_session_cookie(response, token)
+    await security_db.create_session(
+        user_id,
+        hash_token(token),
+        ttl_hours=settings.session_max_age_days * 24,
+    )
+    set_session_cookie(response, token, settings=settings)
     return token
 
 
-def set_session_cookie(response: Response, token: str) -> None:
-    settings = get_effective_settings_sync()
+def set_session_cookie(response: Response, token: str, *, settings=None) -> None:
+    settings = settings or get_effective_settings_sync()
     response.set_cookie(
         SESSION_COOKIE,
         token,

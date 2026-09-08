@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Response
 from pydantic import BaseModel
 
 from core.settings_service import get_effective_settings
@@ -17,6 +17,13 @@ class InitializeRequest(BaseModel):
     password: str
 
 
+async def require_setup_request(
+    x_waveflow_request: str = Header(default=""),
+) -> None:
+    if x_waveflow_request != "1":
+        raise HTTPException(status_code=403, detail="缺少安全请求头")
+
+
 @router.get("/status")
 async def setup_status() -> dict:
     settings = await get_effective_settings()
@@ -29,7 +36,7 @@ async def setup_status() -> dict:
     }
 
 
-@router.post("/initialize")
+@router.post("/initialize", dependencies=[Depends(require_setup_request)])
 async def initialize_admin(payload: InitializeRequest, response: Response) -> dict:
     username = (payload.username or "").strip()
     if len(username) < 3:

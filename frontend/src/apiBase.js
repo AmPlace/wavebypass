@@ -8,4 +8,5 @@ const currentOrigin = typeof window !== 'undefined' && /^https?:$/.test(window.l
 
 const viteEnv = import.meta.env || {}
 
+export const isDesktop = Boolean(desktopApiBase)
 export const API_BASE = desktopApiBase || viteEnv.VITE_API_BASE_URL || currentOrigin || ''

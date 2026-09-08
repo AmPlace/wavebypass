@@ -5,14 +5,11 @@ import uvicorn
 
 def configure_desktop_environment(data_dir: str) -> None:
     os.makedirs(data_dir, exist_ok=True)
-    os.environ.setdefault(
-        "WAVEFLOW_DB_PATH",
-        os.path.join(data_dir, "waveflow.db"),
-    )
-    os.environ.setdefault(
-        "RTSP_HLS_ROOT",
-        os.path.join(data_dir, "rtsp_hls"),
-    )
+    os.environ["WAVEFLOW_MODE"] = "desktop"
+    os.environ["WAVEFLOW_ALLOWED_ORIGINS"] = "null"
+    os.environ["WAVEFLOW_SESSION_COOKIE_SECURE"] = "0"
+    os.environ["WAVEFLOW_DB_PATH"] = os.path.join(data_dir, "waveflow.db")
+    os.environ["RTSP_HLS_ROOT"] = os.path.join(data_dir, "rtsp_hls")
     # Plugin installations/environments are user data, not release-bundle
     # files. This keeps them across app updates and prevents the frozen
     # backend directory from becoming a mutable Plugin store.

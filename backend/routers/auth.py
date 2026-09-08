@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
 
@@ -11,6 +13,8 @@ from security.sessions import SESSION_COOKIE, clear_session_cookie, create_login
 
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
+_DESKTOP_BOOTSTRAP_LOCK = asyncio.Lock()
+_desktop_bootstrap_consumed = False
 
 
 class LoginRequest(BaseModel):
@@ -47,15 +51,21 @@ async def me(admin: dict = Depends(current_admin)) -> dict:
 
 @router.post("/desktop")
 async def desktop_auth(payload: DesktopAuthRequest, request: Request, response: Response) -> dict:
-    settings = await get_effective_settings()
-    if settings.mode != "desktop":
-        raise HTTPException(status_code=404, detail="desktop auth unavailable")
-    client_host = request.client.host if request.client else ""
-    if client_host not in {"127.0.0.1", "::1", "localhost"}:
-        raise HTTPException(status_code=403, detail="desktop auth only accepts loopback")
-    if not settings.desktop_session_secret or payload.desktop_session != settings.desktop_session_secret:
-        raise HTTPException(status_code=401, detail="desktop auth failed")
+    global _desktop_bootstrap_consumed
 
-    user = await security_db.ensure_desktop_user()
-    await create_login_session(user["id"], response)
-    return {"ok": True, "desktop": True, "user": {"id": user["id"], "username": user["username"], "role": user["role"]}}
+    async with _DESKTOP_BOOTSTRAP_LOCK:
+        settings = await get_effective_settings()
+        if settings.mode != "desktop":
+            raise HTTPException(status_code=404, detail="desktop auth unavailable")
+        client_host = request.client.host if request.client else ""
+        if client_host not in {"127.0.0.1", "::1", "localhost"}:
+            raise HTTPException(status_code=403, detail="desktop auth only accepts loopback")
+        if _desktop_bootstrap_consumed:
+            raise HTTPException(status_code=401, detail="desktop auth already used")
+        if not settings.desktop_session_secret or payload.desktop_session != settings.desktop_session_secret:
+            raise HTTPException(status_code=401, detail="desktop auth failed")
+
+        user = await security_db.ensure_desktop_user()
+        await create_login_session(user["id"], response)
+        _desktop_bootstrap_consumed = True
+        return {"ok": True, "desktop": True, "user": {"id": user["id"], "username": user["username"], "role": user["role"]}}

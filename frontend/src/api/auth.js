@@ -1,4 +1,4 @@
-import { apiRequest } from './client'
+import { apiRequest } from './client.js'
 
 export async function fetchSetupStatus() {
   const res = await apiRequest('/api/setup/status')

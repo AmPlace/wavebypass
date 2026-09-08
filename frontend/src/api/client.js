@@ -1,4 +1,4 @@
-import { API_BASE } from '../apiBase.js'
+import { API_BASE, isDesktop } from '../apiBase.js'
 
 export class ApiError extends Error {
   constructor(message, { status = 0, detail = null } = {}) {
@@ -7,6 +7,12 @@ export class ApiError extends Error {
     this.status = status
     this.detail = detail
   }
+}
+
+let unauthorizedHandler = null
+
+export function setUnauthorizedHandler(handler) {
+  unauthorizedHandler = typeof handler === 'function' ? handler : null
 }
 
 /**
@@ -58,15 +64,19 @@ export async function apiRequest(url, options = {}) {
       method,
       headers,
       signal,
-      credentials: 'same-origin',
+      credentials: isDesktop ? 'include' : 'same-origin',
     })
     cleanup()
     if (!res.ok) {
       const err = await res.json().catch(() => ({}))
-      throw new ApiError(err.detail || `HTTP ${res.status}`, {
+      const apiError = new ApiError(err.detail || `HTTP ${res.status}`, {
         status: res.status,
         detail: err,
       })
+      if (res.status === 401 && unauthorizedHandler) {
+        try { unauthorizedHandler({ method, url }) } catch {}
+      }
+      throw apiError
     }
     return res
   } catch (error) {

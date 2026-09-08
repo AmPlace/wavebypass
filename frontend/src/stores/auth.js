@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 
-import { fetchMe, fetchSetupStatus, initializeAdmin, login, logout } from '../api/auth'
+import { fetchMe, fetchSetupStatus, initializeAdmin, login, logout } from '../api/auth.js'
 
 export const useAuthStore = defineStore('auth', {
   state: () => ({
@@ -55,6 +55,12 @@ export const useAuthStore = defineStore('auth', {
       this.user = result.user || null
       this.status = 'authenticated'
       return result
+    },
+    expireSession() {
+      if (!this.user) return false
+      this.user = null
+      this.status = this.setup.anonymousBrowse ? 'anonymous' : 'login-required'
+      return true
     },
     async logout() {
       await logout()

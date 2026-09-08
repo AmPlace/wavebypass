@@ -1,5 +1,6 @@
 import { createRouter, createWebHashHistory } from 'vue-router'
 
+import { installSessionExpiryHandling } from '../auth/sessionExpiry.js'
 import { useAuthStore } from '../stores/auth'
 import { appRoutes } from './routes'
 
@@ -7,6 +8,8 @@ const router = createRouter({
   history: createWebHashHistory(),
   routes: appRoutes,
 })
+
+installSessionExpiryHandling(router)
 
 router.beforeEach(async (to) => {
   const auth = useAuthStore()

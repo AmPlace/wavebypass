@@ -1259,8 +1259,8 @@ app = FastAPI(
 #跨域
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
+    allow_origins=list(get_settings().allowed_origins),
+    allow_credentials=get_settings().mode == "desktop",
     allow_methods=["*"],
     allow_headers=["*"],
 )
