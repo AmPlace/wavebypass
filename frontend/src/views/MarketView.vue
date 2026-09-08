@@ -600,6 +600,8 @@
           </button>
         </div>
 
+        <MarketAutomationSettings />
+
         <div class="mb-5 space-y-3">
           <div v-for="source in marketSources" :key="source.id" class="rounded-[14px] border border-[var(--border)] bg-[var(--surface)] p-3">
             <div class="mb-3 flex flex-col gap-2">
@@ -679,6 +681,7 @@ import { adminRequestErrorMessage, safeAdminDiagnostic, safeAdminUrl } from '../
 import { useToastStore } from '../stores/toast'
 import MarketFilterDropdown from '../components/MarketFilterDropdown.vue'
 import AdaptiveTagList from '../components/AdaptiveTagList.vue'
+import MarketAutomationSettings from '../components/MarketAutomationSettings.vue'
 import { isLogoPackage, isPluginPackage, packageActionLabel, packageInstallable, permissionLabel, pluginDependencies, pluginIdentity, pluginRuntimeLabel, pluginSchemeLabels, providerContractLabels, requestedPermissions } from './marketPackageUi'
 import { createLatestMarketSourceProjection, marketSourceDraft } from './marketSourceUi.js'
 import { packageCardTitle, packageIdentity, packageScaleLabel, packageSubtitle, packageSummary, packageTagItems } from './marketCardUi.js'
