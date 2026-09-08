@@ -65,7 +65,7 @@ test('Settings Plugins 只做 runtime management 并把 update/uninstall 留给 
   for (const symbol of ['fetchPlugins', 'fetchPlugin', 'enablePlugin', 'disablePlugin', 'recoverPlugin', 'approvePluginPermission', 'revokePluginPermission', 'setPluginOwnership']) {
     assert.match(view, new RegExp(`\\b${symbol}\\b`))
   }
-  for (const label of ['运行状态', 'Permissions', 'Dependencies', '切换到 Plugin', '切换回 Legacy', '在 Market 中查看']) {
+  for (const label of ['运行状态', 'Permissions', '运行依赖', '切换到 Plugin', '切换回 Legacy', '在 Market 中查看']) {
     assert.match(view, new RegExp(label))
   }
   assert.doesNotMatch(view, /updatePlugin|uninstallPlugin|安装 Plugin/)

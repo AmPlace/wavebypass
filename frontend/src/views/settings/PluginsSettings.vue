@@ -3,14 +3,15 @@
     <header class="mb-6 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
       <div>
         <h2 id="plugins-settings-title" class="text-xl font-semibold text-[var(--text-primary)]">Plugins</h2>
-        <p class="mt-1.5 text-sm leading-6 text-[var(--text-secondary)]">管理已安装插件的运行状态、权限与 scheme ownership</p>
+        <p class="mt-1.5 text-sm leading-6 text-[var(--text-secondary)]">管理电视与电台插件的运行状态、权限和解析接管</p>
       </div>
       <RouterLink to="/market?type=plugins" class="inline-flex min-h-10 items-center justify-center rounded-xl border border-[var(--border)] px-4 text-sm font-medium text-[var(--text-primary)] hover:bg-[var(--surface-hover)]">
         前往 Market
       </RouterLink>
     </header>
 
-    <section class="mb-6 rounded-2xl border border-amber-500/25 bg-amber-500/5 p-4 sm:p-5">
+    <details class="plugin-developer mb-6 border-y border-[var(--border)] py-4">
+      <summary class="cursor-pointer text-sm font-medium text-[var(--text-primary)]">开发者选项 <span class="text-xs text-[var(--text-secondary)]">{{ developerLoaded ? (developerMode ? '已启用' : '未启用') : '状态未加载' }}</span></summary>
       <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <h3 class="text-sm font-semibold text-[var(--text-primary)]">Developer Mode</h3>
@@ -18,21 +19,20 @@
             本地 Developer Plugin 不经过 WaveFlow Official 签名验证，但仍必须通过 manifest、digest、权限和隔离运行时校验。
           </p>
         </div>
-        <button type="button" class="plugin-btn" :disabled="developerActing" @click="toggleDeveloperMode">
+        <button type="button" class="plugin-btn" :disabled="developerActing || !developerLoaded" @click="toggleDeveloperMode">
           {{ developerMode ? '关闭 Developer Mode' : '启用 Developer Mode' }}
         </button>
       </div>
       <div v-if="developerMode" class="mt-4 space-y-2">
-        <label class="block text-xs font-medium text-[var(--text-secondary)]" for="developer-plugin-path">本地 package 目录、manifest.json 或 .pyz 路径</label>
+        <label class="block text-xs font-medium text-[var(--text-secondary)]" for="developer-plugin-path">服务器上的 package 目录、manifest.json 或 .pyz 路径</label>
         <div class="flex flex-col gap-2 sm:flex-row">
           <input id="developer-plugin-path" v-model="developerPath" type="text" class="min-h-10 min-w-0 flex-1 rounded-xl border border-[var(--border)] bg-[var(--card-bg)] px-3 text-sm text-[var(--text-primary)]" placeholder="/path/to/plugin/dist/manifest.json" />
-          <label class="plugin-btn cursor-pointer" for="developer-plugin-file">选择文件</label>
-          <input id="developer-plugin-file" type="file" class="hidden" accept=".json,.pyz" @change="selectDeveloperFile" />
           <button type="button" class="plugin-btn" :disabled="developerActing || !developerPath.trim()" @click="installLocalPlugin">安装本地 Plugin</button>
         </div>
         <p class="text-xs leading-5 text-[var(--text-tertiary)]">关闭 Developer Mode 不会删除已安装的本地插件；只会阻止新的 unsigned local install/update。</p>
+        <p class="text-xs leading-5 text-[var(--text-tertiary)]">此入口不上传文件。NAS / Docker 使用服务器或容器内可访问的路径，桌面版使用本机路径。</p>
       </div>
-    </section>
+    </details>
 
     <section v-if="loading" class="grid gap-3 md:grid-cols-2" aria-label="正在加载插件" aria-busy="true">
       <div v-for="index in 4" :key="index" class="h-40 animate-pulse rounded-2xl border border-[var(--border)] bg-[var(--surface)]"></div>
@@ -71,9 +71,9 @@
               <span v-if="plugin.market?.update_available" class="plugin-chip plugin-chip-update">有更新</span>
             </div>
             <dl class="mt-4 grid grid-cols-[72px_minmax(0,1fr)] gap-y-1.5 text-xs">
-              <dt class="text-[var(--text-tertiary)]">Schemes</dt>
+              <dt class="text-[var(--text-tertiary)]">解析协议</dt>
               <dd class="truncate text-[var(--text-primary)]">{{ plugin.owned_schemes?.join(', ') || '无' }}</dd>
-              <dt class="text-[var(--text-tertiary)]">Ownership</dt>
+              <dt class="text-[var(--text-tertiary)]">接管状态</dt>
               <dd class="truncate text-[var(--text-primary)]">{{ ownershipSummary(plugin) }}</dd>
             </dl>
           </button>
@@ -108,11 +108,11 @@
             <template v-else-if="selected">
               <DetailSection title="运行状态">
                 <dl class="plugin-detail-grid">
-                  <dt>Lifecycle</dt><dd>{{ selected.lifecycle_state || 'unknown' }}</dd>
-                  <dt>Enabled</dt><dd>{{ selected.enabled ? '已启用' : '已停用' }}</dd>
-                  <dt>Runtime</dt><dd>{{ runtimeLabel(selected.runtime) }}</dd>
-                  <dt>Environment</dt><dd>{{ environmentLabel(selected.runtime?.environment_status) }}</dd>
-                  <dt>Trust</dt><dd>{{ trustLabel(selected.trust_state) }}</dd>
+                  <dt>生命周期</dt><dd>{{ selected.lifecycle_state || 'unknown' }}</dd>
+                  <dt>启用状态</dt><dd>{{ selected.enabled ? '已启用' : '已停用' }}</dd>
+                  <dt>运行时</dt><dd>{{ runtimeLabel(selected.runtime) }}</dd>
+                  <dt>运行环境</dt><dd>{{ environmentLabel(selected.runtime?.environment_status) }}</dd>
+                  <dt>信任来源</dt><dd>{{ trustLabel(selected.trust_state) }}</dd>
                 </dl>
                 <p v-if="selected.last_error" class="mt-3 rounded-xl border border-red-500/20 bg-red-500/5 px-3 py-2 text-xs leading-5 text-red-600 dark:text-red-300">{{ safeAdminDiagnostic(selected.last_error) }}</p>
                 <div class="mt-4 flex flex-wrap gap-2">
@@ -121,7 +121,7 @@
                 </div>
               </DetailSection>
 
-              <DetailSection title="Provider">
+              <DetailSection title="Provider · 内容提供方">
                 <p class="text-xs text-[var(--text-secondary)]">{{ contractLabels(selected.provider_contracts) }}</p>
                 <div v-if="selected.ownership?.length" class="mt-3 space-y-2">
                   <div v-for="item in selected.ownership" :key="item.scheme" class="flex flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-3 sm:flex-row sm:items-center sm:justify-between">
@@ -131,7 +131,7 @@
                 </div>
               </DetailSection>
 
-              <DetailSection title="Permissions">
+              <DetailSection title="Permissions · 权限">
                 <div v-if="selected.permissions?.requested?.length" class="space-y-2">
                   <div v-for="permission in selected.permissions.requested" :key="permission.name" class="flex flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-3 sm:flex-row sm:items-center sm:justify-between">
                     <div><p class="text-sm font-medium text-[var(--text-primary)]">{{ permissionLabel(permission.name) }}</p><p class="mt-1 text-xs" :class="permission.risk === 'high' ? 'text-red-600 dark:text-red-300' : 'text-[var(--text-secondary)]'">{{ permission.risk === 'high' ? '高风险权限' : '标准权限' }}</p></div>
@@ -143,14 +143,14 @@
                 <p v-else class="text-sm text-[var(--text-secondary)]">此插件未申请额外权限。</p>
               </DetailSection>
 
-              <DetailSection title="Dependencies">
+              <DetailSection title="运行依赖">
                 <p class="text-xs text-[var(--text-secondary)]">{{ selected.runtime?.dependency_count || 0 }} dependencies</p>
                 <ul v-if="selected.runtime?.dependencies?.length" class="mt-3 divide-y divide-[var(--border)] rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3">
                   <li v-for="dependency in selected.runtime.dependencies" :key="`${dependency.name}-${dependency.version}`" class="flex items-center justify-between gap-3 py-2.5 text-sm"><span class="truncate text-[var(--text-primary)]">{{ dependency.name }}</span><span class="shrink-0 text-xs text-[var(--text-tertiary)]">{{ dependency.version }}</span></li>
                 </ul>
               </DetailSection>
 
-              <DetailSection title="Package">
+              <DetailSection title="安装来源">
                 <dl class="plugin-detail-grid"><dt>Version</dt><dd>{{ selected.version || '未知' }}</dd><dt>Source</dt><dd>{{ selected.source_provenance?.source_key || 'unknown' }}</dd><dt>Package</dt><dd class="truncate">{{ selected.market?.package_id || 'unknown' }}</dd></dl>
                 <RouterLink :to="marketLink(selected)" class="plugin-btn plugin-btn-primary mt-4 inline-flex">{{ selected.market?.update_available ? '有可用更新 · 在 Market 中查看' : '在 Market 中查看' }}</RouterLink>
               </DetailSection>
@@ -184,6 +184,7 @@ const detailLoading = ref(false)
 const detailError = ref('')
 const acting = ref(false)
 const developerMode = ref(false)
+const developerLoaded = ref(false)
 const developerPath = ref('')
 const developerActing = ref(false)
 const selectedIdentity = computed(() => selected.value?.plugin || '')
@@ -234,15 +235,20 @@ async function loadDeveloperMode() {
   developerModeController = controller
   try {
     const result = await fetchDeveloperMode({ signal: controller.signal })
-    if (!controller.signal.aborted && !componentDisposed) developerMode.value = Boolean(result.enabled)
+    if (!controller.signal.aborted && !componentDisposed) {
+      developerMode.value = Boolean(result.enabled)
+      developerLoaded.value = true
+    }
   } catch (error) {
     if (!controller.signal.aborted && !componentDisposed) toastStore.error(pluginErrorMessage(error, 'Developer Mode 状态加载失败'))
   }
 }
 async function toggleDeveloperMode() {
-  if (developerActing.value || componentDisposed) return
+  if (developerActing.value || !developerLoaded.value || componentDisposed) return
   developerActing.value = true
   try {
+    if (!developerMode.value && !await toastStore.askConfirm({ title: '启用开发者模式？', message: '允许安装服务器本地的未签名插件。仅安装你信任的代码；此操作不会自动安装或启用任何插件。', confirmText: '确认启用', danger: true })) return
+    if (componentDisposed) return
     const result = await setDeveloperMode(!developerMode.value)
     if (componentDisposed) return
     developerMode.value = Boolean(result.enabled)
@@ -253,7 +259,6 @@ async function toggleDeveloperMode() {
     if (!componentDisposed) developerActing.value = false
   }
 }
-function selectDeveloperFile(event) { const file = event.target?.files?.[0]; if (file?.path) developerPath.value = file.path; else if (file?.name) developerPath.value = file.name }
 async function installLocalPlugin() {
   if (developerActing.value || !developerPath.value.trim() || componentDisposed) return
   developerActing.value = true
@@ -322,5 +327,11 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+.plugin-developer > div { margin-top: 16px; }
+.plugin-developer summary:focus-visible { outline: 2px solid var(--text-secondary); outline-offset: 3px; }
+:global(html.dark .plugin-status.is-healthy) { color: #6ee7b7; }
+:global(html.dark .plugin-status.is-danger), :global(html.dark .plugin-chip-danger) { color: #fca5a5; }
+:global(html.dark .plugin-chip-warning) { color: #fcd34d; }
+:global(html.dark .plugin-chip-update) { color: #7dd3fc; }
 .plugin-status,.plugin-chip{display:inline-flex;align-items:center;border:1px solid var(--border);border-radius:999px;padding:.2rem .55rem;white-space:nowrap}.plugin-status{font-size:.7rem}.plugin-status.is-healthy{color:#047857;border-color:rgb(16 185 129 / .25);background:rgb(16 185 129 / .08)}.plugin-status.is-danger,.plugin-chip-danger{color:#dc2626;border-color:rgb(239 68 68 / .25);background:rgb(239 68 68 / .07)}.plugin-status.is-muted{color:var(--text-tertiary)}.plugin-chip-warning{color:#b45309;border-color:rgb(245 158 11 / .25);background:rgb(245 158 11 / .08)}.plugin-chip-update{color:#0369a1;border-color:rgb(14 165 233 / .25);background:rgb(14 165 233 / .08)}.plugin-btn{display:inline-flex;min-height:var(--control-height-small);align-items:center;justify-content:center;border:1px solid var(--border);border-radius:var(--control-radius);padding:0 .8rem;font-size:.78rem;font-weight:500;color:var(--text-primary)}.plugin-btn:hover{background:var(--surface-hover)}.plugin-btn:disabled{cursor:not-allowed;opacity:.45}.plugin-btn-primary{border-color:var(--text-primary);background:var(--text-primary);color:var(--bg)}.plugin-detail-grid{display:grid;grid-template-columns:88px minmax(0,1fr);gap:.45rem;font-size:.8rem}.plugin-detail-grid dt{color:var(--text-tertiary)}.plugin-detail-grid dd{min-width:0;color:var(--text-primary)}.plugin-drawer-enter-active,.plugin-drawer-leave-active{transition:opacity .18s ease}.plugin-drawer-enter-from,.plugin-drawer-leave-to{opacity:0}
 </style>

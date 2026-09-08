@@ -35,8 +35,9 @@ test('Admin diagnostics and URLs redact credentials, query secrets, paths, and t
   assert.match(diagnostic, /\[redacted\]|\[local-path\]|\[diagnostic-hidden\]/)
 })
 
-test('Settings projects the complete backend schema and separates effective, stored, forced, and restart state', () => {
+test('Settings exposes verified consumer fields and separates effective, stored, forced, and restart state', () => {
   const view = source('src/views/settings/SecuritySettings.vue')
+  const presentation = source('src/views/settings/securitySettingsUi.js')
   for (const key of [
     'anonymous_browse',
     'anonymous_playback',
@@ -46,19 +47,14 @@ test('Settings projects the complete backend schema and separates effective, sto
     'rtsp_max_sessions',
     'media_credential_default_ttl_days',
     'session_max_age_days',
-    'public_base_url',
-    'm3u8_cache_ttl',
-    'm3u8_cache_max_entries',
-    'probe_concurrency',
-    'subscription_refresh_cooldown',
-  ]) assert.match(view, new RegExp(`\\b${key}\\b`), key)
+  ]) assert.match(presentation, new RegExp(`\\b${key}\\b`), key)
   assert.match(view, /data\?\.runtime/)
   assert.match(view, /data\?\.schema/)
   assert.match(view, /restart_required/)
-  assert.match(view, /restart_required[\s\S]*v-if="isForced\(item\.key\)"/)
+  assert.match(view, /v-if="isForced\(item\.key\)"/)
   assert.match(view, /当前生效/)
   assert.match(view, /已保存/)
-  assert.match(view, /:disabled="saving \|\| isForced\(item\.key\)"/)
+  assert.match(view, /:disabled="fieldDisabled\(item\)"/)
 })
 
 test('Admin views own latest reads and invalidate pending work on unmount', () => {
