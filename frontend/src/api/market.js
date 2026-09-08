@@ -59,7 +59,8 @@ export async function deleteMarketSource(id) {
 }
 
 export async function fetchMarketPackages(filters = {}) {
-  const params = new URLSearchParams()
+  // Catalog browsing includes unsupported entries so their failure reason stays visible.
+  const params = new URLSearchParams({ supported_only: 'false' })
   for (const [key, value] of Object.entries(filters)) {
     if (value === undefined || value === null || value === '') continue
     params.set(key, String(value))
