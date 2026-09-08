@@ -11,7 +11,7 @@
   "capabilities": ["radio.catalog", "radio.resolve_stream"],
   "permissions": {"network": {"managed": true, "allowed_hosts": ["myradio-dev.zeabur.app", "myradio.com.tw", "pop.olis.com.tw", "best.olis.com.tw", "ipget.apple-line.com", "hichannel.com.tw"]}},
   "runtime": {"type": "python", "ipc": "stdio_framed_json_v1", "python_version_range": ">=3.14.0 <3.15.0", "entrypoint": "plugin.py", "dependency_lock": {"lock_version": 1, "artifacts": []}},
-  "artifacts": [{"os": "macos", "arch": "arm64", "runtime": "python", "entrypoint": "plugin.py", "sha256": "0000000000000000000000000000000000000000000000000000000000000000", "size_bytes": 1, "signature": {"algorithm": "ed25519", "key_id": "org.waveflow.release.2026-01", "value": "UNSIGNED"}}],
+  "artifacts": [{"os": "macos", "arch": "arm64", "runtime": "python", "entrypoint": "plugin.py", "sha256": "d3681ba09a90befca8fac2f6c35119f860b0087ae6268e35c66a7d5fd01b6f0a", "size_bytes": 10003, "signature": {"algorithm": "ed25519", "key_id": "org.waveflow.release.2026-01", "value": "UNSIGNED"}}, {"os": "windows", "arch": "x86_64", "runtime": "python", "entrypoint": "plugin.py", "sha256": "d3681ba09a90befca8fac2f6c35119f860b0087ae6268e35c66a7d5fd01b6f0a", "size_bytes": 10003, "signature": {"algorithm": "ed25519", "key_id": "org.waveflow.release.2026-01", "value": "UNSIGNED"}}],
   "dependencies": [],
   "state_schema_version": 1
 }

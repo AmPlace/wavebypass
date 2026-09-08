@@ -1,6 +1,7 @@
 param(
   [string]$PythonInstaller = $env:WAVEFLOW_DESKTOP_PYTHON_RUNTIME_INSTALLER,
   [string]$PythonRuntimeLock = $env:WAVEFLOW_DESKTOP_PYTHON_RUNTIME_LOCK,
+  [string]$PythonRuntimeLayout = $env:WAVEFLOW_DESKTOP_PYTHON_RUNTIME_LAYOUT,
   [string]$CaBundleWheel = $env:WAVEFLOW_DESKTOP_CA_BUNDLE_WHEEL,
   [string]$FfmpegPath = $env:WAVEFLOW_DESKTOP_FFMPEG,
   [string]$FfmpegSha256 = $env:WAVEFLOW_DESKTOP_FFMPEG_SHA256
@@ -19,7 +20,9 @@ if ([string]::IsNullOrWhiteSpace($FfmpegPath)) {
 $backendDist = Join-Path $Root "backend_dist"
 $backendStage = Join-Path $Root (".backend_dist.staging-" + [guid]::NewGuid().ToString("N"))
 $backendPrevious = Join-Path $Root (".backend_dist.previous-" + [guid]::NewGuid().ToString("N"))
+$buildVenv = Join-Path $Root (".codex-tmp\desktop-build-venv-" + [guid]::NewGuid().ToString("N"))
 $published = $false
+$buildVenvCreated = $false
 
 try {
   Push-Location $Root
@@ -32,17 +35,40 @@ try {
   if ($LASTEXITCODE -ne 0) { throw "Frontend build failed" }
   Pop-Location
 
-  Write-Host "== Build backend =="
-  Push-Location (Join-Path $Root "backend")
-  if (!(Test-Path -LiteralPath ".venv" -PathType Container)) {
-    python -m venv .venv
-    if ($LASTEXITCODE -ne 0) { throw "Backend virtual environment creation failed" }
+  Write-Host "== Stage locked Python runtime =="
+  New-Item -ItemType Directory -Path $backendStage -Force | Out-Null
+  if ([string]::IsNullOrWhiteSpace($PythonInstaller)) {
+    throw "Set WAVEFLOW_DESKTOP_PYTHON_RUNTIME_INSTALLER to the locked Python 3.14.7 Windows installer"
   }
-  .\.venv\Scripts\pip install -r requirements.txt
+  if ([string]::IsNullOrWhiteSpace($CaBundleWheel)) {
+    throw "Set WAVEFLOW_DESKTOP_CA_BUNDLE_WHEEL to the locked certifi wheel"
+  }
+  $runtimeBuilder = Join-Path $Root "scripts\build-desktop-python-runtime.ps1"
+  $runtimeArguments = @(
+    "-SourceInstaller", $PythonInstaller,
+    "-Destination", (Join-Path $backendStage "python-runtime"),
+    "-LockFile", $PythonRuntimeLock,
+    "-CaBundleWheel", $CaBundleWheel
+  )
+  if (-not [string]::IsNullOrWhiteSpace($PythonRuntimeLayout)) {
+    $runtimeArguments += @("-LayoutDirectory", $PythonRuntimeLayout)
+  }
+  & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $runtimeBuilder @runtimeArguments
+  if ($LASTEXITCODE -ne 0) {
+    throw "Windows Python runtime staging failed"
+  }
+
+  Write-Host "== Build backend with staged Python =="
+  $runtimePython = Join-Path $backendStage "python-runtime\python.exe"
+  & $runtimePython -B -I -m venv $buildVenv
+  if ($LASTEXITCODE -ne 0) { throw "Backend build virtual environment creation failed" }
+  $buildVenvCreated = $true
+  Push-Location (Join-Path $Root "backend")
+  & (Join-Path $buildVenv "Scripts\python.exe") -m pip install -r requirements.txt
   if ($LASTEXITCODE -ne 0) { throw "Backend dependency installation failed" }
-  .\.venv\Scripts\pip install pyinstaller
+  & (Join-Path $buildVenv "Scripts\python.exe") -m pip install pyinstaller
   if ($LASTEXITCODE -ne 0) { throw "PyInstaller installation failed" }
-  .\.venv\Scripts\pyinstaller.exe `
+  & (Join-Path $buildVenv "Scripts\pyinstaller.exe") `
     --clean `
     --noconfirm `
     --onedir `
@@ -50,6 +76,7 @@ try {
     --collect-data zhconv `
     --add-data "config;config" `
     --add-data "official_plugins;official_plugins" `
+    --add-data "bundled_plugins;bundled_plugins" `
     --name waveflow-backend `
     desktop_entry.py
   Pop-Location
@@ -59,21 +86,6 @@ try {
   Copy-Item -Path (Join-Path $Root "backend\dist\waveflow-backend\*") `
     -Destination $backendStage -Recurse -Force
 
-  if ([string]::IsNullOrWhiteSpace($PythonInstaller)) {
-    throw "Set WAVEFLOW_DESKTOP_PYTHON_RUNTIME_INSTALLER to the locked Python 3.14.7 Windows installer"
-  }
-  if ([string]::IsNullOrWhiteSpace($CaBundleWheel)) {
-    throw "Set WAVEFLOW_DESKTOP_CA_BUNDLE_WHEEL to the locked certifi wheel"
-  }
-  $runtimeBuilder = Join-Path $Root "scripts\build-desktop-python-runtime.ps1"
-  & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $runtimeBuilder `
-    -SourceInstaller $PythonInstaller `
-    -Destination (Join-Path $backendStage "python-runtime") `
-    -LockFile $PythonRuntimeLock `
-    -CaBundleWheel $CaBundleWheel
-  if ($LASTEXITCODE -ne 0) {
-    throw "Windows Python runtime staging failed"
-  }
 
   Write-Host "== Bundle ffmpeg =="
   if (-not (Test-Path -LiteralPath $FfmpegPath -PathType Leaf)) {
@@ -122,5 +134,8 @@ finally {
   }
   if (Test-Path -LiteralPath $backendPrevious) {
     Remove-Item -LiteralPath $backendPrevious -Recurse -Force -ErrorAction SilentlyContinue
+  }
+  if ($buildVenvCreated -and (Test-Path -LiteralPath $buildVenv)) {
+    Remove-Item -LiteralPath $buildVenv -Recurse -Force -ErrorAction SilentlyContinue
   }
 }

@@ -2,8 +2,14 @@
   <div
     ref="scrollRef"
     class="app-root h-dvh overflow-y-auto font-sans text-[var(--text-primary)] antialiased transition-colors duration-300"
-    :class="{ 'desktop-shell': hasDesktopShell, 'sidebar-collapsed': sidebarCollapsed }"
+    :class="{ 'desktop-shell': hasDesktopShell, 'desktop-window-shell': isDesktopRuntime && showAppShell, 'sidebar-collapsed': sidebarCollapsed }"
   >
+    <div
+      v-if="isDesktopRuntime && showAppShell"
+      class="desktop-window-drag-region"
+      aria-hidden="true"
+    ></div>
+
     <aside
       v-if="showAppShell"
       class="app-sidebar fixed bottom-0 left-0 top-0 z-40 hidden border-r border-[var(--border)] bg-[var(--sidebar-bg)] px-3 py-6 backdrop-blur-[10px] backdrop-saturate-110 lg:flex lg:flex-col"
@@ -209,6 +215,7 @@ const mobileMenuRef = ref(null)
 const showAppShell = computed(() => !route.meta.authPage)
 const showGlobalSearch = computed(() => showAppShell.value && route.path !== '/market')
 const hasDesktopShell = computed(() => showAppShell.value)
+const isDesktopRuntime = Boolean(window.WAVEFLOW_DESKTOP?.platform)
 const SIDEBAR_STORAGE_KEY = 'waveflow-sidebar-collapsed'
 const sidebarCollapsed = ref(window.localStorage.getItem(SIDEBAR_STORAGE_KEY) === '1')
 const justActivatedLabel = ref('')

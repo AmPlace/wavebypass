@@ -5,7 +5,8 @@ param(
   [string]$Destination,
   [string]$LockFile = "",
   [Parameter(Mandatory = $true)]
-  [string]$CaBundleWheel
+  [string]$CaBundleWheel,
+[string]$LayoutDirectory = $env:WAVEFLOW_DESKTOP_PYTHON_RUNTIME_LAYOUT
 )
 
 $ErrorActionPreference = "Stop"
@@ -31,6 +32,7 @@ $installerHash = (Get-FileHash -LiteralPath $SourceInstaller -Algorithm SHA256).
 if ($installerHash -ne $source.sha256.ToLowerInvariant()) {
   throw "Python installer SHA-256 does not match the provenance lock"
 }
+
 if ([IO.Path]::GetFileName($CaBundleWheel) -ne $ca.filename) {
   throw "CA bundle wheel filename does not match the provenance lock"
 }
@@ -40,10 +42,24 @@ if ($caWheelHash -ne $ca.sha256.ToLowerInvariant()) {
 }
 
 $work = Join-Path ([IO.Path]::GetTempPath()) ("waveflow-python-runtime-" + [guid]::NewGuid().ToString("N"))
-$installRoot = Join-Path $work "python-install"
+$providedLayout = -not [string]::IsNullOrWhiteSpace($LayoutDirectory)
+if (-not $providedLayout) {
+  throw "Set WAVEFLOW_DESKTOP_PYTHON_RUNTIME_LAYOUT to the locked CPython installer layout"
+}
+$layoutRoot = (Resolve-Path $LayoutDirectory).Path
 $runtimeRoot = Join-Path $work "runtime"
 $certifiArchive = Join-Path $work "certifi.zip"
 $certifiExtract = Join-Path $work "certifi-extract"
+if ($providedLayout) {
+  $layoutInstaller = Join-Path $layoutRoot $source.filename
+  if (-not (Test-Path -LiteralPath $layoutInstaller -PathType Leaf)) {
+    throw "Locked CPython layout is missing $($source.filename)"
+  }
+  $layoutHash = (Get-FileHash -LiteralPath $layoutInstaller -Algorithm SHA256).Hash.ToLowerInvariant()
+  if ($layoutHash -ne $source.sha256.ToLowerInvariant()) {
+    throw "Locked CPython layout installer hash does not match the provenance lock"
+  }
+}
 $destinationParent = Split-Path -Parent $Destination
 $destinationName = Split-Path -Leaf $Destination
 $stagingDestination = Join-Path $destinationParent ("." + $destinationName + ".staging-" + [guid]::NewGuid().ToString("N"))
@@ -51,30 +67,28 @@ $previousDestination = Join-Path $destinationParent ("." + $destinationName + ".
 $published = $false
 
 try {
-  New-Item -ItemType Directory -Path $installRoot, $runtimeRoot, $certifiExtract, $destinationParent -Force | Out-Null
-  $arguments = @(
-    "/quiet",
-    "InstallAllUsers=0",
-    "TargetDir=`"$installRoot`"",
-    "Include_launcher=0",
-    "Include_pip=1",
-    "Include_test=0",
-    "PrependPath=0",
-    "Shortcuts=0",
-    "AssociateFiles=0"
-  )
-  $installer = Start-Process -FilePath $SourceInstaller -ArgumentList $arguments -Wait -PassThru -WindowStyle Hidden
-  if ($installer.ExitCode -ne 0) {
-    throw "Python installer failed with exit code $($installer.ExitCode)"
-  }
-  $installedPython = Join-Path $installRoot "python.exe"
-  if (-not (Test-Path -LiteralPath $installedPython -PathType Leaf)) {
-    throw "Python installer did not produce python.exe"
+  New-Item -ItemType Directory -Path $runtimeRoot, $certifiExtract, $destinationParent -Force | Out-Null
+  Write-Host "Using locked CPython layout: $layoutRoot"
+
+  $runtimeExtractor = Join-Path $Root "scripts\extract-desktop-python-msi.ps1"
+  $msiNames = @("core.msi", "exe.msi", "lib.msi", "tcltk.msi", "ucrt.msi")
+  foreach ($msiName in $msiNames) {
+    $msiPath = Join-Path $layoutRoot $msiName
+    if (-not (Test-Path -LiteralPath $msiPath -PathType Leaf)) {
+      throw "Python installer layout is missing $msiName"
+    }
+    $extractArguments = @("-MsiPath", $msiPath, "-RuntimeRoot", $runtimeRoot, "-WorkRoot", $work)
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $runtimeExtractor @extractArguments
+    if ($LASTEXITCODE -ne 0) {
+      throw "MSI runtime extraction failed for $msiName"
+    }
   }
 
-  Get-ChildItem -LiteralPath $installRoot -Force | ForEach-Object {
-    Copy-Item -LiteralPath $_.FullName -Destination $runtimeRoot -Recurse -Force
+  $installedPython = Join-Path $runtimeRoot "python.exe"
+  if (-not (Test-Path -LiteralPath $installedPython -PathType Leaf)) {
+    throw "MSI extraction did not produce python.exe"
   }
+  New-Item -ItemType Directory -Path (Join-Path $runtimeRoot "Scripts") -Force | Out-Null
 
   Copy-Item -LiteralPath $CaBundleWheel -Destination $certifiArchive -Force
   Expand-Archive -LiteralPath $certifiArchive -DestinationPath $certifiExtract -Force
@@ -107,7 +121,6 @@ if not os.environ.get("SSL_CERT_FILE"):
   $sitecustomizePath = Join-Path $runtimeRoot "Lib\sitecustomize.py"
   [IO.File]::WriteAllText($sitecustomizePath, $sitecustomize, [Text.UTF8Encoding]::new($false))
 
-  $env:PYTHONDONTWRITEBYTECODE = "1"
   $metadataWriter = Join-Path $Root "scripts\write-desktop-runtime-metadata.py"
   & $installedPython -B -I $metadataWriter $runtimeRoot $LockFile windows x86_64 python.exe certifi/cacert.pem
   if ($LASTEXITCODE -ne 0) {

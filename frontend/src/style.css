@@ -42,6 +42,7 @@
     --sidebar-w: 232px;
     --sidebar-w-collapsed: 72px;
     --page-gutter: 20px;
+    --desktop-titlebar-height: 28px;
     --page-top: calc(env(safe-area-inset-top) + 4rem);
     --mini-player-height: 72px;
     --mini-player-bottom-offset: calc(env(safe-area-inset-bottom) + 12px);
@@ -205,6 +206,30 @@
     padding-left: var(--page-gutter);
   }
 
+  .desktop-window-shell .desktop-window-drag-region {
+    position: fixed;
+    top: 0;
+    right: 0;
+    left: 0;
+    z-index: 60;
+    display: block;
+    height: var(--desktop-titlebar-height);
+    background: transparent;
+    -webkit-app-region: drag;
+  }
+
+  .desktop-window-shell .app-main {
+    padding-top: var(--desktop-titlebar-height);
+  }
+
+  .desktop-window-shell .desktop-top-actions {
+    top: calc(var(--desktop-titlebar-height) + 1.5rem);
+  }
+
+  .desktop-window-shell > .fixed.inset-x-0.top-0 {
+    top: var(--desktop-titlebar-height);
+  }
+
   .app-sidebar {
     width: var(--sidebar-w);
     transition: width 260ms cubic-bezier(0.4, 0, 0.2, 1);
@@ -274,6 +299,14 @@
   @media (min-width: 1024px) {
     .desktop-shell .app-main {
       padding-left: var(--sidebar-w);
+    }
+
+    .desktop-window-shell .app-sidebar {
+      padding-top: calc(1.5rem + var(--desktop-titlebar-height));
+    }
+
+    .desktop-window-shell .sidebar-toggle {
+      top: calc(1.5rem + var(--desktop-titlebar-height));
     }
   }
 
